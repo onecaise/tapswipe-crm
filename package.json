@@ -6,7 +6,8 @@
     "start": "next start",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:live": "vitest run --config vitest.live.config.mts"
   },
   "dependencies": {
     "@radix-ui/react-checkbox": "^1.3.1",
