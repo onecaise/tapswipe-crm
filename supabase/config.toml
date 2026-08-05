@@ -221,10 +221,20 @@ web3 = 30
 # secret = ""
 
 [auth.email]
-# Allow/disallow new user signups via email to your project.
-# OFF for the same reason as [auth].enable_signup above — both must be false,
-# or email sign-up stays reachable.
-enable_signup = false
+# MUST STAY TRUE. Despite the field name, the CLI maps this to
+# GOTRUE_EXTERNAL_EMAIL_ENABLED — it switches the whole email provider on or
+# off, sign-IN included, not just sign-up. Setting it false makes every
+# password login fail with "Email logins are disabled", which is the only way
+# anyone gets into this app.
+#
+# Sign-up is already blocked by [auth].enable_signup above
+# (GOTRUE_DISABLE_SIGNUP=true), which applies to every provider. That is the
+# switch that enforces admin-only provisioning; this one is not a second lock
+# on the same door, it's the front door.
+#
+# tests/live/document-urls.test.ts asserts both halves — password sign-in
+# works, self-service sign-up is refused — so the pair can't silently drift.
+enable_signup = true
 # If enabled, a user will be required to confirm any email change on both the old, and new email
 # addresses. If disabled, only the new email is required to confirm.
 double_confirm_changes = true
