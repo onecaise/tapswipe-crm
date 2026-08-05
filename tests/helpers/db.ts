@@ -124,11 +124,16 @@ export const AGENT_ID = "22222222-2222-2222-2222-222222222222";
 export const OTHER_AGENT_ID = "33333333-3333-3333-3333-333333333333";
 
 /**
- * Seeds one admin and two agents, plus a lead owned by each agent.
+ * Seeds one admin and two agents, plus leads and merchants owned by each agent.
  *
  * Two agents rather than one on purpose: with a single agent, a policy bug that
  * returned "all rows belonging to any agent" would be indistinguishable from
  * one that correctly returned "only my rows".
+ *
+ * Each agent gets one active and one inactive merchant, so the status filter can
+ * be tested without it coinciding with the ownership filter — if every one of an
+ * agent's merchants were active, "filtered by status" and "filtered by owner"
+ * would produce the same rows and neither assertion would mean much.
  */
 export async function seed(db: TestDb): Promise<void> {
   await asPlatform(db);
@@ -147,7 +152,33 @@ export async function seed(db: TestDb): Promise<void> {
       ('${AGENT_ID}', 'Agent Lead A'),
       ('${AGENT_ID}', 'Agent Lead B'),
       ('${OTHER_AGENT_ID}', 'Other Agent Lead');
+
+    insert into merchants (agent_id, mid, dba, legal_business_name, status, processor, split_agent_pct, split_company_pct)
+    values
+      ('${AGENT_ID}',       'MID-AGENT-1', 'Agent Active Co',   'Agent Active Co LLC',   'active',   'TSYS',  60.00, 40.00),
+      ('${AGENT_ID}',       'MID-AGENT-2', 'Agent Inactive Co', 'Agent Inactive Co LLC', 'inactive', 'FDMS',  55.00, 45.00),
+      ('${OTHER_AGENT_ID}', 'MID-OTHER-1', 'Other Active Co',   'Other Active Co LLC',   'active',   'TSYS',  50.00, 50.00),
+      ('${OTHER_AGENT_ID}', 'MID-OTHER-2', 'Other Other Co',    'Other Other Co LLC',    'other',    'Elavon', 70.00, 30.00);
   `);
+}
+
+/**
+ * Wipes and re-seeds the data without touching the schema.
+ *
+ * Spinning up a fresh PGlite per test gives clean isolation but costs ~2s each
+ * in WASM init plus migration replay, which doesn't scale as tables are added.
+ * Creating the database once per file and calling this in `beforeEach` keeps the
+ * same isolation for a fraction of the time.
+ *
+ * `restart identity` resets the serial sequences, so row ids are stable across
+ * tests. `cascade` picks up every table referencing profiles.
+ */
+export async function resetData(db: TestDb): Promise<void> {
+  await asPlatform(db);
+  await db.exec(
+    `truncate auth.users, profiles, merchants, leads restart identity cascade;`,
+  );
+  await seed(db);
 }
 
 /** Convenience: run a query and return typed rows. */
