@@ -661,6 +661,104 @@ end;
 $$;
 
 -- =====================================================================
+-- DATA API GRANTS — required, not optional.
+--
+-- RLS decides which ROWS a caller sees. Grants decide whether the caller
+-- may touch the table at all, and the two are independent: a table with
+-- perfect policies and no grant answers every request with "permission
+-- denied for table X". That is the state this schema was in until this
+-- section existed, and it is not a local-only quirk — Supabase's current
+-- cloud default is that tables, views, sequences and functions created
+-- in `public` by `postgres` (i.e. everything a migration creates) are
+-- NOT auto-exposed to the Data API roles. The legacy auto-expose
+-- behaviour is deprecated and the `auto_expose_new_tables` escape hatch
+-- is removed on 2026-10-30, so relying on it is not an option.
+--
+-- Three roles, three different answers:
+--
+--   anon          nothing. This is an admin-provisioned CRM with sign-up
+--                 off; there is no public data. Login goes through
+--                 /auth/v1, not PostgREST, so anon never needs a table.
+--   authenticated broad grants on the 13 non-secret tables. Broader than
+--                 the policies on purpose — RLS is the enforcement layer
+--                 and is what the tests assert. A grant list that tried
+--                 to mirror each table's policy set would be a second,
+--                 untested copy of the rules, free to drift.
+--   service_role  everything, including the secrets tables. It bypasses
+--                 RLS by design; this is the grant the Edge Functions
+--                 run on.
+--
+-- The three *_secrets tables get NO grant for `authenticated`. Their
+-- zero-policy RLS already denies everything, so this is the second lock
+-- on the same door: if someone later adds a policy to one of them (§ the
+-- standing "never add a policy to these tables" rule), the missing grant
+-- still holds the line.
+--
+-- Tables are listed one by one rather than via `all tables in schema
+-- public`. A new table then starts with no access and fails loudly on
+-- first use, which forces the author back to this list — the same reason
+-- the four-policy pattern is spelled out per table rather than automated.
+-- =====================================================================
+grant usage on schema public to anon, authenticated, service_role;
+
+grant select, insert, update, delete on
+  profiles,
+  merchants,
+  leads,
+  ghost_sheets,
+  pre_apps,
+  pre_app_owners,
+  pre_app_terminal,
+  pre_app_business_profile,
+  documents,
+  support_tickets,
+  notes,
+  tasks,
+  audit_log
+to authenticated;
+
+-- USAGE only, not SELECT: nextval() is all a serial insert needs, and
+-- SELECT on a sequence would hand out last_value — a free row count of
+-- every other agent's book.
+grant usage on
+  merchants_id_seq,
+  leads_id_seq,
+  ghost_sheets_id_seq,
+  pre_apps_id_seq,
+  pre_app_owners_id_seq,
+  pre_app_terminal_id_seq,
+  pre_app_business_profile_id_seq,
+  documents_id_seq,
+  support_tickets_id_seq,
+  notes_id_seq,
+  tasks_id_seq,
+  audit_log_id_seq
+to authenticated;
+
+-- service_role bypasses RLS and is the only role that may reach the
+-- secrets tables — via the submit-pre-app-secrets / read-pre-app-secrets
+-- Edge Functions, which hold the encryption key.
+grant all on all tables in schema public to service_role;
+grant all on all sequences in schema public to service_role;
+
+-- Functions. Postgres grants EXECUTE to PUBLIC on creation, which would
+-- leave these callable by anon; revoked first so the grants below are the
+-- whole list. is_admin() and is_active_agent() must be executable by
+-- `authenticated` because the policies call them during RLS evaluation,
+-- which runs as the querying role.
+revoke all on function is_admin() from public;
+revoke all on function is_active_agent() from public;
+revoke all on function update_own_full_name(text) from public;
+revoke all on function approve_pre_app(int) from public;
+revoke all on function convert_ghost_sheet_to_lead(int) from public;
+
+grant execute on function is_admin() to authenticated, service_role;
+grant execute on function is_active_agent() to authenticated, service_role;
+grant execute on function update_own_full_name(text) to authenticated, service_role;
+grant execute on function approve_pre_app(int) to authenticated, service_role;
+grant execute on function convert_ghost_sheet_to_lead(int) to authenticated, service_role;
+
+-- =====================================================================
 -- NOTE ON SUPABASE STORAGE (not SQL — set up in the dashboard/CLI)
 -- Create one private bucket named `documents`. Do not add public storage
 -- policies referencing these tables — all upload/download access goes

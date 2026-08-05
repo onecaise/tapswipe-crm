@@ -13,20 +13,33 @@ const MIGRATIONS_DIR = path.join(process.cwd(), "supabase", "migrations");
  * test environment could diverge from production. It provides exactly three
  * things:
  *
- *   1. the `authenticated` role, so queries can run as a non-owner. This is
+ *   1. the three Data API roles, so queries can run as a non-owner. This is
  *      what makes RLS apply at all: Postgres bypasses RLS for a table's owner,
  *      so running as the default superuser would silently pass every test.
+ *      All three exist because the grants migration names all three.
  *   2. `auth.users`, which `profiles.id` references.
  *   3. `auth.uid()`, reading the `request.jwt.claims` GUC. This is how the real
  *      Supabase API layer exposes the caller's JWT to Postgres, so setting that
  *      GUC is a faithful stand-in for arriving with a valid access token.
+ *
+ * It does NOT grant table privileges. It used to, on the assumption that
+ * Supabase grants them during project setup — but that auto-exposure is
+ * deprecated and off by default on new projects, so the grant block here was
+ * hiding the fact that no migration granted anything and the deployed schema was
+ * unreachable through PostgREST. Privileges now come from
+ * 20260805200000_grant_data_api_roles.sql like everything else, which means
+ * these tests would fail if that migration were dropped.
  */
 const AUTH_SHIM = `
   do $$
+  declare
+    r text;
   begin
-    if not exists (select 1 from pg_roles where rolname = 'authenticated') then
-      create role authenticated nologin;
-    end if;
+    foreach r in array array['anon', 'authenticated', 'service_role'] loop
+      if not exists (select 1 from pg_roles where rolname = r) then
+        execute format('create role %I nologin', r);
+      end if;
+    end loop;
   end
   $$;
 
@@ -46,16 +59,26 @@ const AUTH_SHIM = `
   $$;
 `;
 
+export const GRANTS_MIGRATION = "20260805200000_grant_data_api_roles.sql";
+
 /**
- * Supabase grants these to `authenticated` as part of project setup, so the
- * migrations don't. Applied after the migrations run, since it needs the tables
- * to exist. Without it every query fails on permissions rather than RLS, which
- * would look like a passing security test for entirely the wrong reason.
+ * Stand-in grants for the regression tests only.
+ *
+ * Those tests apply a deliberate *subset* of migrations to prove a later
+ * migration is load-bearing, and the grants migration can't go into an
+ * arbitrary subset — it revokes on functions (is_active_agent,
+ * convert_ghost_sheet_to_lead) that the earlier migrations haven't created yet.
+ * Without any grants they'd fail on "permission denied" instead of on the
+ * behaviour they're actually probing, which is a false pass waiting to happen.
+ *
+ * Applied ONLY when an explicit subset was requested. The normal path — every
+ * migration, which is what all the real assertions run on — gets its privileges
+ * from GRANTS_MIGRATION and nothing else.
  */
-const GRANTS = `
+const SUBSET_GRANTS = `
   grant usage on schema public to authenticated;
   grant select, insert, update, delete on all tables in schema public to authenticated;
-  grant usage, select on all sequences in schema public to authenticated;
+  grant usage on all sequences in schema public to authenticated;
 `;
 
 export type TestDb = PGlite;
@@ -90,7 +113,9 @@ export async function createTestDb(migrationFiles?: string[]): Promise<TestDb> {
     }
   }
 
-  await db.exec(GRANTS);
+  if (migrationFiles && !migrationFiles.includes(GRANTS_MIGRATION)) {
+    await db.exec(SUBSET_GRANTS);
+  }
 
   return db;
 }
