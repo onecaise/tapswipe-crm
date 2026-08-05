@@ -290,28 +290,36 @@ describe("leads write scoping", () => {
     expect(n).toBe(0);
   });
 
-  it("blocks deleting a lead a ghost sheet still points at", async () => {
+  it("nulls a ghost sheet's link when its converted lead is deleted", async () => {
     await asUser(db, ADMIN_ID);
 
-    // ghost_sheets.lead_id references leads(id) with no ON DELETE clause, so it
-    // defaults to NO ACTION. An admin therefore *cannot* delete a lead that came
-    // from a ghost sheet while that sheet still references it — the delete is
-    // refused rather than cascading or nulling the link.
-    //
-    // Asserted because it's surprising, it isn't visible anywhere in the UI, and
-    // it's the kind of thing that surfaces as an unexplained failure later. If
-    // the intent is for lead deletion to win, the schema needs
-    // `on delete set null` on ghost_sheets.lead_id.
-    await expect(
-      db.exec(`delete from leads where dba = 'Agent Lead C';`),
-    ).rejects.toThrow(/foreign key constraint/i);
+    // ghost_sheets.lead_id is `on delete set null` as of 20260805161500. Before
+    // that it had no ON DELETE clause, so it defaulted to NO ACTION and this
+    // delete was refused outright — an admin could not remove a converted lead
+    // without first unpicking every sheet pointing at it.
+    await db.exec(`delete from leads where dba = 'Agent Lead C';`);
 
     await asPlatform(db);
     const [{ n }] = await rows<CountRow>(
       db,
       `select count(*)::int as n from leads where dba = 'Agent Lead C'`,
     );
-    expect(n).toBe(1);
+    expect(n).toBe(0);
+
+    // The sheet survives with its link cleared. Since lead_id is the
+    // authoritative record of conversion state, the sheet correctly reverts to
+    // unconverted rather than pointing at a lead that no longer exists.
+    const [sheet] = await rows<{ lead_id: number | null; status: string }>(
+      db,
+      `select lead_id, status from ghost_sheets where dba = 'Agent Sheet Converted'`,
+    );
+    expect(sheet.lead_id).toBeNull();
+
+    // Known wart, asserted so it isn't a surprise later: the status *text* still
+    // reads 'converted', because SET NULL touches only the FK column. lead_id is
+    // what the UI filters on, so the sheet shows as open; the stale label is
+    // cosmetic. Fixing it properly would need a trigger.
+    expect(sheet.status).toBe("converted");
   });
 });
 

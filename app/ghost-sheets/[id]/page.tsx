@@ -7,6 +7,7 @@ import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { type GhostSheet, isConverted } from "@/lib/ghost-sheets";
 import { formatDate, formatText } from "@/lib/format";
+import { ConvertGhostSheetButton } from "@/components/convert-ghost-sheet-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -106,12 +107,22 @@ async function GhostSheetDetail({
         </p>
       </div>
 
-      {converted && (
+      {converted ? (
         <div className="flex flex-col gap-2 items-start">
           <h2 className="font-semibold text-lg">Converted lead</h2>
           <Button asChild variant="outline" size="sm">
             <Link href={`/leads/${sheet.lead_id}`}>View lead</Link>
           </Button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2 items-start">
+          <h2 className="font-semibold text-lg">Convert</h2>
+          <p className="text-sm text-muted-foreground">
+            Creates a lead in{" "}
+            {profile.role === "admin" ? "this sheet's agent's" : "your"} book and
+            copies these notes onto it.
+          </p>
+          <ConvertGhostSheetButton ghostSheetId={sheet.id} />
         </div>
       )}
     </>
