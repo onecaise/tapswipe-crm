@@ -5,12 +5,8 @@ import { ArrowLeftIcon, PencilIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
-import {
-  type Merchant,
-  formatDate,
-  formatPct,
-  statusBadgeVariant,
-} from "@/lib/merchants";
+import { type Merchant, statusBadgeVariant } from "@/lib/merchants";
+import { formatDate, formatPct, formatText } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -96,10 +92,10 @@ async function MerchantDetail({
 
       <dl className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
         <Field label="Legal business name">
-          {merchant.legal_business_name ?? "—"}
+          {formatText(merchant.legal_business_name)}
         </Field>
-        <Field label="MID">{merchant.mid ?? "—"}</Field>
-        <Field label="Processor">{merchant.processor ?? "—"}</Field>
+        <Field label="MID">{formatText(merchant.mid)}</Field>
+        <Field label="Processor">{formatText(merchant.processor)}</Field>
         <Field label="Agent split">{formatPct(merchant.split_agent_pct)}</Field>
         <Field label="Company split">
           {formatPct(merchant.split_company_pct)}

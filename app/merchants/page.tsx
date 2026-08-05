@@ -5,15 +5,14 @@ import { PlusIcon } from "lucide-react";
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import {
-  MERCHANT_FILTERS,
+  MERCHANT_FILTER_OPTIONS,
   MERCHANT_LIST_COLUMNS,
-  type MerchantFilter,
   type MerchantListRow,
-  formatDate,
-  formatPct,
   parseMerchantFilter,
   statusBadgeVariant,
 } from "@/lib/merchants";
+import { formatDate, formatPct, formatText } from "@/lib/format";
+import { FilterTabs } from "@/components/filter-tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,29 +23,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
-function FilterTabs({ active }: { active: MerchantFilter }) {
-  // Plain links rather than a client-side <select>: the filter is navigation,
-  // so it stays linkable, works without JS, and adds nothing to the bundle.
-  return (
-    <div className="flex flex-wrap gap-2">
-      {MERCHANT_FILTERS.map((filter) => (
-        <Button
-          key={filter}
-          asChild
-          size="sm"
-          variant={filter === active ? "default" : "outline"}
-        >
-          <Link
-            href={filter === "all" ? "/merchants" : `/merchants?status=${filter}`}
-          >
-            {filter === "all" ? "All" : filter}
-          </Link>
-        </Button>
-      ))}
-    </div>
-  );
-}
 
 async function MerchantsList({
   searchParams,
@@ -103,7 +79,13 @@ async function MerchantsList({
 
   return (
     <div className="flex flex-col gap-4">
-      <FilterTabs active={filter} />
+      <FilterTabs
+        options={MERCHANT_FILTER_OPTIONS}
+        active={filter}
+        hrefFor={(value) =>
+          value === "all" ? "/merchants" : `/merchants?status=${value}`
+        }
+      />
 
       <Table>
         <TableHeader>
@@ -140,17 +122,17 @@ async function MerchantsList({
                     {merchant.dba}
                   </Link>
                 </TableCell>
-                <TableCell>{merchant.mid ?? "—"}</TableCell>
+                <TableCell>{formatText(merchant.mid)}</TableCell>
                 <TableCell>
                   <Badge variant={statusBadgeVariant(merchant.status)}>
                     {merchant.status}
                   </Badge>
                 </TableCell>
-                <TableCell>{merchant.processor ?? "—"}</TableCell>
+                <TableCell>{formatText(merchant.processor)}</TableCell>
                 <TableCell>{formatPct(merchant.split_agent_pct)}</TableCell>
                 {isAdmin && (
                   <TableCell className="text-muted-foreground">
-                    {agentNames.get(merchant.agent_id) ?? "—"}
+                    {formatText(agentNames.get(merchant.agent_id))}
                   </TableCell>
                 )}
                 <TableCell className="text-muted-foreground">

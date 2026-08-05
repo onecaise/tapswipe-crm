@@ -15,6 +15,12 @@ export const MERCHANT_FILTERS = ["all", ...MERCHANT_STATUSES] as const;
 
 export type MerchantFilter = (typeof MERCHANT_FILTERS)[number];
 
+/** Tab options for the list page, in display order. */
+export const MERCHANT_FILTER_OPTIONS = MERCHANT_FILTERS.map((value) => ({
+  value,
+  label: value === "all" ? "All" : value,
+}));
+
 export type Merchant = {
   id: number;
   agent_id: string;
@@ -58,16 +64,6 @@ export function parseMerchantFilter(value: string | undefined): MerchantFilter {
   return MERCHANT_FILTERS.includes(value as MerchantFilter)
     ? (value as MerchantFilter)
     : "all";
-}
-
-export function formatPct(value: number | null): string {
-  return value === null ? "—" : `${value}%`;
-}
-
-export function formatDate(value: string | null): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleDateString();
 }
 
 export function statusBadgeVariant(
