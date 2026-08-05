@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Suspense } from "react";
-import { StoreIcon, UsersIcon } from "lucide-react";
+import { StoreIcon, TargetIcon, UsersIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { LogoutButton } from "@/components/logout-button";
@@ -28,12 +28,20 @@ async function DashboardContent() {
 
       <div className="flex flex-col gap-2 items-start">
         <h2 className="font-semibold text-lg">Book of business</h2>
-        <Button asChild variant="outline">
-          <Link href="/merchants">
-            <StoreIcon size={16} />
-            Merchants
-          </Link>
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button asChild variant="outline">
+            <Link href="/merchants">
+              <StoreIcon size={16} />
+              Merchants
+            </Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link href="/leads">
+              <TargetIcon size={16} />
+              Leads
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {/* Hiding this for agents is a UX nicety only — /admin/users enforces the
