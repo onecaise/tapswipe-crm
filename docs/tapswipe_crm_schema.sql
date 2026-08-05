@@ -708,8 +708,7 @@ $$;
 -- leaks today (RLS returns zero rows for anon, the secrets tables have no
 -- policies at all, and the security definer RPCs guard themselves), but on
 -- that project RLS is the only lock on the secrets tables rather than the
--- second one. Converging it needs a separate `revoke ... from anon`
--- migration, written knowing the platform may re-grant on new objects.
+-- second one. The REVOKE section below is what converges it.
 -- Do not assume the deployed grant surface matches this file.
 -- =====================================================================
 grant usage on schema public to anon, authenticated, service_role;
@@ -770,6 +769,93 @@ grant execute on function is_active_agent() to authenticated, service_role;
 grant execute on function update_own_full_name(text) to authenticated, service_role;
 grant execute on function approve_pre_app(int) to authenticated, service_role;
 grant execute on function convert_ghost_sheet_to_lead(int) to authenticated, service_role;
+
+-- =====================================================================
+-- REVOKE LEGACY PLATFORM GRANTS — converges an older project onto the
+-- model above, and closes the door behind it.
+--
+-- The GRANTS section only adds privileges, so on a project created before
+-- the always-revoked default it sits on top of Supabase's legacy blanket
+-- grants rather than replacing them. Two problems with that, and they
+-- need different fixes:
+--
+--   Existing objects — plain `revoke`. Strips anon back to nothing, and
+--   takes `authenticated` off the three *_secrets tables so the missing
+--   grant is once again the second lock behind their zero-policy RLS.
+--
+--   FUTURE objects — `alter default privileges`. This is the part that
+--   plain revokes cannot reach, and the reason the legacy grants exist on
+--   every table in the first place: they were never granted per table.
+--   Supabase's older project init ran
+--
+--     alter default privileges in schema public
+--       grant all on tables to anon, authenticated, service_role;
+--
+--   so every table a migration creates is auto-granted at CREATE time, in
+--   perpetuity. Revoking today and adding a table tomorrow would silently
+--   re-open it. Removing the default-privilege entries is what makes "a
+--   new table starts with no access and fails loudly" true rather than
+--   aspirational.
+--
+-- This works for TABLES and not for FUNCTIONS, which was measured rather
+-- than assumed. On Postgres 17 and on PGlite, a function created by
+-- `postgres` in `public` comes out with `proacl = NULL` — the built-in
+-- default, PUBLIC included — regardless of what pg_default_acl holds;
+-- `alter default privileges ... revoke execute on functions from public`
+-- is a verified no-op here. So there is no declarative backstop for
+-- functions: every new RPC must carry its own
+--
+--   revoke all on function <sig> from public;
+--   grant execute on function <sig> to authenticated, service_role;
+--
+-- in the migration that creates it, as the GRANTS section does for the
+-- five that exist. tests/rls/grants.test.ts pins this so the gap is not
+-- rediscovered the hard way.
+--
+-- Deliberately NOT touched:
+--   * anon keeps USAGE on schema public. It has no table, sequence or
+--     function privileges left, so it can reach nothing; keeping schema
+--     usage only preserves the error shape the app already sees, rather
+--     than turning an empty result into a schema-level failure on any
+--     unauthenticated query that slips through.
+--   * service_role's default privileges. It bypasses RLS and is the tier
+--     the Edge Functions run on, so it keeps inheriting new tables. Note
+--     the consequence: a table created on a project WITHOUT those legacy
+--     defaults (a fresh one, or the local stack) is not reachable by
+--     service_role until granted, so new-table migrations should grant it
+--     explicitly rather than rely on inheritance.
+--   * `for role supabase_admin`, whose defaults DO grant a full arwdDxtm
+--     on tables to anon and authenticated on the local stack. Naming it
+--     is fatal, not merely unnecessary: `postgres` is not a superuser and
+--     not a member of that role, so the statement fails with `permission
+--     denied to change default privileges` and aborts the migration
+--     (tried). It is also the wrong target — that entry governs objects
+--     created BY supabase_admin, i.e. the platform's, not ours. Default
+--     privileges key on the CREATING role, and everything this repo adds
+--     is created by `postgres` via db push or the SQL editor.
+-- =====================================================================
+revoke all on all tables in schema public from anon;
+revoke all on all sequences in schema public from anon;
+revoke all on all functions in schema public from anon;
+
+revoke all on
+  pre_app_owner_secrets,
+  pre_app_banking_secrets,
+  pre_app_terminal_secrets
+from anon, authenticated;
+
+revoke all on
+  pre_app_owner_secrets_id_seq,
+  pre_app_banking_secrets_id_seq,
+  pre_app_terminal_secrets_id_seq
+from anon, authenticated;
+
+alter default privileges for role postgres in schema public
+  revoke all on tables from anon, authenticated;
+alter default privileges for role postgres in schema public
+  revoke all on sequences from anon, authenticated;
+alter default privileges for role postgres in schema public
+  revoke all on functions from anon, authenticated;
 
 -- =====================================================================
 -- NOTE ON SUPABASE STORAGE (not SQL — set up in the dashboard/CLI)

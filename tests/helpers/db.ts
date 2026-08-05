@@ -62,6 +62,22 @@ const AUTH_SHIM = `
 `;
 
 export const GRANTS_MIGRATION = "20260805200000_grant_data_api_roles.sql";
+export const REVOKE_MIGRATION = "20260805210000_revoke_legacy_anon_grants.sql";
+
+/** Every migration filename in apply order, minus the ones named. */
+export async function migrationsExcept(
+  ...exclude: string[]
+): Promise<string[]> {
+  const files = (await readdir(MIGRATIONS_DIR))
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+  return files.filter((f) => !exclude.includes(f));
+}
+
+/** Raw SQL of one migration, for tests that apply it mid-scenario. */
+export async function readMigration(file: string): Promise<string> {
+  return readFile(path.join(MIGRATIONS_DIR, file), "utf8");
+}
 
 /**
  * Stand-in grants for the regression tests only.
