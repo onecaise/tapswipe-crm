@@ -10,8 +10,13 @@
 -- linked project (ref vdjtosofrimipklbdjbi) on 2026-08-05: `anon` gets a
 -- 200 with zero rows on all 16 tables — the three *_secrets tables
 -- included — and can still execute is_admin(), which the previous
--- migration had revoked from PUBLIC. So the platform granted `anon`
--- explicitly, and a revoke aimed at PUBLIC never touched it.
+-- migration had revoked from PUBLIC. So `anon` holds its own explicit
+-- grant, and a revoke aimed at PUBLIC never touched it. A schema dump
+-- confirms it object by object (`GRANT ALL ON TABLE "public"."merchants"
+-- TO "anon"`, and the same for pre_app_owner_secrets); those per-object
+-- grants are the default privileges in §3 below, materialised at CREATE
+-- time and re-rendered by pg_dump as explicit statements. One mechanism,
+-- not two.
 --
 -- Nothing leaks in that state: RLS filters every row, the secrets tables
 -- have no policies at all, the insert policies fail on both branches for
@@ -24,7 +29,18 @@
 --   1. Existing objects: plain `revoke`.
 --
 --   2. Future objects: `alter default privileges`. The legacy grants were
---      never per-table — the old project init ran
+--      never written per table. Read off the linked project's pg_default_acl
+--      on 2026-08-05:
+--
+--        grantor  | objtype | schema | acl
+--        postgres | r       | public | {postgres=arwdDxtm/postgres,
+--                                       anon=arwdDxtm/postgres,
+--                                       authenticated=arwdDxtm/postgres,
+--                                       service_role=arwdDxtm/postgres}
+--        postgres | S       | public | {...anon=rwU...}
+--        postgres | f       | public | {...anon=X...}
+--
+--      i.e. the old project init ran the equivalent of
 --
 --        alter default privileges in schema public
 --          grant all on tables to anon, authenticated, service_role;

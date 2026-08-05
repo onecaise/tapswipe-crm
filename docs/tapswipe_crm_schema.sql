@@ -786,13 +786,19 @@ grant execute on function convert_ghost_sheet_to_lead(int) to authenticated, ser
 --   FUTURE objects — `alter default privileges`. This is the part that
 --   plain revokes cannot reach, and the reason the legacy grants exist on
 --   every table in the first place: they were never granted per table.
---   Supabase's older project init ran
+--   Confirmed by reading the linked project's pg_default_acl on
+--   2026-08-05 — grantor `postgres`, schema `public`, objtype `r`:
+--   {postgres=arwdDxtm, anon=arwdDxtm, authenticated=arwdDxtm,
+--   service_role=arwdDxtm}, plus anon=rwU on sequences and anon=X on
+--   functions. Supabase's older project init ran the equivalent of
 --
 --     alter default privileges in schema public
 --       grant all on tables to anon, authenticated, service_role;
 --
 --   so every table a migration creates is auto-granted at CREATE time, in
---   perpetuity. Revoking today and adding a table tomorrow would silently
+--   perpetuity. The per-object `GRANT ALL ON TABLE ... TO "anon"` lines a
+--   schema dump shows are that default materialising at CREATE time, not a
+--   separate mechanism. Revoking today and adding a table tomorrow would silently
 --   re-open it. Removing the default-privilege entries is what makes "a
 --   new table starts with no access and fails loudly" true rather than
 --   aspirational.
