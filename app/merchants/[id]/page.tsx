@@ -7,6 +7,8 @@ import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { type Merchant, statusBadgeVariant } from "@/lib/merchants";
 import { formatDate, formatPct, formatText } from "@/lib/format";
+import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
+import { DocumentsPanel } from "@/components/documents-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -66,6 +68,15 @@ async function MerchantDetail({
     agentName = (agent?.full_name as string | undefined) ?? null;
   }
 
+  // Tier 1 read, scoped by the documents select policy.
+  const { data: docs } = await supabase
+    .from("documents")
+    .select(DOCUMENT_LIST_COLUMNS)
+    .eq("owner_type", "merchant")
+    .eq("owner_id", merchant.id)
+    .order("uploaded_at", { ascending: false });
+  const documents = (docs ?? []) as DocumentRow[];
+
   return (
     <>
       <div className="flex items-start justify-between gap-4">
@@ -104,6 +115,12 @@ async function MerchantDetail({
         {agentName !== null && <Field label="Agent">{agentName}</Field>}
         <Field label="Last updated">{formatDate(merchant.updated_at)}</Field>
       </dl>
+
+      <DocumentsPanel
+        ownerType="merchant"
+        ownerId={merchant.id}
+        documents={documents}
+      />
     </>
   );
 }

@@ -185,6 +185,27 @@ export async function seed(db: TestDb): Promise<void> {
       ('${AGENT_ID}',       'MID-AGENT-2', 'Agent Inactive Co', 'Agent Inactive Co LLC', 'inactive', 'FDMS',  55.00, 45.00),
       ('${OTHER_AGENT_ID}', 'MID-OTHER-1', 'Other Active Co',   'Other Active Co LLC',   'active',   'TSYS',  50.00, 50.00),
       ('${OTHER_AGENT_ID}', 'MID-OTHER-2', 'Other Other Co',    'Other Other Co LLC',    'other',    'Elavon', 70.00, 30.00);
+
+    -- Documents. owner_id is resolved by lookup rather than a hardcoded serial.
+    -- One per agent against a merchant, plus one against a lead, so the
+    -- owner_type/owner_id pair is exercised with more than a single shape.
+    insert into documents (agent_id, owner_type, owner_id, doc_type, file_key, file_name, mime_type)
+    values
+      ('${AGENT_ID}', 'merchant',
+        (select id from merchants where dba = 'Agent Active Co'),
+        'Voided check',
+        '${AGENT_ID}/merchant/1/11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        'agent-voided-check.pdf', 'application/pdf'),
+      ('${AGENT_ID}', 'lead',
+        (select id from leads where dba = 'Agent Lead A'),
+        'Statement',
+        '${AGENT_ID}/lead/1/22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        'agent-statement.pdf', 'application/pdf'),
+      ('${OTHER_AGENT_ID}', 'merchant',
+        (select id from merchants where dba = 'Other Active Co'),
+        'Driver''s license',
+        '${OTHER_AGENT_ID}/merchant/3/33333333-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        'other-dl.jpg', 'image/jpeg');
   `);
 }
 
@@ -202,7 +223,7 @@ export async function seed(db: TestDb): Promise<void> {
 export async function resetData(db: TestDb): Promise<void> {
   await asPlatform(db);
   await db.exec(
-    `truncate auth.users, profiles, merchants, leads, ghost_sheets, notes
+    `truncate auth.users, profiles, merchants, leads, ghost_sheets, notes, documents
      restart identity cascade;`,
   );
   await seed(db);
