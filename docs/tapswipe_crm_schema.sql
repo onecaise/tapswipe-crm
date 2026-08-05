@@ -524,6 +524,58 @@ create policy "admin reads audit log" on audit_log
 -- writes come only from service-role Edge Functions / triggers, not clients
 
 -- =====================================================================
+-- INDEXES — every RLS policy filters on agent_id, so every query does too
+-- (§14.8). Added while the tables are empty, where it costs nothing.
+-- =====================================================================
+create index idx_merchants_agent_id on merchants(agent_id);
+create index idx_leads_agent_id on leads(agent_id);
+create index idx_ghost_sheets_agent_id on ghost_sheets(agent_id);
+create index idx_pre_apps_agent_id on pre_apps(agent_id);
+create index idx_documents_agent_id on documents(agent_id);
+create index idx_support_tickets_agent_id on support_tickets(agent_id);
+create index idx_notes_agent_id on notes(agent_id);
+create index idx_tasks_agent_id on tasks(agent_id);
+
+-- columns the list pages actually filter on
+create index idx_merchants_status on merchants(status);
+create index idx_pre_apps_status on pre_apps(status);
+create index idx_leads_next_followup_date on leads(next_followup_date);
+
+-- child tables reach their access check through
+-- `exists (select 1 from pre_apps where pre_apps.id = pre_app_id ...)`,
+-- so they filter on pre_app_id on every read and write
+create index idx_pre_app_owners_pre_app_id on pre_app_owners(pre_app_id);
+create index idx_pre_app_terminal_pre_app_id on pre_app_terminal(pre_app_id);
+create index idx_pre_app_business_profile_pre_app_id on pre_app_business_profile(pre_app_id);
+
+-- ---------------------------------------------------------------------
+-- updated_at trigger — plain function, no security definer: it only
+-- ever touches the row already being written, under the caller's own
+-- RLS-checked UPDATE. Applied only where the column actually exists.
+-- ---------------------------------------------------------------------
+create or replace function set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+create trigger merchants_set_updated_at
+  before update on merchants
+  for each row execute function set_updated_at();
+
+create trigger leads_set_updated_at
+  before update on leads
+  for each row execute function set_updated_at();
+
+create trigger pre_apps_set_updated_at
+  before update on pre_apps
+  for each row execute function set_updated_at();
+
+-- =====================================================================
 -- PRE-APP APPROVAL — Tier 2 (Postgres RPC function, no secrets needed).
 -- security definer because it must write to merchants regardless of the
 -- caller's own row restrictions; guards that power with an explicit

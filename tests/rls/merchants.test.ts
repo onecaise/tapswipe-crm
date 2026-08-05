@@ -189,6 +189,53 @@ describe("merchants write scoping", () => {
     expect(result.map((m) => m.dba)).toContain("My New Co");
   });
 
+  it("bumps updated_at when a merchant is edited", async () => {
+    await asPlatform(db);
+    const [before] = await rows<{ updated_at: string; created_at: string }>(
+      db,
+      `select updated_at, created_at from merchants where dba = 'Agent Active Co'`,
+    );
+
+    await asUser(db, AGENT_ID);
+    await db.exec(
+      `update merchants set processor = 'Nuvei' where dba = 'Agent Active Co';`,
+    );
+
+    await asPlatform(db);
+    const [after] = await rows<{ updated_at: string }>(
+      db,
+      `select updated_at from merchants where dba = 'Agent Active Co'`,
+    );
+
+    // set_updated_at() fires on update. Before the trigger existed, updated_at
+    // kept its insert-time default forever, so the detail page's "Last updated"
+    // was really showing the creation time.
+    expect(new Date(after.updated_at).getTime()).toBeGreaterThan(
+      new Date(before.updated_at).getTime(),
+    );
+  });
+
+  it("does not let the client dictate updated_at", async () => {
+    await asUser(db, AGENT_ID);
+
+    // The trigger overwrites whatever is supplied, so a wrong clock or a
+    // hostile client can't backdate a row. This is why the form doesn't send
+    // the column at all.
+    await db.exec(`
+      update merchants
+      set processor = 'Nuvei', updated_at = '2000-01-01T00:00:00Z'
+      where dba = 'Agent Active Co';
+    `);
+
+    await asPlatform(db);
+    const [after] = await rows<{ updated_at: string }>(
+      db,
+      `select updated_at from merchants where dba = 'Agent Active Co'`,
+    );
+
+    expect(new Date(after.updated_at).getUTCFullYear()).toBeGreaterThan(2000);
+  });
+
   it("lets an agent update their own merchant", async () => {
     await asUser(db, AGENT_ID);
 
@@ -229,6 +276,41 @@ describe("merchants write scoping", () => {
       `select count(*)::int as n from merchants where dba = 'Agent Active Co'`,
     );
     expect(n).toBe(0);
+  });
+});
+
+describe("regression: what the trigger migration changes", () => {
+  const BEFORE_TRIGGERS = [
+    "20260804201300_initial_schema.sql",
+    "20260805103000_add_is_active_agent_and_profile_self_service.sql",
+  ];
+
+  it("without the trigger migration, updated_at never advances", async () => {
+    const old = await createTestDb(BEFORE_TRIGGERS);
+    await resetData(old);
+
+    const [before] = await rows<{ updated_at: string }>(
+      old,
+      `select updated_at from merchants where dba = 'Agent Active Co'`,
+    );
+
+    await asUser(old, AGENT_ID);
+    await old.exec(
+      `update merchants set processor = 'Nuvei' where dba = 'Agent Active Co';`,
+    );
+
+    await asPlatform(old);
+    const [after] = await rows<{ updated_at: string }>(
+      old,
+      `select updated_at from merchants where dba = 'Agent Active Co'`,
+    );
+
+    // The bug the trigger fixes: the column keeps its insert-time default, so
+    // "last updated" was really "created". Asserted here so the fix above is
+    // demonstrably load-bearing rather than assumed.
+    expect(after.updated_at).toEqual(before.updated_at);
+
+    await old.close();
   });
 });
 
