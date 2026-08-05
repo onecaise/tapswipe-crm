@@ -159,6 +159,26 @@ export async function seed(db: TestDb): Promise<void> {
       ('${AGENT_ID}',       'Agent Lead C',     null),
       ('${OTHER_AGENT_ID}', 'Other Agent Lead', current_date + 2);
 
+    -- Ghost sheets: two open and one already-converted for the agent, one open
+    -- for the other agent. The converted one lets the "already converted" path
+    -- be tested without converting first, and the notes-less one covers the
+    -- branch where conversion must NOT create a notes row.
+    -- lead_id is resolved by dba rather than a hardcoded serial, so the fixture
+    -- doesn't silently break if seed order changes.
+    insert into ghost_sheets (agent_id, lead_id, dba, contact_name, contact_phone, notes, status)
+    values
+      ('${AGENT_ID}',       null, 'Agent Sheet Open',     'Ann Agent',  '555-0101', 'Met at the diner. Wants terminal pricing.', 'open'),
+      ('${AGENT_ID}',       null, 'Agent Sheet No Notes', 'Ned Nonote', '555-0102', null,   'open'),
+      -- Points at 'Agent Lead C', deliberately not 'Agent Lead A'.
+      -- ghost_sheets.lead_id has no ON DELETE clause, so it defaults to
+      -- NO ACTION: a referenced lead cannot be deleted. 'Agent Lead A' is kept
+      -- unreferenced so the lead delete tests have a row they can actually
+      -- remove. (The FK behaviour itself is asserted in leads.test.ts.)
+      ('${AGENT_ID}',
+        (select id from leads where dba = 'Agent Lead C'),
+                                 'Agent Sheet Converted', 'Cal Convert', '555-0103', 'Already promoted.', 'converted'),
+      ('${OTHER_AGENT_ID}', null, 'Other Sheet Open',     'Oli Other',  '555-0201', 'Other agent notes.', 'open');
+
     insert into merchants (agent_id, mid, dba, legal_business_name, status, processor, split_agent_pct, split_company_pct)
     values
       ('${AGENT_ID}',       'MID-AGENT-1', 'Agent Active Co',   'Agent Active Co LLC',   'active',   'TSYS',  60.00, 40.00),

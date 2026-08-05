@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Suspense } from "react";
-import { StoreIcon, TargetIcon, UsersIcon } from "lucide-react";
+import { GhostIcon, StoreIcon, TargetIcon, UsersIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { LogoutButton } from "@/components/logout-button";
@@ -39,6 +39,12 @@ async function DashboardContent() {
             <Link href="/leads">
               <TargetIcon size={16} />
               Leads
+            </Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link href="/ghost-sheets">
+              <GhostIcon size={16} />
+              Ghost Sheets
             </Link>
           </Button>
         </div>

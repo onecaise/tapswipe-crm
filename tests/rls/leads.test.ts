@@ -289,6 +289,30 @@ describe("leads write scoping", () => {
     );
     expect(n).toBe(0);
   });
+
+  it("blocks deleting a lead a ghost sheet still points at", async () => {
+    await asUser(db, ADMIN_ID);
+
+    // ghost_sheets.lead_id references leads(id) with no ON DELETE clause, so it
+    // defaults to NO ACTION. An admin therefore *cannot* delete a lead that came
+    // from a ghost sheet while that sheet still references it — the delete is
+    // refused rather than cascading or nulling the link.
+    //
+    // Asserted because it's surprising, it isn't visible anywhere in the UI, and
+    // it's the kind of thing that surfaces as an unexplained failure later. If
+    // the intent is for lead deletion to win, the schema needs
+    // `on delete set null` on ghost_sheets.lead_id.
+    await expect(
+      db.exec(`delete from leads where dba = 'Agent Lead C';`),
+    ).rejects.toThrow(/foreign key constraint/i);
+
+    await asPlatform(db);
+    const [{ n }] = await rows<CountRow>(
+      db,
+      `select count(*)::int as n from leads where dba = 'Agent Lead C'`,
+    );
+    expect(n).toBe(1);
+  });
 });
 
 describe("leads scoping test is load-bearing", () => {
