@@ -698,6 +698,19 @@ $$;
 -- public`. A new table then starts with no access and fails loudly on
 -- first use, which forces the author back to this list — the same reason
 -- the four-policy pattern is spelled out per table rather than automated.
+--
+-- CAVEAT for the existing project (ref vdjtosofrimipklbdjbi), confirmed by
+-- probing it on 2026-08-05: it was created before the always-revoked
+-- default and carries Supabase's legacy blanket grants — `anon` and
+-- `authenticated` both hold select/insert/update/delete on all 16 tables,
+-- INCLUDING the three *_secrets tables, plus execute on every function.
+-- This section only ADDS grants, so it does not undo any of that. Nothing
+-- leaks today (RLS returns zero rows for anon, the secrets tables have no
+-- policies at all, and the security definer RPCs guard themselves), but on
+-- that project RLS is the only lock on the secrets tables rather than the
+-- second one. Converging it needs a separate `revoke ... from anon`
+-- migration, written knowing the platform may re-grant on new objects.
+-- Do not assume the deployed grant surface matches this file.
 -- =====================================================================
 grant usage on schema public to anon, authenticated, service_role;
 

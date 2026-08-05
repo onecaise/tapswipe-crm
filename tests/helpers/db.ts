@@ -24,11 +24,13 @@ const MIGRATIONS_DIR = path.join(process.cwd(), "supabase", "migrations");
  *
  * It does NOT grant table privileges. It used to, on the assumption that
  * Supabase grants them during project setup — but that auto-exposure is
- * deprecated and off by default on new projects, so the grant block here was
- * hiding the fact that no migration granted anything and the deployed schema was
- * unreachable through PostgREST. Privileges now come from
- * 20260805200000_grant_data_api_roles.sql like everything else, which means
- * these tests would fail if that migration were dropped.
+ * deprecated and off by default now, so the grant block here was hiding the fact
+ * that no migration granted anything: any project built from these migrations
+ * alone is unreachable through PostgREST. (The currently linked project predates
+ * the change and carries legacy blanket grants, which is why it kept working —
+ * that is platform history, not something this repo can rely on.) Privileges now
+ * come from 20260805200000_grant_data_api_roles.sql like everything else, which
+ * means these tests would fail if that migration were dropped.
  */
 const AUTH_SHIM = `
   do $$
