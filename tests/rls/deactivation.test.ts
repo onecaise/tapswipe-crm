@@ -39,7 +39,7 @@ describe("deactivated agents lose own-row access (current schema)", () => {
     const result = await rows<LeadRow>(db, `select id, dba from leads`);
 
     // Baseline: the gating must not break the normal case.
-    expect(result).toHaveLength(2);
+    expect(result).toHaveLength(3);
   });
 
   it("sees no leads once deactivated", async () => {
@@ -138,7 +138,7 @@ describe("regression: the hole the gating migration closes", () => {
 
     // This is the bug. It is asserted here so the fix above is demonstrably
     // load-bearing rather than assumed.
-    expect(result).toHaveLength(2);
+    expect(result).toHaveLength(3);
   });
 
   it("initial schema alone lets a deactivated agent still insert leads", async () => {

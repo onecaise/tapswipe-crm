@@ -148,10 +148,16 @@ export async function seed(db: TestDb): Promise<void> {
       ('${AGENT_ID}', 'Agent User', 'agent', true),
       ('${OTHER_AGENT_ID}', 'Other Agent', 'agent', true);
 
-    insert into leads (agent_id, dba) values
-      ('${AGENT_ID}', 'Agent Lead A'),
-      ('${AGENT_ID}', 'Agent Lead B'),
-      ('${OTHER_AGENT_ID}', 'Other Agent Lead');
+    -- Follow-up dates are relative to current_date so the leads list's
+    -- date-window filter can be tested without hardcoding a calendar date.
+    -- One of each bucket, and the only lead inside the other agent's 7-day
+    -- window belongs to the *other* agent, so "filtered by date" and
+    -- "filtered by owner" can't be mistaken for each other.
+    insert into leads (agent_id, dba, next_followup_date) values
+      ('${AGENT_ID}',       'Agent Lead A',     current_date - 3),
+      ('${AGENT_ID}',       'Agent Lead B',     current_date),
+      ('${AGENT_ID}',       'Agent Lead C',     null),
+      ('${OTHER_AGENT_ID}', 'Other Agent Lead', current_date + 2);
 
     insert into merchants (agent_id, mid, dba, legal_business_name, status, processor, split_agent_pct, split_company_pct)
     values
@@ -176,7 +182,8 @@ export async function seed(db: TestDb): Promise<void> {
 export async function resetData(db: TestDb): Promise<void> {
   await asPlatform(db);
   await db.exec(
-    `truncate auth.users, profiles, merchants, leads restart identity cascade;`,
+    `truncate auth.users, profiles, merchants, leads, ghost_sheets, notes
+     restart identity cascade;`,
   );
   await seed(db);
 }
