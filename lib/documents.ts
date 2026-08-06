@@ -61,8 +61,9 @@ export function ownerHref(
       return `/merchants/${ownerId}`;
     case "lead":
       return `/leads/${ownerId}`;
-    // No pages for these yet — the rows can exist, there's just nowhere to go.
     case "pre_app":
+      return `/pre-apps/${ownerId}`;
+    // No page for this one yet — the rows can exist, there's just nowhere to go.
     case "support_ticket":
       return null;
   }

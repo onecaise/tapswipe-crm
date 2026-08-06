@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Suspense } from "react";
 import {
+  ClipboardListIcon,
   FolderIcon,
   GhostIcon,
   StoreIcon,
@@ -39,6 +40,12 @@ async function DashboardContent() {
             <Link href="/merchants">
               <StoreIcon size={16} />
               Merchants
+            </Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link href="/pre-apps">
+              <ClipboardListIcon size={16} />
+              Pre-Apps
             </Link>
           </Button>
           <Button asChild variant="outline">
