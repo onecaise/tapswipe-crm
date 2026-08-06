@@ -219,22 +219,35 @@ export const isState = (value: string): boolean =>
   value === "" || US_STATES.some((state) => state.code === value);
 
 /**
+ * The states matching what has been typed, in list (code) order.
+ *
+ * A match is a prefix of either the code or the name, so "TN" and "tenn" both
+ * find Tennessee. An empty query matches everything, which is what the combobox
+ * shows when it first opens.
+ *
+ * This is the single definition of the matching rule: the combobox filters with
+ * it and `matchState` is derived from it, so the highlighted option and the
+ * visible list can never disagree.
+ */
+export function filterStates(query: string): readonly (typeof US_STATES)[number][] {
+  const q = query.trim().toUpperCase();
+  if (q === "") return US_STATES;
+  return US_STATES.filter(
+    (state) =>
+      state.code.startsWith(q) || state.name.toUpperCase().startsWith(q),
+  );
+}
+
+/**
  * The state the combobox should highlight for what has been typed so far.
  *
- * Matches on the code first, then the name, so typing "T" lands on TN
- * (Tennessee sorts before Texas either way) and typing "tex" still finds TX.
- * Returns null when nothing matches, which is the signal to show no highlight
- * rather than to guess.
+ * The first match in list order, so typing "T" lands on TN. Returns null when
+ * nothing matches, which is the signal to show no highlight rather than to
+ * guess at one.
  */
 export function matchState(query: string): StateCode | null {
-  const q = query.trim().toUpperCase();
-  if (q === "") return null;
-  const byCode = US_STATES.find((state) => state.code.startsWith(q));
-  if (byCode) return byCode.code;
-  const byName = US_STATES.find((state) =>
-    state.name.toUpperCase().startsWith(q),
-  );
-  return byName ? byName.code : null;
+  if (query.trim() === "") return null;
+  return filterStates(query)[0]?.code ?? null;
 }
 
 // ---------------------------------------------------------------------------
