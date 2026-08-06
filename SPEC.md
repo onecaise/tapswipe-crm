@@ -62,7 +62,7 @@ Two risks checked and closed:
 | 5 | Autosave | Debounced 2s after last keystroke, dirty fields only, forced flush on step navigation. |
 | 6 | Duplicate rows | `unique (pre_app_id)` on terminal + business_profile; autosave uses `.upsert(..., { onConflict })`. |
 | 7 | Owner removal | DELETE policies on the three child tables, mirroring the parent rule. |
-| 8 | Edit lock | Agents edit `draft` only; admins always. Enforced in UI **and** re-checked in the RPCs — RLS cannot express it, since the update policy ignores status. |
+| 8 | Edit lock | Agents edit `draft` only; admins always. **Amended during design:** UI + RPC checks are *not* sufficient — see §5.3. A `before update` guard trigger on `pre_apps` is required, because an agent can otherwise set `status` directly through PostgREST and walk past both RPCs. |
 | 9 | Secrets entry | Own step, no autosave, explicit "Encrypt & save". Values cleared from component state after success. Shows "on file / not on file", never a stored value. |
 | 10 | Secret rewrites | Unique constraints on the three secrets tables; the Edge Function upserts, so a correction replaces rather than accumulates. |
 | 11 | Secret reads | Admins get full plaintext; the **owning agent gets last-4 only**. Every read writes `audit_log`. |
@@ -170,6 +170,15 @@ revoke/grant pair.
 - on success: `status = 'submitted'`, `date_submitted = current_date`, clear
   `decline_reason`, write `audit_log`
 
+> **Open — the card-mix rule as written is probably unsatisfiable.** "The six card-mix
+> percentages sum to 100" cannot be right for a real merchant: `card_swiped_pct` +
+> `card_keyed_pct` is one 100% split of *how* the card is read, `card_present_pct` +
+> `card_not_present_pct` is a second independent 100% split, and `moto_pct` / `internet_pct`
+> are subsets of card-not-present. A single six-column sum of 100 would reject every
+> honestly-filled form. The likely correct rule is two independent pair checks. **This is a
+> product question and is flagged for the user, not decided here** — whatever it becomes,
+> the RPC and the wizard must agree exactly, or the rep gets an error they cannot act on.
+
 > **Reading a secrets table from SQL.** `submit_pre_app` runs
 > `select exists (select 1 from pre_app_banking_secrets where ...)`. This does not violate
 > the never-grant rule — a `security definer` function runs as its owner, so it needs no
@@ -194,6 +203,42 @@ requires `status='submitted'` and a non-empty reason; sets `status='declined'` a
 **`reopen_pre_app(pre_app_id_input int) returns void`** — owner or admin, requires
 `status='declined'`, returns it to `'draft'`, keeping `decline_reason` visible until the
 next successful submit clears it.
+
+### 5.3 A status guard trigger — required, and not in the original decision list
+
+Decision 8 assumed "UI plus RPC checks" was enough to keep an agent out of a submitted
+pre-app. **It isn't.** The `pre_apps` update policy is
+`(agent_id = auth.uid() and is_active_agent()) or is_admin()` and says nothing about
+*which columns* may change, so an agent can send
+
+```
+PATCH /rest/v1/pre_apps?id=eq.7   {"status": "approved"}
+```
+
+straight through PostgREST and skip `submit_pre_app` and `approve_pre_app` entirely —
+`approve_pre_app`'s `is_admin()` guard is irrelevant if the column is directly writable.
+They can also bump `split_agent_pct` after submitting but before approval, which
+`approve_pre_app` then copies into `merchants`.
+
+RLS cannot express this: a `with check` expression sees only `NEW`, never `OLD`, so
+"status unchanged" is not statable as a policy. A row trigger can:
+
+- `before update on pre_apps for each row`
+- returns early for `is_admin()` (admins edit freely, per decision 8) or when a
+  transaction-local flag is set
+- otherwise raises if `status`, `date_submitted`, or the split columns changed, and raises
+  if `OLD.status <> 'draft'`
+- the two RPCs set the flag via `set_config('...', 'on', true)` around their own single
+  UPDATE — transaction-local, so it cannot leak past the statement that set it
+
+Column-level privileges (`grant update (col, …)`) are the declarative alternative and were
+rejected: Postgres checks the table-level privilege first, so this would mean replacing the
+table-level `grant update on pre_apps` with an explicit ~30-column list that every future
+migration has to remember to extend. That fails closed rather than open, but it fails
+often, and a forgotten column shows up as a mystery `permission denied` in autosave.
+
+This lands with the RPCs in commit 6, not with the schema — the flag mechanism only makes
+sense once there is an RPC to set it.
 
 ## 6. Validation contract
 
@@ -327,7 +372,24 @@ echoes a value**.
 
 **`read-pre-app-secrets`** — same preamble, then branches on an `is_admin()` RPC through
 the caller-scoped client: admin gets plaintext, the owning agent gets `last4` only.
-Writes an `audit_log` row on every read, recording whether the response was masked.
+Determine the tier from `is_admin()`, **never** by comparing the caller to `agent_id` — an
+admin can also be the owning agent, and that inference would silently downgrade them.
+
+Write the `audit_log` row **before decrypting**; if the insert fails, return 500 and
+decrypt nothing. An audit outage blocking reads is the right trade for this data; plaintext
+returned with no trail is not.
+
+**Refinement to decision 11: `rp_password` returns presence only, never a suffix.** Last-4
+is a reasonable disclosure for an identifier like an account number, and a real leak for a
+password — four characters removes most of its entropy for anyone who also knows the
+vendor's password rules. Non-admins get `{ present: true }`.
+
+**Bind each ciphertext to its row (AAD).** Pass
+`aad = "<table>:<column>:<parent id>"` to AES-GCM. Without it, anyone who can write to the
+database can copy agent A's `account_number_encrypted` onto agent B's row and read the
+plaintext back through this function, because the ciphertext carries no statement about
+where it belongs. With it, that swap fails the tag check. It costs nothing at write time and
+**cannot be retrofitted** once ciphertext exists, so it goes in from the first write.
 
 Local wiring: uncomment `[edge_runtime.secrets]` in `config.toml` with
 `PRE_APP_SECRETS_KEY = "env(PRE_APP_SECRETS_KEY)"` and add the **name** (not a value) to
@@ -483,7 +545,12 @@ the parent, making autosave a plain UPDATE.
   gains the pre-app tables explicitly (today they're cleared only incidentally by cascade,
   and their sequences aren't reset).
 - `tests/live/helpers/stack.ts` — `provisionFixtures()` gains `preAppIds` and
-  `preAppOwnerIds` per persona; `teardownFixtures()` deletes them in FK order.
+  `preAppOwnerIds` per persona; `teardownFixtures()` deletes them in FK order. **This
+  feature breaks teardown:** `audit_log.actor_id references profiles(id)` with no `ON
+  DELETE`, and `profiles` cascades from `auth.users`, so as soon as these tests write audit
+  rows, `auth.admin.deleteUser()` fails on that FK. Delete the caller's `audit_log` rows
+  first. (Whether `actor_id` should become `on delete set null`, preserving the trail rather
+  than blocking or deleting it, is a real question and deliberately out of scope.)
 
 ## 10. Tests
 
