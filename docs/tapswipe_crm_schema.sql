@@ -189,9 +189,19 @@ create policy "admin delete only" on ghost_sheets
 create table pre_apps (
   id serial primary key,
   agent_id uuid references profiles(id) not null,
-  lead_id int references leads(id),
-  status text default 'draft' check (status in ('draft', 'submitted', 'approved', 'declined')),
+  -- `on delete set null` for the same reason as ghost_sheets.lead_id: this
+  -- records provenance, not a dependency. Without it an admin cannot delete a
+  -- lead any pre-app points at. Never CASCADE here -- deleting a lead must not
+  -- delete a merchant application.
+  lead_id int references leads(id) on delete set null,
+  -- `not null` is load-bearing, not tidiness: a CHECK that evaluates to NULL
+  -- passes, so without it `set status = null` is accepted and defeats the
+  -- whole state machine (and every status filter) silently.
+  status text not null default 'draft' check (status in ('draft', 'submitted', 'approved', 'declined')),
   date_submitted date,
+  -- Set by decline_pre_app() so the rep knows what to fix. Cleared by the
+  -- next successful submit_pre_app().
+  decline_reason text,
 
   -- business info
   dba_name text not null,
@@ -222,6 +232,16 @@ create table pre_apps (
   billing_type text check (billing_type in ('gross', 'net')),
   bank_name text,
 
+  -- Commission split between the rep and Tapswipe, recorded by the rep who
+  -- knows the deal terms and copied into merchants by approve_pre_app(). The
+  -- standard deal is 50/50; it is 100/0 when the CEO is the one on the sale.
+  -- Without these columns approve_pre_app leaves merchants.split_*_pct NULL
+  -- and an admin has to retype terms the pre-app already captured.
+  split_agent_pct numeric(5,2) not null default 50,
+  split_company_pct numeric(5,2) not null default 50,
+  constraint pre_apps_split_sums_to_100
+    check (split_agent_pct + split_company_pct = 100),
+
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
@@ -245,7 +265,13 @@ create policy "admin delete only" on pre_apps
 -- ---------------------------------------------------------------------
 create table pre_app_owners (
   id serial primary key,
-  pre_app_id int references pre_apps(id) not null,
+  -- `on delete cascade` here and on every pre-app child: pre_apps has an
+  -- admin-only DELETE policy, but without a referential action that delete
+  -- fails with a foreign-key violation, and an admin cannot clear the
+  -- children first (pre_app_owner_secrets is not granted to anyone). The
+  -- cascade runs as the constraint owner and so bypasses RLS, which is what
+  -- makes deleting an owner who has an SSN on file work at all.
+  pre_app_id int references pre_apps(id) on delete cascade not null,
   owner_name text,
   title text,
   id_type text,
@@ -278,8 +304,27 @@ create policy "insert via parent pre_app" on pre_app_owners
       select 1 from pre_apps where pre_apps.id = pre_app_id and pre_apps.agent_id = auth.uid()
     ))
   );
+-- The `with check` is spelled out rather than left to Postgres reusing the
+-- USING expression. Same effect, but the parent tables state it explicitly
+-- and a reader should not have to know that rule to see that re-parenting a
+-- row to someone else's pre-app is blocked.
 create policy "update via parent pre_app" on pre_app_owners
   for update using (
+    is_admin() or (is_active_agent() and exists (
+      select 1 from pre_apps where pre_apps.id = pre_app_id and pre_apps.agent_id = auth.uid()
+    ))
+  )
+  with check (
+    is_admin() or (is_active_agent() and exists (
+      select 1 from pre_apps where pre_apps.id = pre_app_id and pre_apps.agent_id = auth.uid()
+    ))
+  );
+-- Unlike most tables, delete is NOT admin-only here. A rep filling in the
+-- form has to be able to remove an owner row they added by mistake, the same
+-- exception `documents` makes for a rep's own uploads. Without this policy
+-- the wizard's "Remove owner" cannot work at all.
+create policy "delete via parent pre_app" on pre_app_owners
+  for delete using (
     is_admin() or (is_active_agent() and exists (
       select 1 from pre_apps where pre_apps.id = pre_app_id and pre_apps.agent_id = auth.uid()
     ))
@@ -291,7 +336,11 @@ create policy "update via parent pre_app" on pre_app_owners
 -- ---------------------------------------------------------------------
 create table pre_app_terminal (
   id serial primary key,
-  pre_app_id int references pre_apps(id) not null,
+  -- `unique` because this is one section of one form, not a collection. It is
+  -- what lets the wizard autosave with upsert(onConflict: 'pre_app_id')
+  -- instead of insert-or-update guesswork, and it is the only thing stopping
+  -- a debounced save from quietly leaving two terminal rows behind.
+  pre_app_id int references pre_apps(id) on delete cascade not null unique,
   batch_out_time time,
   terminal_type text,
   auto_batch boolean,
@@ -337,6 +386,17 @@ create policy "update via parent pre_app" on pre_app_terminal
     is_admin() or (is_active_agent() and exists (
       select 1 from pre_apps where pre_apps.id = pre_app_id and pre_apps.agent_id = auth.uid()
     ))
+  )
+  with check (
+    is_admin() or (is_active_agent() and exists (
+      select 1 from pre_apps where pre_apps.id = pre_app_id and pre_apps.agent_id = auth.uid()
+    ))
+  );
+create policy "delete via parent pre_app" on pre_app_terminal
+  for delete using (
+    is_admin() or (is_active_agent() and exists (
+      select 1 from pre_apps where pre_apps.id = pre_app_id and pre_apps.agent_id = auth.uid()
+    ))
   );
 
 -- ---------------------------------------------------------------------
@@ -344,7 +404,8 @@ create policy "update via parent pre_app" on pre_app_terminal
 -- ---------------------------------------------------------------------
 create table pre_app_business_profile (
   id serial primary key,
-  pre_app_id int references pre_apps(id) not null,
+  -- unique for the same reason as pre_app_terminal.pre_app_id above.
+  pre_app_id int references pre_apps(id) on delete cascade not null unique,
   card_swiped_pct numeric(5,2),
   card_keyed_pct numeric(5,2),
   card_present_pct numeric(5,2),
@@ -374,6 +435,17 @@ create policy "update via parent pre_app" on pre_app_business_profile
     is_admin() or (is_active_agent() and exists (
       select 1 from pre_apps where pre_apps.id = pre_app_id and pre_apps.agent_id = auth.uid()
     ))
+  )
+  with check (
+    is_admin() or (is_active_agent() and exists (
+      select 1 from pre_apps where pre_apps.id = pre_app_id and pre_apps.agent_id = auth.uid()
+    ))
+  );
+create policy "delete via parent pre_app" on pre_app_business_profile
+  for delete using (
+    is_admin() or (is_active_agent() and exists (
+      select 1 from pre_apps where pre_apps.id = pre_app_id and pre_apps.agent_id = auth.uid()
+    ))
   );
 
 -- =====================================================================
@@ -388,27 +460,52 @@ create policy "update via parent pre_app" on pre_app_business_profile
 -- tables via supabase-js.
 -- =====================================================================
 
+-- `unique` on the parent reference of all three: one row is the current
+-- value. Without it, correcting a mistyped account number appends a second
+-- ciphertext row and nothing in the schema says which one is live — the read
+-- function would have to guess (and "order by id desc" is a convention a
+-- future caller will forget). With it, submit-pre-app-secrets upserts and a
+-- correction replaces.
+--
+-- `on delete cascade` so removing an owner or deleting a pre-app takes its
+-- ciphertext with it. Note this is also the only way that delete can succeed:
+-- these tables are granted to nobody, so no client can clear them first.
+
+-- `key_version` on all three: the stored value is a bare
+-- 12-byte IV || ciphertext || 16-byte GCM tag with no version field, so
+-- nothing in the ciphertext says which key or algorithm produced it. Rotating
+-- PRE_APP_SECRETS_KEY, or moving off AES-256-GCM, would otherwise leave every
+-- row undecodable with no way to tell old from new. It cannot be backfilled
+-- once real ciphertext exists, so it goes in before any is written.
+--
+-- Values travel over PostgREST as the `\x`-hex text form, NEVER base64:
+-- bytea_in accepts a base64 string as the escape format and silently stores
+-- its literal ASCII, so a base64 bug here is undetectable data destruction.
+
 create table pre_app_owner_secrets (
   id serial primary key,
-  pre_app_owner_id int references pre_app_owners(id) not null,
-  ssn_encrypted bytea not null
+  pre_app_owner_id int references pre_app_owners(id) on delete cascade not null unique,
+  ssn_encrypted bytea not null,
+  key_version smallint not null default 1
 );
 alter table pre_app_owner_secrets enable row level security;
 -- intentionally zero policies for `authenticated` — service role only
 
 create table pre_app_banking_secrets (
   id serial primary key,
-  pre_app_id int references pre_apps(id) not null,
+  pre_app_id int references pre_apps(id) on delete cascade not null unique,
   aba_routing_encrypted bytea not null,
-  account_number_encrypted bytea not null
+  account_number_encrypted bytea not null,
+  key_version smallint not null default 1
 );
 alter table pre_app_banking_secrets enable row level security;
 -- intentionally zero policies for `authenticated` — service role only
 
 create table pre_app_terminal_secrets (
   id serial primary key,
-  pre_app_id int references pre_apps(id) not null,
-  rp_password_encrypted bytea not null
+  pre_app_id int references pre_apps(id) on delete cascade not null unique,
+  rp_password_encrypted bytea not null,
+  key_version smallint not null default 1
 );
 alter table pre_app_terminal_secrets enable row level security;
 -- intentionally zero policies for `authenticated` — service role only
@@ -550,8 +647,13 @@ create index idx_leads_next_followup_date on leads(next_followup_date);
 -- `exists (select 1 from pre_apps where pre_apps.id = pre_app_id ...)`,
 -- so they filter on pre_app_id on every read and write
 create index idx_pre_app_owners_pre_app_id on pre_app_owners(pre_app_id);
-create index idx_pre_app_terminal_pre_app_id on pre_app_terminal(pre_app_id);
-create index idx_pre_app_business_profile_pre_app_id on pre_app_business_profile(pre_app_id);
+-- pre_app_terminal, pre_app_business_profile and the three *_secrets tables
+-- need no index here: their `unique (pre_app_id)` / `unique (pre_app_owner_id)`
+-- constraint already creates a unique btree index on exactly that column,
+-- which serves these lookups. A second plain index would be dead weight on
+-- every write. (This is why the earlier idx_pre_app_terminal_pre_app_id and
+-- idx_pre_app_business_profile_pre_app_id are dropped when the constraints
+-- are added.)
 
 -- ---------------------------------------------------------------------
 -- updated_at trigger — plain function, no security definer: it only
@@ -763,6 +865,11 @@ revoke all on function is_active_agent() from public;
 revoke all on function update_own_full_name(text) from public;
 revoke all on function approve_pre_app(int) from public;
 revoke all on function convert_ghost_sheet_to_lead(int) from public;
+-- Trigger function: revoked, and deliberately NOT granted. A trigger fires
+-- regardless of whether the querying role holds EXECUTE on its function, so a
+-- grant would widen the surface for no benefit. (This one was missed when the
+-- grants block was first written and shipped executable by anon.)
+revoke all on function set_updated_at() from public;
 
 grant execute on function is_admin() to authenticated, service_role;
 grant execute on function is_active_agent() to authenticated, service_role;

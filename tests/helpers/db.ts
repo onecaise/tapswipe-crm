@@ -167,7 +167,9 @@ export const AGENT_ID = "22222222-2222-2222-2222-222222222222";
 export const OTHER_AGENT_ID = "33333333-3333-3333-3333-333333333333";
 
 /**
- * Seeds one admin and two agents, plus leads and merchants owned by each agent.
+ * Seeds one admin and two agents, plus leads, ghost sheets, merchants,
+ * documents and pre-apps (with owners, terminal, business profile and
+ * stand-in ciphertext) owned by each agent.
  *
  * Two agents rather than one on purpose: with a single agent, a policy bug that
  * returned "all rows belonging to any agent" would be indistinguishable from
@@ -250,6 +252,70 @@ export async function seed(db: TestDb): Promise<void> {
         '${OTHER_AGENT_ID}/merchant/3/33333333-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
         'other-dl.jpg', 'image/jpeg');
   `);
+
+  // Second exec on purpose, not for tidiness. PGlite's `exec` runs a script
+  // through the simple query protocol and accumulates one result per
+  // statement; past roughly this many statements in a single call it fails
+  // with a bare "invalid message format" from the protocol parser, with no
+  // indication of which statement is at fault. Splitting the script keeps
+  // each call comfortably under that and makes a future failure point at
+  // real SQL instead of at the transport.
+  await db.exec(`
+    -- Pre-apps: a draft and a submitted one for the agent, one draft for the
+    -- other agent. Two statuses for the same agent for the same reason the
+    -- merchants fixture has two — otherwise "filtered by status" and
+    -- "filtered by owner" select the same rows and neither assertion means
+    -- much.
+    --
+    -- Deliberately names only columns that exist in the INITIAL schema. The
+    -- regression tests in merchants/deactivation/ghost-sheet-conversion build
+    -- explicit migration *prefixes* and then call this function, so naming a
+    -- column added by a later migration (split_agent_pct, decline_reason)
+    -- breaks those suites with an error that looks nothing like their subject.
+    -- Tests that care about the split set it themselves.
+    insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+    values
+      ('${AGENT_ID}',       'draft',     'Agent Draft App',     'Agent Draft App LLC'),
+      ('${AGENT_ID}',       'submitted', 'Agent Submitted App', 'Agent Submitted App LLC'),
+      ('${OTHER_AGENT_ID}', 'draft',     'Other Draft App',     'Other Draft App LLC');
+
+    -- Owners on the agent's draft: one controlling (51%) and one minority, so
+    -- the "at least one owner at 51%+" submit rule has both a passing and a
+    -- failing shape available without rewriting rows mid-test.
+    insert into pre_app_owners (pre_app_id, owner_name, percent_owned)
+    values
+      ((select id from pre_apps where dba_name = 'Agent Draft App'), 'Ada Owner',  51.00),
+      ((select id from pre_apps where dba_name = 'Agent Draft App'), 'Ben Minor',  49.00),
+      ((select id from pre_apps where dba_name = 'Other Draft App'), 'Ozzy Other', 100.00);
+
+    -- One row each, which is now all the unique constraint allows.
+    insert into pre_app_terminal (pre_app_id, terminal_type, auto_batch)
+    values ((select id from pre_apps where dba_name = 'Agent Draft App'), 'Ingenico', true);
+
+    insert into pre_app_business_profile (pre_app_id, card_swiped_pct, card_keyed_pct)
+    values ((select id from pre_apps where dba_name = 'Agent Draft App'), 60.00, 40.00);
+
+    -- Ciphertext stand-ins, deliberately not real AES output: nothing in the
+    -- PGlite suite decrypts anything. They exist so the tests can assert that
+    -- these tables stay unreachable to every client role, and that deleting a
+    -- parent cascades the ciphertext away. Inserted as the owner because no
+    -- role holds a grant here — which is the point of the tables.
+    --
+    -- decode(..., 'hex') rather than a hex-escaped bytea literal on purpose.
+    -- This SQL lives in a JS template literal, so a backslash-x escape is
+    -- consumed by JavaScript before Postgres ever sees it: it becomes a real
+    -- control byte in the query string and the connection dies with "invalid
+    -- message format" from the protocol parser, naming no statement. decode()
+    -- has no backslash to get wrong. (Do not write such an escape even in a
+    -- comment on this line — JS does not care that it is a SQL comment.)
+    insert into pre_app_owner_secrets (pre_app_owner_id, ssn_encrypted)
+    values ((select id from pre_app_owners where owner_name = 'Ada Owner'),
+            decode('0011', 'hex'));
+
+    insert into pre_app_banking_secrets (pre_app_id, aba_routing_encrypted, account_number_encrypted)
+    values ((select id from pre_apps where dba_name = 'Agent Draft App'),
+            decode('0022', 'hex'), decode('0033', 'hex'));
+  `);
 }
 
 /**
@@ -262,11 +328,19 @@ export async function seed(db: TestDb): Promise<void> {
  *
  * `restart identity` resets the serial sequences, so row ids are stable across
  * tests. `cascade` picks up every table referencing profiles.
+ *
+ * The pre-app tables are named explicitly even though `cascade` would reach
+ * them anyway: `restart identity` only resets the sequences of the tables
+ * actually listed, so leaving them to the cascade would let their ids drift
+ * upward test after test — and an assertion about a specific id would then
+ * pass or fail depending on what ran before it.
  */
 export async function resetData(db: TestDb): Promise<void> {
   await asPlatform(db);
   await db.exec(
-    `truncate auth.users, profiles, merchants, leads, ghost_sheets, notes, documents
+    `truncate auth.users, profiles, merchants, leads, ghost_sheets, notes, documents,
+              pre_apps, pre_app_owners, pre_app_terminal, pre_app_business_profile,
+              pre_app_owner_secrets, pre_app_banking_secrets, pre_app_terminal_secrets
      restart identity cascade;`,
   );
   await seed(db);
