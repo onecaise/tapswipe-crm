@@ -279,6 +279,15 @@ Three details that matter:
   **no merchant row and no `audit_log` entry** — a data-integrity hole, not merely an
   authorization one. Status moves only through an RPC, for everyone. `is_admin()` appears in
   the trigger only to relax the separate rule that non-draft rows are frozen, per decision 8.
+- **The trigger fires for the table owner too, so `service_role` is not exempt** — and a
+  service-role connection has no `auth.uid()`, so `is_admin()` is false there as well.
+  Privileged server code therefore cannot `UPDATE pre_apps.status` or touch a non-draft
+  pre-app at all; it has to call these RPCs. Intended, and pinned by a test: it keeps the
+  `audit_log` write and the merchant creation on the only path that exists. A future function
+  that genuinely needs to bypass it should set the transition flag around its own write
+  rather than weaken the trigger. **Consequence for tests:** fixture setup cannot mutate a
+  submitted pre-app via `asPlatform` — drive the real path (edit as a draft, then submit
+  through the RPC) instead.
 
 Column-level privileges (`grant update (col, …)`) are the declarative alternative and were
 rejected: Postgres checks the table-level privilege first, so this would mean replacing the

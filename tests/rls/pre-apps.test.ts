@@ -172,14 +172,23 @@ describe("pre_apps row scoping", () => {
 });
 
 describe("pre_apps status is a real column constraint", () => {
+  // Asserted on INSERT rather than UPDATE. The status guard trigger added with
+  // the state machine is BEFORE UPDATE, so it now intercepts a direct
+  // `update ... set status = ...` before the column constraints are ever
+  // evaluated — a test written that way would pass on the trigger's message
+  // and prove nothing about NOT NULL or the CHECK. INSERT reaches them.
+
   it("rejects a null status", async () => {
-    // A CHECK constraint passes when it evaluates to NULL, so before `not
-    // null` was added `status = null` was accepted and produced a pre-app that
-    // could never be submitted or approved, with nothing explaining why.
+    // A CHECK passes when it evaluates to NULL, so before `not null` was added
+    // an explicit null status was accepted and produced a pre-app that could
+    // never be submitted or approved, with nothing explaining why.
     await asPlatform(db);
 
     await expect(
-      db.exec(`update pre_apps set status = null where id = ${agentDraftId}`),
+      db.exec(
+        `insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+         values ('${AGENT_ID}', null, 'Null Status', 'Null Status LLC')`,
+      ),
     ).rejects.toThrow(/not-null|null value/i);
   });
 
@@ -187,7 +196,10 @@ describe("pre_apps status is a real column constraint", () => {
     await asPlatform(db);
 
     await expect(
-      db.exec(`update pre_apps set status = 'pending' where id = ${agentDraftId}`),
+      db.exec(
+        `insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+         values ('${AGENT_ID}', 'pending', 'Bad Status', 'Bad Status LLC')`,
+      ),
     ).rejects.toThrow(/check constraint/i);
   });
 });
