@@ -11,9 +11,9 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Built:** `app/dashboard`, `app/merchants/*`, `app/leads/*`, `app/ghost-sheets/*`, `app/documents`, `app/admin/users`, with data-access helpers in `lib/{merchants,leads,ghost-sheets,documents,auth,format}.ts`.
 - **Not built yet:** Pre-Apps, Support Tickets, My Submissions.
 - **Still [starter-kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase) template, not product code:** `README.md`, `app/page.tsx`, `app/protected/*`, `components/tutorial/*`, and `components/{hero,deploy-button,next-logo,supabase-logo,env-var-warning}.tsx`.
-- **Edge Functions:** `create-upload-url` and `create-download-url` are implemented (with shared helpers in `supabase/functions/_shared/documents.ts`). The other five are still `withSupabase` hello-world stubs — identical 36-line files that echo `Hello ${name}`.
+- **Edge Functions:** `create-upload-url`, `create-download-url`, `submit-pre-app-secrets` and `read-pre-app-secrets` are implemented (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env}.ts`). The other three — `create-user`, `deactivate-user`, `admin-reset-password` — are still `withSupabase` hello-world stubs.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Six migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Eight migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi`.
 
@@ -25,8 +25,8 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # PGlite suite — hermetic, no Docker (117 tests)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (17 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (289 tests)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (37 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED project (4 tests)
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -35,7 +35,8 @@ npx supabase migration new <name>        # new timestamped migration
 npx supabase db push                     # apply migrations to the linked remote project
 npx supabase functions serve             # serve all functions locally (hot reload)
 npx supabase functions deploy <name>     # deploy one function
-npx supabase secrets set KEY=value       # set Edge Function secrets (encryption key, etc.)
+npx supabase secrets set PRE_APP_SECRETS_KEY=$(openssl rand -base64 32)   # deployed encryption key
+npx supabase functions serve --env-file ./supabase/functions/.env         # local serve WITH the key
 ```
 
 `npm run build`, `npm run lint` and `npx tsc --noEmit` all pass. If one fails, it's your change.

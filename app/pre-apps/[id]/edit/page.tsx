@@ -7,7 +7,6 @@ import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import {
   canEditPreApp,
-  PRE_APP_STEP_LABELS,
   type PreApp,
   type PreAppBusinessProfile,
   type PreAppOwner,
@@ -18,6 +17,7 @@ import { PreAppWizardShell } from "@/components/pre-app-wizard-shell";
 import { BusinessStep } from "@/components/pre-app-steps/business-step";
 import { OwnersStep } from "@/components/pre-app-steps/owners-step";
 import { ProfileStep } from "@/components/pre-app-steps/profile-step";
+import { SecretsStep } from "@/components/pre-app-steps/secrets-step";
 import { TerminalStep } from "@/components/pre-app-steps/terminal-step";
 import { Button } from "@/components/ui/button";
 
@@ -63,7 +63,7 @@ async function PreAppEditor({
   // Only the active step's rows are fetched. Loading all four sections on every
   // step change would triple the query count for data the step cannot show.
   const [owners, terminal, cardMix] = await Promise.all([
-    step === "owners"
+    step === "owners" || step === "secrets"
       ? supabase
           .from("pre_app_owners")
           .select("*")
@@ -108,11 +108,7 @@ async function PreAppEditor({
         <ProfileStep preAppId={preApp.id} profile={cardMix} canEdit />
       )}
       {step === "secrets" && (
-        <p className="rounded-md border border-dashed p-6 text-sm text-muted-foreground">
-          The {PRE_APP_STEP_LABELS[step].toLowerCase()} step isn&rsquo;t built
-          yet. It needs the encryption Edge Function, which lands next — SSN,
-          banking and the RP password never travel through the ordinary tables.
-        </p>
+        <SecretsStep preAppId={preApp.id} owners={owners} canEdit />
       )}
     </PreAppWizardShell>
   );
