@@ -221,21 +221,78 @@ They can also bump `split_agent_pct` after submitting but before approval, which
 `approve_pre_app` then copies into `merchants`.
 
 RLS cannot express this: a `with check` expression sees only `NEW`, never `OLD`, so
-"status unchanged" is not statable as a policy. A row trigger can:
+"status unchanged" is not statable as a policy. A row trigger can.
 
-- `before update on pre_apps for each row`
-- returns early for `is_admin()` (admins edit freely, per decision 8) or when a
-  transaction-local flag is set
-- otherwise raises if `status`, `date_submitted`, or the split columns changed, and raises
-  if `OLD.status <> 'draft'`
-- the two RPCs set the flag via `set_config('...', 'on', true)` around their own single
-  UPDATE — transaction-local, so it cannot leak past the statement that set it
+**Why the trigger cannot tell the two apart by role.** `SECURITY DEFINER` changes
+`current_user`, not the session's JWT claims — `auth.uid()` reads the
+`request.jwt.claims` GUC, so inside `submit_pre_app` it still returns the *caller*, and
+`is_admin()` still evaluates against the caller's profile. That produces an asymmetry that
+rules out an `is_admin()`-based test:
+
+- `approve_pre_app` — the caller is an admin by the function's own guard, so `is_admin()`
+  is true and a role test would let its UPDATE through.
+- `submit_pre_app` — the caller is normally the **agent** submitting their own draft, so
+  `is_admin()` is false. A role-based trigger would block the primary path outright.
+
+**Mechanism: a session-local flag the RPC sets immediately before its own write and clears
+immediately after.**
+
+```sql
+if coalesce(current_setting('tapswipe.pre_app_transition', true), '') = 'on' then
+  return new;   -- an RPC's own write
+end if;
+```
+
+```sql
+perform set_config('tapswipe.pre_app_transition', 'on', true);
+update pre_apps set status = 'submitted', date_submitted = current_date where id = pa.id;
+perform set_config('tapswipe.pre_app_transition', '', true);
+```
+
+Three details that matter:
+
+- `set_config(..., true)` is **transaction**-local, not statement-local: it survives to the
+  end of the transaction and is discarded on commit or rollback. PostgREST runs one
+  transaction per request, so it cannot outlive the call — but the explicit clear is what
+  keeps it from covering any *later* statement in the same transaction, which is what a
+  future plpgsql caller invoking the RPC and then updating would hit. Clear it, don't rely
+  on the request boundary.
+- The GUC is named under a `tapswipe.` prefix, deliberately **not** under `request.`, which
+  PostgREST populates from client-controlled headers. A client cannot set a `tapswipe.*`
+  GUC: `set_config` lives in `pg_catalog`, so it is not reachable as `/rpc/set_config`.
+- **No `is_admin()` early return** (a correction to the first draft of this section). With
+  one, an admin could PATCH `status = 'approved'` directly and reach the approved state with
+  **no merchant row and no `audit_log` entry** — a data-integrity hole, not merely an
+  authorization one. Status moves only through an RPC, for everyone. `is_admin()` appears in
+  the trigger only to relax the separate rule that non-draft rows are frozen, per decision 8.
 
 Column-level privileges (`grant update (col, …)`) are the declarative alternative and were
 rejected: Postgres checks the table-level privilege first, so this would mean replacing the
 table-level `grant update on pre_apps` with an explicit ~30-column list that every future
 migration has to remember to extend. That fails closed rather than open, but it fails
 often, and a forgotten column shows up as a mystery `permission denied` in autosave.
+
+**Verified as a prototype over the real migrations before committing to it** — agent direct
+`status` PATCH rejected; agent `submit_pre_app` **succeeds**; a direct PATCH immediately
+after the RPC returned still rejected (no flag leak); agent edit of a submitted pre-app
+rejected; admin edit allowed; admin direct `status` PATCH rejected; admin
+`approve_pre_app` succeeds and creates the merchant with the split; second approve rejected.
+
+**Required tests, in `tests/rls/pre-app-rpcs.test.ts` (commit 6).** Both directions, because
+either alone is misleading — a suite that only proves a direct PATCH is refused would pass
+just as happily against a trigger that blocks the RPCs too:
+
+1. agent direct `status` PATCH raises, and `status` is unchanged when read back as platform
+2. agent direct `date_submitted` PATCH raises
+3. **`submit_pre_app` succeeds for the owning agent under the trigger**, and `status` is
+   `submitted` with `date_submitted` set
+4. **`approve_pre_app` succeeds for an admin under the trigger**, and the merchant row
+   exists with both split columns copied
+5. a direct `status` PATCH immediately after an RPC call still raises — the flag was cleared
+6. agent edit of a non-status column on a submitted pre-app raises; the same edit as admin
+   succeeds
+7. admin direct `status` PATCH raises, and no merchant row appears
+8. load-bearing: with the trigger dropped, case 1 stops raising
 
 This lands with the RPCs in commit 6, not with the schema — the flag mechanism only makes
 sense once there is an RPC to set it.
