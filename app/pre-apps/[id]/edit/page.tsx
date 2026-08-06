@@ -9,10 +9,16 @@ import {
   canEditPreApp,
   PRE_APP_STEP_LABELS,
   type PreApp,
+  type PreAppBusinessProfile,
+  type PreAppOwner,
+  type PreAppTerminal,
   parsePreAppStep,
 } from "@/lib/pre-apps";
 import { PreAppWizardShell } from "@/components/pre-app-wizard-shell";
 import { BusinessStep } from "@/components/pre-app-steps/business-step";
+import { OwnersStep } from "@/components/pre-app-steps/owners-step";
+import { ProfileStep } from "@/components/pre-app-steps/profile-step";
+import { TerminalStep } from "@/components/pre-app-steps/terminal-step";
 import { Button } from "@/components/ui/button";
 
 async function PreAppEditor({
@@ -54,6 +60,35 @@ async function PreAppEditor({
 
   const step = parsePreAppStep(rawStep);
 
+  // Only the active step's rows are fetched. Loading all four sections on every
+  // step change would triple the query count for data the step cannot show.
+  const [owners, terminal, cardMix] = await Promise.all([
+    step === "owners"
+      ? supabase
+          .from("pre_app_owners")
+          .select("*")
+          .eq("pre_app_id", preApp.id)
+          .order("id")
+          .then(({ data }) => (data ?? []) as PreAppOwner[])
+      : Promise.resolve<PreAppOwner[]>([]),
+    step === "terminal"
+      ? supabase
+          .from("pre_app_terminal")
+          .select("*")
+          .eq("pre_app_id", preApp.id)
+          .maybeSingle()
+          .then(({ data }) => (data ?? null) as PreAppTerminal | null)
+      : Promise.resolve<PreAppTerminal | null>(null),
+    step === "profile"
+      ? supabase
+          .from("pre_app_business_profile")
+          .select("*")
+          .eq("pre_app_id", preApp.id)
+          .maybeSingle()
+          .then(({ data }) => (data ?? null) as PreAppBusinessProfile | null)
+      : Promise.resolve<PreAppBusinessProfile | null>(null),
+  ]);
+
   return (
     <PreAppWizardShell
       preAppId={preApp.id}
@@ -62,12 +97,21 @@ async function PreAppEditor({
       status={preApp.status}
       isAdmin={isAdmin}
     >
-      {step === "business" ? (
-        <BusinessStep preApp={preApp} canEdit />
-      ) : (
+      {step === "business" && <BusinessStep preApp={preApp} canEdit />}
+      {step === "owners" && (
+        <OwnersStep preAppId={preApp.id} owners={owners} canEdit />
+      )}
+      {step === "terminal" && (
+        <TerminalStep preAppId={preApp.id} terminal={terminal} canEdit />
+      )}
+      {step === "profile" && (
+        <ProfileStep preAppId={preApp.id} profile={cardMix} canEdit />
+      )}
+      {step === "secrets" && (
         <p className="rounded-md border border-dashed p-6 text-sm text-muted-foreground">
           The {PRE_APP_STEP_LABELS[step].toLowerCase()} step isn&rsquo;t built
-          yet. Navigation and autosave work; the fields land in a later change.
+          yet. It needs the encryption Edge Function, which lands next — SSN,
+          banking and the RP password never travel through the ordinary tables.
         </p>
       )}
     </PreAppWizardShell>

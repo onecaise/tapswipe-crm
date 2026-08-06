@@ -88,6 +88,35 @@ export type PreAppOwner = {
   home_zip: string | null;
 };
 
+export type PreAppTerminal = {
+  id: number;
+  pre_app_id: number;
+  batch_out_time: string | null;
+  terminal_type: string | null;
+  auto_batch: boolean | null;
+  communication_method: string | null;
+  dial_9_outside: boolean | null;
+  reprogram_terminal: boolean | null;
+  equipment_purchase: boolean | null;
+  equipment_rental: boolean | null;
+  next_day_funding: boolean | null;
+  tip_edit: boolean | null;
+  ebt: boolean | null;
+  fns_number: string | null;
+  tax_calculation: boolean | null;
+  tax_rate: number | null;
+  refund_policy: string | null;
+  print_refund_on_footer: boolean | null;
+  software_pos_integration: boolean | null;
+  software_name_version: string | null;
+  pricing_provided: string | null;
+  statement_analysis: string | null;
+  receipt_header_message: string | null;
+  receipt_footer_message: string | null;
+  mp_ap_name: string | null;
+  rp_name: string | null;
+};
+
 export type PreAppBusinessProfile = {
   id: number;
   pre_app_id: number;

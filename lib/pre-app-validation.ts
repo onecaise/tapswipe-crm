@@ -140,3 +140,138 @@ export const LEGAL_ENTITY_TYPES = [
   "Partnership",
   "Non-profit",
 ] as const;
+
+/* ---------------------------------------------------------------------------
+ * Owners
+ * ------------------------------------------------------------------------- */
+
+/**
+ * One owner row.
+ *
+ * The primary key is called `rowId`, not `id`, deliberately. `useFieldArray`
+ * appends its own `id` to every entry of `fields` for use as a React key, so a
+ * field literally named `id` would be shadowed — and `.eq("id", field.id)` would
+ * then target RHF's generated string instead of the `pre_app_owners` row.
+ */
+export const ownerRowSchema = z.object({
+  rowId: z.number(),
+  owner_name: text,
+  title: text,
+  id_type: text,
+  id_number: text,
+  id_issue_date: isoDate,
+  id_expiration_date: isoDate,
+  id_state: masked(isState, "Pick a state from the list"),
+  dob: isoDate,
+  home_phone: masked(isPhone, "Use 615-555-1234"),
+  percent_owned: masked(isPercent, "0 to 100"),
+  length_of_ownership: text,
+  home_address: text,
+  home_city: text,
+  home_state: masked(isState, "Pick a state from the list"),
+  home_country: text,
+  home_zip: masked(isZip, "12345 or 12345-6789"),
+});
+
+export const ownersStepSchema = z.object({
+  owners: z.array(ownerRowSchema),
+});
+
+export type OwnerRowValues = z.infer<typeof ownerRowSchema>;
+export type OwnersStepValues = z.infer<typeof ownersStepSchema>;
+
+/* ---------------------------------------------------------------------------
+ * Terminal
+ * ------------------------------------------------------------------------- */
+
+/** numeric(5,3), so three decimals rather than the usual two. */
+const taxRate = z
+  .string()
+  .refine(
+    (v) =>
+      v === "" ||
+      (/^\d{1,3}(\.\d{1,3})?$/.test(v) && Number(v) >= 0 && Number(v) <= 100),
+    { message: "0 to 100" },
+  );
+
+/** A native <input type="time"> emits "" or HH:MM. */
+const clockTime = z
+  .string()
+  .refine((v) => v === "" || /^\d{2}:\d{2}(:\d{2})?$/.test(v), {
+    message: "Use the time picker",
+  });
+
+/**
+ * The eleven boolean columns.
+ *
+ * Modelled as plain booleans, so an unchecked box writes `false` rather than
+ * leaving NULL. The columns are nullable and have no default, so the database
+ * can still distinguish "never answered" — a row loaded with NULL shows as
+ * unchecked and stays NULL until the rep actually touches it, because autosave
+ * only ever sends dirty fields.
+ */
+export const TERMINAL_BOOLEANS = [
+  ["auto_batch", "Auto batch"],
+  ["dial_9_outside", "Dial 9 for outside line"],
+  ["reprogram_terminal", "Reprogram existing terminal"],
+  ["equipment_purchase", "Equipment purchase"],
+  ["equipment_rental", "Equipment rental"],
+  ["next_day_funding", "Next-day funding"],
+  ["tip_edit", "Tip edit"],
+  ["ebt", "EBT"],
+  ["tax_calculation", "Tax calculation"],
+  ["print_refund_on_footer", "Print refund policy on receipt"],
+  ["software_pos_integration", "Software / POS integration"],
+] as const;
+
+export const terminalStepSchema = z.object({
+  batch_out_time: clockTime,
+  terminal_type: text,
+  communication_method: text,
+  fns_number: text,
+  tax_rate: taxRate,
+  refund_policy: text,
+  software_name_version: text,
+  pricing_provided: text,
+  statement_analysis: text,
+  receipt_header_message: text,
+  receipt_footer_message: text,
+  mp_ap_name: text,
+  rp_name: text,
+  auto_batch: z.boolean(),
+  dial_9_outside: z.boolean(),
+  reprogram_terminal: z.boolean(),
+  equipment_purchase: z.boolean(),
+  equipment_rental: z.boolean(),
+  next_day_funding: z.boolean(),
+  tip_edit: z.boolean(),
+  ebt: z.boolean(),
+  tax_calculation: z.boolean(),
+  print_refund_on_footer: z.boolean(),
+  software_pos_integration: z.boolean(),
+});
+
+export type TerminalStepValues = z.infer<typeof terminalStepSchema>;
+
+/* ---------------------------------------------------------------------------
+ * Card mix
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Per-field format only. The two pair totals are NOT enforced here: they are a
+ * submission rule, not a formatting one, so a draft with 60/30 has to remain
+ * saveable while still being flagged. `preAppSubmitBlockers` and
+ * `submit_pre_app` are where the pairs are checked.
+ */
+export const profileStepSchema = z.object({
+  card_swiped_pct: masked(isPercent, "0 to 100"),
+  card_keyed_pct: masked(isPercent, "0 to 100"),
+  card_present_pct: masked(isPercent, "0 to 100"),
+  card_not_present_pct: masked(isPercent, "0 to 100"),
+  moto_pct: masked(isPercent, "0 to 100"),
+  internet_pct: masked(isPercent, "0 to 100"),
+  test_product_type: text,
+  notes: z.string().max(4000, "Too long"),
+});
+
+export type ProfileStepValues = z.infer<typeof profileStepSchema>;
