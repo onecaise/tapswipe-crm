@@ -170,14 +170,28 @@ revoke/grant pair.
 - on success: `status = 'submitted'`, `date_submitted = current_date`, clear
   `decline_reason`, write `audit_log`
 
-> **Open — the card-mix rule as written is probably unsatisfiable.** "The six card-mix
-> percentages sum to 100" cannot be right for a real merchant: `card_swiped_pct` +
-> `card_keyed_pct` is one 100% split of *how* the card is read, `card_present_pct` +
-> `card_not_present_pct` is a second independent 100% split, and `moto_pct` / `internet_pct`
-> are subsets of card-not-present. A single six-column sum of 100 would reject every
-> honestly-filled form. The likely correct rule is two independent pair checks. **This is a
-> product question and is flagged for the user, not decided here** — whatever it becomes,
-> the RPC and the wizard must agree exactly, or the rep gets an error they cannot act on.
+### 5.2.1 The card-mix rule — settled
+
+A single six-column sum of 100 was wrong and would have rejected every honestly-filled
+form: `card_swiped_pct` + `card_keyed_pct` is one 100% split of *how* the card is read,
+`card_present_pct` + `card_not_present_pct` is a second, independent one, and `moto_pct` /
+`internet_pct` are subsets of card-not-present rather than peers of it.
+
+The rule is **two independent pair checks, and nothing else**:
+
+- `card_swiped_pct + card_keyed_pct = 100`
+- `card_present_pct + card_not_present_pct = 100`
+
+Each pair is checked only if at least one of its two columns is non-null, so a draft that
+has filled in one pair and not the other still submits. `moto_pct` and `internet_pct` are
+**informational** — captured, displayed, never constrained, and in particular **not**
+summed against `card_not_present_pct`. That relationship may well hold in reality, but it
+isn't being enforced now.
+
+The wizard's client-side `submitBlockers()` must implement exactly these two rules and no
+others. Any rule the RPC enforces that the client doesn't mirror becomes an error a rep
+cannot act on; any rule the client enforces that the RPC doesn't becomes a field they can't
+submit for no visible reason.
 
 > **Reading a secrets table from SQL.** `submit_pre_app` runs
 > `select exists (select 1 from pre_app_banking_secrets where ...)`. This does not violate
