@@ -8,7 +8,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:live": "vitest run --config vitest.live.config.mts",
-    "test:deployed": "vitest run --config vitest.deployed.config.mts"
+    "test:deployed": "vitest run --config vitest.deployed.config.mts",
+    "seed:local": "node scripts/seed-local-users.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.7.1",
