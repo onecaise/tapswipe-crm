@@ -550,7 +550,22 @@ create table support_tickets (
   serial_number_imei text,
   subject text not null,
   message text,
-  status text default 'open',
+  -- Constrained, and NOT NULL, because the list page filters on it. The two
+  -- other filtered statuses (merchants, pre_apps) are both constrained; leads
+  -- is bare text and its list deliberately filters on next_followup_date
+  -- instead, because a vocabulary that lives only in TypeScript is free to
+  -- drift from the column's real contents. NOT NULL for the same reason
+  -- pre_apps.status is: a CHECK that evaluates to NULL passes, so a nullable
+  -- status silently defeats both the check and every filter built on it.
+  --
+  -- Three values, not four: 'pending' covers waiting on the merchant, the
+  -- processor or a hardware RMA, and a separate 'resolved' before 'closed'
+  -- would need a rule about who moves it between the two.
+  status text not null default 'open' check (status in ('open', 'pending', 'closed')),
+  -- category, sub_category, priority and serial_number_imei stay free text on
+  -- purpose. They are reference data an admin will want to extend without a
+  -- migration, and the form offers a native <datalist> of suggestions the same
+  -- way documents-panel.tsx does for doc_type -- suggestions, not a constraint.
   created_at timestamptz default now()
 );
 
@@ -563,10 +578,29 @@ create policy "insert own" on support_tickets
 create policy "update own or admin" on support_tickets
   for update using ((agent_id = auth.uid() and is_active_agent()) or is_admin())
   with check ((agent_id = auth.uid() and is_active_agent()) or is_admin());
+create policy "admin delete only" on support_tickets
+  for delete using (is_admin());
 
 -- ---------------------------------------------------------------------
 -- NOTES & TASKS — generic, attach to any of lead / pre_app / merchant /
 -- ghost_sheet via owner_type + owner_id.
+--
+-- owner_id carries NO foreign key, and cannot: it points into one of four
+-- different tables depending on owner_type, which one column cannot
+-- reference. Two consequences the database therefore cannot enforce, and
+-- application code owns:
+--
+--   1. A row can be written against an owner_id that does not exist, or
+--      that the writer cannot see -- the policies here check only
+--      notes.agent_id / tasks.agent_id, never whether the *owner* is the
+--      caller's. The damage is bounded (the author and admins are the only
+--      readers, so a misfiled note is invisible to the owner's real owner
+--      rather than leaked to them) but it is real. Insert paths pass
+--      owner_type/owner_id from a server-rendered page that has already
+--      loaded that parent row under RLS, never from client input.
+--   2. Deleting an owner leaves its notes and tasks behind. There is no
+--      cascade to hang them on, so they are orphans, invisible to every
+--      page because no page asks for that owner_id any more.
 -- ---------------------------------------------------------------------
 create table notes (
   id serial primary key,
@@ -579,10 +613,19 @@ create table notes (
 
 alter table notes enable row level security;
 
+-- Notes are APPEND-ONLY by design: there is deliberately no update policy, so
+-- a note can be written, and removed by an admin, but never silently rewritten.
+-- A correction is a second note, which keeps the trail readable in order and
+-- means a quoted note cannot have changed since it was quoted. This is the one
+-- Tier 1 table without an update policy, so it reads like an omission -- it
+-- isn't. The UI must not offer an edit affordance, because RLS would filter the
+-- UPDATE to zero rows and the rep would see a save that silently did nothing.
 create policy "select own or admin" on notes
   for select using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
 create policy "insert own" on notes
   for insert with check ((agent_id = auth.uid() and is_active_agent()) or is_admin());
+create policy "admin delete only" on notes
+  for delete using (is_admin());
 
 create table tasks (
   id serial primary key,
@@ -601,9 +644,14 @@ create policy "select own or admin" on tasks
   for select using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
 create policy "insert own" on tasks
   for insert with check ((agent_id = auth.uid() and is_active_agent()) or is_admin());
+-- Tasks DO get an update policy, unlike notes: `completed` is a checkbox whose
+-- whole purpose is to be toggled back and forth, and due_date moves when a
+-- callback slips.
 create policy "update own or admin" on tasks
   for update using ((agent_id = auth.uid() and is_active_agent()) or is_admin())
   with check ((agent_id = auth.uid() and is_active_agent()) or is_admin());
+create policy "admin delete only" on tasks
+  for delete using (is_admin());
 
 -- ---------------------------------------------------------------------
 -- AUDIT LOG — who touched what, when. Populated from Edge Functions for
@@ -641,7 +689,24 @@ create index idx_tasks_agent_id on tasks(agent_id);
 -- columns the list pages actually filter on
 create index idx_merchants_status on merchants(status);
 create index idx_pre_apps_status on pre_apps(status);
+create index idx_support_tickets_status on support_tickets(status);
 create index idx_leads_next_followup_date on leads(next_followup_date);
+
+-- The polymorphic owner pair. documents, notes and tasks are all read the same
+-- way -- `where owner_type = $1 and owner_id = $2` -- by the panels on every
+-- lead / pre-app / merchant / ghost-sheet detail page, which is three such
+-- queries per page render. agent_id alone does not serve those: a rep's whole
+-- book shares one agent_id, so that index selects everything they own and the
+-- owner pair is then filtered out row by row.
+--
+-- owner_type leads because it is the equality column with the smaller domain
+-- and both are always supplied together; the composite serves the pair. No
+-- index on owner_id alone: nothing queries a note by owner_id without also
+-- naming its type, and owner_id values collide across types by construction
+-- (merchant 7 and lead 7 both exist).
+create index idx_documents_owner on documents(owner_type, owner_id);
+create index idx_notes_owner on notes(owner_type, owner_id);
+create index idx_tasks_owner on tasks(owner_type, owner_id);
 
 -- child tables reach their access check through
 -- `exists (select 1 from pre_apps where pre_apps.id = pre_app_id ...)`,

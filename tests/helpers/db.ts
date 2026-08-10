@@ -168,8 +168,8 @@ export const OTHER_AGENT_ID = "33333333-3333-3333-3333-333333333333";
 
 /**
  * Seeds one admin and two agents, plus leads, ghost sheets, merchants,
- * documents and pre-apps (with owners, terminal, business profile and
- * stand-in ciphertext) owned by each agent.
+ * documents, pre-apps (with owners, terminal, business profile and stand-in
+ * ciphertext), support tickets, notes and tasks owned by each agent.
  *
  * Two agents rather than one on purpose: with a single agent, a policy bug that
  * returned "all rows belonging to any agent" would be indistinguishable from
@@ -316,6 +316,74 @@ export async function seed(db: TestDb): Promise<void> {
     values ((select id from pre_apps where dba_name = 'Agent Draft App'),
             decode('0022', 'hex'), decode('0033', 'hex'));
   `);
+
+  // Third exec, same protocol-limit reason as the second.
+  await db.exec(`
+    -- Support tickets: the agent gets one of each status so "filtered by
+    -- status" and "filtered by owner" cannot select the same rows, and the
+    -- other agent's ticket is 'open' — the status the agent also has — so a
+    -- filter that lost its ownership half would visibly pick it up.
+    --
+    -- merchant_id deliberately points at 'Agent Inactive Co', NOT
+    -- 'Agent Active Co'. support_tickets.merchant_id has no ON DELETE clause,
+    -- so it defaults to NO ACTION and a referenced merchant cannot be deleted —
+    -- and 'Agent Active Co' is the row merchants.test.ts deletes. Pointing here
+    -- broke that test with a bare FK error naming a table it has never heard
+    -- of. Same reasoning as 'Agent Lead A' being kept unreferenced above.
+    insert into support_tickets (agent_id, merchant_id, subject, message, status, category, priority)
+    values
+      ('${AGENT_ID}',
+        (select id from merchants where dba = 'Agent Inactive Co'),
+        'Terminal will not batch', 'Batches at 11pm, times out.', 'open',    'Hardware', 'High'),
+      ('${AGENT_ID}',       null, 'Statement copy request', 'Needs June PDF.',  'pending', 'Billing',  'Normal'),
+      ('${AGENT_ID}',       null, 'Old chargeback question', 'Resolved by ops.', 'closed',  'Billing',  'Low'),
+      ('${OTHER_AGENT_ID}',
+        (select id from merchants where dba = 'Other Active Co'),
+        'Reprint receipts', 'Wants footer changed.', 'open', 'Hardware', 'Normal');
+
+    -- Notes and tasks across THREE different owner_types, so a query that
+    -- ignored owner_type would visibly over-collect. 'Agent Lead A' is id 1 in
+    -- leads and 'Agent Active Co' is id 1 in merchants, which is the collision
+    -- the composite index comment describes — a note on lead 1 must not appear
+    -- against merchant 1.
+    insert into notes (agent_id, owner_type, owner_id, body)
+    values
+      ('${AGENT_ID}', 'lead',
+        (select id from leads where dba = 'Agent Lead A'),
+        'Left voicemail Tuesday.'),
+      ('${AGENT_ID}', 'lead',
+        (select id from leads where dba = 'Agent Lead A'),
+        'Called back, wants pricing by Friday.'),
+      ('${AGENT_ID}', 'merchant',
+        (select id from merchants where dba = 'Agent Active Co'),
+        'Owner prefers texts.'),
+      ('${AGENT_ID}', 'pre_app',
+        (select id from pre_apps where dba_name = 'Agent Draft App'),
+        'Waiting on the voided check.'),
+      ('${OTHER_AGENT_ID}', 'lead',
+        (select id from leads where dba = 'Other Agent Lead'),
+        'Other agent note.');
+
+    -- One overdue, one due today, one undated and one already completed, so the
+    -- panel's ordering and the "open" count have distinct rows to prove.
+    insert into tasks (agent_id, owner_type, owner_id, title, due_date, completed)
+    values
+      ('${AGENT_ID}', 'lead',
+        (select id from leads where dba = 'Agent Lead A'),
+        'Send pricing sheet', current_date - 2, false),
+      ('${AGENT_ID}', 'lead',
+        (select id from leads where dba = 'Agent Lead A'),
+        'Confirm terminal count', current_date, false),
+      ('${AGENT_ID}', 'merchant',
+        (select id from merchants where dba = 'Agent Active Co'),
+        'Order paper rolls', null, false),
+      ('${AGENT_ID}', 'merchant',
+        (select id from merchants where dba = 'Agent Active Co'),
+        'Emailed statement', current_date - 5, true),
+      ('${OTHER_AGENT_ID}', 'lead',
+        (select id from leads where dba = 'Other Agent Lead'),
+        'Other agent task', current_date, false);
+  `);
 }
 
 /**
@@ -338,7 +406,8 @@ export async function seed(db: TestDb): Promise<void> {
 export async function resetData(db: TestDb): Promise<void> {
   await asPlatform(db);
   await db.exec(
-    `truncate auth.users, profiles, merchants, leads, ghost_sheets, notes, documents,
+    `truncate auth.users, profiles, merchants, leads, ghost_sheets, notes, tasks,
+              support_tickets, documents,
               pre_apps, pre_app_owners, pre_app_terminal, pre_app_business_profile,
               pre_app_owner_secrets, pre_app_banking_secrets, pre_app_terminal_secrets
      restart identity cascade;`,
