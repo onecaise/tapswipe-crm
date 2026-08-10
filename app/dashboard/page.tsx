@@ -4,6 +4,7 @@ import {
   ClipboardListIcon,
   FolderIcon,
   GhostIcon,
+  LifeBuoyIcon,
   StoreIcon,
   TargetIcon,
   UsersIcon,
@@ -64,6 +65,20 @@ async function DashboardContent() {
             <Link href="/documents">
               <FolderIcon size={16} />
               Document Center
+            </Link>
+          </Button>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2 items-start">
+        <h2 className="font-semibold text-lg">Support</h2>
+        <div className="flex flex-wrap gap-2">
+          {/* Its own row rather than a sixth tile above: a ticket is not part of
+              the book of business, it is work outstanding against it. */}
+          <Button asChild variant="outline">
+            <Link href="/support-tickets">
+              <LifeBuoyIcon size={16} />
+              Support Tickets
             </Link>
           </Button>
         </div>
