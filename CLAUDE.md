@@ -8,12 +8,12 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 
 **Current state matters when reading the code**, and it is a mix — real CRM pages alongside untouched starter scaffolding:
 
-- **Built:** `app/dashboard`, `app/merchants/*`, `app/leads/*`, `app/ghost-sheets/*`, `app/pre-apps/*`, `app/documents`, `app/admin/users`, with data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,documents,auth,format}.ts` and `hooks/use-autosave.ts`.
-- **Not built yet:** Support Tickets, My Submissions.
+- **Built:** `app/dashboard`, `app/merchants/*`, `app/leads/*`, `app/ghost-sheets/*`, `app/pre-apps/*`, `app/support-tickets/*`, `app/documents`, `app/admin/users`, with data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,documents,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks have no pages of their own — they are panels (`components/{notes,tasks}-panel.tsx`) on the four owner records.
+- **Not built yet:** My Submissions.
 - **Still [starter-kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase) template, not product code:** `README.md`, `app/page.tsx`, `app/protected/*`, `components/tutorial/*`, and `components/{hero,deploy-button,next-logo,supabase-logo,env-var-warning}.tsx`.
 - **Edge Functions:** `create-upload-url`, `create-download-url`, `submit-pre-app-secrets` and `read-pre-app-secrets` are implemented (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env}.ts`). The other three — `create-user`, `deactivate-user`, `admin-reset-password` — are still `withSupabase` hello-world stubs.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Nine migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Ten migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi`.
 
@@ -25,7 +25,7 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (312 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (366 tests)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (37 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED project (4 tests)
 
@@ -135,7 +135,7 @@ Runtime is Deno 2 with per-function `deno.json` import maps; `.vscode/settings.j
 
 Storage: one private bucket named `documents`, created out-of-band — it is not in any migration, so a freshly started local stack does not have it and every signing call 404s until it exists (`tests/live/helpers/stack.ts` creates it as part of provisioning). The `documents` table stores metadata only (`owner_type` + `owner_id` polymorphic pointer, `doc_type`, `file_key`); bytes are in the bucket and are only reachable through the two signed-URL functions. The object key is `{agent_id}/{owner_type}/{owner_id}/{uuid}`, where `agent_id` is the **parent record's** owner rather than the uploader — so an admin uploading for a rep files it under that rep.
 
-`notes` and `tasks` use the same polymorphic `owner_type` + `owner_id` shape (`lead` | `pre_app` | `merchant` | `ghost_sheet`) — there is no FK, so validate `owner_id` in application code.
+`notes` and `tasks` use the same polymorphic `owner_type` + `owner_id` shape (`lead` | `pre_app` | `merchant` | `ghost_sheet`) — there is no FK, so validate `owner_id` in application code. Concretely: the panels take `ownerType`/`ownerId` as props from a page that already loaded that parent row under RLS, never from a searchParam. Two consequences of the missing FK that no policy covers — the policies check only `agent_id` — are that a row can be filed against an owner the writer cannot see, and that deleting an owner orphans its notes and tasks. **`owner_type` must be in every query**: ids collide across types (lead 7 and merchant 7 both exist) and both rows can legitimately belong to the caller, so dropping it mixes one record's notes into another's page and RLS will not object. `notes` is the one Tier 1 table with **no update policy** — append-only by design, so never offer an edit affordance; RLS would filter the UPDATE to zero rows and the rep would see a save that did nothing. Deletes on `support_tickets`, `notes` and `tasks` are admin-only, as of `20260810171500`.
 
 ### Next.js / auth wiring
 
