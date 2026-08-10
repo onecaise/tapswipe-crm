@@ -1240,6 +1240,194 @@ end;
 $$;
 
 -- =====================================================================
+-- DASHBOARD COUNTS — Tier 2. Plain function, NOT security definer, for
+-- the same reason convert_ghost_sheet_to_lead is: the caller's own RLS
+-- does the scoping. Every count below is therefore automatically "mine"
+-- for an agent and "everyone's" for an admin, with no role branch in the
+-- function and no agent_id filter to keep in step with the policies.
+--
+-- This is the whole argument for not marking it `security definer`. A
+-- definer version would run as the owner, bypass RLS, and have to
+-- re-implement `(agent_id = auth.uid() and is_active_agent()) or
+-- is_admin()` five times by hand — five more places for the access rule
+-- to drift, in a function whose entire output is numbers an agent should
+-- not be able to learn about other people's books.
+--
+-- One round trip rather than five head:true selects from the browser,
+-- which also makes the set of numbers a single atomic snapshot.
+--
+-- On "active":
+--
+--   active_merchants  merchants.status = 'active'. A real constrained
+--                     vocabulary, so this one means what it says.
+--   active_leads      leads with no pre-app pointing at them. NOT
+--                     `status = 'active'`: leads.status is nullable
+--                     unconstrained text defaulting to 'open' (see the
+--                     note on support_tickets.status for why that was
+--                     deliberate), so there is no 'active' to compare
+--                     against and a filter on it would invent the
+--                     vocabulary this schema went out of its way not to
+--                     have. pre_apps.lead_id is a real column with a real
+--                     meaning, and it makes the dashboard read as a
+--                     funnel — a deal counted under Pre-Apps is no longer
+--                     counted under Leads, so the four figures sum to
+--                     distinct work rather than double-counting.
+--
+-- ghost_sheets and pre_apps are deliberately unfiltered totals.
+-- =====================================================================
+create or replace function dashboard_counts()
+returns table (
+  active_merchants bigint,
+  active_leads bigint,
+  ghost_sheets_total bigint,
+  pre_apps_total bigint,
+  open_tickets bigint
+)
+language sql
+stable
+-- Output names are prefixed/suffixed away from the table names on purpose.
+-- `returns table` makes each one a parameter that is in scope inside the body,
+-- so an output called `ghost_sheets` would collide with the relation of the
+-- same name. Every reference below is schema- or alias-qualified for the same
+-- reason.
+as $$
+  select
+    (select count(*) from public.merchants m where m.status = 'active'),
+    (select count(*)
+       from public.leads l
+      where not exists (
+        select 1 from public.pre_apps p where p.lead_id = l.id
+      )),
+    (select count(*) from public.ghost_sheets),
+    (select count(*) from public.pre_apps),
+    (select count(*) from public.support_tickets t where t.status = 'open');
+$$;
+
+revoke all on function dashboard_counts() from public;
+grant execute on function dashboard_counts() to authenticated, service_role;
+
+-- =====================================================================
+-- GLOBAL SEARCH — Tier 2. Plain function, NOT security definer, and here
+-- that is a security property rather than a convenience: a search box is
+-- exactly the shape of thing that turns into a disclosure bug. Running as
+-- the invoker means an agent's query is filtered by the same select
+-- policies their list pages use, so the box cannot surface a record the
+-- rest of the app would hide. A definer version would search everything
+-- and rely on a hand-written filter being right five times over.
+--
+-- Returns a flat (kind, record_id, title, subtitle) shape rather than one
+-- column per table, so the caller renders a single list. `record_id` is
+-- named away from `id` because `returns table` puts these names in scope
+-- inside the body.
+--
+-- Two guards on the input:
+--   - Under MIN_TERM characters returns nothing, so an empty or one-key
+--     query doesn't select every row the caller can see.
+--   - The LIKE metacharacters are escaped, so typing '%' searches for a
+--     percent sign instead of matching everything. Not a privilege issue
+--     — RLS still applies — but "_" silently matching any character makes
+--     search results look broken.
+--
+-- limit_input is per record kind, not overall, so one noisy table cannot
+-- crowd the others out of the list.
+-- =====================================================================
+create or replace function search_crm(query_input text, limit_input int default 5)
+returns table (
+  kind text,
+  record_id int,
+  title text,
+  subtitle text
+)
+language sql
+stable
+as $$
+  with term as (
+    select
+      '%' ||
+      -- Backslash first: escaping it after adding the others would escape the
+      -- backslashes this very expression introduces.
+      replace(replace(replace(btrim(query_input), '\', '\\'), '%', '\%'), '_', '\_')
+      || '%' as pattern,
+      length(btrim(coalesce(query_input, ''))) as term_length
+  ),
+  hits as (
+    select * from (
+      select 1 as rank, 'lead'::text as kind, l.id as record_id,
+             coalesce(l.dba, l.contact_name, 'Lead #' || l.id) as title,
+             l.contact_name as subtitle
+        from public.leads l, term t
+       where t.term_length >= 2
+         and (l.dba ilike t.pattern
+           or l.contact_name ilike t.pattern
+           or l.contact_phone ilike t.pattern
+           or l.contact_email ilike t.pattern
+           or l.merchant_legal_name ilike t.pattern)
+       order by l.dba
+       limit limit_input
+    ) lead_hits
+    union all
+    select * from (
+      select 2 as rank, 'pre_app'::text as kind, p.id as record_id,
+             p.dba_name as title,
+             coalesce(p.legal_business_name, p.contact_name) as subtitle
+        from public.pre_apps p, term t
+       where t.term_length >= 2
+         and (p.dba_name ilike t.pattern
+           or p.legal_business_name ilike t.pattern
+           or p.contact_name ilike t.pattern
+           or p.email_address ilike t.pattern)
+       order by p.dba_name
+       limit limit_input
+    ) pre_app_hits
+    union all
+    select * from (
+      select 3 as rank, 'merchant'::text as kind, m.id as record_id,
+             m.dba as title,
+             coalesce(m.legal_business_name, m.mid) as subtitle
+        from public.merchants m, term t
+       where t.term_length >= 2
+         and (m.dba ilike t.pattern
+           or m.legal_business_name ilike t.pattern
+           or m.mid ilike t.pattern)
+       order by m.dba
+       limit limit_input
+    ) merchant_hits
+    union all
+    select * from (
+      select 4 as rank, 'ghost_sheet'::text as kind, g.id as record_id,
+             coalesce(g.dba, g.contact_name, 'Ghost sheet #' || g.id) as title,
+             g.contact_name as subtitle
+        from public.ghost_sheets g, term t
+       where t.term_length >= 2
+         and (g.dba ilike t.pattern
+           or g.contact_name ilike t.pattern
+           or g.contact_phone ilike t.pattern)
+       order by g.dba
+       limit limit_input
+    ) ghost_sheet_hits
+    union all
+    select * from (
+      select 5 as rank, 'support_ticket'::text as kind, s.id as record_id,
+             s.subject as title,
+             coalesce(s.category, s.serial_number_imei) as subtitle
+        from public.support_tickets s, term t
+       where t.term_length >= 2
+         and (s.subject ilike t.pattern
+           or s.serial_number_imei ilike t.pattern
+           or s.category ilike t.pattern)
+       order by s.subject
+       limit limit_input
+    ) support_ticket_hits
+  )
+  select h.kind, h.record_id, h.title, h.subtitle
+    from hits h
+   order by h.rank, h.title;
+$$;
+
+revoke all on function search_crm(text, int) from public;
+grant execute on function search_crm(text, int) to authenticated, service_role;
+
+-- =====================================================================
 -- DATA API GRANTS — required, not optional.
 --
 -- RLS decides which ROWS a caller sees. Grants decide whether the caller

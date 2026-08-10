@@ -11,35 +11,47 @@ import { Badge } from "@/components/ui/badge";
 /**
  * Counts for the stat row.
  *
- * All four are Tier 1 reads with `head: true`, so RLS scopes them and Postgres
- * returns the count without the rows — an agent sees the size of their own book
- * and an admin sees the company's. Issued together because they don't depend on
- * each other, and a null count (an errored query) renders as "—" rather than a
- * confident zero, which would read as "you have no merchants".
+ * One `dashboard_counts()` RPC rather than five head:true selects. The function
+ * is SECURITY INVOKER, so the caller's own RLS scopes every count inside it: an
+ * agent gets the size of their own book, an admin the company's, and there is no
+ * agent_id filter here to fall out of step with the policies. It also makes the
+ * five figures a single snapshot instead of five reads that can disagree.
+ *
+ * Ordered as a funnel, left to right — ghost sheet, lead, pre-app, merchant —
+ * which is also why `active_leads` excludes leads that already have a pre-app.
+ * A deal is counted once, at the stage it has reached. See the migration.
+ *
+ * `count(*)` is bigint, so PostgREST sends these as strings; Number() rather
+ * than trusting the shape. A failed RPC renders "—" rather than a confident
+ * zero, which would read as an empty book.
  */
 async function DashboardStats() {
   const supabase = await createClient();
+  const { data, error } = await supabase.rpc("dashboard_counts").maybeSingle();
 
-  const [merchants, leads, preApps, openTickets] = await Promise.all([
-    supabase.from("merchants").select("id", { count: "exact", head: true }),
-    supabase.from("leads").select("id", { count: "exact", head: true }),
-    supabase.from("pre_apps").select("id", { count: "exact", head: true }),
-    supabase
-      .from("support_tickets")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "open"),
-  ]);
+  if (error || !data) {
+    return (
+      <p className="text-sm text-destructive">
+        Could not load your counts{error ? `: ${error.message}` : "."}
+      </p>
+    );
+  }
 
-  const show = (count: number | null) => count ?? "—";
+  const counts = data as Record<string, number | string | null>;
+  const show = (key: string) => {
+    const raw = counts[key];
+    return raw === null || raw === undefined ? "—" : Number(raw);
+  };
 
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      <StatCard label="Merchants" value={show(merchants.count)} />
-      <StatCard label="Leads" value={show(leads.count)} />
-      <StatCard label="Pre-apps" value={show(preApps.count)} />
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+      <StatCard label="Ghost sheets" value={show("ghost_sheets_total")} />
+      <StatCard label="Active leads" value={show("active_leads")} />
+      <StatCard label="Pre-apps" value={show("pre_apps_total")} />
+      <StatCard label="Active merchants" value={show("active_merchants")} />
       {/* The one red figure on the row: open tickets are the only number here
           that represents work someone still has to do. */}
-      <StatCard label="Open tickets" value={show(openTickets.count)} accent />
+      <StatCard label="Open tickets" value={show("open_tickets")} accent />
     </div>
   );
 }
@@ -83,8 +95,8 @@ export default function DashboardPage() {
 
 function StatsSkeleton() {
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      {[0, 1, 2, 3].map((i) => (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+      {[0, 1, 2, 3, 4].map((i) => (
         <div
           key={i}
           className="h-[74px] animate-pulse rounded-xl border bg-card"
