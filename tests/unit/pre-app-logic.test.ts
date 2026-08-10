@@ -29,6 +29,7 @@ import {
   nextStep,
   parsePreAppFilter,
   parsePreAppStep,
+  preAppDefaultsFromLead,
   preAppSubmitBlockers,
   prevStep,
   statusBadgeVariant,
@@ -426,5 +427,98 @@ describe("submit blockers mirror the RPC", () => {
         preApp: { ...complete.preApp, split_agent_pct: 60, split_company_pct: 50 },
       }),
     ).toContain("Agent and company splits must total 100.");
+  });
+});
+
+describe("carrying a lead's fields into a new pre-app", () => {
+  const lead = {
+    dba: "Dot's Diner",
+    merchant_legal_name: "Dot's Diner LLC",
+    contact_name: "Dot Owner",
+    contact_phone: "(615) 555-1234",
+    business_phone: "6155559999",
+    contact_email: "dot@dotsdiner.test",
+    address: "12 Main St",
+    city: "Nashville",
+    state: "TN",
+    country: "USA",
+    zip: "372011234",
+  };
+
+  it("maps every overlapping column onto its pre_apps name", () => {
+    expect(preAppDefaultsFromLead(lead)).toEqual({
+      dba_name: "Dot's Diner",
+      legal_business_name: "Dot's Diner LLC",
+      contact_name: "Dot Owner",
+      contact_phone: "615-555-1234",
+      phone_number: "615-555-9999",
+      email_address: "dot@dotsdiner.test",
+      physical_address: "12 Main St",
+      city: "Nashville",
+      state: "TN",
+      country: "USA",
+      zip: "37201-1234",
+    });
+  });
+
+  it("resolves a state NAME rather than truncating it", () => {
+    // maskState("Tennessee") is "TE" — two characters that look like a code and
+    // are not one. This is the whole reason matchState is used instead.
+    expect(preAppDefaultsFromLead({ ...lead, state: "Tennessee" }).state).toBe(
+      "TN",
+    );
+    expect(preAppDefaultsFromLead({ ...lead, state: "tn" }).state).toBe("TN");
+  });
+
+  it("returns null for a state it cannot resolve, rather than guessing", () => {
+    expect(preAppDefaultsFromLead({ ...lead, state: "ZZ" }).state).toBeNull();
+    expect(preAppDefaultsFromLead({ ...lead, state: "  " }).state).toBeNull();
+  });
+
+  it("carries a partial phone across instead of dropping it", () => {
+    // The wizard treats a half-typed value as savable-but-not-valid, so the rep
+    // sees this and finishes it. Silently discarding what they typed on the
+    // lead would be worse.
+    const result = preAppDefaultsFromLead({ ...lead, contact_phone: "615555" });
+    expect(result.contact_phone).toBe("615-555");
+    expect(isPhone(result.contact_phone!)).toBe(false);
+  });
+
+  it("turns empty and whitespace-only columns into null, not empty strings", () => {
+    const blank = preAppDefaultsFromLead({
+      dba: null,
+      merchant_legal_name: null,
+      contact_name: "   ",
+      contact_phone: "",
+      business_phone: null,
+      contact_email: null,
+      address: null,
+      city: "",
+      state: null,
+      country: null,
+      zip: null,
+    });
+
+    // The two NOT NULL columns are the exception: they feed form inputs, and a
+    // controlled input needs a string.
+    expect(blank.dba_name).toBe("");
+    expect(blank.legal_business_name).toBe("");
+    expect(blank.contact_name).toBeNull();
+    expect(blank.contact_phone).toBeNull();
+    expect(blank.city).toBeNull();
+  });
+
+  it("trims the two required columns", () => {
+    const result = preAppDefaultsFromLead({
+      ...lead,
+      dba: "  Dot's Diner  ",
+      merchant_legal_name: "  Dot's Diner LLC  ",
+    });
+    expect(result.dba_name).toBe("Dot's Diner");
+    expect(result.legal_business_name).toBe("Dot's Diner LLC");
+  });
+
+  it("drops a zip that masks away to nothing", () => {
+    expect(preAppDefaultsFromLead({ ...lead, zip: "abc" }).zip).toBeNull();
   });
 });

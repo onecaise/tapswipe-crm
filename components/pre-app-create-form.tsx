@@ -33,10 +33,18 @@ export function PreAppCreateForm({
   agentId,
   prefill,
   leadId,
+  carryOver,
 }: {
   agentId: string;
   prefill?: { dba_name?: string | null; legal_business_name?: string | null };
   leadId?: number;
+  /**
+   * Further `pre_apps` columns to write on insert — the rest of what a lead
+   * already knows. Deliberately not rendered as inputs: this form's job is the
+   * two NOT NULL columns, and the business step is where the rest is reviewed
+   * and corrected. Built by `preAppDefaultsFromLead`.
+   */
+  carryOver?: Record<string, string | null>;
 }) {
   const router = useRouter();
   const [dbaName, setDbaName] = useState(prefill?.dba_name ?? "");
@@ -57,9 +65,15 @@ export function PreAppCreateForm({
       // agent_id is the caller's own. The insert policy's `with check` means an
       // agent physically cannot create a row owned by someone else, so this
       // supplies the value the policy requires rather than enforcing it.
+      //
+      // carryOver is spread FIRST so the four columns below always win. It
+      // arrives from a lead the server already resolved, but it is still a bag
+      // of keys reaching an insert, and it must never be able to name agent_id,
+      // lead_id, or the two columns the rep just typed.
       const { data, error: insertError } = await supabase
         .from("pre_apps")
         .insert({
+          ...carryOver,
           agent_id: agentId,
           dba_name: dbaName.trim(),
           legal_business_name: legalName.trim(),

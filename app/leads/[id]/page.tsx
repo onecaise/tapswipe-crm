@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
-import { ArrowLeftIcon, PencilIcon } from "lucide-react";
+import { ArrowLeftIcon, FilePlusIcon, PencilIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
@@ -101,12 +101,22 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
             )}
           </div>
         </div>
-        <Button asChild size="sm">
-          <Link href={`/leads/${lead.id}/edit`}>
-            <PencilIcon size={16} />
-            Edit
-          </Link>
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* The lead's own fields ride across, so this is the path a rep should
+              take rather than /pre-apps/new — see preAppDefaultsFromLead. */}
+          <Button asChild size="sm" variant="outline">
+            <Link href={`/pre-apps/new?lead=${lead.id}`}>
+              <FilePlusIcon size={16} />
+              Start pre-app
+            </Link>
+          </Button>
+          <Button asChild size="sm">
+            <Link href={`/leads/${lead.id}/edit`}>
+              <PencilIcon size={16} />
+              Edit
+            </Link>
+          </Button>
+        </div>
       </div>
 
       <Section title="Contact">

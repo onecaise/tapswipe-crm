@@ -1,3 +1,6 @@
+import type { Lead } from "@/lib/leads";
+import { maskPhone, maskZip, matchState } from "@/lib/masks";
+
 /**
  * Shared pre-app types, vocabulary and row shapes.
  *
@@ -239,6 +242,91 @@ export function nextStep(step: PreAppStep): PreAppStep | null {
 export function prevStep(step: PreAppStep): PreAppStep | null {
   const i = PRE_APP_STEPS.indexOf(step);
   return i > 0 ? PRE_APP_STEPS[i - 1] : null;
+}
+
+/**
+ * The `pre_apps` columns a lead can supply, ready to write on insert.
+ *
+ * A pre-app started from a lead should not make the rep retype what they
+ * already captured, so the overlapping columns are copied across. The two NOT
+ * NULL columns come back as strings (possibly empty) because they populate the
+ * create form's inputs; everything else is nullable and goes straight into the
+ * insert.
+ *
+ * Three judgement calls, none of them obvious:
+ *
+ *   - **State goes through `matchState`, not `maskState`.** `leads.state` is
+ *     free text, so it may hold "TN", "tn" or "Tennessee". `maskState` would
+ *     truncate that last one to "TE" — two characters that look like a code and
+ *     are not one, which `isState` then rejects on the business step for
+ *     reasons the rep cannot see. `matchState` resolves the name properly and
+ *     returns null rather than guessing.
+ *   - **Phones are masked but not validated away.** A lead holding a partial
+ *     number carries it across as-is. The wizard already treats a half-typed
+ *     value as savable-but-not-valid, so the rep sees it and finishes it;
+ *     silently dropping data they entered would be worse.
+ *   - **`leads.mobile_phone` is not carried.** `pre_apps` has no column for it.
+ */
+export type PreAppLeadDefaults = {
+  dba_name: string;
+  legal_business_name: string;
+} & Pick<
+  PreApp,
+  | "contact_name"
+  | "contact_phone"
+  | "physical_address"
+  | "city"
+  | "state"
+  | "country"
+  | "zip"
+  | "phone_number"
+  | "email_address"
+>;
+
+export function preAppDefaultsFromLead(
+  lead: Pick<
+    Lead,
+    | "dba"
+    | "merchant_legal_name"
+    | "contact_name"
+    | "contact_phone"
+    | "business_phone"
+    | "contact_email"
+    | "address"
+    | "city"
+    | "state"
+    | "country"
+    | "zip"
+  >,
+): PreAppLeadDefaults {
+  return {
+    dba_name: lead.dba?.trim() ?? "",
+    legal_business_name: lead.merchant_legal_name?.trim() ?? "",
+    contact_name: clean(lead.contact_name),
+    contact_phone: mapped(lead.contact_phone, maskPhone),
+    phone_number: mapped(lead.business_phone, maskPhone),
+    email_address: clean(lead.contact_email),
+    physical_address: clean(lead.address),
+    city: clean(lead.city),
+    state: lead.state ? matchState(lead.state) : null,
+    country: clean(lead.country),
+    zip: mapped(lead.zip, maskZip),
+  };
+}
+
+/** Trims, and treats a whitespace-only column as the empty it really is. */
+function clean(value: string | null | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed === "" ? null : trimmed;
+}
+
+/** `clean`, then a mask — which must not be handed an empty string. */
+function mapped(
+  value: string | null | undefined,
+  mask: (input: string) => string,
+): string | null {
+  const trimmed = clean(value);
+  return trimmed === null ? null : (clean(mask(trimmed)) ?? null);
 }
 
 /**
