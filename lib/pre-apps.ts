@@ -199,13 +199,21 @@ export function canEditPreApp(
   return isAdmin || status === "draft";
 }
 
-/** The wizard's steps, in order. Each maps onto exactly one table. */
+/**
+ * The wizard's steps, in order.
+ *
+ * The first five each map onto exactly one table. `review` is the exception and
+ * owns no columns: it reads what the others wrote, lists whatever still blocks
+ * submission, and is the only place that calls `submit_pre_app`. It sits last so
+ * `nextStep` returns null there and the shell shows Done rather than Next.
+ */
 export const PRE_APP_STEPS = [
   "business",
   "owners",
   "terminal",
   "profile",
   "secrets",
+  "review",
 ] as const;
 
 export type PreAppStep = (typeof PRE_APP_STEPS)[number];
@@ -216,6 +224,7 @@ export const PRE_APP_STEP_LABELS: Record<PreAppStep, string> = {
   terminal: "Terminal",
   profile: "Card mix",
   secrets: "Sensitive data",
+  review: "Review & submit",
 };
 
 /**

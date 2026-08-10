@@ -1058,6 +1058,75 @@ end;
 $$;
 
 -- =====================================================================
+-- PRE-APP SECRETS PRESENCE — Tier 2. Two booleans the wizard's review step
+-- needs and cannot get any other way: does banking ciphertext exist, and how
+-- many owners still have no SSN.
+--
+-- Why this exists rather than reusing read-pre-app-secrets: that function
+-- DECRYPTS. Calling it to learn a boolean makes an admin's browser receive
+-- full plaintext it never asked to see, and writes an audit_log row claiming
+-- a full read that no human performed -- so merely opening the review tab
+-- would pollute the one trail that is supposed to mean "somebody looked at an
+-- SSN". Presence is not disclosure, so it gets its own door.
+--
+-- security definer for the same reason submit_pre_app is, and constrained the
+-- same three ways: it only ever asks `exists`/`count`, so no *_encrypted
+-- column is named anywhere in the body and no ciphertext can leave; the
+-- checks sit behind the ownership check, so it is no oracle; and
+-- set search_path = public stops a temp-table shadow redirecting a read. A
+-- test asserts the no-ciphertext property from pg_get_functiondef.
+--
+-- Deliberately NO audit_log write. It reveals only what the rep is already
+-- being asked to supply, and logging every render of a form step would bury
+-- the reads that matter.
+-- =====================================================================
+create or replace function pre_app_secrets_presence(pre_app_id_input int)
+returns table (banking_on_file boolean, owners_missing_ssn int)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  pa pre_apps;
+begin
+  select * into pa from pre_apps where id = pre_app_id_input;
+  if not found then
+    raise exception 'pre-app not found' using errcode = 'PT404';
+  end if;
+
+  -- Byte-for-byte the guard submit_pre_app uses, for the same reason: "not
+  -- yours" and "doesn't exist" must be indistinguishable.
+  if is_admin() then
+    null;
+  elsif pa.agent_id = auth.uid() then
+    if not is_active_agent() then
+      raise exception 'account is deactivated' using errcode = 'PT403';
+    end if;
+  else
+    raise exception 'pre-app not found' using errcode = 'PT404';
+  end if;
+
+  return query
+    select
+      exists (
+        select 1 from pre_app_banking_secrets b where b.pre_app_id = pa.id
+      ),
+      (
+        select count(*)::int
+          from pre_app_owners o
+         where o.pre_app_id = pa.id
+           and not exists (
+             select 1 from pre_app_owner_secrets s
+              where s.pre_app_owner_id = o.id
+           )
+      );
+end;
+$$;
+
+revoke all on function pre_app_secrets_presence(int) from public;
+grant execute on function pre_app_secrets_presence(int) to authenticated, service_role;
+
+-- =====================================================================
 -- GHOST SHEET CONVERSION — Tier 2. Plain function, NOT security definer:
 -- the caller owns both rows, so letting their own RLS scope the reads and
 -- writes is safer than re-implementing the ownership check by hand. One

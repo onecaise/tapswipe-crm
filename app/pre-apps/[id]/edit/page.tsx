@@ -17,6 +17,7 @@ import { PreAppWizardShell } from "@/components/pre-app-wizard-shell";
 import { BusinessStep } from "@/components/pre-app-steps/business-step";
 import { OwnersStep } from "@/components/pre-app-steps/owners-step";
 import { ProfileStep } from "@/components/pre-app-steps/profile-step";
+import { ReviewStep } from "@/components/pre-app-steps/review-step";
 import { SecretsStep } from "@/components/pre-app-steps/secrets-step";
 import { TerminalStep } from "@/components/pre-app-steps/terminal-step";
 import { Button } from "@/components/ui/button";
@@ -62,8 +63,10 @@ async function PreAppEditor({
 
   // Only the active step's rows are fetched. Loading all four sections on every
   // step change would triple the query count for data the step cannot show.
+  // Review is the one step that needs more than its own section: it mirrors
+  // submit_pre_app's rules, which span owners and the card mix.
   const [owners, terminal, cardMix] = await Promise.all([
-    step === "owners" || step === "secrets"
+    step === "owners" || step === "secrets" || step === "review"
       ? supabase
           .from("pre_app_owners")
           .select("*")
@@ -79,7 +82,7 @@ async function PreAppEditor({
           .maybeSingle()
           .then(({ data }) => (data ?? null) as PreAppTerminal | null)
       : Promise.resolve<PreAppTerminal | null>(null),
-    step === "profile"
+    step === "profile" || step === "review"
       ? supabase
           .from("pre_app_business_profile")
           .select("*")
@@ -109,6 +112,14 @@ async function PreAppEditor({
       )}
       {step === "secrets" && (
         <SecretsStep preAppId={preApp.id} owners={owners} canEdit />
+      )}
+      {step === "review" && (
+        <ReviewStep
+          preApp={preApp}
+          owners={owners}
+          profile={cardMix}
+          isAdmin={isAdmin}
+        />
       )}
     </PreAppWizardShell>
   );

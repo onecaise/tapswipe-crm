@@ -24,6 +24,8 @@ import {
   US_STATES,
 } from "@/lib/masks";
 import {
+  PRE_APP_STEPS,
+  PRE_APP_STEP_LABELS,
   canEditPreApp,
   defaultPreAppFilter,
   nextStep,
@@ -299,9 +301,19 @@ describe("pre-app vocabulary", () => {
 
   it("walks the steps and stops at both ends", () => {
     expect(nextStep("business")).toBe("owners");
-    expect(nextStep("secrets")).toBeNull();
+    expect(nextStep("secrets")).toBe("review");
+    // Review is last, which is what makes the shell render Done rather than
+    // Next there — and what stops a rep being walked past the submit button.
+    expect(nextStep("review")).toBeNull();
     expect(prevStep("business")).toBeNull();
     expect(prevStep("owners")).toBe("business");
+    expect(prevStep("review")).toBe("secrets");
+  });
+
+  it("keeps a label for every step, so the nav cannot render blank", () => {
+    for (const step of PRE_APP_STEPS) {
+      expect(PRE_APP_STEP_LABELS[step]?.length ?? 0).toBeGreaterThan(0);
+    }
   });
 
   it("gives declined its own badge treatment", () => {
