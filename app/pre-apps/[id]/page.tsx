@@ -14,7 +14,10 @@ import {
 } from "@/lib/pre-apps";
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
+import { loadAnnotations } from "@/lib/annotations-data";
 import { DocumentsPanel } from "@/components/documents-panel";
+import { NotesPanel } from "@/components/notes-panel";
+import { TasksPanel } from "@/components/tasks-panel";
 import { PreAppDecision } from "@/components/pre-app-decision";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -112,6 +115,10 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
   }
 
   const canEdit = canEditPreApp(preApp.status, isAdmin);
+
+  // owner_type is a literal here, never from the URL: owner_id has no foreign
+  // key, so a mismatched pair is not something the database would catch.
+  const { notes, tasks } = await loadAnnotations("pre_app", preApp.id);
 
   return (
     <>
@@ -250,6 +257,22 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
         <Field label="MOTO">{formatPct(cardMix?.moto_pct)}</Field>
         <Field label="Internet">{formatPct(cardMix?.internet_pct)}</Field>
       </Section>
+
+      <TasksPanel
+        ownerType="pre_app"
+        ownerId={preApp.id}
+        tasks={tasks}
+        agentId={profile.id}
+        isAdmin={isAdmin}
+      />
+
+      <NotesPanel
+        ownerType="pre_app"
+        ownerId={preApp.id}
+        notes={notes}
+        agentId={profile.id}
+        isAdmin={isAdmin}
+      />
 
       <DocumentsPanel
         ownerType="pre_app"

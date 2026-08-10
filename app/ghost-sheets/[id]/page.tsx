@@ -7,7 +7,10 @@ import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { type GhostSheet, isConverted } from "@/lib/ghost-sheets";
 import { formatDate, formatText } from "@/lib/format";
+import { loadAnnotations } from "@/lib/annotations-data";
 import { ConvertGhostSheetButton } from "@/components/convert-ghost-sheet-button";
+import { NotesPanel } from "@/components/notes-panel";
+import { TasksPanel } from "@/components/tasks-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -67,6 +70,10 @@ async function GhostSheetDetail({
     agentName = (agent?.full_name as string | undefined) ?? null;
   }
 
+  // owner_type is a literal here, never from the URL: owner_id has no foreign
+  // key, so a mismatched pair is not something the database would catch.
+  const { notes, tasks } = await loadAnnotations("ghost_sheet", sheet.id);
+
   return (
     <>
       <div className="flex items-start justify-between gap-4">
@@ -100,8 +107,14 @@ async function GhostSheetDetail({
             one would mean inventing a value. */}
       </dl>
 
+      {/* "Intake notes", not "Notes": this is ghost_sheets.notes — one text
+          column captured when the sheet was written down, and the thing
+          convert_ghost_sheet_to_lead copies onto the new lead. The Notes panel
+          below is the polymorphic notes table, which is a different thing with
+          many rows. Two sections both called Notes on one page would be a
+          genuine trap. */}
       <div className="flex flex-col gap-2">
-        <h2 className="font-semibold text-lg">Notes</h2>
+        <h2 className="font-semibold text-lg">Intake notes</h2>
         <p className="text-sm whitespace-pre-wrap">
           {formatText(sheet.notes)}
         </p>
@@ -125,6 +138,22 @@ async function GhostSheetDetail({
           <ConvertGhostSheetButton ghostSheetId={sheet.id} />
         </div>
       )}
+
+      <TasksPanel
+        ownerType="ghost_sheet"
+        ownerId={sheet.id}
+        tasks={tasks}
+        agentId={profile.id}
+        isAdmin={profile.role === "admin"}
+      />
+
+      <NotesPanel
+        ownerType="ghost_sheet"
+        ownerId={sheet.id}
+        notes={notes}
+        agentId={profile.id}
+        isAdmin={profile.role === "admin"}
+      />
     </>
   );
 }

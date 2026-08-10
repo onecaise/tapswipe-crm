@@ -8,7 +8,10 @@ import { createClient } from "@/lib/supabase/server";
 import { type Merchant, statusBadgeVariant } from "@/lib/merchants";
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
+import { loadAnnotations } from "@/lib/annotations-data";
 import { DocumentsPanel } from "@/components/documents-panel";
+import { NotesPanel } from "@/components/notes-panel";
+import { TasksPanel } from "@/components/tasks-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -77,6 +80,10 @@ async function MerchantDetail({
     .order("uploaded_at", { ascending: false });
   const documents = (docs ?? []) as DocumentRow[];
 
+  // owner_type is a literal here, never from the URL: owner_id has no foreign
+  // key, so a mismatched pair is not something the database would catch.
+  const { notes, tasks } = await loadAnnotations("merchant", merchant.id);
+
   return (
     <>
       <div className="flex items-start justify-between gap-4">
@@ -115,6 +122,22 @@ async function MerchantDetail({
         {agentName !== null && <Field label="Agent">{agentName}</Field>}
         <Field label="Last updated">{formatDate(merchant.updated_at)}</Field>
       </dl>
+
+      <TasksPanel
+        ownerType="merchant"
+        ownerId={merchant.id}
+        tasks={tasks}
+        agentId={profile.id}
+        isAdmin={profile.role === "admin"}
+      />
+
+      <NotesPanel
+        ownerType="merchant"
+        ownerId={merchant.id}
+        notes={notes}
+        agentId={profile.id}
+        isAdmin={profile.role === "admin"}
+      />
 
       <DocumentsPanel
         ownerType="merchant"

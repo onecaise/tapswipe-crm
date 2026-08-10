@@ -8,7 +8,10 @@ import { createClient } from "@/lib/supabase/server";
 import { type Lead } from "@/lib/leads";
 import { formatDate, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
+import { loadAnnotations } from "@/lib/annotations-data";
 import { DocumentsPanel } from "@/components/documents-panel";
+import { NotesPanel } from "@/components/notes-panel";
+import { TasksPanel } from "@/components/tasks-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -87,6 +90,10 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
     .order("uploaded_at", { ascending: false });
   const documents = (docs ?? []) as DocumentRow[];
 
+  // owner_type is a literal here, never from the URL: owner_id has no foreign
+  // key, so a mismatched pair is not something the database would catch.
+  const { notes, tasks } = await loadAnnotations("lead", lead.id);
+
   return (
     <>
       <div className="flex items-start justify-between gap-4">
@@ -156,6 +163,22 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
         {agentName !== null && <Field label="Agent">{agentName}</Field>}
         <Field label="Last updated">{formatDate(lead.updated_at)}</Field>
       </Section>
+
+      <TasksPanel
+        ownerType="lead"
+        ownerId={lead.id}
+        tasks={tasks}
+        agentId={profile.id}
+        isAdmin={profile.role === "admin"}
+      />
+
+      <NotesPanel
+        ownerType="lead"
+        ownerId={lead.id}
+        notes={notes}
+        agentId={profile.id}
+        isAdmin={profile.role === "admin"}
+      />
 
       <DocumentsPanel
         ownerType="lead"
