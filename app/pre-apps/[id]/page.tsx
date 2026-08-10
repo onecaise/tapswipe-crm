@@ -15,6 +15,7 @@ import {
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { DocumentsPanel } from "@/components/documents-panel";
+import { PreAppDecision } from "@/components/pre-app-decision";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -137,20 +138,50 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
           // Reps lose write access the moment it leaves draft. Saying so beats
           // a missing button they'd otherwise read as a bug. The enforcing
           // halves are the guard trigger and the RPCs, not this.
+          //
+          // Each status gets its own sentence because the way back differs: a
+          // declined pre-app has one (reopen, below, which reps may do
+          // themselves), a submitted one does not — reopen_pre_app requires
+          // 'declined', so not even an admin can return this to draft; they
+          // edit it in place or decline it. Approval is terminal.
           <p className="text-sm text-muted-foreground max-w-[16rem] text-right">
-            {preApp.status === "submitted"
-              ? "Submitted for review — ask an admin to reopen it to make changes."
-              : `This pre-app is ${preApp.status} and can no longer be edited.`}
+            {preApp.status === "submitted" &&
+              "Submitted for review — only an admin can change it now."}
+            {preApp.status === "declined" &&
+              "Declined — reopen it below to make changes and submit again."}
+            {preApp.status === "approved" &&
+              "Approved, and no longer editable. Its merchant record carries on from here."}
           </p>
         )}
       </div>
 
       {preApp.decline_reason && (
         <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm dark:border-red-900 dark:bg-red-950">
-          <p className="font-medium">Declined</p>
+          {/* reopen_pre_app deliberately leaves decline_reason in place so it
+              stays on screen while the rep fixes it, and submit_pre_app clears
+              it. So this banner outlives the declined status by design, and must
+              not still read "Declined" over a row the badge calls a draft. */}
+          <p className="font-medium">
+            {preApp.status === "declined" ? "Declined" : "Previously declined"}
+          </p>
           <p className="text-muted-foreground">{preApp.decline_reason}</p>
+          {preApp.status === "draft" && (
+            <p className="mt-2 text-muted-foreground">
+              This note clears when the pre-app is submitted again.
+            </p>
+          )}
         </div>
       )}
+
+      {/* Renders nothing on a draft, or on anything an admin has already
+          approved — see the component. */}
+      <PreAppDecision
+        preAppId={preApp.id}
+        status={preApp.status}
+        isAdmin={isAdmin}
+        agentName={agentName}
+      />
+
 
       <Section title="Business">
         <Field label="DBA">{preApp.dba_name}</Field>
