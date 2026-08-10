@@ -6,6 +6,7 @@ import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { type Lead } from "@/lib/leads";
 import { preAppDefaultsFromLead } from "@/lib/pre-apps";
+import { PageShell } from "@/components/page-shell";
 import { PreAppCreateForm } from "@/components/pre-app-create-form";
 import { Button } from "@/components/ui/button";
 
@@ -92,7 +93,7 @@ export default function NewPreAppPage({
   searchParams: Promise<{ lead?: string }>;
 }) {
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-3xl mx-auto">
+    <PageShell width="form">
       {/* searchParams stays unawaited here — awaiting it outside a Suspense
           boundary is what cacheComponents rejects at build time. The back link
           lives inside for the same reason: its href depends on whether the lead
@@ -102,6 +103,6 @@ export default function NewPreAppPage({
       >
         <NewPreApp searchParams={searchParams} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

@@ -12,6 +12,8 @@ import {
   statusIntent,
 } from "@/lib/merchants";
 import { formatDate, formatPct, formatText } from "@/lib/format";
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
 import { FilterTabs } from "@/components/filter-tabs";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -153,21 +155,19 @@ export default function MerchantsPage({
   searchParams: Promise<{ status?: string }>;
 }) {
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-6xl mx-auto">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold">Merchants</h1>
-          <p className="text-sm text-muted-foreground">
-            Agents see their own book; admins see the whole company.
-          </p>
-        </div>
-        <Button asChild size="sm">
-          <Link href="/merchants/new">
-            <PlusIcon size={16} />
-            New merchant
-          </Link>
-        </Button>
-      </div>
+    <PageShell width="list">
+      <PageHeader
+        title="Merchants"
+        subtitle="Agents see their own book; admins see the whole company."
+        action={
+          <Button asChild size="sm">
+            <Link href="/merchants/new">
+              <PlusIcon size={16} />
+              New merchant
+            </Link>
+          </Button>
+        }
+      />
 
       {/* cacheComponents: true means both the searchParams await and the fetch
           must sit inside a Suspense boundary. */}
@@ -178,6 +178,6 @@ export default function MerchantsPage({
       >
         <MerchantsList searchParams={searchParams} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

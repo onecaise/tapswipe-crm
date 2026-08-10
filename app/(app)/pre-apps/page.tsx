@@ -13,6 +13,8 @@ import {
   statusIntent,
 } from "@/lib/pre-apps";
 import { formatDate, formatText } from "@/lib/format";
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
 import { FilterTabs } from "@/components/filter-tabs";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -161,22 +163,19 @@ export default function PreAppsPage({
   searchParams: Promise<{ status?: string }>;
 }) {
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-6xl mx-auto">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold">Pre-Apps</h1>
-          <p className="text-sm text-muted-foreground">
-            Merchant applications. Agents see their own; admins see the whole
-            company and land on what needs review.
-          </p>
-        </div>
-        <Button asChild size="sm">
-          <Link href="/pre-apps/new">
-            <PlusIcon size={16} />
-            New pre-app
-          </Link>
-        </Button>
-      </div>
+    <PageShell width="list">
+      <PageHeader
+        title="Pre-Apps"
+        subtitle="Merchant applications. Agents see their own; admins see the whole company and land on what needs review."
+        action={
+          <Button asChild size="sm">
+            <Link href="/pre-apps/new">
+              <PlusIcon size={16} />
+              New pre-app
+            </Link>
+          </Button>
+        }
+      />
 
       {/* cacheComponents: true means both the searchParams await and the fetch
           must sit inside a Suspense boundary. */}
@@ -187,6 +186,6 @@ export default function PreAppsPage({
       >
         <PreAppsList searchParams={searchParams} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

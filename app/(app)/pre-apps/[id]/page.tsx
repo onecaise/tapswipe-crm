@@ -15,6 +15,8 @@ import {
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { loadAnnotations } from "@/lib/annotations-data";
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
 import { DocumentsPanel } from "@/components/documents-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
@@ -123,45 +125,45 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
 
   return (
     <>
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold">{preApp.dba_name}</h1>
+      <PageHeader
+        title={
+          <span className="flex items-center gap-3">
+            {preApp.dba_name}
             <StatusBadge intent={statusIntent(preApp.status)}>
               {preApp.status}
             </StatusBadge>
-          </div>
-          <p className="text-sm text-muted-foreground">
-            {formatText(preApp.legal_business_name)}
-          </p>
-        </div>
-        {canEdit ? (
-          <Button asChild size="sm">
-            <Link href={`/pre-apps/${preApp.id}/edit?step=business`}>
-              <PencilIcon size={16} />
-              Edit
-            </Link>
-          </Button>
-        ) : (
-          // Reps lose write access the moment it leaves draft. Saying so beats
-          // a missing button they'd otherwise read as a bug. The enforcing
-          // halves are the guard trigger and the RPCs, not this.
-          //
-          // Each status gets its own sentence because the way back differs: a
-          // declined pre-app has one (reopen, below, which reps may do
-          // themselves), a submitted one does not — reopen_pre_app requires
-          // 'declined', so not even an admin can return this to draft; they
-          // edit it in place or decline it. Approval is terminal.
-          <p className="text-sm text-muted-foreground max-w-[16rem] text-right">
-            {preApp.status === "submitted" &&
-              "Submitted for review — only an admin can change it now."}
-            {preApp.status === "declined" &&
-              "Declined — reopen it below to make changes and submit again."}
-            {preApp.status === "approved" &&
-              "Approved, and no longer editable. Its merchant record carries on from here."}
-          </p>
-        )}
-      </div>
+          </span>
+        }
+        subtitle={formatText(preApp.legal_business_name)}
+        action={
+          canEdit ? (
+            <Button asChild size="sm">
+              <Link href={`/pre-apps/${preApp.id}/edit?step=business`}>
+                <PencilIcon size={16} />
+                Edit
+              </Link>
+            </Button>
+          ) : (
+            // Reps lose write access the moment it leaves draft. Saying so beats
+            // a missing button they'd otherwise read as a bug. The enforcing
+            // halves are the guard trigger and the RPCs, not this.
+            //
+            // Each status gets its own sentence because the way back differs: a
+            // declined pre-app has one (reopen, below, which reps may do
+            // themselves), a submitted one does not — reopen_pre_app requires
+            // 'declined', so not even an admin can return this to draft; they
+            // edit it in place or decline it. Approval is terminal.
+            <p className="max-w-[16rem] text-right text-sm text-muted-foreground">
+              {preApp.status === "submitted" &&
+                "Submitted for review — only an admin can change it now."}
+              {preApp.status === "declined" &&
+                "Declined — reopen it below to make changes and submit again."}
+              {preApp.status === "approved" &&
+                "Approved, and no longer editable. Its merchant record carries on from here."}
+            </p>
+          )
+        }
+      />
 
       {preApp.decline_reason && (
         <Callout tone="danger" className="p-4">
@@ -289,7 +291,7 @@ export default function PreAppDetailPage({
   params: Promise<{ id: string }>;
 }) {
   return (
-    <div className="flex-1 w-full flex flex-col gap-8 max-w-5xl mx-auto">
+    <PageShell width="detail">
       <Button asChild variant="ghost" size="sm" className="self-start">
         <Link href="/pre-apps">
           <ArrowLeftIcon size={16} />
@@ -304,6 +306,6 @@ export default function PreAppDetailPage({
       >
         <PreAppDetail params={params} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

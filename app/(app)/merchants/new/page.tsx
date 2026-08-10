@@ -3,6 +3,7 @@ import { Suspense } from "react";
 import { ArrowLeftIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
+import { PageShell } from "@/components/page-shell";
 import { MerchantForm } from "@/components/merchant-form";
 import { Button } from "@/components/ui/button";
 
@@ -14,7 +15,7 @@ async function NewMerchant() {
 
 export default function NewMerchantPage() {
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-3xl mx-auto">
+    <PageShell width="form">
       <Button asChild variant="ghost" size="sm" className="self-start">
         <Link href="/merchants">
           <ArrowLeftIcon size={16} />
@@ -27,6 +28,6 @@ export default function NewMerchantPage() {
       >
         <NewMerchant />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

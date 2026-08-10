@@ -13,6 +13,8 @@ import {
   parseGhostSheetFilter,
 } from "@/lib/ghost-sheets";
 import { formatDate, formatText } from "@/lib/format";
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
 import { FilterTabs } from "@/components/filter-tabs";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -161,22 +163,19 @@ export default function GhostSheetsPage({
   searchParams: Promise<{ filter?: string }>;
 }) {
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-6xl mx-auto">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold">Ghost Sheets</h1>
-          <p className="text-sm text-muted-foreground">
-            Lightweight pre-lead capture. Convert one to promote it to a full
-            lead.
-          </p>
-        </div>
-        <Button asChild size="sm">
-          <Link href="/ghost-sheets/new">
-            <PlusIcon size={16} />
-            New ghost sheet
-          </Link>
-        </Button>
-      </div>
+    <PageShell width="list">
+      <PageHeader
+        title="Ghost Sheets"
+        subtitle="Lightweight pre-lead capture. Convert one to promote it to a full lead."
+        action={
+          <Button asChild size="sm">
+            <Link href="/ghost-sheets/new">
+              <PlusIcon size={16} />
+              New ghost sheet
+            </Link>
+          </Button>
+        }
+      />
 
       <Suspense
         fallback={
@@ -185,6 +184,6 @@ export default function GhostSheetsPage({
       >
         <GhostSheetsList searchParams={searchParams} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

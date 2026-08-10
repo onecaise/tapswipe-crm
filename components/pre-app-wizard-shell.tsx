@@ -15,6 +15,7 @@ import {
   stepHref,
 } from "@/lib/pre-apps";
 import type { Autosave } from "@/hooks/use-autosave";
+import { PageHeader } from "@/components/page-header";
 import { Callout } from "@/components/callout";
 import { Button } from "@/components/ui/button";
 
@@ -163,12 +164,10 @@ export function PreAppWizardShell({
   return (
     <RegistryContext.Provider value={registry}>
       <div className="flex flex-col gap-6">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold">{dbaName}</h1>
-          <p className="text-sm text-muted-foreground">
-            Pre-app #{preAppId} · changes save as you go.
-          </p>
-        </div>
+        <PageHeader
+          title={dbaName}
+          subtitle={`Pre-app #${preAppId} · changes save as you go.`}
+        />
 
         {status !== "draft" && isAdmin && (
           // An admin editing a record someone else has already submitted for

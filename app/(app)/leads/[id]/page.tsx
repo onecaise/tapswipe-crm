@@ -9,6 +9,8 @@ import { type Lead } from "@/lib/leads";
 import { formatDate, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { loadAnnotations } from "@/lib/annotations-data";
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
 import { DocumentsPanel } from "@/components/documents-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
@@ -96,35 +98,40 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
 
   return (
     <>
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-2">
-          <h1 className="text-2xl font-bold">{formatText(lead.dba)}</h1>
+      <PageHeader
+        title={formatText(lead.dba)}
+        action={
           <div className="flex items-center gap-2">
-            <StatusBadge intent="neutral">{formatText(lead.status)}</StatusBadge>
-            {lead.next_followup_date && (
-              <span className="text-sm text-muted-foreground">
-                Follow up {formatDate(lead.next_followup_date)}
-              </span>
-            )}
+            {/* The lead's own fields ride across, so this is the path a rep
+                should take rather than /pre-apps/new — see
+                preAppDefaultsFromLead. */}
+            <Button asChild size="sm" variant="outline">
+              <Link href={`/pre-apps/new?lead=${lead.id}`}>
+                <FilePlusIcon size={16} />
+                Start pre-app
+              </Link>
+            </Button>
+            <Button asChild size="sm">
+              <Link href={`/leads/${lead.id}/edit`}>
+                <PencilIcon size={16} />
+                Edit
+              </Link>
+            </Button>
           </div>
+        }
+      >
+        <div className="mt-1 flex items-center gap-2">
+          {/* `leads.status` is unconstrained text, so there is no vocabulary to
+              map to a colour — see lib/leads.ts. Every lead status is neutral
+              rather than guessed at. */}
+          <StatusBadge intent="neutral">{formatText(lead.status)}</StatusBadge>
+          {lead.next_followup_date && (
+            <span className="text-sm text-muted-foreground">
+              Follow up {formatDate(lead.next_followup_date)}
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          {/* The lead's own fields ride across, so this is the path a rep should
-              take rather than /pre-apps/new — see preAppDefaultsFromLead. */}
-          <Button asChild size="sm" variant="outline">
-            <Link href={`/pre-apps/new?lead=${lead.id}`}>
-              <FilePlusIcon size={16} />
-              Start pre-app
-            </Link>
-          </Button>
-          <Button asChild size="sm">
-            <Link href={`/leads/${lead.id}/edit`}>
-              <PencilIcon size={16} />
-              Edit
-            </Link>
-          </Button>
-        </div>
-      </div>
+      </PageHeader>
 
       <Section title="Contact">
         <Field label="Contact name">{formatText(lead.contact_name)}</Field>
@@ -197,7 +204,7 @@ export default function LeadDetailPage({
   // params stays unawaited here — awaiting it outside Suspense is what
   // cacheComponents rejects at build time.
   return (
-    <div className="flex-1 w-full flex flex-col gap-8 max-w-5xl mx-auto">
+    <PageShell width="detail">
       <Button asChild variant="ghost" size="sm" className="self-start">
         <Link href="/leads">
           <ArrowLeftIcon size={16} />
@@ -210,6 +217,6 @@ export default function LeadDetailPage({
       >
         <LeadDetail params={params} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

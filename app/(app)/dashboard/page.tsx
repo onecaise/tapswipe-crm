@@ -1,115 +1,95 @@
-import Link from "next/link";
 import { Suspense } from "react";
-import {
-  ClipboardListIcon,
-  FolderIcon,
-  GhostIcon,
-  LifeBuoyIcon,
-  StoreIcon,
-  TargetIcon,
-  UsersIcon,
-} from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
+import { createClient } from "@/lib/supabase/server";
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
+import { StatCard } from "@/components/stat-card";
 import { LogoutButton } from "@/components/logout-button";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 
-async function DashboardContent() {
+/**
+ * Counts for the stat row.
+ *
+ * All four are Tier 1 reads with `head: true`, so RLS scopes them and Postgres
+ * returns the count without the rows — an agent sees the size of their own book
+ * and an admin sees the company's. Issued together because they don't depend on
+ * each other, and a null count (an errored query) renders as "—" rather than a
+ * confident zero, which would read as "you have no merchants".
+ */
+async function DashboardStats() {
+  const supabase = await createClient();
+
+  const [merchants, leads, preApps, openTickets] = await Promise.all([
+    supabase.from("merchants").select("id", { count: "exact", head: true }),
+    supabase.from("leads").select("id", { count: "exact", head: true }),
+    supabase.from("pre_apps").select("id", { count: "exact", head: true }),
+    supabase
+      .from("support_tickets")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "open"),
+  ]);
+
+  const show = (count: number | null) => count ?? "—";
+
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <StatCard label="Merchants" value={show(merchants.count)} />
+      <StatCard label="Leads" value={show(leads.count)} />
+      <StatCard label="Pre-apps" value={show(preApps.count)} />
+      {/* The one red figure on the row: open tickets are the only number here
+          that represents work someone still has to do. */}
+      <StatCard label="Open tickets" value={show(openTickets.count)} accent />
+    </div>
+  );
+}
+
+async function DashboardHeader() {
   const profile = await requireUser();
 
   return (
-    <>
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold">
-            Welcome back, {profile.full_name}
-          </h1>
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary">
-              {profile.role}
-            </Badge>
-          </div>
-        </div>
-        <LogoutButton />
+    <PageHeader
+      title={`Welcome back, ${profile.full_name}`}
+      action={<LogoutButton />}
+    >
+      <div className="mt-1">
+        <Badge variant="secondary">{profile.role}</Badge>
       </div>
-
-      <div className="flex flex-col gap-2 items-start">
-        <h2 className="font-semibold text-lg">Book of business</h2>
-        <div className="flex flex-wrap gap-2">
-          <Button asChild variant="outline">
-            <Link href="/merchants">
-              <StoreIcon size={16} />
-              Merchants
-            </Link>
-          </Button>
-          <Button asChild variant="outline">
-            <Link href="/pre-apps">
-              <ClipboardListIcon size={16} />
-              Pre-Apps
-            </Link>
-          </Button>
-          <Button asChild variant="outline">
-            <Link href="/leads">
-              <TargetIcon size={16} />
-              Leads
-            </Link>
-          </Button>
-          <Button asChild variant="outline">
-            <Link href="/ghost-sheets">
-              <GhostIcon size={16} />
-              Ghost Sheets
-            </Link>
-          </Button>
-          <Button asChild variant="outline">
-            <Link href="/documents">
-              <FolderIcon size={16} />
-              Document Center
-            </Link>
-          </Button>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-2 items-start">
-        <h2 className="font-semibold text-lg">Support</h2>
-        <div className="flex flex-wrap gap-2">
-          {/* Its own row rather than a sixth tile above: a ticket is not part of
-              the book of business, it is work outstanding against it. */}
-          <Button asChild variant="outline">
-            <Link href="/support-tickets">
-              <LifeBuoyIcon size={16} />
-              Support Tickets
-            </Link>
-          </Button>
-        </div>
-      </div>
-
-      {/* Hiding this for agents is a UX nicety only — /admin/users enforces the
-          real boundary itself via requireAdmin(), and RLS enforces it again at
-          the row level. See §8 of the master plan. */}
-      {profile.role === "admin" && (
-        <div className="flex flex-col gap-2 items-start">
-          <h2 className="font-semibold text-lg">Admin</h2>
-          <Button asChild variant="outline">
-            <Link href="/admin/users">
-              <UsersIcon size={16} />
-              Manage Users
-            </Link>
-          </Button>
-        </div>
-      )}
-    </>
+    </PageHeader>
   );
 }
 
 export default function DashboardPage() {
+  // The grid of nav buttons that used to be here is gone: the sidebar does
+  // navigation now, and a second copy of the same links is just something else
+  // to keep in step with lib/nav.ts.
   return (
-    <div className="flex-1 w-full flex flex-col gap-10 max-w-5xl mx-auto">
+    <PageShell width="detail">
       {/* cacheComponents: true in next.config.ts means dynamic data fetching
-          must sit inside a Suspense boundary. */}
-      <Suspense fallback={<p className="text-sm text-muted-foreground">Loading…</p>}>
-        <DashboardContent />
+          must sit inside a Suspense boundary. Two boundaries rather than one so
+          the greeting doesn't wait on four count queries. */}
+      <Suspense
+        fallback={<p className="text-sm text-muted-foreground">Loading…</p>}
+      >
+        <DashboardHeader />
       </Suspense>
+
+      <Suspense fallback={<StatsSkeleton />}>
+        <DashboardStats />
+      </Suspense>
+    </PageShell>
+  );
+}
+
+function StatsSkeleton() {
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {[0, 1, 2, 3].map((i) => (
+        <div
+          key={i}
+          className="h-[74px] animate-pulse rounded-xl border bg-card"
+        />
+      ))}
     </div>
   );
 }

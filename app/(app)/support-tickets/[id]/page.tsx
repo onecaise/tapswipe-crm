@@ -14,6 +14,8 @@ import { formatDate, formatText } from "@/lib/format";
 // notes.owner_type / tasks.owner_type allows only lead | pre_app | merchant |
 // ghost_sheet, so a support ticket has nowhere to hang them. The ticket's own
 // message field is the record of what was said.
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 
@@ -83,35 +85,36 @@ async function TicketDetail({ params }: { params: Promise<{ id: string }> }) {
 
   return (
     <>
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-2">
-          <h1 className="text-2xl font-bold">{ticket.subject}</h1>
+      <PageHeader
+        title={ticket.subject}
+        action={
           <div className="flex items-center gap-2">
-            <StatusBadge intent={supportTicketStatusIntent(ticket.status)}>
-              {ticket.status}
-            </StatusBadge>
-            <span className="text-sm text-muted-foreground">
-              Opened {formatDate(ticket.created_at)}
-            </span>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {ticket.merchant_id !== null && merchantName !== null && (
-            <Button asChild size="sm" variant="outline">
-              <Link href={`/merchants/${ticket.merchant_id}`}>
-                <StoreIcon size={16} />
-                {merchantName}
+            {ticket.merchant_id !== null && merchantName !== null && (
+              <Button asChild size="sm" variant="outline">
+                <Link href={`/merchants/${ticket.merchant_id}`}>
+                  <StoreIcon size={16} />
+                  {merchantName}
+                </Link>
+              </Button>
+            )}
+            <Button asChild size="sm">
+              <Link href={`/support-tickets/${ticket.id}/edit`}>
+                <PencilIcon size={16} />
+                Edit
               </Link>
             </Button>
-          )}
-          <Button asChild size="sm">
-            <Link href={`/support-tickets/${ticket.id}/edit`}>
-              <PencilIcon size={16} />
-              Edit
-            </Link>
-          </Button>
+          </div>
+        }
+      >
+        <div className="mt-1 flex items-center gap-2">
+          <StatusBadge intent={supportTicketStatusIntent(ticket.status)}>
+            {ticket.status}
+          </StatusBadge>
+          <span className="text-sm text-muted-foreground">
+            Opened {formatDate(ticket.created_at)}
+          </span>
         </div>
-      </div>
+      </PageHeader>
 
       <section className="flex flex-col gap-3">
         <h2 className="font-semibold text-lg">Details</h2>
@@ -153,7 +156,7 @@ export default function TicketDetailPage({
   params: Promise<{ id: string }>;
 }) {
   return (
-    <div className="flex-1 w-full flex flex-col gap-8 max-w-5xl mx-auto">
+    <PageShell width="detail">
       {/* params stays unawaited here — awaiting it outside Suspense is what
           cacheComponents rejects at build time. */}
       <Button asChild variant="ghost" size="sm" className="self-start">
@@ -168,6 +171,6 @@ export default function TicketDetailPage({
       >
         <TicketDetail params={params} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

@@ -4,6 +4,7 @@ import { ArrowLeftIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { merchantOptions } from "@/lib/merchant-options";
+import { PageShell } from "@/components/page-shell";
 import { SupportTicketForm } from "@/components/support-ticket-form";
 import { Button } from "@/components/ui/button";
 
@@ -16,7 +17,7 @@ async function NewTicket() {
 
 export default function NewTicketPage() {
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-3xl mx-auto">
+    <PageShell width="form">
       <Button asChild variant="ghost" size="sm" className="self-start">
         <Link href="/support-tickets">
           <ArrowLeftIcon size={16} />
@@ -29,6 +30,6 @@ export default function NewTicketPage() {
       >
         <NewTicket />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

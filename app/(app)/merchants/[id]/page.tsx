@@ -9,6 +9,8 @@ import { type Merchant, statusIntent } from "@/lib/merchants";
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { loadAnnotations } from "@/lib/annotations-data";
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
 import { DocumentsPanel } from "@/components/documents-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
@@ -86,27 +88,28 @@ async function MerchantDetail({
 
   return (
     <>
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-2">
-          <h1 className="text-2xl font-bold">{merchant.dba}</h1>
-          <div className="flex items-center gap-2">
-            <StatusBadge intent={statusIntent(merchant.status)}>
-              {merchant.status}
-            </StatusBadge>
-            {merchant.mid && (
-              <span className="text-sm text-muted-foreground">
-                MID {merchant.mid}
-              </span>
-            )}
-          </div>
+      <PageHeader
+        title={merchant.dba}
+        action={
+          <Button asChild size="sm">
+            <Link href={`/merchants/${merchant.id}/edit`}>
+              <PencilIcon size={16} />
+              Edit
+            </Link>
+          </Button>
+        }
+      >
+        <div className="mt-1 flex items-center gap-2">
+          <StatusBadge intent={statusIntent(merchant.status)}>
+            {merchant.status}
+          </StatusBadge>
+          {merchant.mid && (
+            <span className="text-sm text-muted-foreground">
+              MID {merchant.mid}
+            </span>
+          )}
         </div>
-        <Button asChild size="sm">
-          <Link href={`/merchants/${merchant.id}/edit`}>
-            <PencilIcon size={16} />
-            Edit
-          </Link>
-        </Button>
-      </div>
+      </PageHeader>
 
       <dl className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
         <Field label="Legal business name">
@@ -157,7 +160,7 @@ export default function MerchantDetailPage({
   // dynamic data access outside the Suspense boundary, which cacheComponents
   // rejects at build time. Same shape as app/auth/error/page.tsx.
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-5xl mx-auto">
+    <PageShell width="detail">
       <Button asChild variant="ghost" size="sm" className="self-start">
         <Link href="/merchants">
           <ArrowLeftIcon size={16} />
@@ -170,6 +173,6 @@ export default function MerchantDetailPage({
       >
         <MerchantDetail params={params} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

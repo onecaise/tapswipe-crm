@@ -12,6 +12,8 @@ import {
 } from "@/lib/ghost-sheets";
 import { formatDate, formatText } from "@/lib/format";
 import { loadAnnotations } from "@/lib/annotations-data";
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
 import { ConvertGhostSheetButton } from "@/components/convert-ghost-sheet-button";
 import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
@@ -80,25 +82,26 @@ async function GhostSheetDetail({
 
   return (
     <>
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-2">
-          <h1 className="text-2xl font-bold">{formatText(sheet.dba)}</h1>
-          <div className="flex items-center gap-2">
-            <StatusBadge intent={conversionIntent(sheet)}>
-              {converted ? "converted" : "open"}
-            </StatusBadge>
-            <span className="text-sm text-muted-foreground">
-              {formatText(sheet.status)}
-            </span>
-          </div>
+      <PageHeader
+        title={formatText(sheet.dba)}
+        action={
+          <Button asChild size="sm" variant="outline">
+            <Link href={`/ghost-sheets/${sheet.id}/edit`}>
+              <PencilIcon size={16} />
+              Edit
+            </Link>
+          </Button>
+        }
+      >
+        <div className="mt-1 flex items-center gap-2">
+          <StatusBadge intent={conversionIntent(sheet)}>
+            {converted ? "converted" : "open"}
+          </StatusBadge>
+          <span className="text-sm text-muted-foreground">
+            {formatText(sheet.status)}
+          </span>
         </div>
-        <Button asChild size="sm" variant="outline">
-          <Link href={`/ghost-sheets/${sheet.id}/edit`}>
-            <PencilIcon size={16} />
-            Edit
-          </Link>
-        </Button>
-      </div>
+      </PageHeader>
 
       <dl className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
         <Field label="Contact name">{formatText(sheet.contact_name)}</Field>
@@ -166,7 +169,7 @@ export default function GhostSheetDetailPage({
   params: Promise<{ id: string }>;
 }) {
   return (
-    <div className="flex-1 w-full flex flex-col gap-8 max-w-5xl mx-auto">
+    <PageShell width="detail">
       <Button asChild variant="ghost" size="sm" className="self-start">
         <Link href="/ghost-sheets">
           <ArrowLeftIcon size={16} />
@@ -179,6 +182,6 @@ export default function GhostSheetDetailPage({
       >
         <GhostSheetDetail params={params} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

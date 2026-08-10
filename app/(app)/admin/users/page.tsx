@@ -4,6 +4,8 @@ import { ArrowLeftIcon } from "lucide-react";
 
 import { requireAdmin, type Role } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -99,21 +101,18 @@ async function UsersTable() {
 
 export default function ManageUsersPage() {
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-5xl mx-auto">
-      <div className="flex flex-col gap-2 items-start">
-        <Button asChild variant="ghost" size="sm">
-          <Link href="/dashboard">
-            <ArrowLeftIcon size={16} />
-            Back to dashboard
-          </Link>
-        </Button>
-        <h1 className="text-2xl font-bold">Manage Users</h1>
-        <p className="text-sm text-muted-foreground">
-          Read-only for now. Creating, deactivating and resetting passwords go
-          through the create-user / deactivate-user / admin-reset-password Edge
-          Functions, which are still stubs.
-        </p>
-      </div>
+    <PageShell width="detail">
+      <Button asChild variant="ghost" size="sm" className="self-start">
+        <Link href="/dashboard">
+          <ArrowLeftIcon size={16} />
+          Back to dashboard
+        </Link>
+      </Button>
+
+      <PageHeader
+        title="Manage Users"
+        subtitle="Read-only for now. Creating, deactivating and resetting passwords go through the create-user / deactivate-user / admin-reset-password Edge Functions, which are still stubs."
+      />
 
       {/* cacheComponents: true means dynamic fetches need a Suspense boundary. */}
       <Suspense
@@ -121,6 +120,6 @@ export default function ManageUsersPage() {
       >
         <UsersTable />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

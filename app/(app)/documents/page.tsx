@@ -10,6 +10,8 @@ import {
   ownerHref,
 } from "@/lib/documents";
 import { formatDate, formatText } from "@/lib/format";
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
 import { DownloadDocumentButton } from "@/components/download-document-button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -126,14 +128,11 @@ async function DocumentCenter() {
 
 export default function DocumentsPage() {
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-6xl mx-auto">
-      <div className="flex flex-col gap-1">
-        <h1 className="text-2xl font-bold">Document Center</h1>
-        <p className="text-sm text-muted-foreground">
-          Every document you have access to. Files themselves live in a private
-          bucket and are only reachable through short-lived signed links.
-        </p>
-      </div>
+    <PageShell width="list">
+      <PageHeader
+        title="Document Center"
+        subtitle="Every document you have access to. Files themselves live in a private bucket and are only reachable through short-lived signed links."
+      />
 
       <Suspense
         fallback={
@@ -142,6 +141,6 @@ export default function DocumentsPage() {
       >
         <DocumentCenter />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

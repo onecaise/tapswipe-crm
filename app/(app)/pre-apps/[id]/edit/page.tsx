@@ -13,6 +13,7 @@ import {
   type PreAppTerminal,
   parsePreAppStep,
 } from "@/lib/pre-apps";
+import { PageShell } from "@/components/page-shell";
 import { PreAppWizardShell } from "@/components/pre-app-wizard-shell";
 import { BusinessStep } from "@/components/pre-app-steps/business-step";
 import { OwnersStep } from "@/components/pre-app-steps/owners-step";
@@ -133,7 +134,7 @@ export default function EditPreAppPage({
   searchParams: Promise<{ step?: string }>;
 }) {
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-3xl mx-auto">
+    <PageShell width="form">
       <Button asChild variant="ghost" size="sm" className="self-start">
         <Link href="/pre-apps">
           <ArrowLeftIcon size={16} />
@@ -151,6 +152,6 @@ export default function EditPreAppPage({
       >
         <PreAppEditor params={params} searchParams={searchParams} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

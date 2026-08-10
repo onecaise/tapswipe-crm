@@ -6,6 +6,7 @@ import { ArrowLeftIcon } from "lucide-react";
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { type Merchant } from "@/lib/merchants";
+import { PageShell } from "@/components/page-shell";
 import { MerchantForm } from "@/components/merchant-form";
 import { Button } from "@/components/ui/button";
 
@@ -59,12 +60,12 @@ export default function EditMerchantPage({
   // cacheComponents rejects at build time. The back link lives inside the async
   // child because it needs the id.
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-3xl mx-auto">
+    <PageShell width="form">
       <Suspense
         fallback={<p className="text-sm text-muted-foreground">Loading…</p>}
       >
         <EditMerchant params={params} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

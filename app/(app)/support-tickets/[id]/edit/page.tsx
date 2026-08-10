@@ -7,6 +7,7 @@ import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { merchantOptions } from "@/lib/merchant-options";
 import { type SupportTicket } from "@/lib/support-tickets";
+import { PageShell } from "@/components/page-shell";
 import { SupportTicketForm } from "@/components/support-ticket-form";
 import { Button } from "@/components/ui/button";
 
@@ -58,12 +59,12 @@ export default function EditTicketPage({
   params: Promise<{ id: string }>;
 }) {
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-3xl mx-auto">
+    <PageShell width="form">
       <Suspense
         fallback={<p className="text-sm text-muted-foreground">Loading…</p>}
       >
         <EditTicket params={params} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }

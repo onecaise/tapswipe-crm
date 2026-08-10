@@ -13,6 +13,8 @@ import {
   parseLeadFilter,
 } from "@/lib/leads";
 import { formatDate, formatText } from "@/lib/format";
+import { PageHeader } from "@/components/page-header";
+import { PageShell } from "@/components/page-shell";
 import { FilterTabs } from "@/components/filter-tabs";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -172,21 +174,19 @@ export default function LeadsPage({
   searchParams: Promise<{ filter?: string }>;
 }) {
   return (
-    <div className="flex-1 w-full flex flex-col gap-6 max-w-6xl mx-auto">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold">Leads</h1>
-          <p className="text-sm text-muted-foreground">
-            Filtered by follow-up date. Agents see their own; admins see all.
-          </p>
-        </div>
-        <Button asChild size="sm">
-          <Link href="/leads/new">
-            <PlusIcon size={16} />
-            New lead
-          </Link>
-        </Button>
-      </div>
+    <PageShell width="list">
+      <PageHeader
+        title="Leads"
+        subtitle="Filtered by follow-up date. Agents see their own; admins see all."
+        action={
+          <Button asChild size="sm">
+            <Link href="/leads/new">
+              <PlusIcon size={16} />
+              New lead
+            </Link>
+          </Button>
+        }
+      />
 
       {/* cacheComponents: true means the searchParams await and the fetch both
           have to sit inside a Suspense boundary. */}
@@ -195,6 +195,6 @@ export default function LeadsPage({
       >
         <LeadsList searchParams={searchParams} />
       </Suspense>
-    </div>
+    </PageShell>
   );
 }
