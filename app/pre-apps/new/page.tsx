@@ -64,14 +64,20 @@ async function NewPreApp({
     );
   }
 
+  const lead = data as Lead;
   const { dba_name, legal_business_name, ...carryOver } =
-    preAppDefaultsFromLead(data as Lead);
+    preAppDefaultsFromLead(lead);
 
   return (
     <>
       <BackLink href={`/leads/${leadId}`} label="Back to lead" />
+      {/* agent_id comes from the LEAD, not the caller. For a rep these are the
+          same id — RLS shows them only their own leads — but an admin starting a
+          pre-app from a rep's lead must not move the deal into their own book.
+          Same rule as approve_pre_app ("never auth.uid()") and the documents
+          object key, which files an admin's upload under the parent's owner. */}
       <PreAppCreateForm
-        agentId={profile.id}
+        agentId={lead.agent_id}
         leadId={leadId}
         prefill={{ dba_name, legal_business_name }}
         carryOver={carryOver}
