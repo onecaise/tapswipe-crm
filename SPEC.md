@@ -1,8 +1,38 @@
 # Pre-App Submission Flow — Specification
 
-Status: **approved, not yet built.** This document is the contract for master-plan §12
-step 6. Read it alongside `docs/tapswipe_crm_master_plan.md` §3/§6/§14.5/§14.6 and
+Status: **built, as of 2026-08-10.** All six commits in §11 have landed; the sections below
+are kept as the design record, so where the code and this document disagree the code is now
+the fact. Read it alongside `docs/tapswipe_crm_master_plan.md` §3/§6/§14.5/§14.6 and
 `docs/tapswipe_crm_schema.sql`, which remains the authoritative data-model spec.
+
+Four places where what shipped deviates from what is written below, each deliberate:
+
+1. **Filenames drifted.** `20260806141000_pre_app_rpcs.sql` shipped as
+   `..._pre_app_state_machine.sql`; `tests/rls/pre-app-rpcs.test.ts` as
+   `tests/rls/pre-app-state-machine.test.ts`; `pre-app-submit-button.tsx` as
+   `pre-app-steps/review-step.tsx` (§11 commit 6's submit button became the wizard's last
+   step); `pre-app-admin-actions.tsx` as `pre-app-decision.tsx`; and §8's
+   `start-pre-app-button.tsx` is a plain `<Link>` on `/leads/[id]` rather than a component.
+   Search for the behaviour, not the filename.
+2. **No shared validation file, so no `tests/rls/validation-copy.test.ts`** — see §6. The
+   validators are duplicated and pinned by behaviour in `tests/live/pre-app-secrets.test.ts`
+   instead. Not debt.
+3. **§9's `tests/live/helpers/stack.ts` extension did not happen.** `provisionFixtures()`
+   gained no `preAppIds`/`preAppOwnerIds`; `tests/live/pre-app-secrets.test.ts` provisions and
+   tears down its own personas, including deleting their `audit_log` rows before
+   `deleteUser()` — the FK trap §9 predicted, handled where the rows are written.
+4. **One migration §5 did not anticipate**, added while building the review step:
+   `20260810152129_pre_app_secrets_presence.sql`. The client-side blocker list needs two facts
+   that live in tables the browser may not read (banking ciphertext exists; how many owners
+   lack an SSN). `read-pre-app-secrets` was the wrong source — it decrypts, and it audits, so
+   rendering a checklist would have written an `audit_log` row claiming a full SSN read that
+   no human performed. `pre_app_secrets_presence` answers with `exists`/`count` and names no
+   ciphertext column.
+
+Not in this spec's scope, and repeatedly mistaken for a gap: **there is no Documents step.**
+Decision 1's wizard is `business|owners|terminal|profile|secrets` (plus `review`); pre-app
+document uploads are part of the **detail page** per §8, via the existing `DocumentsPanel`
+and the two signed-URL functions, which already accept `owner_type = 'pre_app'`.
 
 ## 1. Why
 

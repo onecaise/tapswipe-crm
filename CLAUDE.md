@@ -8,12 +8,12 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 
 **Current state matters when reading the code**, and it is a mix — real CRM pages alongside untouched starter scaffolding:
 
-- **Built:** `app/dashboard`, `app/merchants/*`, `app/leads/*`, `app/ghost-sheets/*`, `app/documents`, `app/admin/users`, with data-access helpers in `lib/{merchants,leads,ghost-sheets,documents,auth,format}.ts`.
-- **Not built yet:** Pre-Apps, Support Tickets, My Submissions.
+- **Built:** `app/dashboard`, `app/merchants/*`, `app/leads/*`, `app/ghost-sheets/*`, `app/pre-apps/*`, `app/documents`, `app/admin/users`, with data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,documents,auth,format}.ts` and `hooks/use-autosave.ts`.
+- **Not built yet:** Support Tickets, My Submissions.
 - **Still [starter-kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase) template, not product code:** `README.md`, `app/page.tsx`, `app/protected/*`, `components/tutorial/*`, and `components/{hero,deploy-button,next-logo,supabase-logo,env-var-warning}.tsx`.
 - **Edge Functions:** `create-upload-url`, `create-download-url`, `submit-pre-app-secrets` and `read-pre-app-secrets` are implemented (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env}.ts`). The other three — `create-user`, `deactivate-user`, `admin-reset-password` — are still `withSupabase` hello-world stubs.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Eight migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Nine migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi`.
 
@@ -25,7 +25,7 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (289 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (312 tests)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (37 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED project (4 tests)
 
@@ -130,6 +130,8 @@ The two implemented functions show the required shape, and the order matters:
 Also: return `404`, not `403`, when a record isn't the caller's — "not yours" and "doesn't exist" must be indistinguishable or the endpoint becomes an id oracle. `tests/live/document-urls.test.ts` asserts every one of these branches against the running functions.
 
 Runtime is Deno 2 with per-function `deno.json` import maps; `.vscode/settings.json` enables the Deno language server only for `supabase/functions`, so the rest of the repo stays on the Node TS server.
+
+**The secrets validators exist twice, on purpose, and TypeScript cannot see the pair.** `lib/pre-app-validation.ts` (zod, browser) and `supabase/functions/_shared/pre-app-secrets.ts` (hand-written, dependency-free) both implement `isSsn` / `isRouting` (incl. the mod-10 checksum) / `isAccount` / the `rp_password` cap. Genuinely sharing one file would need each `deno.json` to map a specifier reaching *above* `supabase/functions/` **and** `functions deploy` to bundle from there — not worth betting a deploy on, and `_shared/documents.ts` already answered this question the same way. The risk is real and one-directional in effect: change the checksum on one side only and the function starts rejecting values the UI accepts, producing a `400` the rep cannot explain. Nothing type-checks the pair, so **it is pinned by behaviour instead** — `tests/live/pre-app-secrets.test.ts` POSTs every value the client validator rejects and asserts `400`, plus a valid round-trip asserting success. Change both files together, and keep the cross-reference comments in each. (`tests/rls/validation-copy.test.ts`, which SPEC §10 lists, was deliberately **not** built: there is no second file to diff.)
 
 Storage: one private bucket named `documents`, created out-of-band — it is not in any migration, so a freshly started local stack does not have it and every signing call 404s until it exists (`tests/live/helpers/stack.ts` creates it as part of provisioning). The `documents` table stores metadata only (`owner_type` + `owner_id` polymorphic pointer, `doc_type`, `file_key`); bytes are in the bucket and are only reachable through the two signed-URL functions. The object key is `{agent_id}/{owner_type}/{owner_id}/{uuid}`, where `agent_id` is the **parent record's** owner rather than the uploader — so an admin uploading for a rep files it under that rep.
 
