@@ -2,34 +2,87 @@
 @tailwind components;
 @tailwind utilities;
 
+/**
+ * Tapswipe CRM theme tokens.
+ *
+ * Every colour in the product comes from here. Components reference tokens
+ * (`bg-card`, `text-muted-foreground`, `border-sidebar-border`), never palette
+ * literals like `bg-gray-100` or a hex — so adjusting the design is a change to
+ * this file rather than a sweep through 25 pages.
+ *
+ * Values are space-separated HSL triplets with no `hsl()` wrapper: that is the
+ * shadcn/Tailwind-3 convention, and it is what lets `hsl(var(--x) / 0.5)` work
+ * for opacity variants. Hex equivalents are noted so this file can be diffed
+ * against the design spec.
+ *
+ * Two colour systems are kept deliberately separate, and mixing them is a bug:
+ *   - brand/action  — `primary` (buttons, links, active nav accent, focus
+ *                     rings) and `destructive` (delete/danger only, visibly
+ *                     darker so "primary" and "destructive" never read alike)
+ *   - status        — `success` / `warning` / `neutral`, for state badges only
+ * Never use a status colour on a button or in the nav, and never use brand red
+ * on a status badge.
+ */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 0 0% 3.9%;
+    --background: 0 0% 98%; /* #FAFAFA — main content area */
+    --foreground: 0 0% 9%;
+
+    /* Surfaces: cards, tables, the topbar. */
+    --card: 0 0% 100%; /* #FFFFFF */
+    --card-foreground: 0 0% 9%;
     --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 3.9%;
-    --primary: 0 0% 9%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 96.1%;
+    --popover-foreground: 0 0% 9%;
+
+    /* Brand red. Primary actions, links, active nav accent, notification dots. */
+    --primary: 0 72.2% 50.6%; /* #DC2626 */
+    --primary-foreground: 0 0% 100%;
+
+    /* Danger red. Destructive actions only, and always behind a confirmation
+       step. Darker than brand red on purpose — the difference is what stops a
+       delete button reading as the page's primary action. */
+    --destructive: 0 73.7% 41.8%; /* #B91C1C */
+    --destructive-foreground: 0 0% 100%;
+
+    --secondary: 240 7.7% 94.9%; /* #F1F1F3 */
     --secondary-foreground: 0 0% 9%;
-    --muted: 0 0% 96.1%;
-    --muted-foreground: 0 0% 45.1%;
-    --accent: 0 0% 96.1%;
+    --muted: 240 7.7% 94.9%; /* #F1F1F3 — search input, filter chips */
+    --muted-foreground: 240 4% 55.9%; /* #8A8A93 — labels, secondary text */
+    --accent: 240 7.7% 94.9%;
     --accent-foreground: 0 0% 9%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 89.8%;
-    --input: 0 0% 89.8%;
-    --ring: 0 0% 3.9%;
-    --chart-1: 12 76% 61%;
-    --chart-2: 173 58% 39%;
-    --chart-3: 197 37% 24%;
-    --chart-4: 43 74% 66%;
-    --chart-5: 27 87% 67%;
+
+    --border: 0 0% 92.5%; /* #ECECEC */
+    --input: 0 0% 92.5%;
+    --ring: 0 72.2% 50.6%; /* focus rings are brand red */
+
+    /* Sidebar. Always dark, in every theme — these are not overridden in the
+       .dark block below. */
+    --sidebar: 240 6.7% 5.9%; /* #0E0E10 */
+    --sidebar-active: 240 6.1% 9.6%; /* #17171A */
+    --sidebar-foreground: 240 6% 73.7%; /* #B8B8C0 */
+    --sidebar-foreground-active: 0 0% 100%;
+    --sidebar-border: 240 6.2% 15.9%; /* reads as a hairline on #0E0E10 */
+
+    /* Status. Badges only. */
+    --success: 142 76.2% 36.3%; /* #16A34A */
+    --success-bg: 137 43.8% 93.7%; /* #E8F6EC */
+    --warning: 26 90.5% 37.1%; /* #B45309 */
+    --warning-bg: 37 86.7% 94.1%; /* #FDF3E3 */
+    --neutral: 0 0% 46.7%; /* #777777 */
+    --neutral-bg: 240 7.7% 94.9%; /* #F1F1F3 */
+
+    /* 0.5rem keeps `rounded-lg` at 8px for buttons while Tailwind's default
+       `rounded-xl` stays 12px for cards, which is what the spec asks for. */
     --radius: 0.5rem;
   }
+
+  /**
+   * Dark mode is not part of the design yet: the app is pinned to light in
+   * app/layout.tsx (`enableSystem={false}`, `defaultTheme="light"`). This block
+   * is the stock shadcn neutral scale, left in place so switching dark mode
+   * back on later means filling in values rather than re-plumbing tokens.
+   * Sidebar tokens are absent on purpose — the sidebar is dark either way.
+   */
   .dark {
     --background: 0 0% 3.9%;
     --foreground: 0 0% 98%;
@@ -37,24 +90,25 @@
     --card-foreground: 0 0% 98%;
     --popover: 0 0% 3.9%;
     --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 0 0% 9%;
+    --primary: 0 72.2% 50.6%;
+    --primary-foreground: 0 0% 100%;
+    --destructive: 0 73.7% 41.8%;
+    --destructive-foreground: 0 0% 100%;
     --secondary: 0 0% 14.9%;
     --secondary-foreground: 0 0% 98%;
     --muted: 0 0% 14.9%;
     --muted-foreground: 0 0% 63.9%;
     --accent: 0 0% 14.9%;
     --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
     --border: 0 0% 14.9%;
     --input: 0 0% 14.9%;
-    --ring: 0 0% 83.1%;
-    --chart-1: 220 70% 50%;
-    --chart-2: 160 60% 45%;
-    --chart-3: 30 80% 55%;
-    --chart-4: 280 65% 60%;
-    --chart-5: 340 75% 55%;
+    --ring: 0 72.2% 50.6%;
+    --success: 142 70% 45%;
+    --success-bg: 142 30% 14%;
+    --warning: 37 90% 55%;
+    --warning-bg: 30 40% 14%;
+    --neutral: 0 0% 63.9%;
+    --neutral-bg: 0 0% 14.9%;
   }
 }
 

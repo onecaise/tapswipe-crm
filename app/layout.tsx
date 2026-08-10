@@ -9,8 +9,8 @@ const defaultUrl = process.env.VERCEL_URL
 
 export const metadata: Metadata = {
   metadataBase: new URL(defaultUrl),
-  title: "Next.js and Supabase Starter Kit",
-  description: "The fastest way to build apps with Next.js and Supabase",
+  title: "Tapswipe CRM",
+  description: "Internal CRM for Tapswipe merchant services.",
 };
 
 const geistSans = Geist({
@@ -26,11 +26,16 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${geistSans.className} antialiased`}>
+      {/* `variable` + `font-sans` rather than `geistSans.className`, so the
+          font has one source of truth: the fontFamily token in
+          tailwind.config.ts. */}
+      <body className={`${geistSans.variable} font-sans antialiased`}>
+        {/* Pinned to light: the design is a light theme with a permanently dark
+            sidebar, and there is no dark palette yet. See app/globals.css. */}
         <ThemeProvider
           attribute="class"
-          defaultTheme="system"
-          enableSystem
+          defaultTheme="light"
+          enableSystem={false}
           disableTransitionOnChange
         >
           {children}

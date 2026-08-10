@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import defaultTheme from "tailwindcss/defaultTheme";
 import tailwindcssAnimate from "tailwindcss-animate";
 
 export default {
@@ -45,18 +46,38 @@ export default {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
-        chart: {
-          "1": "hsl(var(--chart-1))",
-          "2": "hsl(var(--chart-2))",
-          "3": "hsl(var(--chart-3))",
-          "4": "hsl(var(--chart-4))",
-          "5": "hsl(var(--chart-5))",
+        // The sidebar is dark in every theme, so these are defined only in
+        // :root — see the note in app/globals.css.
+        sidebar: {
+          DEFAULT: "hsl(var(--sidebar))",
+          active: "hsl(var(--sidebar-active))",
+          foreground: "hsl(var(--sidebar-foreground))",
+          "foreground-active": "hsl(var(--sidebar-foreground-active))",
+          border: "hsl(var(--sidebar-border))",
+        },
+        // Status colours. Badges only — never a button, never the nav.
+        success: {
+          DEFAULT: "hsl(var(--success))",
+          bg: "hsl(var(--success-bg))",
+        },
+        warning: {
+          DEFAULT: "hsl(var(--warning))",
+          bg: "hsl(var(--warning-bg))",
+        },
+        neutral: {
+          DEFAULT: "hsl(var(--neutral))",
+          bg: "hsl(var(--neutral-bg))",
         },
       },
       borderRadius: {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
+      },
+      fontFamily: {
+        // next/font declares --font-geist-sans in app/layout.tsx; this is what
+        // makes `font-sans` (and therefore Tailwind's default body font) use it.
+        sans: ["var(--font-geist-sans)", ...defaultTheme.fontFamily.sans],
       },
     },
   },
