@@ -5,14 +5,14 @@ import { ArrowLeftIcon, PencilIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
-import { type Merchant, statusBadgeVariant } from "@/lib/merchants";
+import { type Merchant, statusIntent } from "@/lib/merchants";
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { DocumentsPanel } from "@/components/documents-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 
 function Field({
@@ -90,9 +90,9 @@ async function MerchantDetail({
         <div className="flex flex-col gap-2">
           <h1 className="text-2xl font-bold">{merchant.dba}</h1>
           <div className="flex items-center gap-2">
-            <Badge variant={statusBadgeVariant(merchant.status)}>
+            <StatusBadge intent={statusIntent(merchant.status)}>
               {merchant.status}
-            </Badge>
+            </StatusBadge>
             {merchant.mid && (
               <span className="text-sm text-muted-foreground">
                 MID {merchant.mid}

@@ -7,14 +7,14 @@ import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import {
   type SupportTicket,
-  supportTicketStatusVariant,
+  supportTicketStatusIntent,
 } from "@/lib/support-tickets";
 import { formatDate, formatText } from "@/lib/format";
 // No notes or tasks panel here on purpose: the check constraint on
 // notes.owner_type / tasks.owner_type allows only lead | pre_app | merchant |
 // ghost_sheet, so a support ticket has nowhere to hang them. The ticket's own
 // message field is the record of what was said.
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 
 function Field({
@@ -87,9 +87,9 @@ async function TicketDetail({ params }: { params: Promise<{ id: string }> }) {
         <div className="flex flex-col gap-2">
           <h1 className="text-2xl font-bold">{ticket.subject}</h1>
           <div className="flex items-center gap-2">
-            <Badge variant={supportTicketStatusVariant(ticket.status)}>
+            <StatusBadge intent={supportTicketStatusIntent(ticket.status)}>
               {ticket.status}
-            </Badge>
+            </StatusBadge>
             <span className="text-sm text-muted-foreground">
               Opened {formatDate(ticket.created_at)}
             </span>

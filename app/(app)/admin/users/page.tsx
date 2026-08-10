@@ -4,6 +4,7 @@ import { ArrowLeftIcon } from "lucide-react";
 
 import { requireAdmin, type Role } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
+import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,7 +40,7 @@ async function UsersTable() {
 
   if (error) {
     return (
-      <p className="text-sm text-red-500">
+      <p className="text-sm text-destructive">
         Could not load users: {error.message}
       </p>
     );
@@ -69,18 +70,19 @@ async function UsersTable() {
             <TableRow key={profile.id}>
               <TableCell className="font-medium">{profile.full_name}</TableCell>
               <TableCell>
-                <Badge
-                  variant={profile.role === "admin" ? "default" : "secondary"}
-                >
-                  {profile.role}
-                </Badge>
+                {/* A role is not a status, so it gets no status colour and
+                    certainly not brand red — the word already says which one it
+                    is. */}
+                <Badge variant="secondary">{profile.role}</Badge>
               </TableCell>
               <TableCell>
-                <Badge
-                  variant={profile.is_active ? "outline" : "destructive"}
-                >
+                {/* Deactivated is grey rather than red: it's an inert state, not
+                    a danger, and red here would read as "something is wrong with
+                    this account" on every row an admin has deliberately
+                    switched off. */}
+                <StatusBadge intent={profile.is_active ? "success" : "neutral"}>
                   {profile.is_active ? "active" : "deactivated"}
-                </Badge>
+                </StatusBadge>
               </TableCell>
               <TableCell className="text-muted-foreground">
                 {profile.created_at

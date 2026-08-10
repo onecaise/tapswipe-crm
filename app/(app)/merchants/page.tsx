@@ -9,11 +9,11 @@ import {
   MERCHANT_LIST_COLUMNS,
   type MerchantListRow,
   parseMerchantFilter,
-  statusBadgeVariant,
+  statusIntent,
 } from "@/lib/merchants";
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { FilterTabs } from "@/components/filter-tabs";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -52,7 +52,7 @@ async function MerchantsList({
 
   if (error) {
     return (
-      <p className="text-sm text-red-500">
+      <p className="text-sm text-destructive">
         Could not load merchants: {error.message}
       </p>
     );
@@ -124,9 +124,9 @@ async function MerchantsList({
                 </TableCell>
                 <TableCell>{formatText(merchant.mid)}</TableCell>
                 <TableCell>
-                  <Badge variant={statusBadgeVariant(merchant.status)}>
+                  <StatusBadge intent={statusIntent(merchant.status)}>
                     {merchant.status}
-                  </Badge>
+                  </StatusBadge>
                 </TableCell>
                 <TableCell>{formatText(merchant.processor)}</TableCell>
                 <TableCell>{formatPct(merchant.split_agent_pct)}</TableCell>

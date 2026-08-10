@@ -142,7 +142,7 @@ export function SecretsStep({
         <strong>Encrypt &amp; save</strong>.
       </p>
 
-      {loadError && <p className="text-sm text-red-500">{loadError}</p>}
+      {loadError && <p className="text-sm text-destructive">{loadError}</p>}
 
       <fieldset className="flex flex-col gap-4">
         <legend className="font-semibold text-sm">Owner SSNs</legend>
@@ -198,7 +198,7 @@ export function SecretsStep({
               onChange={setRouting}
             />
             {routing !== "" && !isRouting(routing) && (
-              <p className="text-xs text-red-500">
+              <p className="text-xs text-destructive">
                 Nine digits, and the checksum has to match — check for a
                 transposed pair.
               </p>
@@ -234,7 +234,7 @@ export function SecretsStep({
           </div>
         </div>
         {(routing === "") !== (account === "") && (
-          <p className="text-xs text-amber-600">
+          <p className="text-xs text-warning">
             Routing and account number are stored together — enter both.
           </p>
         )}
@@ -269,7 +269,7 @@ export function SecretsStep({
         </div>
       </fieldset>
 
-      {saveError && <p className="text-sm text-red-500">{saveError}</p>}
+      {saveError && <p className="text-sm text-destructive">{saveError}</p>}
 
       {canEdit && (
         <div className="flex items-center gap-4 border-t pt-4">

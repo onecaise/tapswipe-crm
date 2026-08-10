@@ -336,7 +336,7 @@ export function OwnersStep({
         </fieldset>
       ))}
 
-      {rowError && <p className="text-sm text-red-500">{rowError}</p>}
+      {rowError && <p className="text-sm text-destructive">{rowError}</p>}
 
       {canEdit && (
         <Button
@@ -384,7 +384,7 @@ function Field({
     <div className="flex flex-col gap-2">
       <Label>{label}</Label>
       {children}
-      {error && <p className="text-xs text-red-500">{error}</p>}
+      {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
 }

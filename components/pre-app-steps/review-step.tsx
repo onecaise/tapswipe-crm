@@ -17,6 +17,7 @@ import {
   type PreAppStatus,
   preAppSubmitBlockers,
 } from "@/lib/pre-apps";
+import { Callout } from "@/components/callout";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -144,14 +145,14 @@ export function ReviewStep({
       </div>
 
       {ready ? (
-        <p className="flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm dark:border-emerald-900 dark:bg-emerald-950">
+        <Callout tone="success" className="flex items-center gap-2">
           <CheckCircle2Icon size={16} className="shrink-0" />
           This pre-app looks complete and is ready to submit.
-        </p>
+        </Callout>
       ) : (
         <div className="flex flex-col gap-2 rounded-md border p-4">
           <p className="flex items-center gap-2 text-sm font-medium">
-            <XCircleIcon size={16} className="shrink-0 text-red-500" />
+            <XCircleIcon size={16} className="shrink-0 text-destructive" />
             {blockers.length === 1
               ? "One thing is missing before this can be submitted:"
               : `${blockers.length} things are missing before this can be submitted:`}
@@ -170,7 +171,7 @@ export function ReviewStep({
       )}
 
       {presenceFailed && (
-        <p className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm dark:border-amber-900 dark:bg-amber-950">
+        <Callout tone="warning" className="flex items-start gap-2">
           <AlertTriangleIcon size={16} className="mt-0.5 shrink-0" />
           <span>
             Could not check the SSN and banking rules — those two are not
@@ -183,7 +184,7 @@ export function ReviewStep({
               Try again
             </button>
           </span>
-        </p>
+        </Callout>
       )}
 
       <div className="flex flex-col gap-2 items-start border-t pt-4">
@@ -202,7 +203,7 @@ export function ReviewStep({
             it does not move into your book.
           </p>
         )}
-        {error && <p className="text-sm text-red-500">{error}</p>}
+        {error && <p className="text-sm text-destructive">{error}</p>}
       </div>
     </div>
   );

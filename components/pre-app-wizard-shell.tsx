@@ -15,6 +15,7 @@ import {
   stepHref,
 } from "@/lib/pre-apps";
 import type { Autosave } from "@/hooks/use-autosave";
+import { Callout } from "@/components/callout";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -173,10 +174,10 @@ export function PreAppWizardShell({
           // An admin editing a record someone else has already submitted for
           // review deserves to be told, rather than discovering it from the
           // status badge. Autosave means every keystroke is already committed.
-          <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm dark:border-amber-900 dark:bg-amber-950">
+          <Callout tone="warning">
             This pre-app is <strong>{status}</strong>. You&rsquo;re editing it as
             an admin and changes are saved immediately.
-          </p>
+          </Callout>
         )}
 
         <nav className="flex flex-wrap gap-2">
@@ -303,7 +304,7 @@ function SaveStatus({
 
   if (state.status === "error") {
     return (
-      <span className="flex items-center gap-2 text-sm text-red-500">
+      <span className="flex items-center gap-2 text-sm text-destructive">
         {state.message}
         <Button type="button" size="sm" variant="outline" onClick={onRetry}>
           Retry

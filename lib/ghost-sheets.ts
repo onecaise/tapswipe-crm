@@ -1,4 +1,5 @@
 import type { FilterOption } from "@/components/filter-tabs";
+import type { StatusIntent } from "@/components/status-badge";
 
 /**
  * Shared ghost sheet types and list-filter definitions.
@@ -70,4 +71,18 @@ export function isConverted(sheet: {
   lead_id: number | null;
 }): boolean {
   return sheet.lead_id !== null;
+}
+
+/**
+ * Badge intent for a sheet's conversion state.
+ *
+ * Keyed off `lead_id` like everything else here, rather than off `status`: the FK
+ * is the authoritative record of conversion, and the text column is just a label
+ * that travels alongside it. Converting a sheet is the outcome the whole record
+ * exists for, so it reads as success; unconverted is inert, not a problem.
+ */
+export function conversionIntent(sheet: {
+  lead_id: number | null;
+}): StatusIntent {
+  return isConverted(sheet) ? "success" : "neutral";
 }

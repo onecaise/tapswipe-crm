@@ -10,11 +10,11 @@ import {
   SUPPORT_TICKET_LIST_COLUMNS,
   type SupportTicketListRow,
   parseSupportTicketFilter,
-  supportTicketStatusVariant,
+  supportTicketStatusIntent,
 } from "@/lib/support-tickets";
 import { formatDate, formatText } from "@/lib/format";
 import { FilterTabs } from "@/components/filter-tabs";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -56,7 +56,7 @@ async function TicketsList({
 
   if (error) {
     return (
-      <p className="text-sm text-red-500">
+      <p className="text-sm text-destructive">
         Could not load tickets: {error.message}
       </p>
     );
@@ -156,9 +156,9 @@ async function TicketsList({
                   {formatDate(ticket.created_at)}
                 </TableCell>
                 <TableCell>
-                  <Badge variant={supportTicketStatusVariant(ticket.status)}>
+                  <StatusBadge intent={supportTicketStatusIntent(ticket.status)}>
                     {ticket.status}
-                  </Badge>
+                  </StatusBadge>
                 </TableCell>
                 {isAdmin && (
                   <TableCell className="text-muted-foreground">

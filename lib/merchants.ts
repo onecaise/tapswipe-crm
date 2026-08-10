@@ -1,3 +1,5 @@
+import type { StatusIntent } from "@/components/status-badge";
+
 /**
  * Shared merchant types and constants.
  *
@@ -66,10 +68,7 @@ export function parseMerchantFilter(value: string | undefined): MerchantFilter {
     : "all";
 }
 
-export function statusBadgeVariant(
-  status: MerchantStatus,
-): "default" | "secondary" | "outline" {
-  if (status === "active") return "default";
-  if (status === "inactive") return "secondary";
-  return "outline";
+export function statusIntent(status: MerchantStatus): StatusIntent {
+  if (status === "active") return "success";
+  return "neutral";
 }

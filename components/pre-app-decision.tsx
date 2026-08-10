@@ -128,7 +128,7 @@ export function PreAppDecision({
             <RotateCcwIcon size={16} />
             {busy ? "Reopening…" : "Reopen as draft"}
           </Button>
-          {error && <p className="text-sm text-red-500">{error}</p>}
+          {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
       </Panel>
     );
@@ -184,7 +184,7 @@ export function PreAppDecision({
               Cancel
             </Button>
           </div>
-          {error && <p className="text-sm text-red-500">{error}</p>}
+          {error && <p className="text-sm text-destructive">{error}</p>}
         </>
       )}
 
@@ -234,7 +234,7 @@ export function PreAppDecision({
               </span>
             )}
           </div>
-          {error && <p className="text-sm text-red-500">{error}</p>}
+          {error && <p className="text-sm text-destructive">{error}</p>}
         </>
       )}
     </Panel>

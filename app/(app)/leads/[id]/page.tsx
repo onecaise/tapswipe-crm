@@ -12,7 +12,7 @@ import { loadAnnotations } from "@/lib/annotations-data";
 import { DocumentsPanel } from "@/components/documents-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 
 function Field({
@@ -100,7 +100,7 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
         <div className="flex flex-col gap-2">
           <h1 className="text-2xl font-bold">{formatText(lead.dba)}</h1>
           <div className="flex items-center gap-2">
-            <Badge variant="secondary">{formatText(lead.status)}</Badge>
+            <StatusBadge intent="neutral">{formatText(lead.status)}</StatusBadge>
             {lead.next_followup_date && (
               <span className="text-sm text-muted-foreground">
                 Follow up {formatDate(lead.next_followup_date)}

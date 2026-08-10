@@ -14,7 +14,7 @@ import {
 } from "@/lib/leads";
 import { formatDate, formatText } from "@/lib/format";
 import { FilterTabs } from "@/components/filter-tabs";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -69,7 +69,7 @@ async function LeadsList({
 
   if (error) {
     return (
-      <p className="text-sm text-red-500">
+      <p className="text-sm text-destructive">
         Could not load leads: {error.message}
       </p>
     );
@@ -150,7 +150,7 @@ async function LeadsList({
                   {formatDate(lead.next_followup_date)}
                 </TableCell>
                 <TableCell>
-                  <Badge variant="secondary">{formatText(lead.status)}</Badge>
+                  <StatusBadge intent="neutral">{formatText(lead.status)}</StatusBadge>
                 </TableCell>
                 {isAdmin && (
                   <TableCell className="text-muted-foreground">

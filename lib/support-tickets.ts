@@ -1,3 +1,5 @@
+import type { StatusIntent } from "@/components/status-badge";
+
 /**
  * Shared support-ticket types, vocabulary and list-filter definitions.
  *
@@ -83,12 +85,25 @@ export function parseSupportTicketFilter(
  */
 export const DEFAULT_SUPPORT_TICKET_FILTER: SupportTicketFilter = "open";
 
-export function supportTicketStatusVariant(
+/**
+ * Open is amber, not red.
+ *
+ * An open ticket is work waiting on someone, which is what amber means
+ * everywhere else in the app; red is reserved for actions. The sidebar's count
+ * pill is the one place open tickets show brand red, and that is an accent
+ * drawing the eye to a number rather than a status colour.
+ *
+ * Each status gets a distinct intent, which is the point of mapping through this
+ * function at all — amber for needs-work, grey for parked, green for done. The
+ * previous mapping put open on `destructive` and pending on `secondary`; keeping
+ * all three separable is what stops the list flattening into one colour.
+ */
+export function supportTicketStatusIntent(
   status: SupportTicketStatus,
-): "default" | "secondary" | "destructive" | "outline" {
-  if (status === "open") return "destructive";
-  if (status === "pending") return "secondary";
-  return "outline";
+): StatusIntent {
+  if (status === "open") return "warning";
+  if (status === "pending") return "neutral";
+  return "success";
 }
 
 /**

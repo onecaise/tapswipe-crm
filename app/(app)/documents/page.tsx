@@ -34,7 +34,7 @@ async function DocumentCenter() {
 
   if (error) {
     return (
-      <p className="text-sm text-red-500">
+      <p className="text-sm text-destructive">
         Could not load documents: {error.message}
       </p>
     );

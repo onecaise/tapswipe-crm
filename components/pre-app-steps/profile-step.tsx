@@ -178,7 +178,7 @@ function PairTotal({ total }: { total: number | null }) {
   }
   const ok = total === 100;
   return (
-    <p className={`text-sm ${ok ? "text-muted-foreground" : "text-amber-600"}`}>
+    <p className={`text-sm ${ok ? "text-muted-foreground" : "text-warning"}`}>
       Total: <strong>{total}%</strong>
       {!ok && " — must be 100 before this can be submitted."}
     </p>
@@ -198,7 +198,7 @@ function Field({
     <div className="flex flex-col gap-2">
       <Label>{label}</Label>
       {children}
-      {error && <p className="text-xs text-red-500">{error}</p>}
+      {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
 }

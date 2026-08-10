@@ -34,7 +34,7 @@ import {
   preAppDefaultsFromLead,
   preAppSubmitBlockers,
   prevStep,
-  statusBadgeVariant,
+  statusIntent,
 } from "@/lib/pre-apps";
 
 /**
@@ -316,11 +316,17 @@ describe("pre-app vocabulary", () => {
     }
   });
 
-  it("gives declined its own badge treatment", () => {
-    expect(statusBadgeVariant("approved")).toBe("default");
-    expect(statusBadgeVariant("submitted")).toBe("secondary");
-    expect(statusBadgeVariant("declined")).toBe("destructive");
-    expect(statusBadgeVariant("draft")).toBe("outline");
+  it("never lets declined look like a draft", () => {
+    // The point this test has always defended: a rejected application must not
+    // render the same as one nobody has started. Four statuses share three
+    // status colours, so the assertion is about which pairs may collide —
+    // declined groups with submitted (someone must act), not with draft (inert).
+    expect(statusIntent("declined")).not.toBe(statusIntent("draft"));
+
+    expect(statusIntent("approved")).toBe("success");
+    expect(statusIntent("submitted")).toBe("warning");
+    expect(statusIntent("declined")).toBe("warning");
+    expect(statusIntent("draft")).toBe("neutral");
   });
 
   it("lets a rep edit only a draft, and an admin anything", () => {

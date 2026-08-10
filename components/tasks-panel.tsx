@@ -156,7 +156,7 @@ export function TasksPanel({
         </Button>
       </div>
 
-      {error && <p className="text-sm text-red-500">{error}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
 
       {tasks.length === 0 ? (
         <p className="text-sm text-muted-foreground">No tasks yet.</p>
@@ -191,7 +191,7 @@ export function TasksPanel({
                     <span
                       className={cn(
                         "text-xs text-muted-foreground",
-                        overdue && "text-red-500",
+                        overdue && "text-destructive",
                       )}
                     >
                       {task.due_date === null

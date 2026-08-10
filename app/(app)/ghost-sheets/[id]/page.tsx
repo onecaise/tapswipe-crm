@@ -5,13 +5,17 @@ import { ArrowLeftIcon, PencilIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
-import { type GhostSheet, isConverted } from "@/lib/ghost-sheets";
+import {
+  conversionIntent,
+  type GhostSheet,
+  isConverted,
+} from "@/lib/ghost-sheets";
 import { formatDate, formatText } from "@/lib/format";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { ConvertGhostSheetButton } from "@/components/convert-ghost-sheet-button";
 import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 
 function Field({
@@ -80,11 +84,9 @@ async function GhostSheetDetail({
         <div className="flex flex-col gap-2">
           <h1 className="text-2xl font-bold">{formatText(sheet.dba)}</h1>
           <div className="flex items-center gap-2">
-            {converted ? (
-              <Badge>converted</Badge>
-            ) : (
-              <Badge variant="outline">open</Badge>
-            )}
+            <StatusBadge intent={conversionIntent(sheet)}>
+              {converted ? "converted" : "open"}
+            </StatusBadge>
             <span className="text-sm text-muted-foreground">
               {formatText(sheet.status)}
             </span>

@@ -114,7 +114,7 @@ export function NotesPanel({
         </Button>
       </div>
 
-      {error && <p className="text-sm text-red-500">{error}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
 
       {notes.length === 0 ? (
         <p className="text-sm text-muted-foreground">No notes yet.</p>

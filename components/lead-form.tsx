@@ -222,7 +222,7 @@ export function LeadForm({
             </fieldset>
           ))}
 
-          {error && <p className="text-sm text-red-500">{error}</p>}
+          {error && <p className="text-sm text-destructive">{error}</p>}
 
           <div className="flex gap-2">
             <Button type="submit" disabled={isSaving}>

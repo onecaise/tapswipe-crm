@@ -10,7 +10,7 @@ import {
   type PreApp,
   type PreAppBusinessProfile,
   type PreAppOwner,
-  statusBadgeVariant,
+  statusIntent,
 } from "@/lib/pre-apps";
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
@@ -19,7 +19,8 @@ import { DocumentsPanel } from "@/components/documents-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
 import { PreAppDecision } from "@/components/pre-app-decision";
-import { Badge } from "@/components/ui/badge";
+import { Callout } from "@/components/callout";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 
 function Field({
@@ -126,9 +127,9 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold">{preApp.dba_name}</h1>
-            <Badge variant={statusBadgeVariant(preApp.status)}>
+            <StatusBadge intent={statusIntent(preApp.status)}>
               {preApp.status}
-            </Badge>
+            </StatusBadge>
           </div>
           <p className="text-sm text-muted-foreground">
             {formatText(preApp.legal_business_name)}
@@ -163,7 +164,7 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
       </div>
 
       {preApp.decline_reason && (
-        <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm dark:border-red-900 dark:bg-red-950">
+        <Callout tone="danger" className="p-4">
           {/* reopen_pre_app deliberately leaves decline_reason in place so it
               stays on screen while the rep fixes it, and submit_pre_app clears
               it. So this banner outlives the declined status by design, and must
@@ -177,7 +178,7 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
               This note clears when the pre-app is submitted again.
             </p>
           )}
-        </div>
+        </Callout>
       )}
 
       {/* Renders nothing on a draft, or on anything an admin has already
@@ -188,7 +189,6 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
         isAdmin={isAdmin}
         agentName={agentName}
       />
-
 
       <Section title="Business">
         <Field label="DBA">{preApp.dba_name}</Field>

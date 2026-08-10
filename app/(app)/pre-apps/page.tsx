@@ -10,11 +10,11 @@ import {
   defaultPreAppFilter,
   parsePreAppFilter,
   type PreAppListRow,
-  statusBadgeVariant,
+  statusIntent,
 } from "@/lib/pre-apps";
 import { formatDate, formatText } from "@/lib/format";
 import { FilterTabs } from "@/components/filter-tabs";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -63,7 +63,7 @@ async function PreAppsList({
 
   if (error) {
     return (
-      <p className="text-sm text-red-500">
+      <p className="text-sm text-destructive">
         Could not load pre-apps: {error.message}
       </p>
     );
@@ -131,9 +131,9 @@ async function PreAppsList({
                 </TableCell>
                 <TableCell>{formatText(preApp.legal_business_name)}</TableCell>
                 <TableCell>
-                  <Badge variant={statusBadgeVariant(preApp.status)}>
+                  <StatusBadge intent={statusIntent(preApp.status)}>
                     {preApp.status}
-                  </Badge>
+                  </StatusBadge>
                 </TableCell>
                 <TableCell>
                   {[preApp.city, preApp.state].filter(Boolean).join(", ") || "—"}

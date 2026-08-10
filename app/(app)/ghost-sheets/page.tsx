@@ -8,12 +8,13 @@ import {
   GHOST_SHEET_FILTER_OPTIONS,
   GHOST_SHEET_LIST_COLUMNS,
   type GhostSheetListRow,
+  conversionIntent,
   isConverted,
   parseGhostSheetFilter,
 } from "@/lib/ghost-sheets";
 import { formatDate, formatText } from "@/lib/format";
 import { FilterTabs } from "@/components/filter-tabs";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -54,7 +55,7 @@ async function GhostSheetsList({
 
   if (error) {
     return (
-      <p className="text-sm text-red-500">
+      <p className="text-sm text-destructive">
         Could not load ghost sheets: {error.message}
       </p>
     );
@@ -127,10 +128,14 @@ async function GhostSheetsList({
                       href={`/leads/${sheet.lead_id}`}
                       className="underline underline-offset-4"
                     >
-                      <Badge>converted</Badge>
+                      <StatusBadge intent={conversionIntent(sheet)}>
+                        converted
+                      </StatusBadge>
                     </Link>
                   ) : (
-                    <Badge variant="outline">open</Badge>
+                    <StatusBadge intent={conversionIntent(sheet)}>
+                      open
+                    </StatusBadge>
                   )}
                 </TableCell>
                 {isAdmin && (

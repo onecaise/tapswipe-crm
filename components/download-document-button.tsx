@@ -55,7 +55,7 @@ export function DownloadDocumentButton({
         <DownloadIcon size={14} />
         {isBusy ? "Opening…" : "Download"}
       </Button>
-      {error && <span className="text-xs text-red-500">{error}</span>}
+      {error && <span className="text-xs text-destructive">{error}</span>}
     </div>
   );
 }

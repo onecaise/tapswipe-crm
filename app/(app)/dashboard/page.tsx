@@ -26,7 +26,7 @@ async function DashboardContent() {
             Welcome back, {profile.full_name}
           </h1>
           <div className="flex items-center gap-2">
-            <Badge variant={profile.role === "admin" ? "default" : "secondary"}>
+            <Badge variant="secondary">
               {profile.role}
             </Badge>
           </div>

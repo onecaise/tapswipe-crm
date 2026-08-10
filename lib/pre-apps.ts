@@ -1,3 +1,4 @@
+import type { StatusIntent } from "@/components/status-badge";
 import type { Lead } from "@/lib/leads";
 import { maskPhone, maskZip, matchState } from "@/lib/masks";
 
@@ -175,13 +176,27 @@ export function defaultPreAppFilter(isAdmin: boolean): PreAppFilter {
   return isAdmin ? "submitted" : "all";
 }
 
-export function statusBadgeVariant(
-  status: PreAppStatus,
-): "default" | "secondary" | "destructive" | "outline" {
-  if (status === "approved") return "default";
-  if (status === "submitted") return "secondary";
-  if (status === "declined") return "destructive";
-  return "outline";
+/**
+ * Badge intent for a pre-app's status.
+ *
+ * Four statuses, three status colours, so the mapping has to group two of them
+ * and the choice of which matters. Amber means unsettled — someone still has to
+ * act — which covers both `submitted` (waiting on an admin) and `declined`
+ * (waiting on the rep). Grey is for `draft`, the genuinely inert state, and green
+ * for `approved`, which is terminal.
+ *
+ * The alternative grouping — declined alongside draft in grey — is the one to
+ * avoid: it makes a rejected application look like one nobody has started, which
+ * is the single most misleading pair on the list page. The previous mapping gave
+ * declined the `destructive` variant to make exactly that point; brand and
+ * destructive red are no longer available to status badges, so amber carries it
+ * and the decline *reason* gets the red surface on the detail page, where it has
+ * room to say why.
+ */
+export function statusIntent(status: PreAppStatus): StatusIntent {
+  if (status === "approved") return "success";
+  if (status === "submitted" || status === "declined") return "warning";
+  return "neutral";
 }
 
 /**
