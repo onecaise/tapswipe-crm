@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { redirect } from "next/navigation";
 
 import { createClient } from "@/lib/supabase/server";
@@ -58,8 +59,15 @@ export async function getCurrentProfile(): Promise<Profile | null> {
  *   - signed in, deactivated   -> /auth/error, because RLS now returns zero
  *                                 rows for them and an unexplained empty app
  *                                 is a worse answer than being told why
+ *
+ * Wrapped in React's cache() so the (app) route-group layout and the page it
+ * wraps share one lookup. Both need the profile — the layout for the sidebar's
+ * identity and admin-only items, the page for its own role checks — and without
+ * this that is two getClaims() calls plus two profiles selects on every single
+ * page load. The memo is per-request, so it cannot leak one user's profile into
+ * another's render.
  */
-export async function requireUser(): Promise<Profile> {
+export const requireUser = cache(async function requireUser(): Promise<Profile> {
   const supabase = await createClient();
   const { data: claimsData } = await supabase.auth.getClaims();
 
@@ -78,7 +86,7 @@ export async function requireUser(): Promise<Profile> {
   }
 
   return profile;
-}
+});
 
 /**
  * Active admins only. Sends everyone else to the dashboard.
