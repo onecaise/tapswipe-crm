@@ -246,7 +246,12 @@ export function SecretsStep({
           <Label>RP password</Label>
           <Input
             type="password"
-            autoComplete="off"
+            // NOT autoComplete="off": Chrome deliberately ignores that on
+            // password inputs so password managers keep working, and would offer
+            // to fill the rep's own saved credential into a field that becomes a
+            // merchant's terminal password. "new-password" is the value it does
+            // honour, and it also stops the save-password prompt on submit.
+            autoComplete="new-password"
             disabled={!canEdit || saving}
             value={rpPassword}
             onChange={(e) => setRpPassword(e.target.value)}
