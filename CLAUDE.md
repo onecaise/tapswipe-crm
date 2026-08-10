@@ -8,7 +8,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 
 **Current state matters when reading the code**, and it is a mix — real CRM pages alongside untouched starter scaffolding:
 
-- **Built:** `app/dashboard`, `app/merchants/*`, `app/leads/*`, `app/ghost-sheets/*`, `app/pre-apps/*`, `app/support-tickets/*`, `app/documents`, `app/admin/users`, with data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,documents,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks have no pages of their own — they are panels (`components/{notes,tasks}-panel.tsx`) on the four owner records.
+- **Built:** every CRM route lives under the `app/(app)/` route group so it renders inside the shell — `app/(app)/{dashboard,merchants,leads,ghost-sheets,pre-apps,support-tickets,documents,admin/users}`. Route groups don't affect URLs, so the paths are still `/dashboard`, `/merchants/7` and so on. Data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,documents,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks have no pages of their own — they are panels (`components/{notes,tasks}-panel.tsx`) on the four owner records, and they appear in the sidebar as muted rows with no `href` for that reason.
 - **Not built yet:** My Submissions.
 - **Still [starter-kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase) template, not product code:** `README.md`, `app/page.tsx`, `app/protected/*`, `components/tutorial/*`, and `components/{hero,deploy-button,next-logo,supabase-logo,env-var-warning}.tsx`.
 - **Edge Functions:** `create-upload-url`, `create-download-url`, `submit-pre-app-secrets` and `read-pre-app-secrets` are implemented (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env}.ts`). The other three — `create-user`, `deactivate-user`, `admin-reset-password` — are still `withSupabase` hello-world stubs.
@@ -150,6 +150,21 @@ Storage: one private bucket named `documents`, created out-of-band — it is not
 ### Conventions
 
 `@/*` path alias maps to the repo root. shadcn/ui components go in `components/ui/` (add via `npx shadcn@latest add <component>`); compose classes with `cn()` from `lib/utils.ts`. Icons from `lucide-react`. Theming is `next-themes` with CSS variables in `app/globals.css`.
+
+### The design system is tokens, not classnames
+
+**Every colour comes from a CSS variable in `app/globals.css`.** No component names a palette colour (`bg-gray-100`) or a hex. Adding one is how the theme starts drifting, and there is nothing that will fail to warn you — so the check is: if you are about to type a Tailwind colour literal, the token you want either exists or should be added there.
+
+Two colour systems that must not mix:
+
+- **Brand and action** — `primary` (#DC2626: primary buttons, links, the sidebar's active accent and count pill, focus rings) and `destructive` (#B91C1C: delete/danger only, and always behind a confirmation step). They are deliberately different reds. A delete button that renders in the same red as the page's main create action invites the misclick the pair exists to prevent.
+- **Status** — `success`/`warning`/`neutral`, for state badges only, via `components/status-badge.tsx` and a `StatusIntent` mapper per domain (`statusIntent` in `lib/{merchants,pre-apps}.ts`, `supportTicketStatusIntent`, `conversionIntent` in `lib/ghost-sheets.ts`). **Never** put brand or destructive red on a status badge, and never put a status colour on a button or in the nav. `leads.status` maps to `neutral` unconditionally — it's unconstrained text, so there is no vocabulary to colour, and inventing one is the drift `lib/leads.ts` warns about.
+
+Shared structure lives in components, so page-level styling stays out of pages: `PageShell` (the three content widths), `PageHeader` (title row), `StatCard`, `StatusBadge`, `Callout`, `FilterTabs`. The `Table` primitive draws its own white card and uppercase muted headers — list pages don't wrap it.
+
+The sidebar is dark in every theme, so its tokens live only in `:root` and are never overridden in `.dark`. The app is pinned to light (`defaultTheme="light"`, `enableSystem={false}` in `app/layout.tsx`) because there is no dark palette yet; the `.dark` block is the stock shadcn scale, left in place so turning dark mode on later is filling in values rather than re-plumbing.
+
+Sidebar contents are data in `lib/nav.ts`, not JSX. An item without an `href` renders as a muted, `aria-disabled` row — that is how Notes and Tasks appear, since they are panels rather than pages. `usePathname()` supplies the active item, which under `cacheComponents` is runtime-only data: the client nav **must** sit inside a `<Suspense>` boundary, and its fallback therefore cannot call the hook either. That is why `components/sidebar-nav-list.tsx` takes `pathname` as a prop and is shared by both the streamed nav and its fallback.
 
 <!-- BEGIN:nextjs-agent-rules -->
 
