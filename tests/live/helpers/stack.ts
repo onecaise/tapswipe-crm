@@ -96,6 +96,31 @@ export async function functionsAreServed(): Promise<boolean> {
   }
 }
 
+/**
+ * Invokes each function once and waits for it to stop 502-ing.
+ *
+ * Call this before asserting on status codes. The CLI writes a `.npmrc` into a
+ * function's directory the first time that function is invoked, its own file
+ * watcher sees the write, and the whole runtime restarts — so the *first*
+ * request to each new function tends to come back 502 "invalid response from the
+ * upstream server", and so does anything else in flight during the restart.
+ *
+ * Without this the failure is thoroughly misleading: a correct function looks
+ * like it returns 502 instead of 403, and only the functions that happened to be
+ * warmed earlier pass.
+ */
+export async function warmFunctions(names: readonly string[]): Promise<void> {
+  for (const name of names) {
+    for (let attempt = 0; attempt < 15; attempt++) {
+      // Unauthenticated and empty-bodied: the point is to boot the isolate, and
+      // whatever it answers is fine as long as it is not a restart.
+      const { status } = await invoke(name, {});
+      if (status !== 502) break;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+}
+
 export function adminClient(): SupabaseClient {
   const { apiUrl, serviceRoleKey } = getStackConfig();
   return createClient(apiUrl, serviceRoleKey, {
@@ -119,7 +144,12 @@ export function userClient(accessToken: string): SupabaseClient {
   });
 }
 
-const PASSWORD = "live-test-password-123";
+/**
+ * Exported because the Manage Users suite has to sign a persona in by password
+ * — proving a deactivated account is refused needs the *correct* password to be
+ * the thing that gets refused, or the test proves nothing.
+ */
+export const PASSWORD = "live-test-password-123";
 
 type Persona = {
   key: "admin" | "owner" | "intruder" | "deactivated";
@@ -161,6 +191,11 @@ const PERSONAS: Persona[] = [
 ];
 
 export type PersonaKey = Persona["key"];
+
+/** Persona key -> the email they sign in with. */
+export const PERSONA_EMAILS = Object.fromEntries(
+  PERSONAS.map((persona) => [persona.key, persona.email]),
+) as Record<PersonaKey, string>;
 
 export type Fixtures = {
   userIds: Record<PersonaKey, string>;
@@ -353,8 +388,33 @@ export async function teardownFixtures(): Promise<void> {
 
     await admin.from("documents").delete().eq("agent_id", user.id);
     await admin.from("merchants").delete().eq("agent_id", user.id);
+
+    // Before deleteUser, not after, and not optional: audit_log.actor_id
+    // references profiles(id) with no ON DELETE clause, so a persona who has
+    // performed an audited admin action cannot be deleted while those rows
+    // exist. deleteUser would fail on the FK, the persona would survive, and
+    // the next run would collide with a "user already registered" error that
+    // says nothing about the real cause.
+    //
+    // Both sides: as the actor of an action, and as the target of one.
+    await admin.from("audit_log").delete().eq("actor_id", user.id);
+    await admin.from("audit_log").delete().eq("row_id", user.id);
+
     await admin.auth.admin.deleteUser(user.id);
   }
+}
+
+/**
+ * Deletes an ad-hoc user created inside a test, with the same FK ordering.
+ *
+ * Tests that create accounts through the create-user function own the cleanup:
+ * teardownFixtures only knows about the four named personas.
+ */
+export async function deleteUserCompletely(userId: string): Promise<void> {
+  const admin = adminClient();
+  await admin.from("audit_log").delete().eq("actor_id", userId);
+  await admin.from("audit_log").delete().eq("row_id", userId);
+  await admin.auth.admin.deleteUser(userId);
 }
 
 export type FunctionResponse = {

@@ -23,6 +23,7 @@ import {
   anonClient,
   invoke,
   provisionFixtures,
+  warmFunctions,
   teardownFixtures,
   toReachableUrl,
   userClient,
@@ -45,6 +46,12 @@ beforeAll(async () => {
         "Run `npx supabase start` and `npx supabase functions serve` first.",
     );
   }
+  // Before any status-code assertion: the CLI writes a `.npmrc` into a
+  // function's directory on its first invocation, its watcher sees the write,
+  // and the runtime restarts — 502-ing whatever is in flight. On a cold
+  // `functions serve` that turns this whole file red with "expected 502 to be
+  // 200", which says nothing about the functions themselves.
+  await warmFunctions(["create-upload-url", "create-download-url"]);
   fx = await provisionFixtures();
 });
 

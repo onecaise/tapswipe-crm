@@ -10,6 +10,14 @@ export type Profile = {
   full_name: string;
   role: Role;
   is_active: boolean;
+  /**
+   * Set when an admin issues a temporary password (create-user or
+   * admin-reset-password) and cleared by the clear_must_change_password() RPC
+   * once the rep sets their own. app/(app)/layout.tsx redirects to
+   * /auth/update-password while it is true, which is what stops a password the
+   * admin knows from staying usable.
+   */
+  must_change_password: boolean;
 };
 
 /**
@@ -35,7 +43,7 @@ export async function getCurrentProfile(): Promise<Profile | null> {
 
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, full_name, role, is_active")
+    .select("id, full_name, role, is_active, must_change_password")
     .eq("id", userId)
     .maybeSingle();
 

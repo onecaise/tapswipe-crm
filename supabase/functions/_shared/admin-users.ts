@@ -1,0 +1,179 @@
+// Shared helpers for create-user / deactivate-user / admin-reset-password.
+//
+// Deliberately dependency-free: it takes clients as arguments rather than
+// importing @supabase/server, so it needs no deno.json import map of its own.
+// Same arrangement as _shared/documents.ts.
+
+/** The roles profiles.role's CHECK constraint allows. */
+export const ROLES = ["agent", "admin"] as const;
+
+export type Role = (typeof ROLES)[number];
+
+/**
+ * A ban long enough to be permanent in practice (~100 years).
+ *
+ * GoTrue has no "disable forever" flag — `banned_until` is a timestamp, so
+ * blocking an account means setting one far enough out that it never arrives.
+ * "none" is the documented value that clears it again.
+ */
+export const PERMANENT_BAN_DURATION = "876000h";
+
+/**
+ * The minimum surface of a supabase-js client these helpers need.
+ *
+ * Structural rather than importing SupabaseClient, so this file stays free of
+ * the import map. The shapes are only as wide as what is actually called.
+ */
+type QueryClient = {
+  rpc: (
+    fn: string,
+    args?: Record<string, unknown>,
+  ) => PromiseLike<{ data: unknown; error: unknown }>;
+};
+
+type AdminClient = {
+  from: (table: string) => {
+    insert: (row: Record<string, unknown>) => PromiseLike<{ error: unknown }>;
+  };
+};
+
+/**
+ * Four lines duplicated from _shared/documents.ts on purpose.
+ *
+ * Sharing it would mean either importing a documents-named module into the admin
+ * functions, or extracting a third _shared file and editing two working
+ * deployed functions to point at it. Neither is worth it for a JSON wrapper;
+ * if a third caller ever appears, extract then.
+ */
+export function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/**
+ * Fails closed unless the caller is an active admin.
+ *
+ * Must go through the CALLER-scoped client. is_admin() is `security definer` and
+ * reads the caller's own profile via auth.uid(), so on a service-role connection
+ * — which has no auth.uid() — it returns false for everyone, including real
+ * admins. Exactly the same trap callerIsActive() documents in documents.ts.
+ *
+ * is_admin() already requires `is_active`, so this subsumes the active check for
+ * admins. The functions still call callerIsActive() first, so a deactivated
+ * caller gets "account is not active" rather than a misleading "admin only".
+ */
+export async function callerIsAdmin(supabase: QueryClient): Promise<boolean> {
+  const { data, error } = await supabase.rpc("is_admin");
+  if (error) return false;
+  return data === true;
+}
+
+/**
+ * Fails closed unless the caller has an active profile.
+ *
+ * Same reasoning and the same caller-scoped requirement as callerIsAdmin above.
+ */
+export async function callerIsActive(supabase: QueryClient): Promise<boolean> {
+  const { data, error } = await supabase.rpc("is_active_agent");
+  if (error) return false;
+  return data === true;
+}
+
+/**
+ * Alphabet for generated passwords, minus the characters a human misreads.
+ *
+ * No 0/O, 1/l/I, or symbols: this password is read aloud over a phone or pasted
+ * from a chat message by an admin onboarding a rep, and a temporary credential
+ * that gets mistyped just generates a support request. Length carries the
+ * entropy instead — 20 characters over this 55-character alphabet is ~115 bits,
+ * far past anything the six-character minimum in config.toml requires.
+ */
+const PASSWORD_ALPHABET =
+  "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+
+const PASSWORD_LENGTH = 20;
+
+/**
+ * A cryptographically random temporary password.
+ *
+ * crypto.getRandomValues, not Math.random: this is a credential.
+ *
+ * Rejection sampling rather than `% alphabet.length`, which would bias toward
+ * the first few characters. The bias would be small and completely invisible,
+ * which is the reason to just avoid it.
+ */
+export function generateTempPassword(): string {
+  const limit = 256 - (256 % PASSWORD_ALPHABET.length);
+  const out: string[] = [];
+
+  while (out.length < PASSWORD_LENGTH) {
+    const bytes = new Uint8Array(PASSWORD_LENGTH);
+    crypto.getRandomValues(bytes);
+    for (const byte of bytes) {
+      if (byte < limit) {
+        out.push(PASSWORD_ALPHABET[byte % PASSWORD_ALPHABET.length]);
+        if (out.length === PASSWORD_LENGTH) break;
+      }
+    }
+  }
+
+  return out.join("");
+}
+
+export function isRole(value: unknown): value is Role {
+  return ROLES.includes(value as Role);
+}
+
+/**
+ * Deliberately permissive: one @, no spaces, a dot in the domain.
+ *
+ * The authority on whether an address is usable is GoTrue, which rejects what it
+ * cannot accept — this only catches obvious typos before a round trip. A stricter
+ * regex here would reject valid addresses and be the harder bug to diagnose.
+ */
+export function isEmail(value: unknown): value is string {
+  return typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+export function isUuid(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  );
+}
+
+/** Trimmed, non-empty display name. */
+export function isFullName(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * Records an admin action against a user.
+ *
+ * actor_id is passed explicitly rather than defaulting to auth.uid(): this runs
+ * on the service-role client, which has no auth.uid() at all, so the caller's id
+ * has to be carried over from the verified JWT.
+ *
+ * Best-effort by design. A failed audit write must not roll back an action that
+ * already happened at the Auth layer — that would leave the account changed and
+ * the response claiming failure, which is a worse lie than a missing log line.
+ * Returns the error so the caller can surface it.
+ */
+export async function writeAudit(
+  supabaseAdmin: AdminClient,
+  actorId: string,
+  action: string,
+  targetUserId: string,
+): Promise<unknown> {
+  const { error } = await supabaseAdmin.from("audit_log").insert({
+    actor_id: actorId,
+    action,
+    table_name: "profiles",
+    row_id: targetUserId,
+  });
+  return error ?? null;
+}

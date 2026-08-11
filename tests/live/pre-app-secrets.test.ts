@@ -7,6 +7,7 @@ import {
   getStackConfig,
   invoke,
   MISSING_ID,
+  warmFunctions,
 } from "./helpers/stack";
 
 /**
@@ -100,6 +101,12 @@ beforeAll(async () => {
         "  npx supabase functions serve --env-file ./supabase/functions/.env",
     );
   }
+
+  // See warmFunctions: the first invocation of each function restarts the
+  // runtime (the CLI writes a .npmrc, its own watcher notices), which 502s
+  // anything in flight. Without this a cold `functions serve` fails most of this
+  // file with "expected 502", pointing nowhere near the cause.
+  await warmFunctions(["submit-pre-app-secrets", "read-pre-app-secrets"]);
 
   owner = await makePersona("live-secrets-owner@tapswipe.test", "agent");
   intruder = await makePersona("live-secrets-intruder@tapswipe.test", "agent");

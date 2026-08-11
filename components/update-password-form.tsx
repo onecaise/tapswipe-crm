@@ -24,7 +24,7 @@ export function UpdatePasswordForm({
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
 
-  const handleForgotPassword = async (e: React.FormEvent) => {
+  const handleUpdatePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     const supabase = createClient();
     setIsLoading(true);
@@ -33,8 +33,20 @@ export function UpdatePasswordForm({
     try {
       const { error } = await supabase.auth.updateUser({ password });
       if (error) throw error;
-      // Update this route to redirect to an authenticated route. The user already has an active session.
-      router.push("/protected");
+
+      // Retires the forced-change flag an admin's temporary password set. Only
+      // after updateUser succeeds: clearing it first would drop the prompt while
+      // the old password was still the live one.
+      //
+      // A narrow RPC because profiles has no self-update policy — a rep cannot
+      // write their own row directly, by design (that would let them try to set
+      // their own role). clear_must_change_password touches this one column.
+      //
+      // A failure here is not worth blocking on: the password IS changed, and the
+      // only consequence is being asked again on the next page load.
+      await supabase.rpc("clear_must_change_password");
+
+      router.push("/dashboard");
     } catch (error: unknown) {
       setError(error instanceof Error ? error.message : "An error occurred");
     } finally {
@@ -52,7 +64,7 @@ export function UpdatePasswordForm({
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleForgotPassword}>
+          <form onSubmit={handleUpdatePassword}>
             <div className="flex flex-col gap-6">
               <div className="grid gap-2">
                 <Label htmlFor="password">New password</Label>

@@ -1,5 +1,9 @@
+import { redirect } from "next/navigation";
+import { Suspense } from "react";
+
 import { AppSidebar } from "@/components/app-sidebar";
 import { AppTopbar } from "@/components/app-topbar";
+import { requireUser } from "@/lib/auth";
 
 /**
  * The shell every CRM route renders inside.
@@ -18,6 +22,11 @@ export default function AppLayout({
 }) {
   return (
     <div className="flex min-h-screen">
+      {/* First in the tree so it starts resolving before anything else. */}
+      <Suspense fallback={null}>
+        <ForcePasswordChangeGate />
+      </Suspense>
+
       <AppSidebar />
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -26,4 +35,32 @@ export default function AppLayout({
       </div>
     </div>
   );
+}
+
+/**
+ * Sends anyone still holding an admin-issued temporary password to set their own.
+ *
+ * One gate in the layout rather than a check in 23 pages, and the target sits
+ * outside this route group so there is no redirect loop. `requireUser()` is
+ * memoised per request, so this shares the lookup the sidebar already does.
+ *
+ * Not in proxy.ts: that would put a database round trip in the request pipeline
+ * for every asset and page, and CLAUDE.md is explicit about not disturbing that
+ * file's session flow.
+ *
+ * It renders nothing, and it must sit inside a Suspense boundary — reading the
+ * profile is dynamic, which cacheComponents rejects unsuspended. One consequence
+ * of that, worth knowing rather than discovering: because the boundary streams,
+ * the shell can paint for an instant before the redirect lands. The redirect is
+ * a convenience, not the security boundary — RLS and the RPCs are — so a brief
+ * flash of empty chrome is a fair trade for not querying on every request.
+ */
+async function ForcePasswordChangeGate() {
+  const profile = await requireUser();
+
+  if (profile.must_change_password) {
+    redirect("/auth/update-password");
+  }
+
+  return null;
 }

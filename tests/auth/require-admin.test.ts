@@ -60,6 +60,7 @@ const ADMIN: Profile = {
   full_name: "Admin User",
   role: "admin",
   is_active: true,
+  must_change_password: false,
 };
 
 const AGENT: Profile = {
@@ -67,6 +68,7 @@ const AGENT: Profile = {
   full_name: "Agent User",
   role: "agent",
   is_active: true,
+  must_change_password: false,
 };
 
 async function expectRedirect(fn: () => Promise<unknown>, url: string) {

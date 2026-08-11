@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { Suspense } from "react";
-import { ArrowLeftIcon } from "lucide-react";
+import { ArrowLeftIcon, UserPlusIcon } from "lucide-react";
 
 import { requireAdmin, type Role } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { StatusBadge } from "@/components/status-badge";
+import { UserRowActions } from "@/components/user-row-actions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,21 +24,25 @@ type ProfileRow = {
   full_name: string;
   role: Role;
   is_active: boolean;
+  must_change_password: boolean;
   created_at: string | null;
 };
 
 async function UsersTable() {
   // Application-level boundary: non-admins never render this page.
-  await requireAdmin();
+  const viewer = await requireAdmin();
 
   // Tier 1 read — plain supabase-js, RLS does the enforcement. This is a
   // second, independent boundary: strip requireAdmin() above and an agent
   // would still only get their own row back, because the `profiles` select
   // policy is `id = auth.uid() or is_admin()`.
+  //
+  // tests/rls/manage-users.test.ts pins this exact column list — change it there
+  // too, or that test is asserting the safety of a query nothing runs.
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, full_name, role, is_active, created_at")
+    .select("id, full_name, role, is_active, must_change_password, created_at")
     .order("created_at", { ascending: true });
 
   if (error) {
@@ -58,19 +63,27 @@ async function UsersTable() {
           <TableHead>Role</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Created</TableHead>
+          <TableHead className="text-right">Actions</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {profiles.length === 0 ? (
           <TableRow>
-            <TableCell colSpan={4} className="text-muted-foreground">
+            <TableCell colSpan={5} className="text-muted-foreground">
               No users found.
             </TableCell>
           </TableRow>
         ) : (
           profiles.map((profile) => (
             <TableRow key={profile.id}>
-              <TableCell className="font-medium">{profile.full_name}</TableCell>
+              <TableCell className="font-medium">
+                {profile.full_name}
+                {profile.id === viewer.id && (
+                  <span className="ml-2 text-xs font-normal text-muted-foreground">
+                    you
+                  </span>
+                )}
+              </TableCell>
               <TableCell>
                 {/* A role is not a status, so it gets no status colour and
                     certainly not brand red — the word already says which one it
@@ -78,18 +91,36 @@ async function UsersTable() {
                 <Badge variant="secondary">{profile.role}</Badge>
               </TableCell>
               <TableCell>
-                {/* Deactivated is grey rather than red: it's an inert state, not
-                    a danger, and red here would read as "something is wrong with
-                    this account" on every row an admin has deliberately
-                    switched off. */}
-                <StatusBadge intent={profile.is_active ? "success" : "neutral"}>
-                  {profile.is_active ? "active" : "deactivated"}
-                </StatusBadge>
+                <div className="flex items-center gap-2">
+                  {/* Deactivated is grey rather than red: it's an inert state, not
+                      a danger, and red here would read as "something is wrong with
+                      this account" on every row an admin has deliberately
+                      switched off. */}
+                  <StatusBadge
+                    intent={profile.is_active ? "success" : "neutral"}
+                  >
+                    {profile.is_active ? "active" : "deactivated"}
+                  </StatusBadge>
+                  {/* Amber, not red: an account mid-onboarding is waiting on
+                      someone, which is what amber means everywhere else here. */}
+                  {profile.must_change_password && (
+                    <StatusBadge intent="warning">temp password</StatusBadge>
+                  )}
+                </div>
               </TableCell>
               <TableCell className="text-muted-foreground">
                 {profile.created_at
                   ? new Date(profile.created_at).toLocaleDateString()
                   : "—"}
+              </TableCell>
+              <TableCell>
+                <UserRowActions
+                  userId={profile.id}
+                  fullName={profile.full_name}
+                  role={profile.role}
+                  isActive={profile.is_active}
+                  isSelf={profile.id === viewer.id}
+                />
               </TableCell>
             </TableRow>
           ))
@@ -101,7 +132,7 @@ async function UsersTable() {
 
 export default function ManageUsersPage() {
   return (
-    <PageShell width="detail">
+    <PageShell width="list">
       <Button asChild variant="ghost" size="sm" className="self-start">
         <Link href="/dashboard">
           <ArrowLeftIcon size={16} />
@@ -111,7 +142,15 @@ export default function ManageUsersPage() {
 
       <PageHeader
         title="Manage Users"
-        subtitle="Read-only for now. Creating, deactivating and resetting passwords go through the create-user / deactivate-user / admin-reset-password Edge Functions, which are still stubs."
+        subtitle="Accounts are created here, never by self-service sign-up. Deactivate rather than delete — a rep who leaves still owns historical deals and residuals."
+        action={
+          <Button asChild size="sm">
+            <Link href="/admin/users/new">
+              <UserPlusIcon size={16} />
+              New user
+            </Link>
+          </Button>
+        }
       />
 
       {/* cacheComponents: true means dynamic fetches need a Suspense boundary. */}
