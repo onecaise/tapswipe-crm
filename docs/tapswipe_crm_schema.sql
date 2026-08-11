@@ -924,9 +924,31 @@ create trigger pre_apps_set_updated_at
 -- produce two rows at different granularities. Additive detail, not a
 -- bug.
 --
--- INSERT is deliberately not covered, so an admin creating a record in a
--- rep's name (the `insert own` policy allows an admin any agent_id) is
--- not recorded here.
+-- INSERT is covered too, against NEW.agent_id -- an admin creating a
+-- record in a rep's name (the `insert own` policy permits an admin any
+-- agent_id) is a privileged act with no other trace.
+--
+-- FAIL CLOSED, AND THAT IS INTENTIONAL. This is an AFTER ROW trigger, so
+-- it runs inside the same transaction as the statement that fired it, and
+-- it carries no EXCEPTION block. If the audit_log insert fails for any
+-- reason, the error propagates and **the triggering INSERT/UPDATE/DELETE
+-- is rolled back with it.** A write to these seven tables therefore
+-- cannot succeed while its audit row silently does not.
+--
+-- That is the trade we want, and it is the opposite of the choice
+-- rls_auto_enable() makes (which swallows per-table failures via
+-- EXCEPTION WHEN OTHERS) and of submit-pre-app-secrets (which cannot fail
+-- closed, because its ciphertext is already written by the time it
+-- audits). Here nothing has been committed yet, so refusing the write is
+-- both possible and correct: an unlogged admin edit is worse than a
+-- failed one, because the failure is visible and the gap is not.
+--
+-- The realistic failure is audit_log.actor_id's foreign key to
+-- profiles(id): a JWT whose sub has no profiles row would violate it. RLS
+-- makes that unreachable in practice (such a caller fails both
+-- is_active_agent() and is_admin(), so no policy admits their write), but
+-- the rollback is asserted in tests/rls/audit-trigger.test.ts rather than
+-- assumed.
 -- =====================================================================
 create or replace function log_cross_agent_change()
 returns trigger
@@ -936,20 +958,43 @@ set search_path = public
 as $$
 declare
   actor        uuid := auth.uid();
-  row_agent_id uuid := (to_jsonb(OLD) ->> 'agent_id')::uuid;
-  new_agent_id uuid := case when TG_OP = 'UPDATE'
-                            then (to_jsonb(NEW) ->> 'agent_id')::uuid end;
+  row_agent_id uuid;
+  new_agent_id uuid;
 begin
-  -- Reassignment first, and checked separately from ownership on purpose.
-  -- An admin moving a record they THEMSELVES own into another rep's book has
-  -- actor = OLD.agent_id, so the ownership test below would skip it -- yet
-  -- moving a record between books is precisely the privileged act a trail
-  -- exists for.
-  if TG_OP = 'UPDATE' and new_agent_id is distinct from row_agent_id then
-    insert into audit_log (actor_id, action, table_name, row_id)
-    values (actor, 'record_reassigned', TG_TABLE_NAME, to_jsonb(OLD) ->> 'id');
+  -- INSERT is handled first and in its own branch because OLD is NOT ASSIGNED
+  -- for an insert. Reading it here -- even inside a CASE that should not
+  -- evaluate -- risks "record old is not assigned yet", which would break every
+  -- insert on all seven tables. Nothing below this block touches OLD until
+  -- TG_OP has ruled INSERT out.
+  if TG_OP = 'INSERT' then
+    row_agent_id := (to_jsonb(NEW) ->> 'agent_id')::uuid;
+    if actor is distinct from row_agent_id then
+      insert into audit_log (actor_id, action, table_name, row_id)
+      values (
+        actor, 'cross_agent_insert', TG_TABLE_NAME, to_jsonb(NEW) ->> 'id'
+      );
+    end if;
+    return null;
+  end if;
 
-  elsif actor is distinct from row_agent_id then
+  -- UPDATE or DELETE from here, so OLD is assigned.
+  row_agent_id := (to_jsonb(OLD) ->> 'agent_id')::uuid;
+
+  if TG_OP = 'UPDATE' then
+    new_agent_id := (to_jsonb(NEW) ->> 'agent_id')::uuid;
+    -- Reassignment is checked before ownership, and separately from it. An admin
+    -- moving a record they THEMSELVES own into another rep's book has
+    -- actor = OLD.agent_id, so the ownership test below would skip it -- yet
+    -- moving a record between books is precisely the privileged act a trail
+    -- exists for.
+    if new_agent_id is distinct from row_agent_id then
+      insert into audit_log (actor_id, action, table_name, row_id)
+      values (actor, 'record_reassigned', TG_TABLE_NAME, to_jsonb(OLD) ->> 'id');
+      return null;
+    end if;
+  end if;
+
+  if actor is distinct from row_agent_id then
     insert into audit_log (actor_id, action, table_name, row_id)
     values (
       actor,
@@ -969,8 +1014,39 @@ revoke all on function log_cross_agent_change() from public;
 -- Deliberately NOT granted to authenticated: a trigger fires whether or not
 -- the querying role holds EXECUTE. Same treatment as set_updated_at().
 
+-- All seven tables that carry agent_id and are written through Tier 1.
+-- `documents` is deliberately absent: its access is audited in the two
+-- signed-URL Edge Functions instead, where the event worth recording is the
+-- mint rather than the metadata row.
 create trigger merchants_audit_cross_agent
-  after update or delete on merchants
+  after insert or update or delete on merchants
+  for each row execute function log_cross_agent_change();
+
+create trigger leads_audit_cross_agent
+  after insert or update or delete on leads
+  for each row execute function log_cross_agent_change();
+
+create trigger ghost_sheets_audit_cross_agent
+  after insert or update or delete on ghost_sheets
+  for each row execute function log_cross_agent_change();
+
+create trigger pre_apps_audit_cross_agent
+  after insert or update or delete on pre_apps
+  for each row execute function log_cross_agent_change();
+
+create trigger support_tickets_audit_cross_agent
+  after insert or update or delete on support_tickets
+  for each row execute function log_cross_agent_change();
+
+-- notes has no UPDATE policy (append-only by design), so the update arm never
+-- fires there. Listed anyway rather than special-cased: if that policy is ever
+-- added, the trail should not have to be remembered separately.
+create trigger notes_audit_cross_agent
+  after insert or update or delete on notes
+  for each row execute function log_cross_agent_change();
+
+create trigger tasks_audit_cross_agent
+  after insert or update or delete on tasks
   for each row execute function log_cross_agent_change();
 
 -- =====================================================================

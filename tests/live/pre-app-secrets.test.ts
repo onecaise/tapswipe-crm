@@ -123,7 +123,28 @@ afterAll(async () => {
     // audit_log.actor_id references profiles(id) with no ON DELETE, and profiles
     // cascades from auth.users — so audit rows block the user delete.
     await service.from("audit_log").delete().eq("actor_id", persona.id);
+
+    // The cross-agent trigger keys its rows on the pre-app id, not the agent, and
+    // fires on this suite's inserts AND on the delete below — a service-role
+    // connection has no auth.uid(), so both count as cross-agent. Ids are
+    // collected before the delete makes them unfindable, and the audit rows are
+    // cleared after it, or the delete's own rows would outlive the cleanup.
+    const { data: preApps } = await service
+      .from("pre_apps")
+      .select("id")
+      .eq("agent_id", persona.id);
+    const preAppIds = (preApps ?? []).map((row) => String(row.id));
+
     await service.from("pre_apps").delete().eq("agent_id", persona.id);
+
+    if (preAppIds.length > 0) {
+      await service
+        .from("audit_log")
+        .delete()
+        .eq("table_name", "pre_apps")
+        .in("row_id", preAppIds);
+    }
+
     await service.auth.admin.deleteUser(persona.id);
   }
 });

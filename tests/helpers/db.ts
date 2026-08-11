@@ -387,6 +387,19 @@ export async function seed(db: TestDb): Promise<void> {
         (select id from leads where dba = 'Other Agent Lead'),
         'Other agent task', current_date, false);
   `);
+
+  // Everything above is inserted by the platform owner, which has no auth.uid(),
+  // so log_cross_agent_change() sees actor NULL against a real agent_id and
+  // records a cross_agent_insert for every seeded merchant, lead, ghost sheet,
+  // pre-app, ticket, note and task.
+  //
+  // Fixture setup is not application activity. Left in place it would put ~25
+  // rows in audit_log before any test had done anything, and every assertion of
+  // the form "no audit row was written" would be false for reasons having nothing
+  // to do with the code under test. Cleared here rather than in resetData() so
+  // that callers which seed directly (the live-stack suites do) get the same
+  // clean slate.
+  await db.exec(`delete from audit_log;`);
 }
 
 /**

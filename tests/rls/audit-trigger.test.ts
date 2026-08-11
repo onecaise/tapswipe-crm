@@ -147,7 +147,11 @@ describe("cross-agent mutations are logged", () => {
     // they THEMSELVES own into someone else's book has actor = OLD.agent_id, so
     // the ownership branch skips it — yet moving a record between books is
     // exactly the privileged act a trail exists for.
-    await asPlatform(db);
+    // Created BY the admin, so the insert itself is not cross-agent and logs
+    // nothing — leaving the reassignment below as the only row. Seeding this via
+    // asPlatform would log a cross_agent_insert with a null actor first, since
+    // the owner has no auth.uid().
+    await asUser(db, ADMIN_ID);
     await db.exec(`
       insert into merchants (agent_id, dba, status)
       values ('${ADMIN_ID}', 'Admin Own Co', 'active');
@@ -182,6 +186,157 @@ describe("cross-agent mutations are logged", () => {
     expect(audit).toHaveLength(1);
     expect(audit[0].actor_id).toBeNull();
     expect(audit[0].action).toBe("cross_agent_update");
+  });
+});
+
+describe("INSERT is covered too", () => {
+  it("records an admin creating a record in a rep's name", async () => {
+    // The `insert own` policy is `(agent_id = auth.uid() and is_active_agent())
+    // or is_admin()`, so an admin may supply ANY agent_id. Before this branch
+    // existed that left no trace anywhere.
+    await asUser(db, ADMIN_ID);
+    await db.exec(`
+      insert into merchants (agent_id, dba, status)
+      values ('${AGENT_ID}', 'Admin Made This', 'active');
+    `);
+
+    const id = await merchantId(db, "Admin Made This");
+    expect(await auditRows(db)).toEqual([
+      {
+        actor_id: ADMIN_ID,
+        action: "cross_agent_insert",
+        table_name: "merchants",
+        row_id: String(id),
+      },
+    ]);
+  });
+
+  it("stays silent when a rep creates their own record", async () => {
+    await asUser(db, AGENT_ID);
+    await db.exec(`
+      insert into leads (agent_id, dba) values ('${AGENT_ID}', 'Rep Made This');
+    `);
+
+    expect(await auditRows(db)).toEqual([]);
+  });
+
+  it("captures the id the database assigned, not one the caller supplied", async () => {
+    // Only an AFTER trigger can do this: the serial default has been resolved by
+    // the time it runs, so row_id names the real row.
+    await asUser(db, ADMIN_ID);
+    await db.exec(`
+      insert into leads (agent_id, dba) values ('${AGENT_ID}', 'Admin Made Lead');
+    `);
+
+    await asPlatform(db);
+    const [lead] = await rows<{ id: number }>(
+      db,
+      `select id from leads where dba = 'Admin Made Lead'`,
+    );
+    const audit = await auditRows(db);
+    expect(audit).toHaveLength(1);
+    expect(audit[0].row_id).toBe(String(lead.id));
+    expect(Number(audit[0].row_id)).toBeGreaterThan(0);
+  });
+});
+
+describe("all seven tables are covered", () => {
+  // One function, seven attachments — so the risk is not the logic but a table
+  // being forgotten. Asserted per table rather than sampled, for the same reason
+  // the grants test enumerates every table: the failure mode is an omission.
+  const CASES: { table: string; insert: string }[] = [
+    {
+      table: "merchants",
+      insert: `insert into merchants (agent_id, dba, status) values ('${AGENT_ID}', 'T Merchant', 'active')`,
+    },
+    {
+      table: "leads",
+      insert: `insert into leads (agent_id, dba) values ('${AGENT_ID}', 'T Lead')`,
+    },
+    {
+      table: "ghost_sheets",
+      insert: `insert into ghost_sheets (agent_id, dba) values ('${AGENT_ID}', 'T Sheet')`,
+    },
+    {
+      table: "pre_apps",
+      insert: `insert into pre_apps (agent_id, status, dba_name, legal_business_name) values ('${AGENT_ID}', 'draft', 'T App', 'T App LLC')`,
+    },
+    {
+      table: "support_tickets",
+      insert: `insert into support_tickets (agent_id, subject, status) values ('${AGENT_ID}', 'T Ticket', 'open')`,
+    },
+    {
+      table: "notes",
+      insert: `insert into notes (agent_id, owner_type, owner_id, body) values ('${AGENT_ID}', 'lead', 1, 'T Note')`,
+    },
+    {
+      table: "tasks",
+      insert: `insert into tasks (agent_id, owner_type, owner_id, title) values ('${AGENT_ID}', 'lead', 1, 'T Task')`,
+    },
+  ];
+
+  for (const { table, insert } of CASES) {
+    it(`logs a cross-agent insert on ${table}`, async () => {
+      await asUser(db, ADMIN_ID);
+      await db.exec(insert);
+
+      const audit = await auditRows(db);
+      expect(audit).toHaveLength(1);
+      expect(audit[0]).toMatchObject({
+        actor_id: ADMIN_ID,
+        action: "cross_agent_insert",
+        table_name: table,
+      });
+    });
+  }
+});
+
+describe("an audit failure rolls the write back — fail closed, not silent", () => {
+  it("refuses the UPDATE when audit_log rejects the row", async () => {
+    // The property this whole design rests on, asserted rather than assumed.
+    //
+    // It is an AFTER ROW trigger with no EXCEPTION block, so it runs inside the
+    // triggering statement's transaction and any error propagates: the write is
+    // rolled back with it. A mutation to these seven tables therefore cannot
+    // succeed while its audit row quietly does not.
+    //
+    // Provoked through the real failure mode — audit_log.actor_id's foreign key
+    // to profiles(id). A JWT whose sub has no profiles row violates it. Reaching
+    // that needs the owner role, because RLS would otherwise refuse such a
+    // caller's UPDATE long before the trigger ran; that is why this is
+    // unreachable in production and still worth pinning here.
+    const id = await merchantId(db, "Agent Active Co");
+    const GHOST = "99999999-9999-9999-9999-999999999999";
+
+    await db.exec(`reset role;`);
+    await db.exec(
+      `set request.jwt.claims = '${JSON.stringify({ sub: GHOST })}';`,
+    );
+
+    let failed = false;
+    try {
+      await db.exec(
+        `update merchants set processor = 'Should Roll Back' where id = ${id}`,
+      );
+    } catch {
+      failed = true;
+    }
+
+    expect(failed, "the audit failure should have aborted the UPDATE").toBe(
+      true,
+    );
+
+    // The write did not land. This is the assertion that distinguishes fail-closed
+    // from fail-silent: without the rollback the processor would read
+    // 'Should Roll Back' with nothing in audit_log to show who changed it.
+    await asPlatform(db);
+    const [merchant] = await rows<{ processor: string | null }>(
+      db,
+      `select processor from merchants where id = ${id}`,
+    );
+    expect(merchant.processor).not.toBe("Should Roll Back");
+
+    expect(await auditRows(db)).toEqual([]);
   });
 });
 

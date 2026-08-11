@@ -386,8 +386,29 @@ export async function teardownFixtures(): Promise<void> {
       if (paths.length > 0) await admin.storage.from(BUCKET).remove(paths);
     }
 
+    // Collected before the delete, because the delete is what makes them
+    // unfindable — and the cross-agent audit trigger keys its rows on the
+    // merchant id, not the agent.
+    const { data: merchants } = await admin
+      .from("merchants")
+      .select("id")
+      .eq("agent_id", user.id);
+    const merchantIds = (merchants ?? []).map((m) => String(m.id));
+
     await admin.from("documents").delete().eq("agent_id", user.id);
     await admin.from("merchants").delete().eq("agent_id", user.id);
+
+    // The delete above fires log_cross_agent_change() — a service-role
+    // connection has no auth.uid(), so it counts as cross-agent and each removed
+    // merchant leaves a cross_agent_delete row behind. Cleared here, after the
+    // delete rather than before, or the rows this generates would outlive it.
+    if (merchantIds.length > 0) {
+      await admin
+        .from("audit_log")
+        .delete()
+        .eq("table_name", "merchants")
+        .in("row_id", merchantIds);
+    }
 
     // Before deleteUser, not after, and not optional: audit_log.actor_id
     // references profiles(id) with no ON DELETE clause, so a persona who has
