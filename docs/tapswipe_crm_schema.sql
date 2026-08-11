@@ -2010,11 +2010,13 @@ alter default privileges for role postgres in schema public
   revoke all on functions from anon, authenticated;
 
 -- =====================================================================
--- NOTE ON `ensure_rls` / `rls_auto_enable()` — a safety net that exists on
--- the hosted project and NOWHERE ELSE. Nothing in code, migrations or
--- tests may assume it.
+-- `ensure_rls` / `rls_auto_enable()` — the RLS backstop. ADOPTED into the
+-- migrations on 2026-08-11 by 20260811150000. Until then it existed on the
+-- hosted project and nowhere else, and that divergence — not the missing
+-- convenience — is what this section used to warn about and what adopting
+-- it removes.
 --
--- Read off ref vdjtosofrimipklbdjbi on 2026-08-05:
+-- PROVENANCE. Read off ref vdjtosofrimipklbdjbi on 2026-08-05:
 --
 --   evtname     | evtevent        | enabled | owner    | tags
 --   ensure_rls  | ddl_command_end | O       | postgres | CREATE TABLE,
@@ -2028,45 +2030,162 @@ alter default privileges for role postgres in schema public
 --   alter table if exists <table> enable row level security
 --
 -- wrapped in an exception handler that swallows failures to a RAISE LOG.
--- So on that project every new table gets RLS switched on for free, and
--- quietly does not if the attempt fails.
+-- So every new table gets RLS switched on for free, and quietly does not
+-- if the attempt fails.
 --
--- Where it does NOT exist:
---   * The local CLI stack. Its event triggers are issue_graphql_placeholder,
---     issue_pg_cron_access, issue_pg_graphql_access, issue_pg_net_access,
---     pgrst_ddl_watch, pgrst_drop_watch — verified, and no ensure_rls.
---   * The PGlite suite (tests/helpers/db.ts). There is no platform layer
---     there at all, only the migrations and a three-role auth shim.
---   * Any fresh project built from this file, because it is not in any
---     migration. `supabase db dump` will not carry it either — the CLI's
---     dump script comments out every `CREATE EVENT TRIGGER` line, so even a
---     dump-based clone arrives without it.
+-- It arrived without a migration behind it: absent from every commit on
+-- every ref, from the Supabase CLI package, and from every other
+-- environment. The style — RAISE LOG lines, defensive pg_toast%/pg_temp%
+-- filters, a blanket EXCEPTION WHEN OTHERS, `set search_path to
+-- 'pg_catalog'` — matches nothing else in this repo, so it was installed
+-- out-of-band through the Dashboard SQL editor or a Supabase advisor
+-- action. Who and when is answerable only from the Dashboard's SQL editor
+-- history or the org audit log.
 --
--- Why this matters more than a missing convenience: a migration that
--- forgets `enable row level security` produces two DIFFERENT bugs
--- depending on where it runs. On the hosted project the table comes up
--- RLS-enabled with no policies, which denies everyone and reads as a
--- broken feature. Everywhere else the same table is wide open, which is a
--- data leak. Same SQL, opposite failure, and the environment where it
--- looks fine is the one nobody tests against. That is worse than the net
--- not existing at all, which is the reason for writing this down.
+-- It is owned by `postgres`, whereas the platform's own event triggers are
+-- owned by `supabase_admin` — so it was almost certainly not shipped by
+-- Supabase, and nobody should assume it is maintained, upgraded or
+-- restored for us. That is not an argument for leaving it alone; it is the
+-- argument for owning it deliberately, which is what the migration does.
 --
--- The rule is therefore unchanged and unconditional: every new table
--- spells out `alter table ... enable row level security` and its four
--- policies, in the migration that creates it. Treat ensure_rls as a
--- backstop that happens to be there, never as the thing doing the work.
+-- WHY IT WAS ADOPTED, rather than dropped or left where it was.
 --
--- Two caveats on the "platform-managed" reading. First, ensure_rls is
--- owned by `postgres` while all six of the triggers above are owned by
--- `supabase_admin`, so it may well have been added through the SQL editor
--- rather than shipped by the platform — meaning nobody should assume it is
--- maintained, upgraded, or restored for us. Second, `postgres` CAN create
--- event triggers here despite not being a superuser (verified on the local
--- stack), so this could be added to a migration to make all environments
--- match. Deliberately not done: it would be a real behaviour change on
--- every future table, which wants its own decision rather than riding
--- along with a documentation note.
+-- Dropping it would have deleted a backstop that demonstrably works, from
+-- the one environment holding real data, purely to buy consistency.
+--
+-- Leaving it alone kept the part that actually hurts. A migration that
+-- forgets `alter table ... enable row level security` produced two
+-- DIFFERENT bugs depending on where it ran. On the hosted project the
+-- table came up RLS-enabled with no policies, which denies everyone and
+-- reads as a broken feature. Everywhere else the same table was wide open,
+-- which is a data leak. Same SQL, opposite failure — and the environment
+-- where it looked fine was the one nobody tests against. That is worse
+-- than the net not existing at all, and it is the divergence CLAUDE.md
+-- warns about under "Do not rely on ensure_rls".
+--
+-- Adopting it keeps the backstop AND closes the divergence. The local
+-- stack, the PGlite suite and any fresh project built from these
+-- migrations now behave the way production already did, so a forgotten
+-- `enable row level security` fails the same way everywhere — and the net
+-- can be ASSERTED instead of described. tests/rls/grants.test.ts,
+-- "auto-enables RLS on a table a future migration forgets", is that
+-- assertion: it creates a table that never asks for RLS and requires
+-- relrowsecurity to come back true.
+--
+-- The adoption is a no-op on the hosted project by construction. The
+-- function below is reproduced verbatim from it — re-verified against
+-- `supabase db dump --linked` on 2026-08-11, identical modulo pg_dump's
+-- quoting and case — and the event trigger is created only when absent.
+--
+-- WHERE IT NOW EXISTS:
+--   * The hosted project (ref vdjtosofrimipklbdjbi), unchanged, since
+--     2026-08-05 or earlier.
+--   * The local CLI stack, from 20260811150000. Its event triggers are now
+--     ensure_rls, issue_graphql_placeholder, issue_pg_cron_access,
+--     issue_pg_graphql_access, issue_pg_net_access, pgrst_ddl_watch and
+--     pgrst_drop_watch — verified 2026-08-11. (Before adoption this list
+--     was the same six minus ensure_rls, which is what the old version of
+--     this note recorded.)
+--   * The PGlite suite (tests/helpers/db.ts), which applies the same
+--     migrations over its three-role auth shim. PGlite does run event
+--     triggers — the test named above is the proof, and it passes.
+--   * Any fresh project built from this file or from supabase/migrations/,
+--     because the DDL below is now part of both.
+--
+-- WHERE IT STILL DOES NOT EXIST, and must not be assumed:
+--   * Any clone made with `supabase db dump`. The CLI's dump script does
+--     not emit `CREATE EVENT TRIGGER` at all — verified against the
+--     2026-08-11 linked dump, which carries the rls_auto_enable() function
+--     and zero occurrences of `CREATE EVENT TRIGGER`. A dump-based restore
+--     therefore arrives with the function defined and nothing calling it,
+--     which is the worst shape available: it LOOKS present in the schema.
+--     Re-run 20260811150000, or create the trigger by hand, after any
+--     restore of that kind.
+--
+-- THE RULE IS UNCHANGED AND UNCONDITIONAL. Every new table still spells
+-- out `alter table ... enable row level security` and its four policies in
+-- the migration that creates it. What changed is only the standing of the
+-- net: it is a deliberate, version-controlled backstop now rather than one
+-- that happened to be there. It is still a net and not a policy — it
+-- enables RLS and adds no policies, so a table it catches denies everyone.
+-- Belt and braces, in that order.
 -- =====================================================================
+
+-- security definer is required: it runs ALTER TABLE on tables it does not
+-- own. search_path is pinned to pg_catalog so a temp-table shadow cannot
+-- redirect any of the catalog lookups.
+create or replace function public.rls_auto_enable()
+returns event_trigger
+language plpgsql
+security definer
+set search_path to 'pg_catalog'
+as $$
+DECLARE
+  cmd record;
+BEGIN
+  FOR cmd IN
+    SELECT *
+    FROM pg_event_trigger_ddl_commands()
+    WHERE command_tag IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
+      AND object_type IN ('table','partitioned table')
+  LOOP
+     IF cmd.schema_name IS NOT NULL AND cmd.schema_name IN ('public') AND cmd.schema_name NOT IN ('pg_catalog','information_schema') AND cmd.schema_name NOT LIKE 'pg_toast%' AND cmd.schema_name NOT LIKE 'pg_temp%' THEN
+      BEGIN
+        EXECUTE format('alter table if exists %s enable row level security', cmd.object_identity);
+        RAISE LOG 'rls_auto_enable: enabled RLS on %', cmd.object_identity;
+      EXCEPTION
+        WHEN OTHERS THEN
+          RAISE LOG 'rls_auto_enable: failed to enable RLS on %', cmd.object_identity;
+      END;
+     ELSE
+        RAISE LOG 'rls_auto_enable: skip % (either system schema or not in enforced list: %.)', cmd.object_identity, cmd.schema_name;
+     END IF;
+  END LOOP;
+END;
+$$;
+
+-- An event-trigger function is never called directly — Postgres refuses a
+-- call to anything returning `event_trigger` — so no role needs EXECUTE.
+-- The hosted project had it granted to `authenticated` from the same
+-- legacy default that produced the M1 table-grant finding: harmless, and
+-- removed here for tidiness.
+revoke all on function public.rls_auto_enable() from public;
+revoke all on function public.rls_auto_enable() from anon, authenticated;
+
+-- The event trigger is guarded three ways, because this is the half that
+-- may legitimately fail:
+--
+--   1. It ALREADY EXISTS on the hosted project, so a bare CREATE would
+--      abort the push. pg_event_trigger is checked first.
+--   2. CREATE EVENT TRIGGER normally requires superuser. `postgres` can
+--      create one on the local stack despite not being a superuser
+--      (verified), but the hosted migration role may refuse it, so
+--      insufficient_privilege degrades to a NOTICE rather than blocking an
+--      otherwise good migration — production already has the trigger,
+--      which is the whole reason the adoption is safe.
+--   3. Anything else is re-raised, so a genuine mistake here is not
+--      swallowed the way the function's own handler swallows per-table
+--      failures.
+--
+-- Deliberately last in this file. Built top-to-bottom, every table above
+-- has already declared its own RLS, so arming the trigger here changes
+-- nothing retroactively — it is armed for what comes next.
+do $$
+begin
+  if exists (select 1 from pg_event_trigger where evtname = 'ensure_rls') then
+    raise notice 'ensure_rls already exists — leaving it alone';
+  else
+    create event trigger ensure_rls
+      on ddl_command_end
+      execute function public.rls_auto_enable();
+    raise notice 'ensure_rls created';
+  end if;
+exception
+  when insufficient_privilege then
+    raise notice
+      'ensure_rls not created: the migration role lacks superuser. The function is in place; create the trigger from the dashboard if this environment needs it.';
+end;
+$$;
 
 -- =====================================================================
 -- NOTE ON SUPABASE STORAGE (not SQL — set up in the dashboard/CLI)
