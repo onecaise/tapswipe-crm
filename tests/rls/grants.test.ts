@@ -111,9 +111,26 @@ describe("grant surface after all migrations", () => {
     expect(await tablePrivileges(db, "authenticated", "merchants")).toEqual(
       ALL_TABLE_PRIVILEGES,
     );
-    expect(await tablePrivileges(db, "authenticated", "documents")).toEqual(
-      ALL_TABLE_PRIVILEGES,
-    );
+
+    // documents is narrower than the rest: no UPDATE. Nothing edits a document
+    // row in place — it is replaced by a new upload plus a delete — so the
+    // table has never had an UPDATE policy, and the grant that outlived that
+    // fact was revoked by 20260811173000. Left in place it would have failed
+    // the quiet way: privilege check passes, RLS filters to zero rows, and a
+    // future edit affordance reports a save that did nothing.
+    expect(await tablePrivileges(db, "authenticated", "documents")).toEqual([
+      "DELETE",
+      "INSERT",
+      "SELECT",
+    ]);
+
+    // profiles is narrower still: SELECT alone, matching its single policy.
+    // It is the table that decides who is an admin, so it gets the *_secrets
+    // treatment — no client write path at all. Every writer is a security
+    // definer RPC or a service-role Edge Function, both of which bypass grants.
+    expect(await tablePrivileges(db, "authenticated", "profiles")).toEqual([
+      "SELECT",
+    ]);
 
     // Zero-policy RLS already denies these; the absent grant is the second
     // lock, so that a policy added by mistake still opens nothing.
@@ -175,13 +192,25 @@ describe("grant surface after all migrations", () => {
       "merchants_id_seq",
       "leads_id_seq",
       "pre_apps_id_seq",
-      "audit_log_id_seq",
     ]) {
       expect(
         await sequencePrivileges(db, "authenticated", sequence),
         `authenticated should hold USAGE alone on ${sequence}`,
       ).toEqual(["USAGE"]);
     }
+
+    // audit_log_id_seq holds nothing at all, and is asserted apart from the
+    // loop above for that reason. It was granted USAGE alongside the others
+    // even after audit_log itself dropped to SELECT-only seventeen lines
+    // earlier in the same migration — nothing authenticated can do consumes it,
+    // since every audit_log insert runs as the owner or as service_role. What
+    // it left reachable was nextval() through a security invoker RPC: burning
+    // ids to put gaps in the sequence of the one table whose job is tamper
+    // evidence.
+    expect(
+      await sequencePrivileges(db, "authenticated", "audit_log_id_seq"),
+      "authenticated should hold nothing on audit_log_id_seq",
+    ).toEqual([]);
 
     await db.close();
   });

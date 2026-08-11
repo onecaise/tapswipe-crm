@@ -51,6 +51,15 @@ async function merchantId(db: TestDb, dba: string): Promise<number> {
   return row.id;
 }
 
+async function documentId(db: TestDb, fileName: string): Promise<number> {
+  await asPlatform(db);
+  const [row] = await rows<{ id: number }>(
+    db,
+    `select id from documents where file_name = '${fileName}'`,
+  );
+  return row.id;
+}
+
 let db: TestDb;
 
 beforeAll(async () => {
@@ -240,10 +249,11 @@ describe("INSERT is covered too", () => {
   });
 });
 
-describe("all seven tables are covered", () => {
-  // One function, seven attachments — so the risk is not the logic but a table
+describe("all eight tables are covered", () => {
+  // One function, eight attachments — so the risk is not the logic but a table
   // being forgotten. Asserted per table rather than sampled, for the same reason
   // the grants test enumerates every table: the failure mode is an omission.
+  // documents was exactly that omission, found by the 11 Aug audit.
   const CASES: { table: string; insert: string }[] = [
     {
       table: "merchants",
@@ -273,6 +283,10 @@ describe("all seven tables are covered", () => {
       table: "tasks",
       insert: `insert into tasks (agent_id, owner_type, owner_id, title) values ('${AGENT_ID}', 'lead', 1, 'T Task')`,
     },
+    {
+      table: "documents",
+      insert: `insert into documents (agent_id, owner_type, owner_id, doc_type, file_key) values ('${AGENT_ID}', 'lead', 1, 'T Doc', 'k/t-doc')`,
+    },
   ];
 
   for (const { table, insert } of CASES) {
@@ -289,6 +303,94 @@ describe("all seven tables are covered", () => {
       });
     });
   }
+});
+
+describe("documents — the eighth table, and the delete that nothing logged", () => {
+  /**
+   * documents was deliberately excluded from this trigger on the grounds that
+   * its access is audited inside create-upload-url and create-download-url,
+   * where the signed-URL mint is the event worth recording. That reasoning is
+   * correct for reads and still holds.
+   *
+   * It does not cover DELETE. documents is the one table whose delete policy is
+   * `(agent_id = auth.uid() and is_active_agent()) or is_admin()` rather than
+   * is_admin() alone, and a delete mints no URL — so neither function ran, no
+   * trigger fired, and the metadata row vanished with its Storage object
+   * orphaned and nothing written down anywhere.
+   */
+  it("records an admin deleting another agent's document", async () => {
+    // The statement, not the voided check: it is documents id 2 against lead 1,
+    // so row_id and owner_id genuinely differ. The voided check is documents
+    // id 1 against merchant 1, where the two collide and the assertion below
+    // could not tell them apart — the same id-collision-across-types hazard the
+    // notes/tasks owner_type rule exists for.
+    const id = await documentId(db, "agent-statement.pdf");
+
+    // Captured before the delete, to prove row_id names the document itself and
+    // not the owner_id it also carries. That is the one way reusing the shared
+    // function on a polymorphic table could have gone wrong:
+    // log_cross_agent_change() reads `id` and `agent_id` out of to_jsonb(OLD)
+    // by name, so it needs no documents-specific variant — documents.id is
+    // serial like the other seven and documents.agent_id is uuid not null.
+    await asPlatform(db);
+    const [doc] = await rows<{ owner_id: number }>(
+      db,
+      `select owner_id from documents where id = ${id}`,
+    );
+
+    await asUser(db, ADMIN_ID);
+    await db.exec(`delete from documents where id = ${id}`);
+
+    const audit = await auditRows(db);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({
+      actor_id: ADMIN_ID,
+      action: "cross_agent_delete",
+      table_name: "documents",
+      row_id: String(id),
+    });
+    expect(audit[0].row_id).not.toBe(String(doc.owner_id));
+  });
+
+  it("stays silent when a rep deletes their own upload", async () => {
+    // The own-row delete documents exists to allow. If this logged, every
+    // routine re-upload would land in the trail and bury the admin actions.
+    const id = await documentId(db, "agent-voided-check.pdf");
+
+    await asUser(db, AGENT_ID);
+    await db.exec(`delete from documents where id = ${id}`);
+
+    expect(await auditRows(db)).toEqual([]);
+  });
+
+  it("records an admin uploading in a rep's name", async () => {
+    // The object key is {parent's agent_id}/..., so an admin uploading for a
+    // rep files the row under that rep — meaning actor is distinct from
+    // agent_id and this is a genuine cross-agent insert. Expect it alongside
+    // the upload_document row create-upload-url writes: one event, two
+    // granularities, the same shape approve_pre_app already produces.
+    await asUser(db, ADMIN_ID);
+    await db.exec(`
+      insert into documents (agent_id, owner_type, owner_id, doc_type, file_key)
+      values ('${AGENT_ID}', 'merchant', 1, 'Bank letter', 'k/admin-made');
+    `);
+
+    await asPlatform(db);
+    const [created] = await rows<{ id: number }>(
+      db,
+      `select id from documents where file_key = 'k/admin-made'`,
+    );
+    const id = created.id;
+
+    const audit = await auditRows(db);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({
+      actor_id: ADMIN_ID,
+      action: "cross_agent_insert",
+      table_name: "documents",
+      row_id: String(id),
+    });
+  });
 });
 
 describe("an audit failure rolls the write back — fail closed, not silent", () => {

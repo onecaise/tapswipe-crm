@@ -1,0 +1,134 @@
+-- Close the four gaps the 11 Aug security audit left open.
+--
+-- Mirrors docs/tapswipe_crm_schema.sql, which is the spec.
+--
+-- All four are one class of defect: a privilege that no policy backs, or a
+-- write path that no audit covers. None was reachable by a rep -- each needs an
+-- admin JWT, or is fail-closed today -- which is why they survived three
+-- migrations of hardening. The risk is forward-looking: each is a trap primed
+-- for the next person who adds a policy or a page and reasonably assumes the
+-- grant surface underneath it was already narrowed.
+
+-- ---------------------------------------------------------------------
+-- 1. profiles becomes writable ONLY through set_user_role().
+--
+-- "admin manages profiles" (20260805103000:56-58) was
+-- `for update using (is_admin()) with check (is_admin())`, so any admin could
+-- PATCH /rest/v1/profiles directly. That walked past every guard inside
+-- set_user_role() -- the role vocabulary, the no-self-demotion block that makes
+-- zero-active-admins unreachable, the last-active-admin check -- and wrote no
+-- audit_log row, because audit_log has no INSERT policy and a plain client
+-- write cannot log itself. It also allowed is_active = false without the
+-- banned_until ban that deactivate-user writes first, producing exactly the
+-- shown-inactive-but-usable state that ordering exists to prevent.
+--
+-- The same treatment as the *_secrets tables, for the same reason: this is the
+-- table that decides who is an admin, so it should have no client write path at
+-- all. profiles keeps its SELECT policy and nothing else.
+--
+-- Nothing legitimate loses access. Every writer is a security definer RPC
+-- (update_own_full_name, clear_must_change_password, set_user_role) or a
+-- service-role Edge Function (create-user, deactivate-user,
+-- admin-reset-password), and both bypass RLS. set_user_role already writes its
+-- own audit_log row (20260811094500:127-135) -- it needed no change here, only
+-- to stop being one of two ways in.
+--
+-- This corrects the header comment at 20260811094500:60-63, which reasoned that
+-- set_user_role() was security definer "despite" this policy existing. The
+-- relationship is now the other way round: security definer is not redundancy
+-- over the policy, it is the only door.
+--
+-- FORWARD CONSTRAINT: a future "admin edits a rep's name" feature needs a new
+-- narrow RPC, not a policy. Re-adding an UPDATE policy here re-opens all of the
+-- above. tests/rls/manage-users.test.ts asserts pg_policies holds no UPDATE
+-- policy on this table, so restoring one fails the suite even though step 3b
+-- below would still deny the write.
+-- ---------------------------------------------------------------------
+drop policy if exists "admin manages profiles" on profiles;
+
+-- ---------------------------------------------------------------------
+-- 2. documents joins the audit trigger set -- eight tables now, not seven.
+--
+-- 20260811160000:110-113 excluded it because its access is audited inside
+-- create-upload-url and create-download-url, where the signed-URL mint is the
+-- event worth recording rather than the metadata row. That is right about reads
+-- and still holds; both functions keep writing their own rows.
+--
+-- It does not cover DELETE. documents is the one table whose delete policy is
+-- `(agent_id = auth.uid() and is_active_agent()) or is_admin()` rather than
+-- is_admin() alone, DELETE is granted to authenticated, and a delete mints no
+-- URL -- so neither function ran, no trigger fired, and the row vanished with
+-- its Storage object orphaned and nothing written down. Three audit mechanisms
+-- exist and documents DELETE fell through all three.
+--
+-- log_cross_agent_change() is reused unchanged, and needs no documents-specific
+-- variant: it reads `id` and `agent_id` by name out of to_jsonb(NEW/OLD), so it
+-- never touches the polymorphic owner_type/owner_id pair documents also
+-- carries. documents.agent_id is uuid not null (20260804201300:383) and
+-- documents.id is serial (:382), the same shapes as the other seven.
+--
+-- Expect duplication on upload, as with approve_pre_app: an admin uploading for
+-- a rep now yields both upload_document:<owner_type> and cross_agent_insert.
+-- One event, two granularities. Assert on `action`, never on row counts.
+--
+-- The update arm is unreachable -- documents has no UPDATE policy, and step 3
+-- removes the grant -- and is attached anyway for the reason notes carries at
+-- 20260811160000:148-151: if that policy is ever added, the trail should not
+-- have to be remembered separately.
+--
+-- This makes documents writes fail closed, like the other seven.
+-- ---------------------------------------------------------------------
+drop trigger if exists documents_audit_cross_agent on documents;
+create trigger documents_audit_cross_agent
+  after insert or update or delete on documents
+  for each row execute function log_cross_agent_change();
+
+-- ---------------------------------------------------------------------
+-- 3. Dead grant: UPDATE on documents.
+--
+-- documents has had three policies since 20260804201300 -- select, insert,
+-- delete -- and no UPDATE policy, yet 20260811143000:50 granted all four verbs.
+-- RLS denies what no policy permits, so this is fail-closed today. The trap is
+-- the failure mode CLAUDE.md documents for notes: a future edit affordance
+-- would pass the privilege check, match zero rows, and report a save that
+-- silently did nothing.
+--
+-- Revoking makes the answer "permission denied" -- loud, and at the layer where
+-- the decision actually lives.
+--
+-- NOT done here: the identical dead UPDATE grant on `notes`, which is
+-- append-only by design. It is the same defect, but it was not among the
+-- audit's findings and narrowing it is a separate decision rather than
+-- something to fold in silently.
+-- ---------------------------------------------------------------------
+revoke update on documents from authenticated;
+
+-- ---------------------------------------------------------------------
+-- 3b. Dead grants: INSERT/UPDATE/DELETE on profiles.
+--
+-- The second lock behind step 1, and the same defect as step 3 on the table
+-- that matters most. profiles has no INSERT policy by design (rows are created
+-- by create-user with the service role), no DELETE policy (§8: production never
+-- deletes users), and as of step 1 no UPDATE policy -- while 20260811143000:42
+-- granted all four verbs. SELECT is the only one anything backs.
+--
+-- Both locks rather than either: with the grant alone gone, re-adding a policy
+-- by mistake still opens nothing, and vice versa. That is the same
+-- belt-and-braces the *_secrets tables get.
+-- ---------------------------------------------------------------------
+revoke insert, update, delete on profiles from authenticated;
+
+-- ---------------------------------------------------------------------
+-- 4. Dead grant: usage on audit_log_id_seq.
+--
+-- 20260811143000:67 dropped audit_log to `grant select` for authenticated, then
+-- :84 re-granted usage on its sequence seventeen lines later. Nothing
+-- authenticated can do consumes it: every audit_log insert comes from a
+-- security definer function (running as the owner) or a service-role Edge
+-- Function, neither of which needs this grant.
+--
+-- What it left reachable is small but points the wrong way -- nextval() through
+-- any security invoker RPC burns ids and puts gaps in the sequence of the one
+-- table whose whole job is tamper evidence.
+-- ---------------------------------------------------------------------
+revoke usage on sequence audit_log_id_seq from authenticated;

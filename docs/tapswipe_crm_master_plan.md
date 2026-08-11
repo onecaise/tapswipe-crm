@@ -103,11 +103,38 @@ Key details worth remembering, not just the headline rule:
   matters most (a just-deactivated user's existing token still claiming
   they're fine). Revisit only if per-request role checks become a real
   measured performance problem, which is unlikely at this scale.
-- **`profiles` has no self-update policy.** Letting agents `UPDATE` their
-  own profile row directly would let them attempt to set their own
-  `role` to `'admin'`. Self-service edits (e.g. changing `full_name`) go
-  through a narrow `update_own_full_name()` RPC instead, which only ever
-  touches that one column no matter what's passed in.
+- **`profiles` has no write policy at all — not for agents, and not for
+  admins either.** Letting agents `UPDATE` their own profile row directly
+  would let them attempt to set their own `role` to `'admin'`.
+  Self-service edits (e.g. changing `full_name`) go through a narrow
+  `update_own_full_name()` RPC instead, which only ever touches that one
+  column no matter what's passed in.
+
+  > **Correction (security audit, 11 Aug 2026): the admin half was
+  > missing.** This bullet used to cover only self-update, and an
+  > `"admin manages profiles"` policy (`for update using (is_admin()) with
+  > check (is_admin())`) sat alongside it. That let any admin `PATCH
+  > /rest/v1/profiles` straight through PostgREST and walk past every
+  > guard in `set_user_role()` — the role vocabulary, the no-self-demotion
+  > block that makes zero-active-admins unreachable, the last-active-admin
+  > check — while writing **no `audit_log` row**, because `audit_log` has
+  > no insert policy and a plain client write cannot log itself. The same
+  > policy allowed `is_active = false` without the `banned_until` ban that
+  > `deactivate-user` writes first, which is precisely the
+  > shown-inactive-but-usable state that ordering exists to prevent.
+  >
+  > The policy is dropped, and the `insert`/`update`/`delete` grants on
+  > `profiles` are revoked with it — two locks, the same treatment the
+  > `*_secrets` tables get and for the same reason: this is the table that
+  > decides who is an admin. `select` is the only privilege and the only
+  > policy left. Every write is now a `security definer` RPC
+  > (`update_own_full_name`, `clear_must_change_password`,
+  > `set_user_role`) or a service-role Edge Function (`create-user`,
+  > `deactivate-user`, `admin-reset-password`).
+  >
+  > **Forward constraint:** an "admin edits a rep's name" feature needs a
+  > new narrow RPC, not a policy. Re-adding an `UPDATE` policy here
+  > re-opens all of the above.
 
 ## 6. Sensitive data handling
 

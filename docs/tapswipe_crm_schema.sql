@@ -67,14 +67,40 @@ alter table profiles enable row level security;
 create policy "read own profile or admin reads all" on profiles
   for select using (id = auth.uid() or is_admin());
 
-create policy "admin manages profiles" on profiles
-  for update using (is_admin()) with check (is_admin());
--- profiles are inserted by the create-user Edge Function (service role),
--- never directly by a client — no insert policy needed for authenticated.
--- Agents do NOT get a direct update policy on their own row — that would
--- let them try to set their own role to 'admin' via a plain client update.
--- Self-service editing (e.g. full_name) goes through the RPC below instead,
--- which only ever touches full_name regardless of what's passed in.
+-- SELECT is the ONLY policy on profiles. There is deliberately no insert,
+-- update or delete policy for `authenticated` — the same treatment the three
+-- *_secrets tables get, and for the same reason: this is the table that decides
+-- who is an admin, so it has no client write path at all.
+--
+-- profiles are inserted by the create-user Edge Function (service role), never
+-- directly by a client. Deletes never happen at all (§8: deactivation, never
+-- deletion).
+--
+-- On the missing UPDATE policy specifically. There used to be an
+-- "admin manages profiles" policy here, `for update using (is_admin()) with
+-- check (is_admin())`. It was removed by the 11 Aug security audit, because an
+-- admin could use it to PATCH /rest/v1/profiles directly and thereby walk past
+-- every guard inside set_user_role() below — the role vocabulary, the
+-- no-self-demotion block that makes zero-active-admins unreachable, the
+-- last-active-admin check — while writing no audit_log row at all, since
+-- audit_log has no INSERT policy and a plain client write cannot log itself. It
+-- also allowed setting is_active = false without the banned_until ban that
+-- deactivate-user writes first, producing exactly the shown-inactive-but-usable
+-- state that ordering exists to prevent.
+--
+-- Agents never had an own-row update policy either, for the narrower version of
+-- the same reason: it would let them try to set their own role to 'admin'.
+--
+-- Every write to profiles is therefore a `security definer` RPC
+-- (update_own_full_name, clear_must_change_password, set_user_role) or a
+-- service-role Edge Function (create-user, deactivate-user,
+-- admin-reset-password) — each of which either touches one column of the
+-- caller's own row, or writes an audit_log row as part of the same statement.
+--
+-- FORWARD CONSTRAINT: a future "admin edits a rep's name" feature needs a new
+-- narrow RPC, not a policy. Re-adding an UPDATE policy here re-opens all of the
+-- above. Pinned by tests/rls/manage-users.test.ts, which asserts pg_policies
+-- holds no UPDATE policy on this table.
 
 create or replace function update_own_full_name(new_full_name text)
 returns void
@@ -116,11 +142,16 @@ $$;
 -- An Edge Function would work but is the wrong tier: this needs no
 -- service-role key and no Auth Admin API, only a server-side admin check
 -- and an audit row, which is precisely §9's Tier 2. `security definer` is
--- required despite the "admin manages profiles" UPDATE policy already
--- existing, because audit_log has no INSERT policy for `authenticated` --
--- so a plain client update could change the role and leave no trail.
--- Bundling both writes here means the role change and its audit row
--- cannot come apart.
+-- required because audit_log has no INSERT policy for `authenticated`;
+-- bundling both writes here means the role change and its audit row cannot
+-- come apart.
+--
+-- This is now the ONLY way a role can change. It used to be one of two: the
+-- "admin manages profiles" UPDATE policy allowed the same change from the
+-- client with no trail, which made `security definer` here look like
+-- redundancy over the policy rather than what it actually is. That policy is
+-- gone (see the profiles block above), so every guard below is unavoidable
+-- rather than merely preferable.
 --
 -- Three guards beyond is_admin(), in order:
 --
@@ -666,6 +697,19 @@ create policy "insert own" on documents
   for insert with check ((agent_id = auth.uid() and is_active_agent()) or is_admin());
 create policy "delete own or admin" on documents
   for delete using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
+-- No UPDATE policy, and no UPDATE grant either (see the grants block). A
+-- document is replaced by uploading a new one and deleting the old, so nothing
+-- edits this row in place. The grant is revoked as well as the policy left out
+-- because a policy-only omission fails the quiet way: the privilege check would
+-- pass, RLS would filter the statement to zero rows, and a future edit
+-- affordance would report a save that did nothing — the same trap `notes`
+-- carries a warning about. With the grant gone the answer is "permission
+-- denied", at the layer where the decision actually lives.
+--
+-- The delete policy is the standing exception to admin-only deletes: reps
+-- remove their own uploads. That is also why documents needs the cross-agent
+-- audit trigger despite its access being audited in the Edge Functions — see
+-- the trigger block below.
 
 -- ---------------------------------------------------------------------
 -- SUPPORT TICKETS
@@ -906,11 +950,14 @@ create trigger pre_apps_set_updated_at
 -- AFTER, not BEFORE: the trail should record what actually happened, and
 -- on pre_apps the BEFORE guard trigger may still reject the write.
 --
--- Reads OLD through to_jsonb rather than OLD.agent_id. All seven tables
+-- Reads OLD through to_jsonb rather than OLD.agent_id. All eight tables
 -- carry both columns today, so direct access would work -- but attached
 -- to a table without agent_id it would raise and break the caller's
 -- write, where this yields NULL and merely over-logs. The safer failure
--- for one function bolted onto seven tables.
+-- for one function bolted onto eight tables, and the reason `documents`
+-- needed no variant of its own when it was added: id and agent_id are
+-- read by name out of the jsonb, so the polymorphic owner_type/owner_id
+-- pair it also carries is simply not looked at.
 --
 -- 'cross_agent_*' rather than 'admin_*' because the condition actually
 -- tested is "the actor is not this row's owner". Under RLS that means an
@@ -932,7 +979,7 @@ create trigger pre_apps_set_updated_at
 -- it runs inside the same transaction as the statement that fired it, and
 -- it carries no EXCEPTION block. If the audit_log insert fails for any
 -- reason, the error propagates and **the triggering INSERT/UPDATE/DELETE
--- is rolled back with it.** A write to these seven tables therefore
+-- is rolled back with it.** A write to these eight tables therefore
 -- cannot succeed while its audit row silently does not.
 --
 -- That is the trade we want, and it is the opposite of the choice
@@ -1014,10 +1061,7 @@ revoke all on function log_cross_agent_change() from public;
 -- Deliberately NOT granted to authenticated: a trigger fires whether or not
 -- the querying role holds EXECUTE. Same treatment as set_updated_at().
 
--- All seven tables that carry agent_id and are written through Tier 1.
--- `documents` is deliberately absent: its access is audited in the two
--- signed-URL Edge Functions instead, where the event worth recording is the
--- mint rather than the metadata row.
+-- All eight tables that carry agent_id and are written through Tier 1.
 create trigger merchants_audit_cross_agent
   after insert or update or delete on merchants
   for each row execute function log_cross_agent_change();
@@ -1047,6 +1091,28 @@ create trigger notes_audit_cross_agent
 
 create trigger tasks_audit_cross_agent
   after insert or update or delete on tasks
+  for each row execute function log_cross_agent_change();
+
+-- documents is the eighth, and was the last one added -- it was excluded at
+-- first on the grounds that its access is audited inside create-upload-url and
+-- create-download-url, where the event worth recording is the signed-URL mint
+-- rather than the metadata row. That reasoning is right about reads and still
+-- holds; the two functions keep writing upload_document / download_document.
+--
+-- It does not cover DELETE, which is what the 11 Aug audit found. documents is
+-- the one table whose delete policy is own-row-or-admin rather than admin-only,
+-- and a delete mints no URL -- so neither function ran, no trigger fired, and
+-- the row vanished with its Storage object orphaned and nothing written down.
+-- Three audit mechanisms and documents DELETE fell through all three.
+--
+-- Expect duplication on upload, as with approve_pre_app: an admin uploading for
+-- a rep now produces both upload_document:<owner_type> and cross_agent_insert.
+-- One event, two granularities. Assert on `action`, never on row counts.
+--
+-- The update arm is unreachable here -- documents has no UPDATE policy and no
+-- UPDATE grant -- and is attached anyway for the reason notes carries above.
+create trigger documents_audit_cross_agent
+  after insert or update or delete on documents
   for each row execute function log_cross_agent_change();
 
 -- =====================================================================
@@ -1792,8 +1858,13 @@ grant usage on schema public to anon, authenticated, service_role;
 -- filter**. The audit found exactly that on both the local stack and the linked
 -- project. So the model has to be stated subtractively first; see the
 -- revoke-from-authenticated block further down.
+--
+-- The rule this list follows: a verb is granted only where a policy backs it.
+-- A grant with no matching policy is dead weight that fails the quiet way --
+-- the privilege check passes, RLS filters the statement to zero rows, and the
+-- caller sees a save that did nothing. Three tables are therefore narrower than
+-- the rest, and each exception is stated where the table is defined.
 grant select, insert, update, delete on
-  profiles,
   merchants,
   leads,
   ghost_sheets,
@@ -1801,11 +1872,27 @@ grant select, insert, update, delete on
   pre_app_owners,
   pre_app_terminal,
   pre_app_business_profile,
-  documents,
   support_tickets,
   notes,
   tasks
 to authenticated;
+
+-- documents: no UPDATE. Nothing edits a document row in place; it is replaced
+-- by a new upload plus a delete.
+--
+-- (`notes` is the remaining table in the list above whose UPDATE grant no
+-- policy backs -- append-only by design. Left as-is for now: unlike documents
+-- it was not part of the audit's findings, and narrowing it is a separate
+-- decision rather than something to fold in silently here.)
+grant select, insert, delete on documents to authenticated;
+
+-- profiles: SELECT only, matching its single SELECT policy. Every write is a
+-- security definer RPC or a service-role Edge Function, both of which bypass
+-- grants entirely, so nothing legitimate loses access here. The INSERT/UPDATE/
+-- DELETE grants this table used to carry were backed by no policy at all after
+-- "admin manages profiles" was dropped -- three dead grants on the table that
+-- decides who is an admin.
+grant select on profiles to authenticated;
 
 -- audit_log is SELECT-only, and deliberately not in the list above.
 --
@@ -1835,9 +1922,15 @@ grant usage on
   documents_id_seq,
   support_tickets_id_seq,
   notes_id_seq,
-  tasks_id_seq,
-  audit_log_id_seq
+  tasks_id_seq
 to authenticated;
+-- audit_log_id_seq is deliberately absent, to match audit_log's SELECT-only
+-- grant above. Nothing `authenticated` can do consumes it: every audit_log
+-- insert comes from a security definer function (running as the owner) or a
+-- service-role Edge Function, neither of which needs this grant. What it left
+-- reachable was small but pointed the wrong way -- nextval() through any
+-- security invoker RPC burns ids and puts gaps in the sequence of the one
+-- table whose job is tamper evidence.
 
 -- service_role bypasses RLS and is the only role that may reach the
 -- secrets tables — via the submit-pre-app-secrets / read-pre-app-secrets
