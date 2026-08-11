@@ -16,6 +16,17 @@ create table profiles (
   full_name text not null,
   role text not null default 'agent' check (role in ('agent', 'admin')),
   is_active boolean not null default true,
+  -- Set by create-user and admin-reset-password, cleared by
+  -- clear_must_change_password() once the rep sets their own. This is what makes
+  -- §8's "forced to set a real password on first login" real rather than a
+  -- convention: the (app) route-group layout redirects to /auth/update-password
+  -- while it is true, so an admin-known temporary password cannot survive as a
+  -- working credential.
+  --
+  -- A column rather than auth.users.app_metadata because requireUser() already
+  -- loads this row on every request, so reading it costs nothing, and because a
+  -- column is assertable in the hermetic test suite where app_metadata is not.
+  must_change_password boolean not null default false,
   created_at timestamptz default now()
 );
 
@@ -78,6 +89,125 @@ begin
   update profiles set full_name = new_full_name where id = auth.uid();
 end;
 $$;
+
+-- Clears the forced-password-change flag for the caller's own row, and nothing
+-- else. Same shape and same reasoning as update_own_full_name above: there is no
+-- self-update policy on profiles, so this is the only way a rep can retire their
+-- own temporary password, and it can only ever touch this one column.
+--
+-- Deliberately NOT gated on is_active_agent(). A deactivated user cannot reach
+-- this anyway (they cannot log in), and a gate here would mean a rep whose
+-- account was switched off mid-password-change is left with the flag stuck on.
+create or replace function clear_must_change_password()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update profiles set must_change_password = false where id = auth.uid();
+end;
+$$;
+
+-- ---------------------------------------------------------------------
+-- SET USER ROLE — Tier 2, promoting or demoting from the Manage Users
+-- screen.
+--
+-- An Edge Function would work but is the wrong tier: this needs no
+-- service-role key and no Auth Admin API, only a server-side admin check
+-- and an audit row, which is precisely §9's Tier 2. `security definer` is
+-- required despite the "admin manages profiles" UPDATE policy already
+-- existing, because audit_log has no INSERT policy for `authenticated` --
+-- so a plain client update could change the role and leave no trail.
+-- Bundling both writes here means the role change and its audit row
+-- cannot come apart.
+--
+-- Three guards beyond is_admin(), in order:
+--
+--   1. The role vocabulary, so this cannot write a value the CHECK
+--      constraint would then have to catch.
+--   2. No self-demotion. An admin demoting themselves loses the screen
+--      they are standing on, mid-session, with no way back. This is the
+--      load-bearing guard: it is what makes zero active admins
+--      unreachable, and zero active admins is the only unrecoverable
+--      state in the whole user-management surface -- nobody could create
+--      users, promote anyone, or reach /admin/users, and recovery is a
+--      hand-written SQL statement in the dashboard, the manual bootstrap
+--      §8 says should apply to admin #1 only.
+--   3. No demoting the last active admin.
+--
+-- Guard 3 is UNREACHABLE as written, and that is worth stating plainly
+-- rather than leaving as a puzzle for the next reader. is_admin() means
+-- the caller is an active admin, and guard 2 means the caller is not the
+-- target, so an active admin other than the target always exists. It is
+-- kept as depth for the plausible future edit that relaxes guard 2 once a
+-- second admin exists, at which point guard 3 becomes the check that
+-- stops the last one going. No test claims to exercise it, because any
+-- such test would really be exercising guard 2.
+-- ---------------------------------------------------------------------
+create or replace function set_user_role(target_user_id uuid, new_role text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  target profiles;
+begin
+  if not is_admin() then
+    raise exception 'admin only' using errcode = 'PT403';
+  end if;
+
+  if new_role not in ('agent', 'admin') then
+    raise exception 'role must be agent or admin' using errcode = 'PT400';
+  end if;
+
+  if target_user_id = auth.uid() then
+    raise exception 'you cannot change your own role' using errcode = 'PT409';
+  end if;
+
+  select * into target from profiles where id = target_user_id;
+  if not found then
+    raise exception 'user not found' using errcode = 'PT404';
+  end if;
+
+  -- Nothing to do, and nothing worth an audit row that says a role changed
+  -- when it did not.
+  if target.role = new_role then
+    return;
+  end if;
+
+  if new_role = 'agent' then
+    if not exists (
+      select 1 from profiles
+       where role = 'admin' and is_active and id <> target_user_id
+    ) then
+      raise exception 'cannot demote the last active admin'
+        using errcode = 'PT409';
+    end if;
+  end if;
+
+  update profiles set role = new_role where id = target_user_id;
+
+  -- Distinct verbs rather than one 'set_user_role' plus a detail column,
+  -- because audit_log has no detail column and the direction is the whole
+  -- point of the entry.
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (
+    auth.uid(),
+    case when new_role = 'admin'
+         then 'promote_user_to_admin'
+         else 'demote_user_to_agent' end,
+    'profiles',
+    target_user_id::text
+  );
+end;
+$$;
+
+revoke all on function clear_must_change_password() from public;
+grant execute on function clear_must_change_password() to authenticated, service_role;
+revoke all on function set_user_role(uuid, text) from public;
+grant execute on function set_user_role(uuid, text) to authenticated, service_role;
 
 -- ---------------------------------------------------------------------
 -- MERCHANTS
