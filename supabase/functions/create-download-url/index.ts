@@ -66,6 +66,27 @@ export default {
       return json({ error: "Document not found" }, 404);
     }
 
+    // Audited BEFORE the URL is minted, and a failed write blocks the download.
+    //
+    // Same ordering and the same trade as read-pre-app-secrets: for data this
+    // sensitive — driver's licences, voided cheques, business verification — an
+    // audit outage refusing access is the right failure, whereas handing out a
+    // signed URL with no record of who asked is not. Note it is not enough to
+    // audit the documents row: bytes leave through the URL, so the mint is the
+    // event worth recording.
+    const { error: auditError } = await ctx.supabaseAdmin
+      .from("audit_log")
+      .insert({
+        actor_id: userId,
+        action: "download_document",
+        table_name: "documents",
+        row_id: String(documentId),
+      });
+    if (auditError) {
+      console.error(`[create-download-url] audit write: ${auditError.message}`);
+      return json({ error: "Could not record the access" }, 500);
+    }
+
     const { data, error: signError } = await ctx.supabaseAdmin.storage
       .from(STORAGE_BUCKET)
       .createSignedUrl(document.file_key as string, SIGNED_URL_TTL_SECONDS, {

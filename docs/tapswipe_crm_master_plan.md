@@ -20,7 +20,15 @@ and admins actually use day to day.
 | Auth | Supabase Auth |
 | File storage | Supabase Storage (private bucket) |
 | Privileged server logic | Supabase Edge Functions |
-| Frontend | **Decided:** Next.js (App Router), started from Supabase's official `create-next-app -e with-supabase` template. Chosen specifically because it comes with cookie-based (`httpOnly`) session handling already wired up — the more secure approach settled on in §8, which a plain client-only React SPA structurally cannot do on its own (there's no server to set an `httpOnly` cookie from). Tier 1 direct `supabase-js` calls from client components still work exactly as designed elsewhere in this plan; Next.js hosts that pattern, it doesn't replace it. |
+| Frontend | **Decided:** Next.js (App Router), started from Supabase's official `create-next-app -e with-supabase` template. Chosen for cookie-based session handling with server-side rendering and route protection — see the correction below on what that does and does not give you. Tier 1 direct `supabase-js` calls from client components still work exactly as designed elsewhere in this plan; Next.js hosts that pattern, it doesn't replace it. |
+
+> **Correction (security audit, 11 Aug 2026): the sessions are not `httpOnly`, and cannot be.** This row previously said the template ships "cookie-based (`httpOnly`) session handling already wired up" and treated that as the deciding reason for Next.js. That was wrong on the facts. `@supabase/ssr` sets `DEFAULT_COOKIE_OPTIONS = { path: "/", sameSite: "lax", httpOnly: false, maxAge: 400 days }` (`node_modules/@supabase/ssr/dist/main/utils/constants.js`) and never sets `secure` at all. `httpOnly: false` is not an oversight to be patched: the browser client hydrates a session by reading `document.cookie` (`dist/main/cookies.js`), so an `httpOnly` cookie would be invisible to it and sign-in would break. No cookie option is overridden anywhere in this repo, so those defaults are what run.
+>
+> **Consequence: the access and refresh tokens are readable by any JavaScript running on the page, so XSS is session theft.** There is no cookie-layer fix, which means **XSS prevention is the real control** — not a mitigation of a lesser problem, but the only thing standing where `httpOnly` was assumed to stand.
+>
+> Two things that genuinely reduce the exposure, neither of which is `httpOnly`: Vercel serves over HTTPS with HSTS, so the missing `secure` flag has little practical effect; and the 400-day `maxAge` is bounded by `jwt_expiry = 3600` plus refresh-token rotation (`supabase/config.toml`).
+>
+> **OPEN FOLLOW-UP — not closed by this correction.** No Content-Security-Policy is set in `next.config.ts`. A CSP is the control that would actually reduce this risk, and it does not exist yet. Choosing Next.js is still defensible for SSR and route protection; the `httpOnly` claim just isn't part of the case.
 | UI / forms | Tailwind CSS + shadcn/ui (ships with the starter template) for components; React Hook Form + Zod for the pre-app form (see §14.5/14.6); TanStack Query for data fetching/caching against Supabase |
 | Frontend hosting | Vercel |
 

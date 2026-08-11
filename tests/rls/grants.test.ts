@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   GRANTS_MIGRATION,
+  NARROW_GRANTS_MIGRATION,
   REVOKE_MIGRATION,
   createTestDb,
   migrationsExcept,
@@ -28,7 +29,13 @@ import {
 /** The four privileges, alphabetical — the order tablePrivileges() returns. */
 const ALL_TABLE_PRIVILEGES = ["DELETE", "INSERT", "SELECT", "UPDATE"];
 
-/** Which of the four table privileges `role` actually holds on `table`. */
+/**
+ * Which of the four DML privileges `role` holds on `table`.
+ *
+ * Deliberately only four. The privileges RLS cannot filter are asserted
+ * separately by nonDmlPrivileges() below, because mixing them into this list
+ * would let a TRUNCATE grant hide inside an expected-set comparison.
+ */
 async function tablePrivileges(
   db: TestDb,
   role: string,
@@ -39,6 +46,47 @@ async function tablePrivileges(
     `select p as privilege
        from unnest(array['SELECT','INSERT','UPDATE','DELETE']) p
       where has_table_privilege('${role}', '${table}', p)
+      order by p`,
+  );
+  return result.map((r) => r.privilege);
+}
+
+/**
+ * The privileges that `GRANT ALL` adds beyond DML, and that RLS says nothing
+ * about.
+ *
+ * TRUNCATE is the one that matters: **RLS does not apply to it**, so a role
+ * holding TRUNCATE can empty a table no matter how careful every policy on it
+ * is. The audit found all 13 tables carrying `GRANT ALL` to `authenticated` on
+ * both the local stack and the linked project — a plain `grant` only adds, and
+ * the legacy blanket grant was only ever revoked from `anon`.
+ */
+async function nonDmlPrivileges(
+  db: TestDb,
+  role: string,
+  table: string,
+): Promise<string[]> {
+  const result = await rows<{ privilege: string }>(
+    db,
+    `select p as privilege
+       from unnest(array['TRUNCATE','REFERENCES','TRIGGER']) p
+      where has_table_privilege('${role}', '${table}', p)
+      order by p`,
+  );
+  return result.map((r) => r.privilege);
+}
+
+/** Which sequence privileges `role` holds. */
+async function sequencePrivileges(
+  db: TestDb,
+  role: string,
+  sequence: string,
+): Promise<string[]> {
+  const result = await rows<{ privilege: string }>(
+    db,
+    `select p as privilege
+       from unnest(array['USAGE','SELECT','UPDATE']) p
+      where has_sequence_privilege('${role}', '${sequence}', p)
       order by p`,
   );
   return result.map((r) => r.privilege);
@@ -76,6 +124,183 @@ describe("grant surface after all migrations", () => {
     ]) {
       expect(await tablePrivileges(db, "authenticated", secrets)).toEqual([]);
       expect(await tablePrivileges(db, "anon", secrets)).toEqual([]);
+    }
+
+    await db.close();
+  });
+
+  it("ends with no privilege RLS cannot filter, and audit_log read-only", async () => {
+    // The end state. On its own this assertion is nearly vacuous — PGlite never
+    // had Supabase's legacy default privileges, so nothing here would have
+    // granted TRUNCATE even without the fix. The test that actually proves the
+    // migration is the before/after one below; this one guards against a future
+    // `grant all` being added by hand.
+    const db = await createTestDb();
+
+    for (const table of [
+      "profiles",
+      "merchants",
+      "leads",
+      "ghost_sheets",
+      "pre_apps",
+      "pre_app_owners",
+      "pre_app_terminal",
+      "pre_app_business_profile",
+      "documents",
+      "support_tickets",
+      "notes",
+      "tasks",
+      "audit_log",
+    ]) {
+      expect(
+        await nonDmlPrivileges(db, "authenticated", table),
+        `authenticated should hold no TRUNCATE/REFERENCES/TRIGGER on ${table}`,
+      ).toEqual([]);
+    }
+
+    // audit_log is the tamper-evidence table. Its INSERT/UPDATE/DELETE grants
+    // used to be held back only by the absence of a policy for those verbs, so
+    // one permissive policy — or one `disable row level security` — would have
+    // made the trail forgeable by any signed-in rep. Every legitimate writer is
+    // a `security definer` function or a service-role Edge Function, both of
+    // which bypass the grant entirely.
+    expect(await tablePrivileges(db, "authenticated", "audit_log")).toEqual([
+      "SELECT",
+    ]);
+
+    // SELECT on a sequence exposes last_value — a free row count of every other
+    // agent's book, past RLS. UPDATE allows setval(), i.e. resetting an id
+    // sequence into collisions. The legacy grant included UPDATE.
+    for (const sequence of [
+      "merchants_id_seq",
+      "leads_id_seq",
+      "pre_apps_id_seq",
+      "audit_log_id_seq",
+    ]) {
+      expect(
+        await sequencePrivileges(db, "authenticated", sequence),
+        `authenticated should hold USAGE alone on ${sequence}`,
+      ).toEqual(["USAGE"]);
+    }
+
+    await db.close();
+  });
+
+  it("takes TRUNCATE back off authenticated on tables that already existed", async () => {
+    // This is the test that proves the audit fix, and it has to construct the
+    // broken state by hand.
+    //
+    // PGlite has no legacy Supabase default privileges, so the suite could never
+    // have caught the original bug: the four verbs in the grants migration are
+    // all PGlite ever had, while the linked project and the local stack both
+    // carried `GRANT ALL` because a plain `grant` only ADDS and the revoke
+    // migration named only `anon`. So the fixture below reproduces production's
+    // real state before asserting the migration corrects it.
+    const db = await createTestDb(
+      await migrationsExcept(NARROW_GRANTS_MIGRATION),
+    );
+
+    // Exactly what `supabase db dump` showed on both environments.
+    await db.exec(`
+      grant all on
+        merchants, leads, pre_apps, documents, notes, tasks, audit_log
+      to authenticated;
+      grant all on merchants_id_seq, audit_log_id_seq to authenticated;
+    `);
+
+    // Baseline, so the assertions afterwards are not vacuous.
+    expect(await nonDmlPrivileges(db, "authenticated", "merchants")).toEqual([
+      "REFERENCES",
+      "TRIGGER",
+      "TRUNCATE",
+    ]);
+    expect(await tablePrivileges(db, "authenticated", "audit_log")).toEqual(
+      ALL_TABLE_PRIVILEGES,
+    );
+    expect(
+      await sequencePrivileges(db, "authenticated", "merchants_id_seq"),
+    ).toEqual(["SELECT", "UPDATE", "USAGE"]);
+
+    await db.exec(await readMigration(NARROW_GRANTS_MIGRATION));
+
+    // TRUNCATE is the one that matters: RLS does not apply to it, so a role
+    // holding it can empty a table however careful the policies are.
+    expect(await nonDmlPrivileges(db, "authenticated", "merchants")).toEqual([]);
+    expect(await nonDmlPrivileges(db, "authenticated", "audit_log")).toEqual([]);
+
+    // The four verbs the app actually needs survive the revoke.
+    expect(await tablePrivileges(db, "authenticated", "merchants")).toEqual(
+      ALL_TABLE_PRIVILEGES,
+    );
+    // …and audit_log drops to read-only.
+    expect(await tablePrivileges(db, "authenticated", "audit_log")).toEqual([
+      "SELECT",
+    ]);
+    expect(
+      await sequencePrivileges(db, "authenticated", "merchants_id_seq"),
+    ).toEqual(["USAGE"]);
+
+    // The secrets tables must come out of a blanket-grant scenario with nothing,
+    // which is the other thing the revoke-then-regrant shape buys.
+    await db.exec(`grant all on pre_app_owner_secrets to authenticated;`);
+    await db.exec(await readMigration(NARROW_GRANTS_MIGRATION));
+    expect(
+      await tablePrivileges(db, "authenticated", "pre_app_owner_secrets"),
+    ).toEqual([]);
+
+    await db.close();
+  });
+
+  it("auto-enables RLS on a table a future migration forgets", async () => {
+    // The `ensure_rls` backstop, adopted from the linked project into
+    // 20260811150000 precisely so it can be asserted instead of described.
+    //
+    // Why it is worth having: a migration that forgets
+    // `alter table ... enable row level security` used to fail two opposite ways
+    // — RLS-on-with-no-policies in production (denies everyone, looks like a
+    // broken feature) and wide open everywhere else (a leak) — with the
+    // environment that looked fine being the one nobody tested. Now both
+    // environments behave the same way, and this test is what says so.
+    const db = await createTestDb();
+
+    await db.exec(`create table forgot_to_enable_rls (id serial primary key);`);
+
+    const [row] = await rows<{ relrowsecurity: boolean }>(
+      db,
+      `select relrowsecurity from pg_class
+        where oid = 'public.forgot_to_enable_rls'::regclass`,
+    );
+
+    expect(
+      row.relrowsecurity,
+      "the event trigger should have enabled RLS on a table that did not ask for it",
+    ).toBe(true);
+
+    // And it is a net, not a policy: the table denies everyone until someone
+    // writes policies, which is the safe direction to fail.
+    expect(
+      await tablePrivileges(db, "authenticated", "forgot_to_enable_rls"),
+    ).toEqual([]);
+
+    await db.close();
+  });
+
+  it("grants no trigger function to authenticated", async () => {
+    // A trigger fires whether or not the querying role holds EXECUTE, so a grant
+    // adds surface for nothing. The linked project had set_updated_at() granted
+    // to `authenticated` from the same legacy default.
+    const db = await createTestDb();
+
+    for (const signature of [
+      "set_updated_at()",
+      "pre_apps_guard_transitions()",
+      "log_cross_agent_change()",
+    ]) {
+      expect(
+        await canExecute(db, "authenticated", signature),
+        `${signature} is a trigger function and needs no grant`,
+      ).toBe(false);
+      expect(await canExecute(db, "anon", signature)).toBe(false);
     }
 
     await db.close();

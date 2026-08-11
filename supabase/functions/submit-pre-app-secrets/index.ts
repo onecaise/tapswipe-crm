@@ -197,16 +197,38 @@ export default {
 
     // actor_id is passed explicitly: a service-role connection has no
     // auth.uid(), so relying on the default would record NULL.
-    await ctx.supabaseAdmin.from("audit_log").insert(
-      stored.map((entry) => ({
-        actor_id: userId,
-        action: `submit_pre_app_secrets:${entry.kind}`,
-        table_name: "pre_apps",
-        row_id: String(preAppId),
-      })),
-    );
+    //
+    // The error IS checked, unlike before, but this cannot fail closed the way
+    // read-pre-app-secrets does — the ciphertext is already written by the time
+    // we get here, so refusing would report failure for work that succeeded and
+    // invite the rep to submit it twice. Reversing the order is not an option
+    // either: the audit row would then claim a write that might never happen.
+    //
+    // So the honest outcome is a 200 that says so. The caller surfaces
+    // `auditWriteFailed`, and the server logs it, rather than the previous
+    // behaviour of discarding the error entirely and leaving SSN and banking
+    // ciphertext stored with no trail and nobody any the wiser.
+    const { error: auditError } = await ctx.supabaseAdmin
+      .from("audit_log")
+      .insert(
+        stored.map((entry) => ({
+          actor_id: userId,
+          action: `submit_pre_app_secrets:${entry.kind}`,
+          table_name: "pre_apps",
+          row_id: String(preAppId),
+        })),
+      );
+    if (auditError) {
+      console.error(
+        `[submit-pre-app-secrets] audit write: ${auditError.message}`,
+      );
+    }
 
     // Reports what is on file. No plaintext, no ciphertext.
-    return json({ ok: true, stored });
+    return json({
+      ok: true,
+      stored,
+      auditWriteFailed: auditError ? true : undefined,
+    });
   }),
 };

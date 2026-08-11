@@ -63,6 +63,9 @@ const AUTH_SHIM = `
 
 export const GRANTS_MIGRATION = "20260805200000_grant_data_api_roles.sql";
 export const REVOKE_MIGRATION = "20260805210000_revoke_legacy_anon_grants.sql";
+/** The audit fix: takes back what a plain `grant` could not remove. */
+export const NARROW_GRANTS_MIGRATION =
+  "20260811143000_narrow_grants_and_audit_trigger.sql";
 
 /** Every migration filename in apply order, minus the ones named. */
 export async function migrationsExcept(

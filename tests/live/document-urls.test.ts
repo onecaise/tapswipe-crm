@@ -20,6 +20,7 @@ import {
   BUCKET,
   type Fixtures,
   functionsAreServed,
+  adminClient,
   anonClient,
   invoke,
   provisionFixtures,
@@ -280,6 +281,76 @@ describe("create-download-url", () => {
     report("no token -> owner's document", status, body);
 
     expect(status).toBe(401);
+  });
+});
+
+describe("document access is audited", () => {
+  // §10 promises an audit trail for sensitive-data access, and until the security
+  // audit these two functions were the gap: an admin could mint a signed URL for
+  // any rep's driver's licence or voided cheque and leave no trace. The bytes
+  // leave through the URL, so the mint is the event worth recording — auditing
+  // only the documents row would miss every read.
+  it("records who was granted a download URL", async () => {
+    const admin = adminClient();
+    await admin
+      .from("audit_log")
+      .delete()
+      .eq("action", "download_document")
+      .eq("row_id", String(fx.documentIds.owner));
+
+    const { status, raw } = await invoke(
+      "create-download-url",
+      { document_id: fx.documentIds.owner },
+      // The admin, not the owner: the cross-agent case is the one that matters.
+      fx.tokens.admin,
+    );
+    expect(status, raw).toBe(200);
+
+    const { data } = await admin
+      .from("audit_log")
+      .select("actor_id, action, table_name, row_id")
+      .eq("action", "download_document")
+      .eq("row_id", String(fx.documentIds.owner));
+
+    expect(data).toEqual([
+      {
+        actor_id: fx.userIds.admin,
+        action: "download_document",
+        table_name: "documents",
+        row_id: String(fx.documentIds.owner),
+      },
+    ]);
+  });
+
+  it("records who was granted an upload URL", async () => {
+    const admin = adminClient();
+    // Cleared first: an earlier case in this file already minted an upload URL
+    // for the SAME merchant as the owner, so without this the assertion below
+    // reads that row and reports the owner's id where the admin's was expected.
+    await admin
+      .from("audit_log")
+      .delete()
+      .eq("action", "upload_document:merchant")
+      .eq("row_id", String(fx.merchantIds.owner));
+
+    const { status, raw } = await invoke(
+      "create-upload-url",
+      { owner_type: "merchant", owner_id: fx.merchantIds.owner },
+      fx.tokens.admin,
+    );
+    expect(status, raw).toBe(200);
+
+    // row_id is the owner record, not a documents id: the documents row does not
+    // exist yet and may never be inserted, so what actually happened here is a
+    // grant of write access to a parent record.
+    const { data } = await admin
+      .from("audit_log")
+      .select("actor_id, action, row_id")
+      .eq("action", "upload_document:merchant")
+      .eq("row_id", String(fx.merchantIds.owner));
+
+    expect(data?.length ?? 0).toBeGreaterThan(0);
+    expect(data?.[0].actor_id).toBe(fx.userIds.admin);
   });
 });
 

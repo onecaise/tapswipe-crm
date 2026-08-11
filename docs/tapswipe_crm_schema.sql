@@ -878,6 +878,102 @@ create trigger pre_apps_set_updated_at
   for each row execute function set_updated_at();
 
 -- =====================================================================
+-- CROSS-AGENT AUDIT TRIGGER — the trail for admin action on other
+-- people's records.
+--
+-- The gap this closes: §10 promises audit logging of admin actions, but
+-- an admin editing or deleting any rep's merchant/lead/pre-app does it
+-- with plain supabase-js. RLS permits it via is_admin() and nothing was
+-- recorded, so the largest privileged surface in the app was the only
+-- unlogged one. Deletes are admin-only across the board and were
+-- equally silent.
+--
+-- Only cross-agent mutations are logged. A rep editing their own lead is
+-- ordinary work, and recording it would bury the entries that matter
+-- under thousands that don't -- the same reasoning that keeps
+-- pre_app_secrets_presence out of the trail.
+--
+-- `security definer` is mandatory here, not stylistic. audit_log has no
+-- INSERT policy for `authenticated`, so a security invoker trigger would
+-- have its insert refused by RLS and would fail the caller's UPDATE
+-- outright. Running as the owner is also what makes this compose with
+-- audit_log's SELECT-only grant above.
+--
+-- auth.uid() still returns the real caller inside a definer function:
+-- definer changes current_user, not the session's JWT claims. The same
+-- property submit_pre_app() relies on, documented there.
+--
+-- AFTER, not BEFORE: the trail should record what actually happened, and
+-- on pre_apps the BEFORE guard trigger may still reject the write.
+--
+-- Reads OLD through to_jsonb rather than OLD.agent_id. All seven tables
+-- carry both columns today, so direct access would work -- but attached
+-- to a table without agent_id it would raise and break the caller's
+-- write, where this yields NULL and merely over-logs. The safer failure
+-- for one function bolted onto seven tables.
+--
+-- 'cross_agent_*' rather than 'admin_*' because the condition actually
+-- tested is "the actor is not this row's owner". Under RLS that means an
+-- admin, but it also catches a service-role connection, which has no
+-- auth.uid() at all and so is caught by `is distinct from` -- logging
+-- privileged server writes is a feature. Naming those rows admin_* would
+-- assert a role nothing here verified.
+--
+-- Note the expected duplication: approve_pre_app and decline_pre_app
+-- write their own audit row AND update a rep's pre_apps, so those events
+-- produce two rows at different granularities. Additive detail, not a
+-- bug.
+--
+-- INSERT is deliberately not covered, so an admin creating a record in a
+-- rep's name (the `insert own` policy allows an admin any agent_id) is
+-- not recorded here.
+-- =====================================================================
+create or replace function log_cross_agent_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  actor        uuid := auth.uid();
+  row_agent_id uuid := (to_jsonb(OLD) ->> 'agent_id')::uuid;
+  new_agent_id uuid := case when TG_OP = 'UPDATE'
+                            then (to_jsonb(NEW) ->> 'agent_id')::uuid end;
+begin
+  -- Reassignment first, and checked separately from ownership on purpose.
+  -- An admin moving a record they THEMSELVES own into another rep's book has
+  -- actor = OLD.agent_id, so the ownership test below would skip it -- yet
+  -- moving a record between books is precisely the privileged act a trail
+  -- exists for.
+  if TG_OP = 'UPDATE' and new_agent_id is distinct from row_agent_id then
+    insert into audit_log (actor_id, action, table_name, row_id)
+    values (actor, 'record_reassigned', TG_TABLE_NAME, to_jsonb(OLD) ->> 'id');
+
+  elsif actor is distinct from row_agent_id then
+    insert into audit_log (actor_id, action, table_name, row_id)
+    values (
+      actor,
+      case TG_OP when 'DELETE' then 'cross_agent_delete'
+                 else 'cross_agent_update' end,
+      TG_TABLE_NAME,
+      to_jsonb(OLD) ->> 'id'
+    );
+  end if;
+
+  -- AFTER trigger: the return value is ignored.
+  return null;
+end;
+$$;
+
+revoke all on function log_cross_agent_change() from public;
+-- Deliberately NOT granted to authenticated: a trigger fires whether or not
+-- the querying role holds EXECUTE. Same treatment as set_updated_at().
+
+create trigger merchants_audit_cross_agent
+  after update or delete on merchants
+  for each row execute function log_cross_agent_change();
+
+-- =====================================================================
 -- PRE-APP STATUS GUARD.
 --
 -- Why this exists: the pre_apps update policy is
@@ -1613,6 +1709,13 @@ grant execute on function search_crm(text, int) to authenticated, service_role;
 -- =====================================================================
 grant usage on schema public to anon, authenticated, service_role;
 
+-- A plain `grant` only ADDS. On a project created before Supabase's
+-- always-revoked default, every table in `public` already carried a legacy
+-- blanket grant to `authenticated`, so layering the intended verbs on top left
+-- the extras in place -- and `ALL` includes TRUNCATE, which **RLS does not
+-- filter**. The audit found exactly that on both the local stack and the linked
+-- project. So the model has to be stated subtractively first; see the
+-- revoke-from-authenticated block further down.
 grant select, insert, update, delete on
   profiles,
   merchants,
@@ -1625,9 +1728,22 @@ grant select, insert, update, delete on
   documents,
   support_tickets,
   notes,
-  tasks,
-  audit_log
+  tasks
 to authenticated;
+
+-- audit_log is SELECT-only, and deliberately not in the list above.
+--
+-- It is the tamper-evidence table: everything else in this schema can be
+-- reconstructed or corrected, but a forged or erased audit row destroys the one
+-- record of who did what. Until now its INSERT/UPDATE/DELETE grants were held
+-- back by nothing but the absence of a policy for those verbs -- one permissive
+-- policy, or one `disable row level security`, and any signed-in rep could
+-- rewrite the trail.
+--
+-- Nothing legitimate loses access. Every writer is either a `security definer`
+-- function (which runs as the owner and bypasses both RLS and grants -- see
+-- log_cross_agent_change and the pre-app RPCs) or a service-role Edge Function.
+grant select on audit_log to authenticated;
 
 -- USAGE only, not SELECT: nextval() is all a serial insert needs, and
 -- SELECT on a sequence would hand out last_value — a free row count of
@@ -1758,6 +1874,45 @@ grant execute on function convert_ghost_sheet_to_lead(int) to authenticated, ser
 revoke all on all tables in schema public from anon;
 revoke all on all sequences in schema public from anon;
 revoke all on all functions in schema public from anon;
+
+-- The same treatment for `authenticated`, and it was missing for a long time.
+--
+-- The blanket revoke above names only `anon`, and `alter default privileges`
+-- (below) binds FUTURE objects only -- so the 13 tables that already existed
+-- kept their legacy `GRANT ALL` to `authenticated`. The audit confirmed it on
+-- the local stack and on the linked project: `GRANT ALL ON TABLE ... TO
+-- "authenticated"` everywhere, where this document said
+-- `select, insert, update, delete`.
+--
+-- What `ALL` adds beyond those four verbs:
+--
+--   TRUNCATE   -- and **RLS does not apply to TRUNCATE**. Every row-level
+--                protection in this schema is silent on it.
+--   REFERENCES -- allows pointing a foreign key at the table.
+--   TRIGGER    -- allows attaching a trigger to it.
+--
+-- Not reachable through the API today: PostgREST issues only
+-- SELECT/INSERT/UPDATE/DELETE, and no `security invoker` RPC here contains a
+-- TRUNCATE, so exploiting it needs a direct Postgres connection as a role that
+-- has no password. It is removed because "unreachable" is a property of today's
+-- surface, not a guarantee, and because a grant that contradicts the documented
+-- model is exactly the drift the whole grants-versus-RLS section exists to
+-- prevent.
+--
+-- Order matters: revoke first, then the explicit grants above are what remains.
+-- Sequences go back to USAGE alone -- the legacy grant included UPDATE, i.e.
+-- setval(), which would let a client reset an id sequence into collisions.
+revoke all on all tables in schema public from authenticated;
+revoke all on all sequences in schema public from authenticated;
+
+-- Trigger functions hold no grant at all: a trigger fires whether or not the
+-- querying role holds EXECUTE, so a grant widens the surface for nothing. The
+-- linked project had `set_updated_at()` granted to `authenticated` from the same
+-- legacy default -- harmless in practice, since Postgres refuses a direct call
+-- to a function returning `trigger`, but it is not supposed to be there.
+revoke all on function set_updated_at() from authenticated;
+revoke all on function pre_apps_guard_transitions() from authenticated;
+revoke all on function log_cross_agent_change() from authenticated;
 
 revoke all on
   pre_app_owner_secrets,

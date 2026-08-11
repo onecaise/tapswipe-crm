@@ -78,6 +78,25 @@ export default {
       crypto.randomUUID(),
     );
 
+    // Audited before the URL is minted, matching create-download-url and
+    // read-pre-app-secrets. row_id is the owner record rather than a documents
+    // id, because the documents row does not exist yet — the caller inserts it
+    // after the bytes land, and may never do so. So this records the grant of
+    // write access to a parent record, which is the part that actually happened
+    // here.
+    const { error: auditError } = await ctx.supabaseAdmin
+      .from("audit_log")
+      .insert({
+        actor_id: userId,
+        action: `upload_document:${ownerType}`,
+        table_name: "documents",
+        row_id: String(ownerId),
+      });
+    if (auditError) {
+      console.error(`[create-upload-url] audit write: ${auditError.message}`);
+      return json({ error: "Could not record the access" }, 500);
+    }
+
     // Only now is the service-role client used, and only to sign.
     const { data, error } = await ctx.supabaseAdmin.storage
       .from(STORAGE_BUCKET)

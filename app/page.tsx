@@ -4,7 +4,6 @@ import { AuthButton } from "@/components/auth-button";
 import { Hero } from "@/components/hero";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { ConnectSupabaseSteps } from "@/components/tutorial/connect-supabase-steps";
-import { SignUpUserSteps } from "@/components/tutorial/sign-up-user-steps";
 import { hasEnvVars } from "@/lib/utils";
 import Link from "next/link";
 import { Suspense } from "react";
@@ -34,7 +33,21 @@ export default function Home() {
           <Hero />
           <main className="flex-1 flex flex-col gap-6 px-4">
             <h2 className="font-medium text-xl mb-4">Next steps</h2>
-            {hasEnvVars ? <SignUpUserSteps /> : <ConnectSupabaseSteps />}
+            {/* SignUpUserSteps deliberately removed, not swapped for another
+                tutorial panel. It linked to /auth/sign-up — a route that does
+                not exist, so it 404'd — and advertised self-service signup on a
+                tool where §8 forbids it outright: accounts come from the
+                create-user Edge Function only, and a walk-up auth.users row with
+                no profiles row can log in, see nothing, and never self-heal.
+                Showing the door is a problem even when the door is locked. */}
+            {hasEnvVars ? (
+              <p className="text-sm text-muted-foreground">
+                Connected. Sign in to continue — accounts are created by an
+                admin, not by signing up.
+              </p>
+            ) : (
+              <ConnectSupabaseSteps />
+            )}
           </main>
         </div>
 
