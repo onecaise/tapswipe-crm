@@ -112,6 +112,14 @@ describe("grant surface after all migrations", () => {
       ALL_TABLE_PRIVILEGES,
     );
 
+    // tasks keeps all four, and this pins why: unlike notes it has an UPDATE
+    // policy (`completed` is a checkbox whose purpose is to be toggled), and an
+    // admin-only DELETE policy still backs the DELETE verb. Audited alongside
+    // the notes revoke in 20260812143407 and found clean.
+    expect(await tablePrivileges(db, "authenticated", "tasks")).toEqual(
+      ALL_TABLE_PRIVILEGES,
+    );
+
     // documents is narrower than the rest: no UPDATE. Nothing edits a document
     // row in place — it is replaced by a new upload plus a delete — so the
     // table has never had an UPDATE policy, and the grant that outlived that
@@ -119,6 +127,17 @@ describe("grant surface after all migrations", () => {
     // the quiet way: privilege check passes, RLS filters to zero rows, and a
     // future edit affordance reports a save that did nothing.
     expect(await tablePrivileges(db, "authenticated", "documents")).toEqual([
+      "DELETE",
+      "INSERT",
+      "SELECT",
+    ]);
+
+    // notes is narrower for a different reason: append-only by design, so a
+    // note can be added and removed by an admin but never rewritten. Same dead
+    // UPDATE grant as documents, revoked one migration later by
+    // 20260812143407 — it was the last verb in the schema that no policy
+    // backed.
+    expect(await tablePrivileges(db, "authenticated", "notes")).toEqual([
       "DELETE",
       "INSERT",
       "SELECT",

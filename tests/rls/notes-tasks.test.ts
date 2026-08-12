@@ -222,13 +222,16 @@ describe("notes writes", () => {
     const leadId = await idOf("leads", "dba", "Agent Lead A");
 
     await asUser(db, AGENT_ID);
-    // No update policy exists, for anyone. Note this is FILTERED, not refused:
-    // zero rows match, so the statement succeeds and changes nothing. That is
-    // exactly why the UI must not offer an edit affordance — the rep would get
-    // a successful save that did nothing.
-    await db.exec(
-      `update notes set body = 'Rewritten.' where owner_id = ${leadId};`,
-    );
+    // No update policy exists, for anyone — and as of 20260812143407 no UPDATE
+    // grant either, so this is REFUSED rather than filtered. It used to be the
+    // latter: zero rows matched, the statement succeeded, and the rep would
+    // have seen a save that did nothing. The grant is what turns that silent
+    // no-op into an error at the layer where the decision actually lives.
+    await expect(
+      db.exec(
+        `update notes set body = 'Rewritten.' where owner_id = ${leadId};`,
+      ),
+    ).rejects.toThrow(/permission denied/i);
 
     await asPlatform(db);
     const [{ n }] = await rows<CountRow>(
@@ -240,15 +243,19 @@ describe("notes writes", () => {
 
   it("does not let even an admin rewrite a note", async () => {
     await asUser(db, ADMIN_ID);
-    await db.exec(`update notes set body = 'Admin rewrite.';`);
+    // is_admin() appears in no update policy here because there is no update
+    // policy at all, and the revoked grant is not role-aware either. Both locks
+    // are on the table rather than on the caller: append-only means
+    // append-only.
+    await expect(
+      db.exec(`update notes set body = 'Admin rewrite.';`),
+    ).rejects.toThrow(/permission denied/i);
 
     await asPlatform(db);
     const [{ n }] = await rows<CountRow>(
       db,
       `select count(*)::int as n from notes where body = 'Admin rewrite.'`,
     );
-    // is_admin() appears in no update policy here because there is no update
-    // policy at all. Append-only means append-only.
     expect(n).toBe(0);
   });
 

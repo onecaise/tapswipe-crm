@@ -703,8 +703,9 @@ create policy "delete own or admin" on documents
 -- because a policy-only omission fails the quiet way: the privilege check would
 -- pass, RLS would filter the statement to zero rows, and a future edit
 -- affordance would report a save that did nothing — the same trap `notes`
--- carries a warning about. With the grant gone the answer is "permission
--- denied", at the layer where the decision actually lives.
+-- carried until 20260812143407 closed it there too. With the grant gone the
+-- answer is "permission denied", at the layer where the decision actually
+-- lives.
 --
 -- The delete policy is the standing exception to admin-only deletes: reps
 -- remove their own uploads. That is also why documents needs the cross-agent
@@ -792,8 +793,10 @@ alter table notes enable row level security;
 -- A correction is a second note, which keeps the trail readable in order and
 -- means a quoted note cannot have changed since it was quoted. This is the one
 -- Tier 1 table without an update policy, so it reads like an omission -- it
--- isn't. The UI must not offer an edit affordance, because RLS would filter the
--- UPDATE to zero rows and the rep would see a save that silently did nothing.
+-- isn't. The UPDATE grant is withheld as well (see the grants block), so the UI
+-- must not offer an edit affordance and no longer can: the answer is
+-- "permission denied for table notes" rather than a save that silently did
+-- nothing.
 create policy "select own or admin" on notes
   for select using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
 create policy "insert own" on notes
@@ -1814,11 +1817,14 @@ grant execute on function search_crm(text, int) to authenticated, service_role;
 --   anon          nothing. This is an admin-provisioned CRM with sign-up
 --                 off; there is no public data. Login goes through
 --                 /auth/v1, not PostgREST, so anon never needs a table.
---   authenticated broad grants on the 13 non-secret tables. Broader than
---                 the policies on purpose — RLS is the enforcement layer
---                 and is what the tests assert. A grant list that tried
---                 to mirror each table's policy set would be a second,
---                 untested copy of the rules, free to drift.
+--   authenticated the 13 non-secret tables, one verb at a time: a verb is
+--                 granted only where a policy backs it, so the two layers
+--                 agree table-for-table. RLS is still the enforcement
+--                 layer and is what the tests assert — the grant is the
+--                 second lock, and it is what makes an unbacked write
+--                 fail loudly instead of quietly. Four tables are
+--                 therefore narrower than the standard four verbs; see
+--                 the rule restated above the list below.
 --   service_role  everything, including the secrets tables. It bypasses
 --                 RLS by design; this is the grant the Edge Functions
 --                 run on.
@@ -1862,8 +1868,10 @@ grant usage on schema public to anon, authenticated, service_role;
 -- The rule this list follows: a verb is granted only where a policy backs it.
 -- A grant with no matching policy is dead weight that fails the quiet way --
 -- the privilege check passes, RLS filters the statement to zero rows, and the
--- caller sees a save that did nothing. Three tables are therefore narrower than
--- the rest, and each exception is stated where the table is defined.
+-- caller sees a save that did nothing. Four tables are therefore narrower than
+-- the rest, and each exception is stated where the table is defined. As of
+-- 20260812143407 the rule holds with no exceptions left: every verb below is
+-- backed by a policy, and every policy has its verb.
 grant select, insert, update, delete on
   merchants,
   leads,
@@ -1873,18 +1881,18 @@ grant select, insert, update, delete on
   pre_app_terminal,
   pre_app_business_profile,
   support_tickets,
-  notes,
   tasks
 to authenticated;
 
 -- documents: no UPDATE. Nothing edits a document row in place; it is replaced
 -- by a new upload plus a delete.
---
--- (`notes` is the remaining table in the list above whose UPDATE grant no
--- policy backs -- append-only by design. Left as-is for now: unlike documents
--- it was not part of the audit's findings, and narrowing it is a separate
--- decision rather than something to fold in silently here.)
 grant select, insert, delete on documents to authenticated;
+
+-- notes: no UPDATE either, for a different reason -- append-only by design, so
+-- that a note can be added and removed but never silently rewritten. Same
+-- shape, same argument as documents: the missing policy already denied the
+-- write, and revoking the grant is what makes it deny loudly.
+grant select, insert, delete on notes to authenticated;
 
 -- profiles: SELECT only, matching its single SELECT policy. Every write is a
 -- security definer RPC or a service-role Edge Function, both of which bypass

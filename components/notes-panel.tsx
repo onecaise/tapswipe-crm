@@ -14,11 +14,12 @@ import { Textarea } from "@/components/ui/textarea";
  * The notes trail on a lead / pre-app / merchant / ghost sheet.
  *
  * **Notes are append-only, and this panel has no edit affordance on purpose.**
- * There is no update policy on `notes` for anyone, admins included, so an UPDATE
- * would be filtered to zero rows: the rep would see a successful save that
- * changed nothing, which is worse than not offering it. A correction is a new
- * note, which is also what keeps the trail readable in order. Removal is
- * admin-only, per the delete policy added in 20260810171500.
+ * There is no update policy on `notes` for anyone, admins included, and since
+ * 20260812143407 no UPDATE grant either, so an UPDATE from here would come back
+ * "permission denied" rather than reporting a successful save that changed
+ * nothing. A correction is a new note, which is also what keeps the trail
+ * readable in order. Removal is admin-only, per the delete policy added in
+ * 20260810171500.
  *
  * `ownerType` and `ownerId` arrive as props from a server page that has already
  * loaded that parent row under RLS. They are never read from the URL here:

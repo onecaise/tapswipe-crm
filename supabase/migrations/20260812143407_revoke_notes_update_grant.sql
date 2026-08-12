@@ -1,0 +1,56 @@
+-- Revoke the dead UPDATE grant on notes -- the fifth finding, deferred.
+--
+-- Mirrors docs/tapswipe_crm_schema.sql, which is the spec.
+--
+-- 20260811173000 closed four access-control gaps and named this one as the
+-- thing it was not doing (:99-102): the identical dead UPDATE grant on `notes`,
+-- left out because it was not among the audit's findings and narrowing it was a
+-- separate decision rather than something to fold in silently. This migration
+-- is that decision.
+
+-- ---------------------------------------------------------------------
+-- 1. Dead grant: UPDATE on notes.
+--
+-- notes has had three policies since 20260804201300:444-447 -- select, insert,
+-- and (from 20260810171500:58-59) an admin-only delete -- and no UPDATE policy,
+-- because notes are APPEND-ONLY by design: a correction is a second note, so
+-- the trail reads in order and a quoted note cannot have changed since it was
+-- quoted. Yet 20260811143000:52 granted all four verbs.
+--
+-- Exactly the shape of the documents grant revoked at 20260811173000:104, and
+-- fail-closed for the same reason -- RLS denies what no policy permits. The
+-- trap is the failure mode CLAUDE.md has always described for this table: a
+-- future edit affordance would pass the privilege check, match zero rows, and
+-- report a save that silently did nothing. With the grant gone the answer is
+-- "permission denied for table notes", at the layer where the decision lives.
+--
+-- Nothing legitimate loses access. components/notes-panel.tsx offers no edit
+-- affordance on purpose and issues no UPDATE; the only writers are its insert
+-- and the admin-only delete. tests/rls/notes-tasks.test.ts asserts both
+-- rewrite attempts -- agent and admin -- are now refused rather than filtered.
+--
+-- The update arm of notes_audit_cross_agent (20260811160000:148-151) stays
+-- attached and stays unreachable, for the reason given there: if an update
+-- policy is ever added, the trail should not have to be remembered separately.
+-- ---------------------------------------------------------------------
+revoke update on notes from authenticated;
+
+-- ---------------------------------------------------------------------
+-- 2. tasks: audited, clean, no change.
+--
+-- Checked for the same defect and it does not have it. Every verb granted to
+-- `authenticated` at 20260811143000:53 is backed by a policy from
+-- 20260805103000:242-252 and 20260810171500:61-62 -- "select own or admin",
+-- "insert own", "update own or admin", "admin delete only". The update policy
+-- is the deliberate difference from notes: `completed` is a checkbox whose
+-- whole purpose is to be toggled, and due_date moves when a callback slips.
+-- (An admin-only DELETE policy still counts as backing the grant: the verb is
+-- reachable, just not by a rep.) tasks_id_seq holds USAGE only, which the
+-- insert path consumes -- not the SELECT that would hand out last_value.
+--
+-- Nothing else on the grant surface is unbacked either: merchants, leads,
+-- ghost_sheets, pre_apps, the three pre_app children and support_tickets all
+-- carry the full four policies. So this was the last dead DML grant in the
+-- schema, and the rule stated in the spec's grants block -- a verb is granted
+-- only where a policy backs it -- now holds with no exceptions.
+-- ---------------------------------------------------------------------
