@@ -270,6 +270,27 @@ describe("support tickets write scoping", () => {
 });
 
 describe("support tickets detail lookup", () => {
+  it("lets the owning agent read their own ticket by id", async () => {
+    await asPlatform(db);
+    const [own] = await rows<{ id: number }>(
+      db,
+      `select id from support_tickets where subject = 'Terminal will not batch'`,
+    );
+
+    await asUser(db, AGENT_ID);
+    const result = await rows<TicketRow>(
+      db,
+      // The detail page's own query shape: one row, by id, with no agent_id
+      // filter of its own. The negative below is only meaningful next to this —
+      // a deny-everyone policy would satisfy "cannot see another agent's" while
+      // breaking every ticket page in the app.
+      `select ${LIST_COLUMNS} from support_tickets where id = ${own.id}`,
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].subject).toBe("Terminal will not batch");
+  });
+
   it("cannot see another agent's ticket by id", async () => {
     await asPlatform(db);
     const [other] = await rows<{ id: number }>(
@@ -302,6 +323,78 @@ describe("support tickets detail lookup", () => {
     await expect(
       db.exec(`delete from merchants where dba = 'Agent Inactive Co';`),
     ).rejects.toThrow(/foreign key|violates/i);
+  });
+});
+
+describe("support ticket priority", () => {
+  it("stores every level the form offers", async () => {
+    await asPlatform(db);
+    const [own] = await rows<{ id: number }>(
+      db,
+      `select id from support_tickets where subject = 'Terminal will not batch'`,
+    );
+
+    // priority is bare `text` — no check constraint, deliberately, so an admin
+    // can introduce a level without a migration. Asserted rather than assumed:
+    // the form was reported as offering only "Normal", and the question of
+    // whether the database or the UI was the limit is exactly what this pins.
+    // If someone ever adds a constraint, this fails and says so.
+    for (const level of ["Low", "Normal", "High", "Urgent"]) {
+      await asUser(db, AGENT_ID);
+      await db.exec(
+        `update support_tickets set priority = '${level}' where id = ${own.id};`,
+      );
+
+      const [row] = await rows<{ priority: string }>(
+        db,
+        `select priority from support_tickets where id = ${own.id}`,
+      );
+      expect(row.priority).toBe(level);
+    }
+  });
+
+  it("lets an admin change priority and status on a ticket they do not own", async () => {
+    await asPlatform(db);
+    const [own] = await rows<{ id: number }>(
+      db,
+      `select id from support_tickets where subject = 'Terminal will not batch'`,
+    );
+
+    await asUser(db, ADMIN_ID);
+    await db.exec(
+      `update support_tickets set priority = 'Urgent', status = 'pending'
+        where id = ${own.id};`,
+    );
+
+    await asPlatform(db);
+    const [row] = await rows<{ priority: string; status: string }>(
+      db,
+      `select priority, status from support_tickets where id = ${own.id}`,
+    );
+    expect(row).toEqual({ priority: "Urgent", status: "pending" });
+  });
+
+  it("touches nothing when a non-owning agent tries the same edit", async () => {
+    await asPlatform(db);
+    const [other] = await rows<{ id: number }>(
+      db,
+      `select id from support_tickets where subject = 'Reprint receipts'`,
+    );
+
+    await asUser(db, AGENT_ID);
+    // Filtered, not refused: the update policy matches zero rows, so the
+    // statement succeeds and changes nothing. This is why the form passes
+    // count: "exact" and treats 0 as a failure.
+    await db.exec(
+      `update support_tickets set priority = 'Urgent' where id = ${other.id};`,
+    );
+
+    await asPlatform(db);
+    const [row] = await rows<{ priority: string }>(
+      db,
+      `select priority from support_tickets where id = ${other.id}`,
+    );
+    expect(row.priority).toBe("Normal");
   });
 });
 

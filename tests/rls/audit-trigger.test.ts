@@ -305,6 +305,96 @@ describe("all eight tables are covered", () => {
   }
 });
 
+describe("support_ticket_replies — a second function, for a table with no agent_id", () => {
+  /**
+   * Replies are deliberately NOT in the eight above. log_cross_agent_change()
+   * reads `agent_id` by name out of to_jsonb, and this table has none — author_id
+   * records who spoke, and ownership lives on the parent ticket. Attached to the
+   * generic function the read would yield NULL, `actor is distinct from null`
+   * would be true for every caller, and every reply including a rep's own would
+   * log a cross_agent_insert. So log_cross_agent_reply() resolves the owner
+   * through support_tickets instead.
+   *
+   * Both directions matter here, and the negative more than the positive: an
+   * admin answering a rep's ticket is the event worth recording, and the rep's
+   * own replies are the ordinary work that would bury it.
+   */
+  async function ticketId(db: TestDb, subject: string): Promise<number> {
+    await asPlatform(db);
+    const [row] = await rows<{ id: number }>(
+      db,
+      `select id from support_tickets where subject = '${subject}'`,
+    );
+    return row.id;
+  }
+
+  it("records an admin replying on a rep's ticket", async () => {
+    const id = await ticketId(db, "Terminal will not batch");
+
+    await asUser(db, ADMIN_ID);
+    await db.exec(
+      `insert into support_ticket_replies (ticket_id, author_id, body)
+       values (${id}, '${ADMIN_ID}', 'Swap dispatched.');`,
+    );
+
+    const audit = await auditRows(db);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({
+      actor_id: ADMIN_ID,
+      action: "cross_agent_insert",
+      table_name: "support_ticket_replies",
+    });
+  });
+
+  it("stays quiet when the rep replies on their own ticket", async () => {
+    const id = await ticketId(db, "Terminal will not batch");
+
+    await asUser(db, AGENT_ID);
+    await db.exec(
+      `insert into support_ticket_replies (ticket_id, author_id, body)
+       values (${id}, '${AGENT_ID}', 'Merchant confirmed.');`,
+    );
+
+    // The whole point of resolving the owner through the parent. Attached to the
+    // generic function this would have logged, and the trail would fill with a
+    // rep answering their own ticket.
+    expect(await auditRows(db)).toHaveLength(0);
+  });
+
+  it("records an admin deleting a rep's reply", async () => {
+    const id = await ticketId(db, "Terminal will not batch");
+
+    // Written AS the agent, not as the platform owner: an owner insert has no
+    // auth.uid(), so it would stamp a cross_agent_insert of its own and the
+    // count below would be measuring the fixture rather than the delete.
+    await asUser(db, AGENT_ID);
+    await db.exec(
+      `insert into support_ticket_replies (ticket_id, author_id, body)
+       values (${id}, '${AGENT_ID}', 'Merchant confirmed receipt.');`,
+    );
+    expect(await auditRows(db)).toHaveLength(0);
+
+    await asPlatform(db);
+    const [reply] = await rows<{ id: number }>(
+      db,
+      `select id from support_ticket_replies
+        where ticket_id = ${id} and author_id = '${AGENT_ID}' order by id asc`,
+    );
+
+    await asUser(db, ADMIN_ID);
+    await db.exec(`delete from support_ticket_replies where id = ${reply.id};`);
+
+    const audit = await auditRows(db);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({
+      actor_id: ADMIN_ID,
+      action: "cross_agent_delete",
+      table_name: "support_ticket_replies",
+    });
+    expect(Number(audit[0].row_id)).toBe(reply.id);
+  });
+});
+
 describe("documents — the eighth table, and the delete that nothing logged", () => {
   /**
    * documents was deliberately excluded from this trigger on the grounds that

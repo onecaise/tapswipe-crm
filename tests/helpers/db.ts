@@ -172,7 +172,8 @@ export const OTHER_AGENT_ID = "33333333-3333-3333-3333-333333333333";
 /**
  * Seeds one admin and two agents, plus leads, ghost sheets, merchants,
  * documents, pre-apps (with owners, terminal, business profile and stand-in
- * ciphertext), support tickets, notes and tasks owned by each agent.
+ * ciphertext), support tickets and their replies, notes and tasks owned by each
+ * agent.
  *
  * Two agents rather than one on purpose: with a single agent, a policy bug that
  * returned "all rows belonging to any agent" would be indistinguishable from
@@ -388,6 +389,13 @@ export async function seed(db: TestDb): Promise<void> {
         'Other agent task', current_date, false);
   `);
 
+  // NOT seeded here: support_ticket_replies. It arrived in 20260812154523, and
+  // the regression suites build a database from a PREFIX of the migrations and
+  // then call this function — so anything named here that a prefix has not
+  // created yet fails those tests with "relation does not exist", pointing
+  // nowhere near the cause. Same constraint as the column rule above.
+  // tests/rls/support-ticket-replies.test.ts seeds its own thread instead.
+
   // Everything above is inserted by the platform owner, which has no auth.uid(),
   // so log_cross_agent_change() sees actor NULL against a real agent_id and
   // records a cross_agent_insert for every seeded merchant, lead, ghost sheet,
@@ -418,6 +426,11 @@ export async function seed(db: TestDb): Promise<void> {
  * actually listed, so leaving them to the cascade would let their ids drift
  * upward test after test — and an assertion about a specific id would then
  * pass or fail depending on what ran before it.
+ *
+ * support_ticket_replies is the deliberate exception: naming it here would break
+ * the regression suites, which truncate against a migration prefix that predates
+ * the table. The cascade from support_tickets still removes its rows; only its
+ * sequence drifts, and no test asserts a literal reply id.
  */
 export async function resetData(db: TestDb): Promise<void> {
   await asPlatform(db);

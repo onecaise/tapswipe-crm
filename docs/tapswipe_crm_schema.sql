@@ -757,6 +757,60 @@ create policy "admin delete only" on support_tickets
   for delete using (is_admin());
 
 -- ---------------------------------------------------------------------
+-- SUPPORT TICKET REPLIES — the conversation on a ticket.
+--
+-- A child of support_tickets rather than a use of `notes`, and the reason is
+-- the policy rather than the shape. notes is scoped own-or-admin, so an admin's
+-- reply on a rep's ticket would be invisible to the rep -- the one person who
+-- has to read it. Replies are scoped through the PARENT instead: whoever can
+-- see the ticket sees its replies, which is what makes this a conversation and
+-- not two private monologues. (notes.owner_type also has no 'support_ticket'
+-- member, and this is why it is not being given one.)
+--
+-- APPEND-ONLY, like notes and for the same reason: a reply is a record of what
+-- was said, and the correction for a wrong one is another reply. No update
+-- policy, and -- per the rule in the grants block -- no update grant either.
+--
+-- author_id is not an ownership column. It records who spoke; visibility comes
+-- from the parent. That is why the insert policy pins it to auth.uid() rather
+-- than trusting the client: without that conjunct a rep could post a reply
+-- under the admin's name on their own ticket.
+-- ---------------------------------------------------------------------
+create table support_ticket_replies (
+  id serial primary key,
+  -- on delete cascade for the reason every pre-app child carries it: the
+  -- parent's admin-only DELETE would otherwise fail on this FK.
+  ticket_id int references support_tickets(id) on delete cascade not null,
+  author_id uuid references profiles(id) not null,
+  body text not null,
+  created_at timestamptz default now()
+);
+
+alter table support_ticket_replies enable row level security;
+
+-- Same shape as the pre_app children: is_admin() first and unqualified, and
+-- is_active_agent() OUTSIDE the exists(), ANDed with it -- the activity check
+-- is about the caller, not about the parent row.
+create policy "select via parent ticket" on support_ticket_replies
+  for select using (
+    is_admin() or (is_active_agent() and exists (
+      select 1 from support_tickets
+       where support_tickets.id = ticket_id and support_tickets.agent_id = auth.uid()
+    ))
+  );
+create policy "insert via parent ticket" on support_ticket_replies
+  for insert with check (
+    author_id = auth.uid() and (
+      is_admin() or (is_active_agent() and exists (
+        select 1 from support_tickets
+         where support_tickets.id = ticket_id and support_tickets.agent_id = auth.uid()
+      ))
+    )
+  );
+create policy "admin delete only" on support_ticket_replies
+  for delete using (is_admin());
+
+-- ---------------------------------------------------------------------
 -- NOTES & TASKS — generic, attach to any of lead / pre_app / merchant /
 -- ghost_sheet via owner_type + owner_id.
 --
@@ -889,6 +943,9 @@ create index idx_tasks_owner on tasks(owner_type, owner_id);
 -- `exists (select 1 from pre_apps where pre_apps.id = pre_app_id ...)`,
 -- so they filter on pre_app_id on every read and write
 create index idx_pre_app_owners_pre_app_id on pre_app_owners(pre_app_id);
+-- Same reasoning, different parent: support_ticket_replies reaches its check
+-- through support_tickets, and the thread is always read by ticket_id.
+create index idx_support_ticket_replies_ticket on support_ticket_replies(ticket_id);
 -- pre_app_terminal, pre_app_business_profile and the three *_secrets tables
 -- need no index here: their `unique (pre_app_id)` / `unique (pre_app_owner_id)`
 -- constraint already creates a unique btree index on exactly that column,
@@ -1117,6 +1174,83 @@ create trigger tasks_audit_cross_agent
 create trigger documents_audit_cross_agent
   after insert or update or delete on documents
   for each row execute function log_cross_agent_change();
+
+-- ---------------------------------------------------------------------
+-- support_ticket_replies gets its OWN function, not the one above.
+--
+-- log_cross_agent_change() reads `agent_id` by name out of to_jsonb(NEW/OLD).
+-- This table has no such column -- author_id records who spoke, and ownership
+-- lives on the parent ticket -- so the read yields NULL, `actor is distinct
+-- from null` is true for every caller, and every reply including a rep's own
+-- would log a cross_agent_insert. That is precisely the noise the "a rep
+-- editing their own lead is ordinary work" rule exists to avoid.
+--
+-- Skipping the trigger entirely was the other option, and it is wrong here:
+-- an admin replying on a rep's ticket is exactly the class of event this
+-- mechanism exists to record, and no write to support_tickets accompanies it,
+-- so the parent's trigger does not fire either.
+--
+-- security definer for the same reason its sibling is: audit_log has no insert
+-- policy, so a caller-run function could not write the row.
+--
+-- Fail-closed, deliberately: no EXCEPTION block, so a failed audit insert rolls
+-- back the reply that triggered it. A reply cannot be posted while its trail
+-- quietly is not.
+-- ---------------------------------------------------------------------
+create or replace function log_cross_agent_reply()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  actor         uuid := auth.uid();
+  ticket_owner  uuid;
+  reply         jsonb;
+begin
+  -- Branch before touching either record. OLD is NOT ASSIGNED on an INSERT and
+  -- NEW is not on a DELETE, and reading the wrong one raises "record is not
+  -- assigned yet" -- which would break every reply. This is the same trap
+  -- log_cross_agent_change() opens with a comment about.
+  if TG_OP = 'DELETE' then
+    reply := to_jsonb(OLD);
+  else
+    reply := to_jsonb(NEW);
+  end if;
+
+  select agent_id into ticket_owner
+    from support_tickets
+   where id = (reply ->> 'ticket_id')::int;
+
+  -- The rep's own replies on their own ticket are ordinary work. Everything
+  -- else -- an admin answering, or a rep somehow reaching another book -- is
+  -- what the trail is for.
+  if actor is distinct from ticket_owner then
+    insert into audit_log (actor_id, action, table_name, row_id)
+    values (
+      actor,
+      case TG_OP when 'DELETE' then 'cross_agent_delete'
+                 when 'UPDATE' then 'cross_agent_update'
+                 else 'cross_agent_insert' end,
+      TG_TABLE_NAME,
+      reply ->> 'id'
+    );
+  end if;
+
+  -- AFTER trigger: the return value is ignored.
+  return null;
+end;
+$$;
+
+-- Not granted to anyone, like its sibling: a trigger function is invoked by the
+-- trigger, running as its owner. Postgres grants EXECUTE to PUBLIC on every new
+-- function, so this line is what closes it.
+revoke all on function log_cross_agent_reply() from public;
+revoke all on function log_cross_agent_reply() from anon, authenticated;
+
+create trigger support_ticket_replies_audit_cross_agent
+  after insert or update or delete on support_ticket_replies
+  for each row execute function log_cross_agent_reply();
 
 -- =====================================================================
 -- PRE-APP STATUS GUARD.
@@ -1894,6 +2028,12 @@ grant select, insert, delete on documents to authenticated;
 -- write, and revoking the grant is what makes it deny loudly.
 grant select, insert, delete on notes to authenticated;
 
+-- support_ticket_replies: append-only, so the same three verbs as notes. The
+-- table was created this way rather than narrowed later, which is the point of
+-- stating the rule above -- a new table gets the verbs its policies back, and
+-- no more.
+grant select, insert, delete on support_ticket_replies to authenticated;
+
 -- profiles: SELECT only, matching its single SELECT policy. Every write is a
 -- security definer RPC or a service-role Edge Function, both of which bypass
 -- grants entirely, so nothing legitimate loses access here. The INSERT/UPDATE/
@@ -1929,6 +2069,7 @@ grant usage on
   pre_app_business_profile_id_seq,
   documents_id_seq,
   support_tickets_id_seq,
+  support_ticket_replies_id_seq,
   notes_id_seq,
   tasks_id_seq
 to authenticated;

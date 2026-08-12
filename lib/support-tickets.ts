@@ -125,4 +125,39 @@ export const TICKET_CATEGORIES = [
   "Other",
 ] as const;
 
+/**
+ * Priority is the exception to the paragraph above: a <select>, not a datalist.
+ *
+ * The column stays unconstrained — an admin can still introduce a new level
+ * without a migration, and an old row holding one still displays. But the
+ * datalist rendered as a plain textbox pre-filled "Normal", with no affordance
+ * saying other values existed, so in practice the field read as fixed. Four
+ * ordered levels are a vocabulary, unlike category's open-ended reference data,
+ * and a control that shows all four is worth more than the ability to type a
+ * fifth by hand.
+ *
+ * supportTicketPriorityOptions() is what the form renders: these four, plus
+ * whatever the ticket already holds if it is not among them, so editing an old
+ * ticket cannot silently rewrite its priority.
+ */
 export const TICKET_PRIORITIES = ["Low", "Normal", "High", "Urgent"] as const;
+
+export const DEFAULT_TICKET_PRIORITY = "Normal";
+
+export function supportTicketPriorityOptions(
+  current: string | null | undefined,
+): string[] {
+  const options: string[] = [...TICKET_PRIORITIES];
+  if (
+    current !== null &&
+    current !== undefined &&
+    current !== "" &&
+    !options.includes(current)
+  ) {
+    // Preserved rather than coerced: the stored value is what this ticket
+    // actually says, and a save should not quietly change a field nobody
+    // touched.
+    options.push(current);
+  }
+  return options;
+}

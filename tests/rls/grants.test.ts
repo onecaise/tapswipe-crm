@@ -143,6 +143,13 @@ describe("grant surface after all migrations", () => {
       "SELECT",
     ]);
 
+    // support_ticket_replies is append-only like notes, and was created that way
+    // rather than narrowed later — a new table gets the verbs its policies back
+    // and no more, which is what keeps the rule above exception-free.
+    expect(
+      await tablePrivileges(db, "authenticated", "support_ticket_replies"),
+    ).toEqual(["DELETE", "INSERT", "SELECT"]);
+
     // profiles is narrower still: SELECT alone, matching its single policy.
     // It is the table that decides who is an admin, so it gets the *_secrets
     // treatment — no client write path at all. Every writer is a security
@@ -184,6 +191,7 @@ describe("grant surface after all migrations", () => {
       "pre_app_business_profile",
       "documents",
       "support_tickets",
+      "support_ticket_replies",
       "notes",
       "tasks",
       "audit_log",

@@ -10,13 +10,18 @@ import {
   supportTicketStatusIntent,
 } from "@/lib/support-tickets";
 import { formatDate, formatText } from "@/lib/format";
-// No notes or tasks panel here on purpose: the check constraint on
-// notes.owner_type / tasks.owner_type allows only lead | pre_app | merchant |
-// ghost_sheet, so a support ticket has nowhere to hang them. The ticket's own
-// message field is the record of what was said.
+import { loadTicketReplies } from "@/lib/support-ticket-replies";
+// Still no notes or tasks panel here: the check constraint on notes.owner_type /
+// tasks.owner_type allows only lead | pre_app | merchant | ghost_sheet, so a
+// ticket has nowhere to hang them — and it is not being given a member, because
+// notes are scoped own-or-admin and an admin's note would be invisible to the
+// rep who opened the ticket. The reply thread below is the parent-scoped
+// alternative: whoever can see the ticket sees the conversation.
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { StatusBadge } from "@/components/status-badge";
+import { LoadingState } from "@/components/loading-state";
+import { TicketRepliesPanel } from "@/components/ticket-replies-panel";
 import { Button } from "@/components/ui/button";
 
 function Field({
@@ -83,6 +88,11 @@ async function TicketDetail({ params }: { params: Promise<{ id: string }> }) {
     merchantName = (merchant?.dba as string | undefined) ?? null;
   }
 
+  // Scoped through the parent ticket by its own policy, so this needs no
+  // ownership check of its own — and the 404 above already ran if the ticket
+  // isn't the caller's.
+  const { replies, error: repliesError } = await loadTicketReplies(ticket.id);
+
   return (
     <>
       <PageHeader
@@ -146,6 +156,19 @@ async function TicketDetail({ params }: { params: Promise<{ id: string }> }) {
           {agentName !== null && <Field label="Agent">{agentName}</Field>}
         </dl>
       </section>
+
+      {repliesError === null ? (
+        <TicketRepliesPanel
+          ticketId={ticket.id}
+          replies={replies}
+          authorId={profile.id}
+          isAdmin={profile.role === "admin"}
+        />
+      ) : (
+        <p className="text-sm text-destructive">
+          Could not load replies: {repliesError}
+        </p>
+      )}
     </>
   );
 }
@@ -166,9 +189,7 @@ export default function TicketDetailPage({
         </Link>
       </Button>
 
-      <Suspense
-        fallback={<p className="text-sm text-muted-foreground">Loading…</p>}
-      >
+      <Suspense fallback={<LoadingState />}>
         <TicketDetail params={params} />
       </Suspense>
     </PageShell>

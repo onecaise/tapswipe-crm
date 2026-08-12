@@ -8,6 +8,7 @@ import { createClient } from "@/lib/supabase/server";
 import { merchantOptions } from "@/lib/merchant-options";
 import { type SupportTicket } from "@/lib/support-tickets";
 import { PageShell } from "@/components/page-shell";
+import { LoadingState } from "@/components/loading-state";
 import { SupportTicketForm } from "@/components/support-ticket-form";
 import { Button } from "@/components/ui/button";
 
@@ -60,9 +61,7 @@ export default function EditTicketPage({
 }) {
   return (
     <PageShell width="form">
-      <Suspense
-        fallback={<p className="text-sm text-muted-foreground">Loading…</p>}
-      >
+      <Suspense fallback={<LoadingState />}>
         <EditTicket params={params} />
       </Suspense>
     </PageShell>

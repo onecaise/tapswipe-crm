@@ -5,9 +5,10 @@ import { useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
 import {
+  DEFAULT_TICKET_PRIORITY,
   SUPPORT_TICKET_STATUSES,
   TICKET_CATEGORIES,
-  TICKET_PRIORITIES,
+  supportTicketPriorityOptions,
   type SupportTicket,
   type SupportTicketStatus,
 } from "@/lib/support-tickets";
@@ -35,9 +36,15 @@ const SELECT_CLASS =
  *
  *  - `status` is a native <select> over the check constraint's vocabulary, like
  *    merchant-form's status.
- *  - `category` / `sub_category` / `priority` are free text with a <datalist> of
- *    suggestions, like documents-panel's doc_type. The column is unconstrained on
- *    purpose, so a rep with a genuinely new category can type it.
+ *  - `priority` is also a <select>, but over a TypeScript vocabulary rather than
+ *    a constraint — the column stays free text. It was a <datalist> until the
+ *    field turned out to read as fixed: Chrome renders one as a plain textbox,
+ *    so a box pre-filled "Normal" gave no hint the other levels existed. See
+ *    supportTicketPriorityOptions, which keeps a stored value that is not in the
+ *    list so editing an old ticket cannot silently rewrite it.
+ *  - `category` / `sub_category` are free text with a <datalist> of suggestions,
+ *    like documents-panel's doc_type. Those are open-ended reference data, so a
+ *    rep with a genuinely new category can type it.
  *  - `merchant_id` is a <select> over merchants the caller can actually see. The
  *    options arrive as a prop from the server page, where RLS scoped them — this
  *    component never queries for them, so it cannot widen that set.
@@ -66,7 +73,9 @@ export function SupportTicketForm({
   const [message, setMessage] = useState(ticket?.message ?? "");
   const [category, setCategory] = useState(ticket?.category ?? "");
   const [subCategory, setSubCategory] = useState(ticket?.sub_category ?? "");
-  const [priority, setPriority] = useState(ticket?.priority ?? "Normal");
+  const [priority, setPriority] = useState(
+    ticket?.priority ?? DEFAULT_TICKET_PRIORITY,
+  );
   const [serial, setSerial] = useState(ticket?.serial_number_imei ?? "");
   const [status, setStatus] = useState<SupportTicketStatus>(
     ticket?.status ?? "open",
@@ -207,17 +216,20 @@ export function SupportTicketForm({
 
               <div className="grid gap-2">
                 <Label htmlFor="priority">Priority</Label>
-                <Input
+                <select
                   id="priority"
-                  list="ticket-priority-suggestions"
+                  className={SELECT_CLASS}
                   value={priority}
                   onChange={(e) => setPriority(e.target.value)}
-                />
-                <datalist id="ticket-priority-suggestions">
-                  {TICKET_PRIORITIES.map((option) => (
-                    <option key={option} value={option} />
-                  ))}
-                </datalist>
+                >
+                  {supportTicketPriorityOptions(ticket?.priority).map(
+                    (option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ),
+                  )}
+                </select>
               </div>
 
               <div className="grid gap-2">
