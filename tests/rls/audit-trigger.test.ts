@@ -249,8 +249,13 @@ describe("INSERT is covered too", () => {
   });
 });
 
-describe("all eight tables are covered", () => {
-  // One function, eight attachments — so the risk is not the logic but a table
+describe("all eight insert-testable tables are covered", () => {
+  // One function, nine attachments — bug_reports is the ninth and is exercised
+  // separately below, because a cross-agent INSERT is impossible there by
+  // policy: its insert is pinned to agent_id = auth.uid(), so the event worth
+  // logging is an admin clearing someone else's report, not filing one.
+  //
+  // The risk is not the logic but a table
   // being forgotten. Asserted per table rather than sampled, for the same reason
   // the grants test enumerates every table: the failure mode is an omission.
   // documents was exactly that omission, found by the 11 Aug audit.
@@ -303,6 +308,58 @@ describe("all eight tables are covered", () => {
       });
     });
   }
+});
+
+describe("bug_reports — the ninth table, audited on the clear rather than the file", () => {
+  /**
+   * The reporter column is named agent_id precisely so the generic function
+   * reads it, with no variant needed. What it catches here is an admin clearing
+   * a rep's report: that is an UPDATE by someone who is not the row's owner,
+   * which is cross_agent_update.
+   *
+   * A rep filing their own report must NOT log — it is ordinary work, and the
+   * insert policy makes filing anyone else's impossible, so every insert on this
+   * table is by definition the owner's own.
+   */
+  async function seedReport(db: TestDb): Promise<number> {
+    await asUser(db, AGENT_ID);
+    await db.exec(
+      `insert into bug_reports (agent_id, page, description)
+       values ('${AGENT_ID}', '/merchants', 'List sorts by id.');`,
+    );
+    await asPlatform(db);
+    const [row] = await rows<{ id: number }>(
+      db,
+      `select id from bug_reports order by id desc limit 1`,
+    );
+    return row.id;
+  }
+
+  it("stays quiet when a rep files their own report", async () => {
+    await seedReport(db);
+
+    expect(await auditRows(db)).toHaveLength(0);
+  });
+
+  it("records an admin clearing a rep's report", async () => {
+    const id = await seedReport(db);
+
+    await asUser(db, ADMIN_ID);
+    await db.exec(
+      `update bug_reports
+          set status = 'dismissed', resolved_at = now(), resolved_by = '${ADMIN_ID}'
+        where id = ${id};`,
+    );
+
+    const audit = await auditRows(db);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({
+      actor_id: ADMIN_ID,
+      action: "cross_agent_update",
+      table_name: "bug_reports",
+    });
+    expect(Number(audit[0].row_id)).toBe(id);
+  });
 });
 
 describe("support_ticket_replies — a second function, for a table with no agent_id", () => {

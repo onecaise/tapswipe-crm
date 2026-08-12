@@ -150,6 +150,16 @@ describe("grant surface after all migrations", () => {
       await tablePrivileges(db, "authenticated", "support_ticket_replies"),
     ).toEqual(["DELETE", "INSERT", "SELECT"]);
 
+    // bug_reports has no DELETE and that is the design: a report is cleared by
+    // setting status, so the row survives for review. The UPDATE is backed by
+    // the admin-only "admin resolves" policy — granted, and unreachable for a
+    // rep, which is the policy's job rather than the grant's.
+    expect(await tablePrivileges(db, "authenticated", "bug_reports")).toEqual([
+      "INSERT",
+      "SELECT",
+      "UPDATE",
+    ]);
+
     // profiles is narrower still: SELECT alone, matching its single policy.
     // It is the table that decides who is an admin, so it gets the *_secrets
     // treatment — no client write path at all. Every writer is a security
@@ -194,6 +204,7 @@ describe("grant surface after all migrations", () => {
       "support_ticket_replies",
       "notes",
       "tasks",
+      "bug_reports",
       "audit_log",
     ]) {
       expect(

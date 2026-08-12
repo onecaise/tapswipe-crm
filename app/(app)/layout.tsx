@@ -3,6 +3,7 @@ import { Suspense } from "react";
 
 import { AppSidebar } from "@/components/app-sidebar";
 import { AppTopbar } from "@/components/app-topbar";
+import { BugReportLauncher } from "@/components/bug-report-launcher";
 import { requireUser } from "@/lib/auth";
 
 /**
@@ -33,6 +34,15 @@ export default function AppLayout({
         <AppTopbar />
         <main className="flex-1 p-7 lg:p-8">{children}</main>
       </div>
+
+      {/* Fixed-position, so it sits outside the flex row rather than in it. In
+          the layout rather than on each page so it is present everywhere inside
+          the shell — and absent from /auth/*, which is a different route group.
+          Suspended for the same reason the gate above is: it reads the profile,
+          and cacheComponents rejects that unsuspended. */}
+      <Suspense fallback={null}>
+        <BugReportLauncher />
+      </Suspense>
     </div>
   );
 }

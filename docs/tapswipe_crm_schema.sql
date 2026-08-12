@@ -885,6 +885,69 @@ create policy "admin delete only" on tasks
   for delete using (is_admin());
 
 -- ---------------------------------------------------------------------
+-- BUG REPORTS — the floating report bubble, on every CRM page.
+--
+-- Ordinary Tier 1 shape: agent_id is the reporter, and the standard
+-- own-or-admin policy scopes it. Naming the column agent_id rather than
+-- reporter_id is deliberate and buys two things -- the policies are the same
+-- ones as everywhere else, and log_cross_agent_change() works unchanged, so an
+-- admin clearing a rep's report is audited with no new trigger function.
+--
+-- CLEARED BY STATUS, NOT BY DELETE. Checking a report off the admin list sets
+-- status and stamps resolved_at / resolved_by; the list filters status = 'open'.
+-- The same reasoning as deactivating a user instead of deleting them (§8): a
+-- report is a description of something that went wrong, and it is worth more
+-- after it has been dismissed than before -- when the same bug is reported
+-- again, or when someone asks whether it was ever looked at. There is
+-- deliberately NO delete policy and no delete grant.
+--
+-- The cost, stated so it is not discovered: the table only grows, and every
+-- query that means "the queue" has to say `status = 'open'`. A list that
+-- forgets the filter shows dismissed reports as live work rather than failing,
+-- which is the quiet kind of wrong. lib/bug-reports.ts owns that filter in one
+-- place for that reason.
+--
+-- `page` is free text, not a check constraint. It holds a route path, and
+-- routes change with every feature -- a constraint would mean a migration each
+-- time one is added, and a report filed against a path that no longer exists is
+-- still worth reading.
+-- ---------------------------------------------------------------------
+create table bug_reports (
+  id serial primary key,
+  agent_id uuid references profiles(id) not null,
+  page text not null,
+  description text not null,
+  -- Two ways to close, because they mean different things: 'resolved' is fixed,
+  -- 'dismissed' is not-a-bug or won't-fix. Both leave the queue; only the first
+  -- claims anything was done. NOT NULL for the reason support_tickets.status is:
+  -- a CHECK that evaluates to NULL passes, so a nullable status silently defeats
+  -- both the check and every filter built on it.
+  status text not null default 'open'
+    check (status in ('open', 'resolved', 'dismissed')),
+  resolved_at timestamptz,
+  resolved_by uuid references profiles(id),
+  created_at timestamptz default now()
+);
+
+alter table bug_reports enable row level security;
+
+create policy "select own or admin" on bug_reports
+  for select using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
+-- Pinned to the caller rather than the usual own-or-admin shape: a bug report
+-- is a first-hand account, so filing one under someone else's name is not a
+-- thing an admin should be able to do either. is_active_agent() checks
+-- is_active without checking role, so an active admin reporting their own bug
+-- satisfies this too.
+create policy "insert own" on bug_reports
+  for insert with check (agent_id = auth.uid() and is_active_agent());
+-- Admin-only, and this is the clear-from-the-list action. A rep cannot edit a
+-- report after filing it -- including their own -- for the same reason notes are
+-- append-only: the value is in what it said at the time.
+create policy "admin resolves" on bug_reports
+  for update using (is_admin()) with check (is_admin());
+-- No delete policy, on purpose. See the header.
+
+-- ---------------------------------------------------------------------
 -- AUDIT LOG — who touched what, when. Populated from Edge Functions for
 -- admin actions and sensitive-data access; optionally from triggers for
 -- everything else.
@@ -916,11 +979,16 @@ create index idx_documents_agent_id on documents(agent_id);
 create index idx_support_tickets_agent_id on support_tickets(agent_id);
 create index idx_notes_agent_id on notes(agent_id);
 create index idx_tasks_agent_id on tasks(agent_id);
+create index idx_bug_reports_agent_id on bug_reports(agent_id);
 
 -- columns the list pages actually filter on
 create index idx_merchants_status on merchants(status);
 create index idx_pre_apps_status on pre_apps(status);
 create index idx_support_tickets_status on support_tickets(status);
+-- The admin queue is `where status = 'open'`, and cleared reports accumulate
+-- behind it forever -- that is the cost of clearing by status rather than by
+-- delete, and this is what keeps paying it cheap.
+create index idx_bug_reports_status on bug_reports(status);
 create index idx_leads_next_followup_date on leads(next_followup_date);
 
 -- The polymorphic owner pair. documents, notes and tasks are all read the same
@@ -1173,6 +1241,15 @@ create trigger tasks_audit_cross_agent
 -- UPDATE grant -- and is attached anyway for the reason notes carries above.
 create trigger documents_audit_cross_agent
   after insert or update or delete on documents
+  for each row execute function log_cross_agent_change();
+
+-- bug_reports is the ninth, and needs no variant: its reporter column is named
+-- agent_id precisely so the generic function reads it. Clearing a report is an
+-- UPDATE by an admin on a rep's row, which is exactly what cross_agent_update
+-- records -- so who dismissed what is in the trail without any extra work, and
+-- resolved_by on the row is the readable copy of the same fact.
+create trigger bug_reports_audit_cross_agent
+  after insert or update or delete on bug_reports
   for each row execute function log_cross_agent_change();
 
 -- ---------------------------------------------------------------------
@@ -2034,6 +2111,12 @@ grant select, insert, delete on notes to authenticated;
 -- no more.
 grant select, insert, delete on support_ticket_replies to authenticated;
 
+-- bug_reports: no DELETE, and that is the whole design rather than an omission
+-- -- a report is cleared by setting status, so the row survives for review. The
+-- UPDATE here is backed by the admin-only "admin resolves" policy, so a rep
+-- holds the privilege but no policy admits their write.
+grant select, insert, update on bug_reports to authenticated;
+
 -- profiles: SELECT only, matching its single SELECT policy. Every write is a
 -- security definer RPC or a service-role Edge Function, both of which bypass
 -- grants entirely, so nothing legitimate loses access here. The INSERT/UPDATE/
@@ -2071,7 +2154,8 @@ grant usage on
   support_tickets_id_seq,
   support_ticket_replies_id_seq,
   notes_id_seq,
-  tasks_id_seq
+  tasks_id_seq,
+  bug_reports_id_seq
 to authenticated;
 -- audit_log_id_seq is deliberately absent, to match audit_log's SELECT-only
 -- grant above. Nothing `authenticated` can do consumes it: every audit_log
