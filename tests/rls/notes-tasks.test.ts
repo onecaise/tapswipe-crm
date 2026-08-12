@@ -458,6 +458,182 @@ describe("notes and tasks survive their owner", () => {
   });
 });
 
+/**
+ * The /notes and /tasks index pages.
+ *
+ * The panels ask for one record's annotations; these pages ask for every one the
+ * caller can see, across all four owner types. That means dropping `owner_type`
+ * from the WHERE clause — the one place in the app where doing so is correct,
+ * because nothing is being addressed. What has to hold is that the wide query is
+ * scoped by exactly the same policy as the narrow one: `owner_type` appears in
+ * no policy on either table, so an agent's index must contain their rows and
+ * nobody else's, and an admin's must contain everyone's.
+ *
+ * These mirror lib/annotations-data.ts (loadNoteIndex / loadTaskIndex) — same
+ * columns, same ordering, same filters. Two copies kept in step by convention,
+ * as with the panel queries above.
+ */
+const NOTE_INDEX = `
+  select ${NOTE_COLUMNS}
+  from notes
+  order by created_at desc, id desc
+`;
+
+const TASK_INDEX_ORDER = `order by completed asc, due_date asc nulls last, id desc`;
+
+const taskIndex = (filter: "open" | "overdue" | "completed" | "all") => {
+  const where =
+    filter === "open"
+      ? "where completed = false"
+      : filter === "overdue"
+        ? "where completed = false and due_date < current_date"
+        : filter === "completed"
+          ? "where completed = true"
+          : "";
+  return `select ${TASK_COLUMNS} from tasks ${where} ${TASK_INDEX_ORDER}`;
+};
+
+describe("cross-owner index scoping", () => {
+  it("gives an agent every note they wrote, across owner types, and nobody else's", async () => {
+    await asUser(db, AGENT_ID);
+    const result = await rows<NoteRow>(db, NOTE_INDEX);
+
+    // Asserted by body rather than by count, so the other agent's note failing
+    // to appear is explicit instead of a coincidence of arithmetic.
+    expect(result.map((n) => n.body).sort()).toEqual([
+      "Called back, wants pricing by Friday.",
+      "Left voicemail Tuesday.",
+      "Owner prefers texts.",
+      "Waiting on the voided check.",
+    ]);
+    expect(result.map((n) => n.agent_id)).not.toContain(OTHER_AGENT_ID);
+
+    // The point of the page: one list spanning several owner types.
+    expect([...new Set(result.map((n) => n.owner_type))].sort()).toEqual([
+      "lead",
+      "merchant",
+      "pre_app",
+    ]);
+  });
+
+  it("gives an admin every agent's notes", async () => {
+    await asUser(db, ADMIN_ID);
+    const result = await rows<NoteRow>(db, NOTE_INDEX);
+
+    expect(result).toHaveLength(5);
+    expect(result.map((n) => n.body)).toContain("Other agent note.");
+  });
+
+  it("gives an agent every task they own, across owner types, and nobody else's", async () => {
+    await asUser(db, AGENT_ID);
+    const result = await rows<TaskRow>(db, taskIndex("all"));
+
+    expect(result.map((t) => t.title).sort()).toEqual([
+      "Confirm terminal count",
+      "Emailed statement",
+      "Order paper rolls",
+      "Send pricing sheet",
+    ]);
+    expect(result.map((t) => t.agent_id)).not.toContain(OTHER_AGENT_ID);
+    expect([...new Set(result.map((t) => t.owner_type))].sort()).toEqual([
+      "lead",
+      "merchant",
+    ]);
+  });
+
+  it("gives an admin every agent's tasks", async () => {
+    await asUser(db, ADMIN_ID);
+    const result = await rows<TaskRow>(db, taskIndex("all"));
+
+    expect(result).toHaveLength(5);
+    expect(result.map((t) => t.title)).toContain("Other agent task");
+  });
+
+  it("shows a deactivated agent nothing on either page", async () => {
+    await asPlatform(db);
+    await db.exec(
+      `update profiles set is_active = false where id = '${AGENT_ID}';`,
+    );
+
+    await asUser(db, AGENT_ID);
+
+    // A valid JWT is not proof the account is still enabled, which is what the
+    // is_active_agent() half of every own-row branch exists for.
+    expect(await rows<NoteRow>(db, NOTE_INDEX)).toHaveLength(0);
+    expect(await rows<TaskRow>(db, taskIndex("all"))).toHaveLength(0);
+  });
+
+  it("collects ghost sheet rows too — all four owner types reach the index", async () => {
+    const sheetId = await idOf("ghost_sheets", "dba", "Agent Sheet Open");
+
+    // Seeded here rather than in the shared seed(): every other test in the
+    // repo runs against that fixture set, and this is the only place a
+    // ghost_sheet annotation is needed. resetData() runs per test, so this
+    // stays local.
+    await asPlatform(db);
+    await db.exec(`
+      insert into notes (agent_id, owner_type, owner_id, body) values
+        ('${AGENT_ID}', 'ghost_sheet', ${sheetId}, 'Walked in, wants a quote.');
+      insert into tasks (agent_id, owner_type, owner_id, title, due_date) values
+        ('${AGENT_ID}', 'ghost_sheet', ${sheetId}, 'Quote the Clover Mini', current_date);
+    `);
+
+    await asUser(db, AGENT_ID);
+    const notes = await rows<NoteRow>(db, NOTE_INDEX);
+    const tasks = await rows<TaskRow>(db, taskIndex("all"));
+
+    expect([...new Set(notes.map((n) => n.owner_type))].sort()).toEqual([
+      "ghost_sheet",
+      "lead",
+      "merchant",
+      "pre_app",
+    ]);
+    expect(tasks.map((t) => t.title)).toContain("Quote the Clover Mini");
+  });
+
+  it("still lists a note whose owner record was deleted", async () => {
+    const leadId = await idOf("leads", "dba", "Agent Lead A");
+
+    await asUser(db, ADMIN_ID);
+    await db.exec(`delete from leads where id = ${leadId};`);
+
+    await asUser(db, AGENT_ID);
+    const orphans = (await rows<NoteRow>(db, NOTE_INDEX)).filter(
+      (n) => n.owner_type === "lead" && n.owner_id === leadId,
+    );
+
+    // This is the behaviour the panels structurally could not have: nothing asks
+    // for a deleted lead's id again, so its notes were invisible. The index asks
+    // for all of them, so they surface — which is why loadNoteIndex resolves the
+    // owner separately and renders an unresolvable one unlinked rather than
+    // pointing at a 404.
+    expect(orphans).toHaveLength(2);
+  });
+
+  it("filters tasks by status without widening what the caller can see", async () => {
+    await asUser(db, AGENT_ID);
+
+    expect((await rows<TaskRow>(db, taskIndex("open"))).map((t) => t.title)).toEqual(
+      expect.arrayContaining([
+        "Send pricing sheet",
+        "Confirm terminal count",
+        "Order paper rolls",
+      ]),
+    );
+    expect(await rows<TaskRow>(db, taskIndex("open"))).toHaveLength(3);
+
+    // Due yesterday and still open. "Confirm terminal count" is due today and
+    // must NOT count — the same calendar-date boundary taskIsOverdue applies.
+    expect(
+      (await rows<TaskRow>(db, taskIndex("overdue"))).map((t) => t.title),
+    ).toEqual(["Send pricing sheet"]);
+
+    expect(
+      (await rows<TaskRow>(db, taskIndex("completed"))).map((t) => t.title),
+    ).toEqual(["Emailed statement"]);
+  });
+});
+
 describe("notes and tasks scoping tests are load-bearing", () => {
   it("would catch a fail-open select policy on either table", async () => {
     const broken = await createTestDb();
@@ -487,6 +663,13 @@ describe("notes and tasks scoping tests are load-bearing", () => {
 
     expect(leakedNotes.map((n) => n.agent_id)).toContain(OTHER_AGENT_ID);
     expect(leakedTasks.map((t) => t.agent_id)).toContain(OTHER_AGENT_ID);
+
+    // The index pages read through the same policy, so the same break has to
+    // show up there — asserted explicitly because that query drops owner_type,
+    // and a reader could reasonably wonder whether it is scoped by anything at
+    // all. It is: only the policy, which is the whole point.
+    const leakedIndex = await rows<NoteRow>(broken, NOTE_INDEX);
+    expect(leakedIndex.map((n) => n.agent_id)).toContain(OTHER_AGENT_ID);
 
     await broken.close();
   });

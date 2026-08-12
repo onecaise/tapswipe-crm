@@ -57,12 +57,13 @@ export const NAV_GROUPS: readonly NavGroup[] = [
         icon: LifeBuoyIcon,
         badge: "openTickets",
       },
-      // Notes and tasks are panels on the four owner records (lead, pre-app,
-      // merchant, ghost sheet), not pages — see components/{notes,tasks}-panel.
-      // Listed without an href so the section reads complete without offering a
-      // link that would 404. Give them an href once the pages exist.
-      { label: "Notes", icon: StickyNoteIcon },
-      { label: "Tasks", icon: ListTodoIcon },
+      // Notes and tasks are written on the four owner records (lead, pre-app,
+      // merchant, ghost sheet) through components/{notes,tasks}-panel. These
+      // pages are the cross-record view of the same rows — read-only for notes,
+      // read plus the complete toggle for tasks. Creation stays on the record,
+      // where owner_type/owner_id come from a parent row loaded under RLS.
+      { label: "Notes", href: "/notes", icon: StickyNoteIcon },
+      { label: "Tasks", href: "/tasks", icon: ListTodoIcon },
     ],
   },
   {

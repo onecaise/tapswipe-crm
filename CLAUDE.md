@@ -8,7 +8,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 
 **Current state matters when reading the code**, and it is a mix — real CRM pages alongside untouched starter scaffolding:
 
-- **Built:** every CRM route lives under the `app/(app)/` route group so it renders inside the shell — `app/(app)/{dashboard,merchants,leads,ghost-sheets,pre-apps,support-tickets,documents,admin/users}`. Route groups don't affect URLs, so the paths are still `/dashboard`, `/merchants/7` and so on. Data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,documents,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks have no pages of their own — they are panels (`components/{notes,tasks}-panel.tsx`) on the four owner records, and they appear in the sidebar as muted rows with no `href` for that reason.
+- **Built:** every CRM route lives under the `app/(app)/` route group so it renders inside the shell — `app/(app)/{dashboard,merchants,leads,ghost-sheets,pre-apps,support-tickets,documents,notes,tasks,admin/users}`. Route groups don't affect URLs, so the paths are still `/dashboard`, `/merchants/7` and so on. Data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,annotations-data,documents,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks are **written** through panels (`components/{notes,tasks}-panel.tsx`) on the four owner records; `/notes` and `/tasks` are the cross-record view of the same rows, and are read-only (notes) or read plus the complete toggle (tasks). Creation stays on the record, because `owner_id` has no FK and the panels take the pair from a parent row already loaded under RLS.
 - **Not built yet:** My Submissions.
 - **Still [starter-kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase) template, not product code:** `README.md`, `app/page.tsx`, `app/protected/*`, `components/tutorial/*`, and `components/{hero,deploy-button,next-logo,supabase-logo,env-var-warning}.tsx`.
 - **Edge Functions:** all seven are implemented — `create-upload-url`, `create-download-url`, `submit-pre-app-secrets`, `read-pre-app-secrets`, `create-user`, `deactivate-user`, `admin-reset-password` (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env,admin-users}.ts`).
@@ -25,7 +25,7 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (437 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (452 tests)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (68 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED project (4 tests)
 
@@ -180,7 +180,7 @@ Shared structure lives in components, so page-level styling stays out of pages: 
 
 The sidebar is dark in every theme, so its tokens live only in `:root` and are never overridden in `.dark`. The app is pinned to light (`defaultTheme="light"`, `enableSystem={false}` in `app/layout.tsx`) because there is no dark palette yet; the `.dark` block is the stock shadcn scale, left in place so turning dark mode on later is filling in values rather than re-plumbing.
 
-Sidebar contents are data in `lib/nav.ts`, not JSX. An item without an `href` renders as a muted, `aria-disabled` row — that is how Notes and Tasks appear, since they are panels rather than pages. `usePathname()` supplies the active item, which under `cacheComponents` is runtime-only data: the client nav **must** sit inside a `<Suspense>` boundary, and its fallback therefore cannot call the hook either. That is why `components/sidebar-nav-list.tsx` takes `pathname` as a prop and is shared by both the streamed nav and its fallback.
+Sidebar contents are data in `lib/nav.ts`, not JSX. An item without an `href` renders as a muted, `aria-disabled` row — the mechanism for listing a section before its page exists. **No item currently uses it**; Notes and Tasks did until `/notes` and `/tasks` were built, and a permanently-greyed row trains people to ignore that part of the nav, so prefer building the page or dropping the row over leaving one there. `usePathname()` supplies the active item, which under `cacheComponents` is runtime-only data: the client nav **must** sit inside a `<Suspense>` boundary, and its fallback therefore cannot call the hook either. That is why `components/sidebar-nav-list.tsx` takes `pathname` as a prop and is shared by both the streamed nav and its fallback.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

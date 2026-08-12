@@ -1,3 +1,5 @@
+import type { FilterOption } from "@/components/filter-tabs";
+
 /**
  * Notes and tasks: the two polymorphic Tier 1 tables, and the vocabulary they
  * share.
@@ -76,3 +78,113 @@ export function taskIsOverdue(task: Pick<Task, "due_date" | "completed">) {
   if (task.completed || task.due_date === null) return false;
   return task.due_date < new Date().toISOString().slice(0, 10);
 }
+
+/* -------------------------------------------------------------------------
+ * The cross-record index pages (/notes, /tasks).
+ *
+ * The panels address one record; these pages collect every note or task the
+ * caller can see, across all four owner types. Same policies, no owner filter —
+ * `owner_type` appears in no policy on either table, so RLS scopes the wide
+ * query exactly as it scopes the narrow one.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Singular labels for the "Attached to" column.
+ *
+ * A Record over the union rather than a function with a default, so adding a
+ * fifth owner type is a type error here instead of a blank cell in the UI.
+ */
+export const ANNOTATION_OWNER_LABELS: Record<AnnotationOwnerType, string> = {
+  lead: "Lead",
+  pre_app: "Pre-app",
+  merchant: "Merchant",
+  ghost_sheet: "Ghost sheet",
+};
+
+/**
+ * The detail route for an owner record.
+ *
+ * Deliberately separate from `ownerHref` in lib/documents.ts and from
+ * SEARCH_KIND_META in lib/search.ts, for the reason given at the top of this
+ * file: the three owner-type unions are not the same set, and merging them
+ * would let a caller ask for a pairing the check constraint rejects.
+ *
+ * Unlike the documents version this never returns null — all four annotation
+ * owner types have a detail page. Whether the row still EXISTS is a different
+ * question, and one only the query can answer; see WithOwner below.
+ */
+export function annotationOwnerHref(
+  ownerType: AnnotationOwnerType,
+  ownerId: number,
+): string {
+  switch (ownerType) {
+    case "lead":
+      return `/leads/${ownerId}`;
+    case "pre_app":
+      return `/pre-apps/${ownerId}`;
+    case "merchant":
+      return `/merchants/${ownerId}`;
+    case "ghost_sheet":
+      return `/ghost-sheets/${ownerId}`;
+  }
+}
+
+/**
+ * A row plus the record it hangs off, resolved server-side.
+ *
+ * `owner_href` is null when the owner lookup came back empty — the record was
+ * deleted (owner_id carries no foreign key, so nothing cascades) or it belongs
+ * to someone the caller cannot see. The index page is the first place in the app
+ * where such a row is visible at all: the panels could never show one, because
+ * nothing asks for that owner_id again. Rendering it unlinked keeps it visible
+ * without offering a click that lands on a 404.
+ */
+export type WithOwner<T> = T & {
+  owner_label: string;
+  owner_href: string | null;
+};
+
+export const TASK_INDEX_FILTERS = [
+  "open",
+  "overdue",
+  "completed",
+  "all",
+] as const;
+
+export type TaskIndexFilter = (typeof TASK_INDEX_FILTERS)[number];
+
+export const TASK_INDEX_FILTER_OPTIONS: readonly FilterOption<TaskIndexFilter>[] =
+  [
+    { value: "open", label: "Open" },
+    { value: "overdue", label: "Overdue" },
+    { value: "completed", label: "Completed" },
+    { value: "all", label: "All" },
+  ];
+
+export const DEFAULT_TASK_INDEX_FILTER: TaskIndexFilter = "open";
+
+/**
+ * Narrows an untrusted `?status=` value.
+ *
+ * Falls back to the default rather than passing the raw value into the query,
+ * where an unrecognised filter would return zero rows and read as "you have no
+ * tasks" instead of "that filter doesn't exist" — the same reasoning as
+ * parseLeadFilter.
+ */
+export function parseTaskIndexFilter(
+  value: string | undefined,
+): TaskIndexFilter {
+  return TASK_INDEX_FILTERS.includes(value as TaskIndexFilter)
+    ? (value as TaskIndexFilter)
+    : DEFAULT_TASK_INDEX_FILTER;
+}
+
+/**
+ * How many rows either index page will render.
+ *
+ * Both lists are unbounded by nature — an admin's note list grows with the whole
+ * company's activity. The cap is surfaced in the UI when it bites rather than
+ * silently truncating, because a list that quietly stops at 200 reads as "that's
+ * everything".
+ */
+export const ANNOTATION_INDEX_LIMIT = 200;
