@@ -4,6 +4,7 @@ import { ArrowLeftIcon, UserPlusIcon } from "lucide-react";
 
 import { requireAdmin, type Role } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
+import { formatText } from "@/lib/format";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { StatusBadge } from "@/components/status-badge";
@@ -22,6 +23,7 @@ import {
 type ProfileRow = {
   id: string;
   full_name: string;
+  email: string | null;
   role: Role;
   is_active: boolean;
   must_change_password: boolean;
@@ -42,7 +44,9 @@ async function UsersTable() {
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, full_name, role, is_active, must_change_password, created_at")
+    .select(
+      "id, full_name, email, role, is_active, must_change_password, created_at",
+    )
     .order("created_at", { ascending: true });
 
   if (error) {
@@ -77,12 +81,23 @@ async function UsersTable() {
           profiles.map((profile) => (
             <TableRow key={profile.id}>
               <TableCell className="font-medium">
-                {profile.full_name}
-                {profile.id === viewer.id && (
-                  <span className="ml-2 text-xs font-normal text-muted-foreground">
-                    you
+                <span className="flex flex-col">
+                  <span>
+                    {profile.full_name}
+                    {profile.id === viewer.id && (
+                      <span className="ml-2 text-xs font-normal text-muted-foreground">
+                        you
+                      </span>
+                    )}
                   </span>
-                )}
+                  {/* The sign-in address. Without it two reps sharing a name
+                      are indistinguishable on the one screen that deactivates
+                      accounts and resets passwords. Null only for rows that
+                      predate profiles.email and were not backfilled. */}
+                  <span className="text-xs font-normal text-muted-foreground">
+                    {formatText(profile.email)}
+                  </span>
+                </span>
               </TableCell>
               <TableCell>
                 {/* A role is not a status, so it gets no status colour and

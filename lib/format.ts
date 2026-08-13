@@ -16,6 +16,22 @@ export function formatPct(value: number | null | undefined): string {
   return value === null || value === undefined ? EMPTY : `${value}%`;
 }
 
+/**
+ * A stored lowercase vocabulary word, for display beside a StatusBadge.
+ *
+ * StatusBadge capitalises through CSS, so a detail page showed "Open" in the
+ * badge and a bare "open" in the field below it — the same value, twice, in two
+ * casings. This capitalises the first letter only: these are single words from
+ * a fixed vocabulary ("open", "submitted", "declined"), not titles, so
+ * per-word capitalisation would be wrong for anything with a space in it.
+ * Everything else, including free text a rep typed, is left exactly as entered.
+ */
+export function formatStatus(value: string | null | undefined): string {
+  const text = formatText(value);
+  if (text === EMPTY) return EMPTY;
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 /** A bare calendar date, as every `date` column arrives from PostgREST. */
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 

@@ -32,7 +32,11 @@ export default function AppLayout({
 
       <div className="flex min-w-0 flex-1 flex-col">
         <AppTopbar />
-        <main className="flex-1 p-7 lg:p-8">{children}</main>
+        {/* The extra bottom padding keeps content clear of the bug-report
+            bubble, which is fixed bottom-right at z-50 and was measured sitting
+            on top of a document row's Remove button. Anything at the end of a
+            long page was in its way. */}
+        <main className="flex-1 p-7 pb-28 lg:p-8 lg:pb-28">{children}</main>
       </div>
 
       {/* Fixed-position, so it sits outside the flex row rather than in it. In

@@ -9,8 +9,10 @@ import {
   BUG_REPORT_RESOLUTION_LABELS,
   type BugReport,
   type BugReportResolution,
+  bugReportStatusIntent,
 } from "@/lib/bug-reports";
 import { formatDate, formatText } from "@/lib/format";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -40,10 +42,17 @@ export type BugReportRow = BugReport & { reporter_name: string | null };
 export function BugReportsTable({
   reports,
   adminId,
+  selectable = true,
 }: {
   reports: BugReportRow[];
   /** The viewer's own profile id, recorded as resolved_by. */
   adminId: string;
+  /**
+   * Whether rows can be picked and cleared. False on the Resolved, Dismissed
+   * and All tabs: only an open report has anywhere to go, so offering the
+   * checkboxes there would be a control that does nothing.
+   */
+  selectable?: boolean;
 }) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -145,32 +154,36 @@ export function BugReportsTable({
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead className="w-10" />
+            {selectable && <TableHead className="w-10" />}
             <TableHead>Report</TableHead>
             <TableHead>Page</TableHead>
             <TableHead>Reported by</TableHead>
             <TableHead>When</TableHead>
+            {!selectable && <TableHead>Status</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
           {reports.length === 0 ? (
             <TableRow>
               <TableCell colSpan={5} className="text-muted-foreground">
-                Nothing outstanding. Cleared reports stay on file — they are not
-                deleted.
+                {selectable
+                  ? "Nothing outstanding. Cleared reports stay on file — the Resolved and Dismissed tabs are where they go."
+                  : "Nothing here yet."}
               </TableCell>
             </TableRow>
           ) : (
             reports.map((report) => (
               <TableRow key={report.id}>
-                <TableCell>
-                  <Checkbox
-                    checked={selected.has(report.id)}
-                    disabled={busy}
-                    aria-label={`Select report ${report.id}`}
-                    onCheckedChange={() => toggle(report.id)}
-                  />
-                </TableCell>
+                {selectable && (
+                  <TableCell>
+                    <Checkbox
+                      checked={selected.has(report.id)}
+                      disabled={busy}
+                      aria-label={`Select report ${report.id}`}
+                      onCheckedChange={() => toggle(report.id)}
+                    />
+                  </TableCell>
+                )}
                 {/* whitespace-pre-line so line breaks survive. React renders
                     this as text, never as markup. */}
                 <TableCell className="max-w-md whitespace-pre-line font-medium">
@@ -185,6 +198,15 @@ export function BugReportsTable({
                 <TableCell className="text-muted-foreground">
                   {formatDate(report.created_at)}
                 </TableCell>
+                {/* Only on the read-only tabs, where "All" mixes the three and
+                    the word is the only thing telling them apart. */}
+                {!selectable && (
+                  <TableCell>
+                    <StatusBadge intent={bugReportStatusIntent(report.status)}>
+                      {report.status}
+                    </StatusBadge>
+                  </TableCell>
+                )}
               </TableRow>
             ))
           )}

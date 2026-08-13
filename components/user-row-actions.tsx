@@ -126,7 +126,11 @@ export function UserRowActions({
           New temporary password — shown once
         </span>
         <div className="flex items-center gap-2">
-          <code className="rounded-lg bg-muted px-2 py-1 font-mono text-xs">
+          {/* text-sm, not text-xs: this is a string someone reads down a phone
+              line or types by hand, and at the row's default size it rendered
+              noticeably smaller than the same value on the create-user page.
+              tracking-wide so 0/O and 1/l are separable. */}
+          <code className="rounded-lg bg-muted px-2 py-1 font-mono text-sm tracking-wide">
             {tempPassword}
           </code>
           <Button

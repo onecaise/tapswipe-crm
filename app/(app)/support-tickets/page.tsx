@@ -9,7 +9,9 @@ import {
   SUPPORT_TICKET_FILTER_OPTIONS,
   SUPPORT_TICKET_LIST_COLUMNS,
   type SupportTicketListRow,
+  compareByStatusThenNewest,
   parseSupportTicketFilter,
+  supportTicketPriorityIntent,
   supportTicketStatusIntent,
 } from "@/lib/support-tickets";
 import { formatDate, formatText } from "@/lib/format";
@@ -64,7 +66,12 @@ async function TicketsList({
     );
   }
 
-  const tickets = (data ?? []) as SupportTicketListRow[];
+  // Open first, then pending, then closed — see compareByStatusThenNewest.
+  // Sorted here rather than in the query because PostgREST cannot express a
+  // CASE ordering and the three words do not sort this way alphabetically.
+  const tickets = ((data ?? []) as SupportTicketListRow[]).sort(
+    compareByStatusThenNewest,
+  );
   const isAdmin = profile.role === "admin";
 
   // Two extra lookups, both plain selects rather than PostgREST embeds, matching
@@ -153,7 +160,17 @@ async function TicketsList({
                     : formatText(merchantNames.get(ticket.merchant_id))}
                 </TableCell>
                 <TableCell>{formatText(ticket.category)}</TableCell>
-                <TableCell>{formatText(ticket.priority)}</TableCell>
+                <TableCell>
+                  {ticket.priority === null || ticket.priority.trim() === "" ? (
+                    formatText(ticket.priority)
+                  ) : (
+                    <StatusBadge
+                      intent={supportTicketPriorityIntent(ticket.priority)}
+                    >
+                      {ticket.priority}
+                    </StatusBadge>
+                  )}
+                </TableCell>
                 <TableCell className="text-muted-foreground">
                   {formatDate(ticket.created_at)}
                 </TableCell>

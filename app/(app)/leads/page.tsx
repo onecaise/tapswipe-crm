@@ -30,9 +30,12 @@ import {
 async function LeadsList({
   searchParams,
 }: {
-  searchParams: Promise<{ filter?: string }>;
+  searchParams: Promise<{ status?: string }>;
 }) {
-  const { filter: rawFilter } = await searchParams;
+  // `status`, not `filter`. Every other list here (merchants, tickets, tasks,
+  // bug reports) uses ?status=, and this page was the sole holdout — enough to
+  // send someone hand-editing a URL to a page that silently ignored them.
+  const { status: rawFilter } = await searchParams;
   const filter = parseLeadFilter(rawFilter);
 
   const profile = await requireUser();
@@ -107,7 +110,7 @@ async function LeadsList({
       <FilterTabs
         options={LEAD_FILTER_OPTIONS}
         active={filter}
-        hrefFor={(value) => (value === "all" ? "/leads" : `/leads?filter=${value}`)}
+        hrefFor={(value) => (value === "all" ? "/leads" : `/leads?status=${value}`)}
       />
 
       <Table>
@@ -171,7 +174,7 @@ async function LeadsList({
 export default function LeadsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ filter?: string }>;
+  searchParams: Promise<{ status?: string }>;
 }) {
   return (
     <PageShell width="list">

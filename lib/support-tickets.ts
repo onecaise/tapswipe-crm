@@ -107,6 +107,61 @@ export function supportTicketStatusIntent(
 }
 
 /**
+ * Sort order for the list: open, then pending, then closed.
+ *
+ * Applied in application code rather than in the query because PostgREST has no
+ * way to express a CASE ordering, and the three status words do not sort into
+ * this order alphabetically in either direction. The list is fetched whole and
+ * unpaginated, so sorting it here costs nothing and keeps the rule readable.
+ *
+ * It exists because the page subtitle says "Open tickets first" and only the
+ * default filter honoured it — the All view was plain id-desc, so a closed
+ * ticket could sit above an open one.
+ */
+const STATUS_RANK: Record<string, number> = {
+  open: 0,
+  pending: 1,
+  closed: 2,
+};
+
+export function compareByStatusThenNewest(
+  a: { status: string; id: number },
+  b: { status: string; id: number },
+): number {
+  // Unknown statuses sort last rather than first: `status` is constrained
+  // today, but a value outside the three is not something to promote.
+  const rank =
+    (STATUS_RANK[a.status] ?? Number.MAX_SAFE_INTEGER) -
+    (STATUS_RANK[b.status] ?? Number.MAX_SAFE_INTEGER);
+  return rank !== 0 ? rank : b.id - a.id;
+}
+
+/**
+ * Priority, as a badge intent.
+ *
+ * It rendered as plain body text in both the list and the detail page, so an
+ * Urgent ticket was typographically identical to a Normal one — the column
+ * existed and carried no weight at all.
+ *
+ * Two intents, not four. Amber means "this one is louder than the rest"; grey
+ * means it is not. Giving High and Urgent separate colours would need a fourth
+ * status colour that does not exist, and the two that do — brand and
+ * destructive red — are barred from status badges on purpose (see
+ * components/status-badge.tsx). The vocabulary is ordered but the colour system
+ * is not, so this maps the ordering onto the one distinction it can carry
+ * honestly, and the word itself still says which of the two it is.
+ *
+ * Unknown values are neutral rather than assumed loud: the column is
+ * unconstrained, so a value outside TICKET_PRIORITIES is something a person
+ * typed and nothing here can rank it.
+ */
+export function supportTicketPriorityIntent(
+  priority: string | null | undefined,
+): StatusIntent {
+  return priority === "High" || priority === "Urgent" ? "warning" : "neutral";
+}
+
+/**
  * Suggestions for the free-text reference fields, offered through a native
  * <datalist> the way documents-panel.tsx does for doc_type.
  *

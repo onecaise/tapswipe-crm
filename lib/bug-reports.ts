@@ -35,6 +35,40 @@ export const BUG_REPORT_LIST_COLUMNS =
 export const BUG_REPORT_OPEN_STATUS: BugReportStatus = "open";
 
 /**
+ * The queue's filter tabs.
+ *
+ * The page said "Cleared reports stay on file — they are not deleted" and then
+ * offered no way to look at one, so "on file" meant "in the database, invisible
+ * forever". Every other list in the app has these; this one was missing them,
+ * which made the retention promise unverifiable by the person relying on it.
+ */
+export const BUG_REPORT_FILTER_OPTIONS = [
+  { value: "open", label: "Open" },
+  { value: "resolved", label: "Resolved" },
+  { value: "dismissed", label: "Dismissed" },
+  { value: "all", label: "All" },
+] as const;
+
+export type BugReportFilter =
+  (typeof BUG_REPORT_FILTER_OPTIONS)[number]["value"];
+
+export const DEFAULT_BUG_REPORT_FILTER: BugReportFilter = "open";
+
+/** Anything unrecognised falls back to the queue, never to "all". */
+export function parseBugReportFilter(raw: string | undefined): BugReportFilter {
+  const match = BUG_REPORT_FILTER_OPTIONS.find((o) => o.value === raw);
+  return match ? match.value : DEFAULT_BUG_REPORT_FILTER;
+}
+
+export function bugReportStatusIntent(
+  status: BugReportStatus,
+): "success" | "warning" | "neutral" {
+  if (status === "open") return "warning";
+  if (status === "resolved") return "success";
+  return "neutral";
+}
+
+/**
  * How a report leaves the queue.
  *
  * Two closures rather than one because they claim different things: 'resolved'

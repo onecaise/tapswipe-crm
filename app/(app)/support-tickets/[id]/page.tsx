@@ -7,6 +7,7 @@ import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import {
   type SupportTicket,
+  supportTicketPriorityIntent,
   supportTicketStatusIntent,
 } from "@/lib/support-tickets";
 import { formatDate, formatText } from "@/lib/format";
@@ -144,7 +145,17 @@ async function TicketDetail({ params }: { params: Promise<{ id: string }> }) {
         <dl className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
           <Field label="Category">{formatText(ticket.category)}</Field>
           <Field label="Sub-category">{formatText(ticket.sub_category)}</Field>
-          <Field label="Priority">{formatText(ticket.priority)}</Field>
+          <Field label="Priority">
+            {ticket.priority === null || ticket.priority.trim() === "" ? (
+              formatText(ticket.priority)
+            ) : (
+              <StatusBadge
+                intent={supportTicketPriorityIntent(ticket.priority)}
+              >
+                {ticket.priority}
+              </StatusBadge>
+            )}
+          </Field>
           <Field label="Serial / IMEI">
             {formatText(ticket.serial_number_imei)}
           </Field>

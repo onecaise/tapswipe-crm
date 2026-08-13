@@ -14,6 +14,23 @@
 create table profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   full_name text not null,
+  -- The sign-in address, copied here by create-user.
+  --
+  -- A denormalised copy of auth.users.email, which is the authority. It exists
+  -- because the Manage Users page had no way to show one: auth.users is not
+  -- reachable from the Data API at all, so listing emails would otherwise mean
+  -- a whole new admin Edge Function, and without them two reps with the same
+  -- full_name are indistinguishable in the only screen that manages accounts.
+  --
+  -- Safe to denormalise only because nothing in this app changes an email after
+  -- creation -- there is no email-change flow, and GoTrue's would bypass this
+  -- column. If one is ever added, it has to write here too, and this comment is
+  -- the reason why. Nullable because rows created before this column exists
+  -- have no value to backfill from within a migration that cannot see
+  -- auth.users at plan time (the migration does backfill it; the column stays
+  -- nullable so a future service-role insert that omits it fails visibly on
+  -- the page rather than at the database).
+  email text,
   role text not null default 'agent' check (role in ('agent', 'admin')),
   is_active boolean not null default true,
   -- Set by create-user and admin-reset-password, cleared by

@@ -11,7 +11,7 @@ import {
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { type Lead } from "@/lib/leads";
-import { formatDate, formatText } from "@/lib/format";
+import { formatDate, formatStatus, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { PageHeader } from "@/components/page-header";
@@ -196,7 +196,9 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
         <Field label="Next follow-up">
           {formatDate(lead.next_followup_date)}
         </Field>
-        <Field label="Status">{formatText(lead.status)}</Field>
+        {/* The badge in the header capitalises through CSS, so this rendered
+            the same value in a second casing right below it. */}
+        <Field label="Status">{formatStatus(lead.status)}</Field>
         {agentName !== null && <Field label="Agent">{agentName}</Field>}
         <Field label="Last updated">{formatDate(lead.updated_at)}</Field>
       </Section>

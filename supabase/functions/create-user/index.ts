@@ -105,6 +105,12 @@ export default {
       .insert({
         id: newUserId,
         full_name: (fullName as string).trim(),
+        // Denormalised copy of auth.users.email, which stays the authority.
+        // Manage Users cannot read auth.users — nothing at the Data API can —
+        // so without this the page has no way to tell two reps with the same
+        // name apart. Taken from `created.user` rather than the request body so
+        // it matches what GoTrue actually stored, normalisation included.
+        email: created.user.email ?? null,
         role,
         is_active: true,
         // Forces the rep to replace the password the admin knows. The (app)
