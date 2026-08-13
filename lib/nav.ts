@@ -1,4 +1,5 @@
 import {
+  BugIcon,
   ClipboardListIcon,
   FolderIcon,
   GhostIcon,
@@ -64,13 +65,25 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       // where owner_type/owner_id come from a parent row loaded under RLS.
       { label: "Notes", href: "/notes", icon: StickyNoteIcon },
       { label: "Tasks", href: "/tasks", icon: ListTodoIcon },
+      // Not admin-only: every rep uploads and downloads their own documents.
+      // It sat under "Admin" and gave agents a one-item section with that
+      // header over a page they use daily.
+      { label: "Documents", href: "/documents", icon: FolderIcon },
     ],
   },
   {
     label: "Admin",
     items: [
       { label: "Users", href: "/admin/users", icon: UsersIcon, adminOnly: true },
-      { label: "Documents", href: "/documents", icon: FolderIcon },
+      // /admin/bug-reports existed with no nav entry at all, so the queue the
+      // bubble promises ("sent to the admins") was reachable only by typing
+      // the URL.
+      {
+        label: "Bug Reports",
+        href: "/admin/bug-reports",
+        icon: BugIcon,
+        adminOnly: true,
+      },
     ],
   },
 ];

@@ -15,9 +15,11 @@ import {
   type PreAppBusinessProfile,
   type PreAppOwner,
   type PreAppStatus,
+  type PreAppTerminal,
   preAppSubmitBlockers,
 } from "@/lib/pre-apps";
 import { Callout } from "@/components/callout";
+import { PreAppSummary } from "@/components/pre-app-summary";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -56,11 +58,13 @@ export function ReviewStep({
   preApp,
   owners,
   profile,
+  terminal,
   isAdmin,
 }: {
   preApp: PreApp;
   owners: PreAppOwner[];
   profile: PreAppBusinessProfile | null;
+  terminal: PreAppTerminal | null;
   isAdmin: boolean;
 }) {
   const router = useRouter();
@@ -143,6 +147,19 @@ export function ReviewStep({
           Everything below is checked again on the server when you submit.
         </p>
       </div>
+
+      {/* The actual application, above the verdict on it. Without this the step
+          was a checklist under a subtitle promising "everything below", and the
+          only way to read back what you were about to submit was to submit it
+          and land on the detail page. */}
+      <PreAppSummary
+        preApp={preApp}
+        owners={owners}
+        terminal={terminal}
+        cardMix={profile}
+      />
+
+      <div className="border-t pt-6" />
 
       {ready ? (
         <Callout tone="success" className="flex items-center gap-2">

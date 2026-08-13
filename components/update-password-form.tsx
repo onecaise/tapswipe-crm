@@ -47,6 +47,12 @@ export function UpdatePasswordForm({
       await supabase.rpc("clear_must_change_password");
 
       router.push("/dashboard");
+      // Without this the push never commits: app/(app)/layout.tsx redirects to
+      // this page while must_change_password is true, and that server render is
+      // cached client-side. The dashboard tree mounts underneath, the URL stays
+      // on /auth/update-password, and the rep is left looking at the form they
+      // just submitted. Same pairing as login-form.tsx.
+      router.refresh();
     } catch (error: unknown) {
       setError(error instanceof Error ? error.message : "An error occurred");
     } finally {

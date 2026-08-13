@@ -10,9 +10,10 @@ import {
   type PreApp,
   type PreAppBusinessProfile,
   type PreAppOwner,
+  type PreAppTerminal,
   statusIntent,
 } from "@/lib/pre-apps";
-import { formatDate, formatPct, formatText } from "@/lib/format";
+import { formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { PageHeader } from "@/components/page-header";
@@ -21,41 +22,10 @@ import { DocumentsPanel } from "@/components/documents-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
 import { PreAppDecision } from "@/components/pre-app-decision";
+import { PreAppSummary } from "@/components/pre-app-summary";
 import { Callout } from "@/components/callout";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <dt className="text-xs uppercase tracking-wide text-muted-foreground">
-        {label}
-      </dt>
-      <dd className="text-sm">{children}</dd>
-    </div>
-  );
-}
-
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-4">
-      <h2 className="font-semibold text-lg">{title}</h2>
-      <dl className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">{children}</dl>
-    </div>
-  );
-}
 
 async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -83,28 +53,38 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
   const preApp = data as PreApp;
   const isAdmin = profile.role === "admin";
 
-  const [{ data: ownerRows }, { data: profileRow }, { data: docRows }] =
-    await Promise.all([
-      supabase
-        .from("pre_app_owners")
-        .select("*")
-        .eq("pre_app_id", preApp.id)
-        .order("id"),
-      supabase
-        .from("pre_app_business_profile")
-        .select("*")
-        .eq("pre_app_id", preApp.id)
-        .maybeSingle(),
-      supabase
-        .from("documents")
-        .select(DOCUMENT_LIST_COLUMNS)
-        .eq("owner_type", "pre_app")
-        .eq("owner_id", preApp.id)
-        .order("uploaded_at", { ascending: false }),
-    ]);
+  const [
+    { data: ownerRows },
+    { data: profileRow },
+    { data: terminalRow },
+    { data: docRows },
+  ] = await Promise.all([
+    supabase
+      .from("pre_app_owners")
+      .select("*")
+      .eq("pre_app_id", preApp.id)
+      .order("id"),
+    supabase
+      .from("pre_app_business_profile")
+      .select("*")
+      .eq("pre_app_id", preApp.id)
+      .maybeSingle(),
+    supabase
+      .from("pre_app_terminal")
+      .select("*")
+      .eq("pre_app_id", preApp.id)
+      .maybeSingle(),
+    supabase
+      .from("documents")
+      .select(DOCUMENT_LIST_COLUMNS)
+      .eq("owner_type", "pre_app")
+      .eq("owner_id", preApp.id)
+      .order("uploaded_at", { ascending: false }),
+  ]);
 
   const owners = (ownerRows ?? []) as PreAppOwner[];
   const cardMix = (profileRow ?? null) as PreAppBusinessProfile | null;
+  const terminal = (terminalRow ?? null) as PreAppTerminal | null;
   const documents = (docRows ?? []) as DocumentRow[];
 
   let agentName: string | null = null;
@@ -192,73 +172,15 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
         agentName={agentName}
       />
 
-      <Section title="Business">
-        <Field label="DBA">{preApp.dba_name}</Field>
-        <Field label="Legal name">
-          {formatText(preApp.legal_business_name)}
-        </Field>
-        <Field label="Contact">{formatText(preApp.contact_name)}</Field>
-        <Field label="Contact phone">{formatText(preApp.contact_phone)}</Field>
-        <Field label="Business phone">{formatText(preApp.phone_number)}</Field>
-        <Field label="Email">{formatText(preApp.email_address)}</Field>
-        <Field label="Address">{formatText(preApp.physical_address)}</Field>
-        <Field label="City">{formatText(preApp.city)}</Field>
-        <Field label="State">{formatText(preApp.state)}</Field>
-        <Field label="ZIP">{formatText(preApp.zip)}</Field>
-        <Field label="Website">{formatText(preApp.website)}</Field>
-        <Field label="Entity type">{formatText(preApp.legal_entity_type)}</Field>
-        <Field label="EIN">{formatText(preApp.ein_number)}</Field>
-        <Field label="Started">{formatDate(preApp.business_start_date)}</Field>
-        <Field label="Goods sold">{formatText(preApp.goods_sold)}</Field>
-        <Field label="Bank">{formatText(preApp.bank_name)}</Field>
-        <Field label="Billing">{formatText(preApp.billing_type)}</Field>
-        <Field label="Split (agent / company)">
-          {formatPct(preApp.split_agent_pct)} /{" "}
-          {formatPct(preApp.split_company_pct)}
-        </Field>
-        {isAdmin && <Field label="Agent">{formatText(agentName)}</Field>}
-      </Section>
-
-      <div className="flex flex-col gap-4">
-        <h2 className="font-semibold text-lg">Owners ({owners.length})</h2>
-        {owners.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No owners recorded yet. At least one owner holding 51% or more is
-            required before this can be submitted.
-          </p>
-        ) : (
-          <div className="flex flex-col gap-6">
-            {owners.map((owner) => (
-              <dl
-                key={owner.id}
-                className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3"
-              >
-                <Field label="Name">{formatText(owner.owner_name)}</Field>
-                <Field label="Title">{formatText(owner.title)}</Field>
-                <Field label="Ownership">
-                  {formatPct(owner.percent_owned)}
-                </Field>
-                <Field label="Home phone">{formatText(owner.home_phone)}</Field>
-                <Field label="Date of birth">{formatDate(owner.dob)}</Field>
-                <Field label="Home state">{formatText(owner.home_state)}</Field>
-              </dl>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <Section title="Card mix">
-        <Field label="Swiped">{formatPct(cardMix?.card_swiped_pct)}</Field>
-        <Field label="Keyed">{formatPct(cardMix?.card_keyed_pct)}</Field>
-        <Field label="Card present">
-          {formatPct(cardMix?.card_present_pct)}
-        </Field>
-        <Field label="Card not present">
-          {formatPct(cardMix?.card_not_present_pct)}
-        </Field>
-        <Field label="MOTO">{formatPct(cardMix?.moto_pct)}</Field>
-        <Field label="Internet">{formatPct(cardMix?.internet_pct)}</Field>
-      </Section>
+      {/* Shared with the wizard's review step, so what a rep sees before
+          submitting and what an admin sees before approving cannot drift. */}
+      <PreAppSummary
+        preApp={preApp}
+        owners={owners}
+        terminal={terminal}
+        cardMix={cardMix}
+        agentName={isAdmin ? agentName : undefined}
+      />
 
       <TasksPanel
         ownerType="pre_app"

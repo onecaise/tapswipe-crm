@@ -93,12 +93,17 @@ async function GhostSheetDetail({
           </Button>
         }
       >
+        {/* The badge is the derived conversion state (does this sheet have a
+            lead_id yet); sheet.status is the column a rep sets by hand. They
+            usually read the same, so showing the raw value bare next to the
+            badge looked like the status had been printed twice. Labelled, so
+            the two are legible as the different things they are. */}
         <div className="mt-1 flex items-center gap-2">
           <StatusBadge intent={conversionIntent(sheet)}>
             {converted ? "converted" : "open"}
           </StatusBadge>
           <span className="text-sm text-muted-foreground">
-            {formatText(sheet.status)}
+            Marked {formatText(sheet.status)}
           </span>
         </div>
       </PageHeader>

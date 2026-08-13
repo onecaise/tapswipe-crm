@@ -108,10 +108,15 @@ export function BugReportsTable({
 
           {confirming ? (
             <div className="flex items-center gap-2">
+              {/* Only "resolved" carries the primary fill. These two sit side by
+                  side and mean opposite things, so rendering both in the brand
+                  red made the pair a coin toss — the same misclick the design
+                  system keeps primary and destructive apart to prevent. */}
               {BUG_REPORT_RESOLUTIONS.map((resolution) => (
                 <Button
                   key={resolution}
                   size="sm"
+                  variant={resolution === "resolved" ? "default" : "outline"}
                   disabled={busy}
                   onClick={() => void clear(resolution)}
                 >

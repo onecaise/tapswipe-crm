@@ -53,3 +53,29 @@ export function formatDate(value: string | null | undefined): string {
   const date = parseDisplayDate(value);
   return date === null ? EMPTY : date.toLocaleDateString();
 }
+
+/** A `time` column, as PostgREST sends it: "HH:MM" or "HH:MM:SS". */
+const CLOCK_TIME = /^(\d{2}):(\d{2})(?::\d{2})?$/;
+
+/**
+ * A wall-clock time carrying no date — `pre_app_terminal.batch_out_time` is the
+ * only one so far.
+ *
+ * Formatted arithmetically rather than through `Date`, for the same reason
+ * parseDisplayDate exists: a `time` value names a time of day, not an instant.
+ * There is no correct date to anchor it to, and anchoring it to today would
+ * reintroduce exactly the zone-shift bug documented above.
+ */
+export function formatClockTime(value: string | null | undefined): string {
+  if (!value) return EMPTY;
+  const parts = CLOCK_TIME.exec(value);
+  if (parts === null) return EMPTY;
+
+  const hours = Number(parts[1]);
+  const minutes = parts[2];
+  if (hours > 23 || Number(minutes) > 59) return EMPTY;
+
+  const suffix = hours < 12 ? "AM" : "PM";
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  return `${hour12}:${minutes} ${suffix}`;
+}

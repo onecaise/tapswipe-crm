@@ -108,7 +108,7 @@ export function PreAppCreateForm({
         <form onSubmit={handleSubmit} className="flex flex-col gap-6">
           <div className="grid gap-6 sm:grid-cols-2">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="dba_name">DBA name</Label>
+              <Label htmlFor="dba_name">DBA name *</Label>
               <Input
                 id="dba_name"
                 value={dbaName}
@@ -117,7 +117,7 @@ export function PreAppCreateForm({
               />
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="legal_business_name">Legal business name</Label>
+              <Label htmlFor="legal_business_name">Legal business name *</Label>
               <Input
                 id="legal_business_name"
                 value={legalName}

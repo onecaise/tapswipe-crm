@@ -75,7 +75,10 @@ async function PreAppEditor({
           .order("id")
           .then(({ data }) => (data ?? []) as PreAppOwner[])
       : Promise.resolve<PreAppOwner[]>([]),
-    step === "terminal"
+    // Review needs this too now that it renders the full summary — without it
+    // the terminal section would read "No terminal details recorded yet" on
+    // every pre-app that has them.
+    step === "terminal" || step === "review"
       ? supabase
           .from("pre_app_terminal")
           .select("*")
@@ -119,6 +122,7 @@ async function PreAppEditor({
           preApp={preApp}
           owners={owners}
           profile={cardMix}
+          terminal={terminal}
           isAdmin={isAdmin}
         />
       )}
