@@ -7,6 +7,7 @@ import { PlusIcon, Trash2Icon } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import type { AnnotationOwnerType, Note, WithAuthor } from "@/lib/annotations";
 import { formatDate } from "@/lib/format";
+import { ConfirmPair } from "@/components/confirm-pair";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -42,6 +43,8 @@ export function NotesPanel({
   const router = useRouter();
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
+  /** Which note's delete is awaiting confirmation, if any. */
+  const [confirmingId, setConfirmingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const add = async () => {
@@ -72,6 +75,7 @@ export function NotesPanel({
   const remove = async (id: number) => {
     setBusy(true);
     setError(null);
+    setConfirmingId(null);
 
     const supabase = createClient();
     // count: "exact" for the same reason the forms use it — RLS filters rather
@@ -135,17 +139,30 @@ export function NotesPanel({
                   {formatDate(note.created_at)}
                 </p>
               </div>
-              {isAdmin && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() => void remove(note.id)}
-                  aria-label="Remove note"
-                >
-                  <Trash2Icon size={16} />
-                </Button>
-              )}
+              {/* Notes are append-only by design — no update policy and, since
+                  20260812143407, no update grant — so a delete is the only way
+                  to change one and there is nothing to undo it with. */}
+              {isAdmin &&
+                (confirmingId === note.id ? (
+                  <ConfirmPair
+                    label="Delete this note?"
+                    confirmLabel="Delete"
+                    destructive
+                    busy={busy}
+                    onConfirm={() => void remove(note.id)}
+                    onCancel={() => setConfirmingId(null)}
+                  />
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => setConfirmingId(note.id)}
+                    aria-label="Remove note"
+                  >
+                    <Trash2Icon size={16} />
+                  </Button>
+                ))}
             </li>
           ))}
         </ul>

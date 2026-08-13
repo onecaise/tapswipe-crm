@@ -8,6 +8,7 @@ import { createClient } from "@/lib/supabase/client";
 import type { ReplyWithAuthor } from "@/lib/support-ticket-replies";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { ConfirmPair } from "@/components/confirm-pair";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -43,6 +44,8 @@ export function TicketRepliesPanel({
   const router = useRouter();
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
+  /** Which reply's delete is awaiting confirmation, if any. */
+  const [confirmingId, setConfirmingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const send = async () => {
@@ -68,6 +71,7 @@ export function TicketRepliesPanel({
   const remove = async (id: number) => {
     setBusy(true);
     setError(null);
+    setConfirmingId(null);
 
     const supabase = createClient();
     // count: "exact" for the same reason the panels use it — RLS filters rather
@@ -121,17 +125,30 @@ export function TicketRepliesPanel({
                     {formatDate(reply.created_at)}
                   </p>
                 </div>
-                {isAdmin && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() => void remove(reply.id)}
-                    aria-label="Remove reply"
-                  >
-                    <Trash2Icon size={16} />
-                  </Button>
-                )}
+                {/* Replies cannot be edited either — the composer says so — so
+                    deleting one is the only way to take it back, and there is
+                    nothing to undo it with. */}
+                {isAdmin &&
+                  (confirmingId === reply.id ? (
+                    <ConfirmPair
+                      label="Delete this reply?"
+                      confirmLabel="Delete"
+                      destructive
+                      busy={busy}
+                      onConfirm={() => void remove(reply.id)}
+                      onCancel={() => setConfirmingId(null)}
+                    />
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => setConfirmingId(reply.id)}
+                      aria-label="Remove reply"
+                    >
+                      <Trash2Icon size={16} />
+                    </Button>
+                  ))}
               </li>
             );
           })}

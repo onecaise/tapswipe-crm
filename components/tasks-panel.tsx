@@ -13,6 +13,7 @@ import {
 } from "@/lib/annotations";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { ConfirmPair } from "@/components/confirm-pair";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -47,6 +48,8 @@ export function TasksPanel({
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [busy, setBusy] = useState(false);
+  /** Which task's delete is awaiting confirmation, if any. */
+  const [confirmingId, setConfirmingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const openCount = tasks.filter((t) => !t.completed).length;
@@ -102,6 +105,7 @@ export function TasksPanel({
   const remove = async (id: number) => {
     setBusy(true);
     setError(null);
+    setConfirmingId(null);
 
     const supabase = createClient();
     const { error: deleteError, count } = await supabase
@@ -201,17 +205,27 @@ export function TasksPanel({
                     </span>
                   </div>
                 </div>
-                {isAdmin && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() => void remove(task.id)}
-                    aria-label="Remove task"
-                  >
-                    <Trash2Icon size={16} />
-                  </Button>
-                )}
+                {isAdmin &&
+                  (confirmingId === task.id ? (
+                    <ConfirmPair
+                      label="Delete this task?"
+                      confirmLabel="Delete"
+                      destructive
+                      busy={busy}
+                      onConfirm={() => void remove(task.id)}
+                      onCancel={() => setConfirmingId(null)}
+                    />
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => setConfirmingId(task.id)}
+                      aria-label="Remove task"
+                    >
+                      <Trash2Icon size={16} />
+                    </Button>
+                  ))}
               </li>
             );
           })}

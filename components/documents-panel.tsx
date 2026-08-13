@@ -11,6 +11,7 @@ import {
   SUGGESTED_DOC_TYPES,
 } from "@/lib/documents";
 import { formatDate, formatText } from "@/lib/format";
+import { ConfirmPair } from "@/components/confirm-pair";
 import { DownloadDocumentButton } from "@/components/download-document-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,6 +38,8 @@ export function DocumentsPanel({
   const [docType, setDocType] = useState<string>(SUGGESTED_DOC_TYPES[0]);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
+  /** Which document's removal is awaiting confirmation, if any. */
+  const [confirmingId, setConfirmingId] = useState<number | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const router = useRouter();
@@ -91,6 +94,7 @@ export function DocumentsPanel({
   const remove = async (documentId: number) => {
     setBusyId(documentId);
     setError(null);
+    setConfirmingId(null);
     const supabase = createClient();
 
     try {
@@ -188,19 +192,32 @@ export function DocumentsPanel({
                 </div>
               </div>
               <div className="flex items-start gap-2 shrink-0">
-                <DownloadDocumentButton
-                  documentId={doc.id}
-                  label={doc.file_name}
-                />
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={busyId === doc.id}
-                  onClick={() => void remove(doc.id)}
-                  aria-label={`Remove ${doc.file_name ?? "document"}`}
-                >
-                  <Trash2Icon size={14} />
-                </Button>
+                {confirmingId === doc.id ? (
+                  <ConfirmPair
+                    label="Remove this document?"
+                    confirmLabel="Remove"
+                    destructive
+                    busy={busyId === doc.id}
+                    onConfirm={() => void remove(doc.id)}
+                    onCancel={() => setConfirmingId(null)}
+                  />
+                ) : (
+                  <>
+                    <DownloadDocumentButton
+                      documentId={doc.id}
+                      label={doc.file_name}
+                    />
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busyId === doc.id}
+                      onClick={() => setConfirmingId(doc.id)}
+                      aria-label={`Remove ${doc.file_name ?? "document"}`}
+                    >
+                      <Trash2Icon size={14} />
+                    </Button>
+                  </>
+                )}
               </div>
             </li>
           ))}
