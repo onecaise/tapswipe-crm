@@ -356,3 +356,91 @@ describe("merchants detail lookup", () => {
     expect(result).toHaveLength(0);
   });
 });
+
+/**
+ * The split constraint added by 20260813162634.
+ *
+ * pre_apps has enforced agent + company = 100 since 20260806140000 and the
+ * wizard derives the company half from the agent half, so an approved merchant
+ * was always consistent. A hand-edited one was not — the merchant form takes
+ * both numbers as free input, and 60/45 saved without complaint.
+ *
+ * Declared `not valid`, so these assert the half that is actually enforced:
+ * every insert and update from here on. Pre-existing rows are deliberately
+ * unchecked, and the last test pins that rather than leaving it to chance.
+ */
+describe("merchant split must total 100", () => {
+  const insertSplit = (agent: string, company: string) => `
+    insert into merchants (agent_id, dba, split_agent_pct, split_company_pct)
+    values ('${AGENT_ID}', 'Split Test', ${agent}, ${company})
+  `;
+
+  it("accepts a pair totalling 100", async () => {
+    await asUser(db, AGENT_ID);
+    await db.exec(insertSplit("55", "45"));
+
+    await asPlatform(db);
+    const [m] = await rows<{ a: string; c: string }>(
+      db,
+      `select split_agent_pct::text as a, split_company_pct::text as c
+         from merchants where dba = 'Split Test'`,
+    );
+    expect([m.a, m.c]).toEqual(["55.00", "45.00"]);
+  });
+
+  it("rejects a pair that does not total 100", async () => {
+    await asUser(db, AGENT_ID);
+    await expect(db.exec(insertSplit("60", "45"))).rejects.toThrow(
+      /merchants_split_totals_100/,
+    );
+  });
+
+  it("rejects one half on its own, which would read as the other being zero", async () => {
+    await asUser(db, AGENT_ID);
+    await expect(db.exec(insertSplit("55", "null"))).rejects.toThrow(
+      /merchants_split_totals_100/,
+    );
+  });
+
+  it("allows both halves null — a split simply not recorded yet", async () => {
+    await asUser(db, AGENT_ID);
+    await db.exec(insertSplit("null", "null"));
+
+    await asPlatform(db);
+    const [m] = await rows<{ a: string | null }>(
+      db,
+      `select split_agent_pct::text as a from merchants where dba = 'Split Test'`,
+    );
+    expect(m.a).toBeNull();
+  });
+
+  it("catches an UPDATE that breaks the total, not just an INSERT", async () => {
+    // The form path that produced the 105% row in the first place.
+    await asPlatform(db);
+    const [m] = await rows<{ id: number }>(
+      db,
+      `select id from merchants where dba = 'Agent Active Co'`,
+    );
+
+    // Seeded 60/40, so raising the agent half alone takes it to 110. NOT VALID
+    // skips the initial scan but still binds every later write, including
+    // writes to rows that predate the constraint — which is the whole point.
+    await asUser(db, AGENT_ID);
+    await expect(
+      db.exec(`update merchants set split_agent_pct = 70 where id = ${m.id}`),
+    ).rejects.toThrow(/merchants_split_totals_100/);
+  });
+
+  it("is NOT VALID, so rows written before it are left alone", async () => {
+    // The reason the migration does not normalise: nothing there can tell a
+    // typo from a deal someone struck. Pinned so a later `validate constraint`
+    // is a deliberate decision rather than an accident.
+    await asPlatform(db);
+    const [c] = await rows<{ convalidated: boolean }>(
+      db,
+      `select convalidated from pg_constraint
+        where conname = 'merchants_split_totals_100'`,
+    );
+    expect(c.convalidated).toBe(false);
+  });
+});

@@ -176,6 +176,18 @@ export function PreAppWizardShell({
           <Callout tone="warning">
             This pre-app is <strong>{status}</strong>. You&rsquo;re editing it as
             an admin and changes are saved immediately.
+            {/* approve_pre_app copies what it needs into merchants at approval
+                and nothing syncs after, so an edit here reaches the application
+                and not the merchant. Saying only "saved immediately" invited
+                exactly the wrong conclusion — that correcting a split here
+                would correct the live one. */}
+            {status === "approved" && (
+              <>
+                {" "}
+                They will not reach the merchant this was approved into — its
+                details were copied across at approval.
+              </>
+            )}
           </Callout>
         )}
 

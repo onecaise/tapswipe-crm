@@ -1,7 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
-import { ArrowLeftIcon, FilePlusIcon, PencilIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  FilePlusIcon,
+  FileTextIcon,
+  PencilIcon,
+} from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
@@ -92,6 +97,24 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
     .order("uploaded_at", { ascending: false });
   const documents = (docs ?? []) as DocumentRow[];
 
+  // Whether an application already came off this lead. pre_apps.lead_id records
+  // provenance and is deliberately not unique — a lead can legitimately be
+  // applied for more than once — so this is not a constraint, it is the thing
+  // the page was missing. "Start pre-app" was shown unconditionally with no
+  // sign that one already existed, so the obvious move on a lead already in
+  // flight was to quietly start a second one.
+  const { data: existingPreApp } = await supabase
+    .from("pre_apps")
+    .select("id, status")
+    .eq("lead_id", lead.id)
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const preApp = (existingPreApp ?? null) as {
+    id: number;
+    status: string;
+  } | null;
+
   // owner_type is a literal here, never from the URL: owner_id has no foreign
   // key, so a mismatched pair is not something the database would catch.
   const { notes, tasks } = await loadAnnotations("lead", lead.id);
@@ -106,10 +129,17 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
                 should take rather than /pre-apps/new — see
                 preAppDefaultsFromLead. */}
             <Button asChild size="sm" variant="outline">
-              <Link href={`/pre-apps/new?lead=${lead.id}`}>
-                <FilePlusIcon size={16} />
-                Start pre-app
-              </Link>
+              {preApp === null ? (
+                <Link href={`/pre-apps/new?lead=${lead.id}`}>
+                  <FilePlusIcon size={16} />
+                  Start pre-app
+                </Link>
+              ) : (
+                <Link href={`/pre-apps/${preApp.id}`}>
+                  <FileTextIcon size={16} />
+                  View pre-app
+                </Link>
+              )}
             </Button>
             <Button asChild size="sm">
               <Link href={`/leads/${lead.id}/edit`}>

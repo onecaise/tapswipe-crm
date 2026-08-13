@@ -124,6 +124,19 @@ async function MerchantDetail({
         <Field label="Date added">{formatDate(merchant.date_added)}</Field>
         {agentName !== null && <Field label="Agent">{agentName}</Field>}
         <Field label="Last updated">{formatDate(merchant.updated_at)}</Field>
+        {/* Only when this merchant was approved from one. Merchants created by
+            hand, and everything approved before 20260813162634, have nothing to
+            point at. */}
+        {merchant.pre_app_id !== null && (
+          <Field label="Approved from">
+            <Link
+              href={`/pre-apps/${merchant.pre_app_id}`}
+              className="underline underline-offset-4"
+            >
+              Pre-app #{merchant.pre_app_id}
+            </Link>
+          </Field>
+        )}
       </dl>
 
       <TasksPanel

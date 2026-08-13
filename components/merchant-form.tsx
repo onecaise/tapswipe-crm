@@ -9,6 +9,7 @@ import {
   type Merchant,
   type MerchantStatus,
 } from "@/lib/merchants";
+import { EMPTY } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -44,10 +45,27 @@ function toFormState(merchant?: Merchant): FormState {
   };
 }
 
+/**
+ * The company half of the split, derived from the agent half.
+ *
+ * Returns null for anything that isn't a usable percentage, so a blank or
+ * half-typed field writes NULL to both columns rather than a number derived
+ * from nonsense — null/null is the one uneven pair merchants_split_totals_100
+ * still allows.
+ */
+function companySplitFrom(agentSplit: string): number | null {
+  if (agentSplit.trim() === "") return null;
+  const agent = Number(agentSplit);
+  if (!Number.isFinite(agent) || agent < 0 || agent > 100) return null;
+  return 100 - agent;
+}
+
 /** Empty text inputs become NULL, not "". Numbers parse or become NULL. */
 function toPayload(form: FormState) {
   const text = (v: string) => (v.trim() === "" ? null : v.trim());
   const num = (v: string) => (v.trim() === "" ? null : Number(v));
+
+  const company = companySplitFrom(form.split_agent_pct);
 
   return {
     dba: form.dba.trim(),
@@ -55,8 +73,10 @@ function toPayload(form: FormState) {
     mid: text(form.mid),
     status: form.status,
     processor: text(form.processor),
-    split_agent_pct: num(form.split_agent_pct),
-    split_company_pct: num(form.split_company_pct),
+    // Both or neither. Sending an agent half with a null company half would
+    // trip the constraint, and the rep has no field to correct it with.
+    split_agent_pct: company === null ? null : num(form.split_agent_pct),
+    split_company_pct: company,
     date_added: text(form.date_added),
     // updated_at is deliberately absent — the set_updated_at() trigger owns it.
   };
@@ -79,6 +99,10 @@ export function MerchantForm({
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
+
+  const derivedCompanySplit = companySplitFrom(form.split_agent_pct);
+  const companySplitLabel =
+    derivedCompanySplit === null ? EMPTY : `${derivedCompanySplit}`;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -206,13 +230,21 @@ export function MerchantForm({
               />
             </div>
 
+            {/* Only the agent half is an input; the company half is derived,
+                the same shape the pre-app wizard's business step uses. Both
+                being free text is what let 60/45 be saved, and the database now
+                refuses it (merchants_split_totals_100) — so leaving two boxes
+                here would just turn a silent wrong number into a constraint
+                error the rep cannot act on. Blank stays blank: a merchant whose
+                split is not recorded yet is an ordinary state, and both columns
+                null is the one pair the constraint still allows. */}
             <div className="grid gap-2">
               <Label htmlFor="split_agent_pct">Agent split %</Label>
               <Input
                 id="split_agent_pct"
                 type="number"
                 min="0"
-                max="999.99"
+                max="100"
                 step="0.01"
                 value={form.split_agent_pct}
                 onChange={(e) => set("split_agent_pct", e.target.value)}
@@ -220,16 +252,13 @@ export function MerchantForm({
             </div>
 
             <div className="grid gap-2">
-              <Label htmlFor="split_company_pct">Company split %</Label>
-              <Input
-                id="split_company_pct"
-                type="number"
-                min="0"
-                max="999.99"
-                step="0.01"
-                value={form.split_company_pct}
-                onChange={(e) => set("split_company_pct", e.target.value)}
-              />
+              <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                Company split %
+              </span>
+              <p className="text-sm">{companySplitLabel}</p>
+              <p className="text-xs text-muted-foreground">
+                Derived, always 100 minus the agent split.
+              </p>
             </div>
           </div>
 

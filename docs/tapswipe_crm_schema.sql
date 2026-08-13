@@ -253,9 +253,36 @@ create table merchants (
   processor text,
   split_agent_pct numeric(5,2),
   split_company_pct numeric(5,2),
+  -- Which pre-app was approved into this merchant, when one was. The foreign
+  -- key is added after pre_apps exists, below. Nullable and staying that way:
+  -- merchants are also created by hand, and every row that predates this
+  -- column has no pre-app to point at.
+  pre_app_id int,
   date_added date default current_date,
   created_at timestamptz default now(),
-  updated_at timestamptz default now()
+  updated_at timestamptz default now(),
+  -- The same rule pre_apps carries, arrived at the other way round. pre_apps
+  -- has enforced it since the beginning and the wizard derives the company
+  -- half from the agent half, so an approved merchant is always consistent.
+  -- A hand-edited one was not: the merchant form takes both numbers as free
+  -- input, and 60/45 saved without complaint.
+  --
+  -- Declared `not valid` deliberately. Existing rows are not checked, because
+  -- nobody can say from here whether a 60/45 row is a typo or a deal someone
+  -- actually struck, and a migration that rewrites commission figures on its
+  -- own authority is worse than one that leaves them alone. Every insert and
+  -- every update from here on is checked. Run
+  --   select id, dba, split_agent_pct, split_company_pct from merchants
+  --    where coalesce(split_agent_pct, 0) + coalesce(split_company_pct, 0) <> 100
+  --      and (split_agent_pct is not null or split_company_pct is not null);
+  -- to list what predates it, then `validate constraint` once they are settled.
+  --
+  -- Both-null stays legal: a merchant whose split is simply not recorded yet
+  -- is an ordinary state, and NULL + NULL would otherwise be forced to 100.
+  constraint merchants_split_totals_100 check (
+    (split_agent_pct is null and split_company_pct is null)
+    or coalesce(split_agent_pct, 0) + coalesce(split_company_pct, 0) = 100
+  ) not valid
 );
 
 alter table merchants enable row level security;
@@ -418,6 +445,18 @@ create policy "update own or admin" on pre_apps
   with check ((agent_id = auth.uid() and is_active_agent()) or is_admin());
 create policy "admin delete only" on pre_apps
   for delete using (is_admin());
+
+-- merchants.pre_app_id, deferred to here because merchants is declared before
+-- pre_apps and a forward reference will not create. `on delete set null` for
+-- the same reason ghost_sheets.lead_id uses it: pre_apps has an admin-only
+-- DELETE policy, and without an action that delete fails against any merchant
+-- approved from the row. The merchant is the durable record and outlives its
+-- application; losing the provenance pointer is the correct trade.
+alter table merchants
+  add constraint merchants_pre_app_id_fkey
+  foreign key (pre_app_id) references pre_apps(id) on delete set null;
+
+create index idx_merchants_pre_app_id on merchants(pre_app_id);
 
 -- ---------------------------------------------------------------------
 -- PRE-APP OWNERS — non-sensitive ownership fields (name, address, %
@@ -1597,10 +1636,17 @@ begin
   -- agent_id comes from the pre-app, never auth.uid(): an admin approving on
   -- a rep's behalf must not move the merchant into their own book. Same
   -- reasoning as convert_ghost_sheet_to_lead.
+  --
+  -- pre_app_id records which application this came from. Note what it is not:
+  -- a live link. Every other column here is a COPY taken at approval, and
+  -- nothing syncs afterwards, so an admin editing an approved pre-app changes
+  -- the application and not the merchant. That is deliberate -- the merchant is
+  -- the record of what was agreed -- and the pointer exists so the divergence
+  -- is at least visible from both ends rather than silent.
   insert into merchants (agent_id, dba, legal_business_name, status,
-                         split_agent_pct, split_company_pct)
+                         split_agent_pct, split_company_pct, pre_app_id)
   values (pa.agent_id, pa.dba_name, pa.legal_business_name, 'active',
-          pa.split_agent_pct, pa.split_company_pct)
+          pa.split_agent_pct, pa.split_company_pct, pa.id)
   returning id into new_merchant_id;
 
   perform set_config('tapswipe.pre_app_transition', 'on', true);
@@ -1801,9 +1847,13 @@ begin
 
   -- agent_id comes from the sheet, not auth.uid(): an admin converting on a
   -- rep's behalf must not move the lead into their own book.
+  --
+  -- 'Ghost sheet' rather than 'ghost_sheet'. lead_source is free text a rep
+  -- types ("Referral", "Cold call", "Web form") and it renders raw on the lead
+  -- page, so the machine-shaped value stood out as the one entry nobody wrote.
   insert into leads (agent_id, dba, contact_name, contact_phone, lead_source, status)
   values (sheet.agent_id, sheet.dba, sheet.contact_name, sheet.contact_phone,
-          'ghost_sheet', 'open')
+          'Ghost sheet', 'open')
   returning id into new_lead_id;
 
   -- leads has no notes column, so the sheet's notes become a row in the

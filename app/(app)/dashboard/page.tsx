@@ -46,7 +46,14 @@ async function DashboardStats() {
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
       <StatCard label="Ghost sheets" value={show("ghost_sheets_total")} />
-      <StatCard label="Active leads" value={show("active_leads")} />
+      {/* "Unconverted", not "Active". The figure is leads with no pre-app yet —
+          it ignores leads.status entirely, so a lead the rep closed as lost
+          still counted under the old label until someone started an
+          application for it. Filtering on status instead would mean inventing a
+          closed-lead vocabulary, which lib/leads.ts warns against precisely
+          because the column is unconstrained free text. The count is right for
+          a funnel; only the word was wrong. */}
+      <StatCard label="Unconverted leads" value={show("active_leads")} />
       <StatCard label="Pre-apps" value={show("pre_apps_total")} />
       <StatCard label="Active merchants" value={show("active_merchants")} />
       {/* The one red figure on the row: open tickets are the only number here

@@ -84,7 +84,11 @@ describe("convert_ghost_sheet_to_lead — happy path", () => {
     expect(lead.dba).toBe("Agent Sheet Open");
     expect(lead.contact_name).toBe("Ann Agent");
     expect(lead.contact_phone).toBe("555-0101");
-    expect(lead.lead_source).toBe("ghost_sheet");
+    // 'Ghost sheet', not 'ghost_sheet': lead_source is free text a rep types
+    // and renders raw on the lead page, so the machine-shaped value stood out
+    // as the one entry nobody had written. 20260813162634 changed it and
+    // backfilled the existing rows.
+    expect(lead.lead_source).toBe("Ghost sheet");
     expect(lead.status).toBe("open");
 
     const [sheet] = await rows<{ lead_id: number; status: string }>(

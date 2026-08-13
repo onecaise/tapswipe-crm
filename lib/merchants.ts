@@ -33,6 +33,15 @@ export type Merchant = {
   processor: string | null;
   split_agent_pct: number | null;
   split_company_pct: number | null;
+  /**
+   * The pre-app this merchant was approved from, when there was one.
+   *
+   * Provenance, not a live link: approve_pre_app copies the columns it needs at
+   * approval and nothing syncs afterwards, so editing an approved pre-app does
+   * not change the merchant. Null for merchants created by hand and for every
+   * row approved before 20260813162634, which had nothing to record.
+   */
+  pre_app_id: number | null;
   date_added: string | null;
   created_at: string | null;
   updated_at: string | null;

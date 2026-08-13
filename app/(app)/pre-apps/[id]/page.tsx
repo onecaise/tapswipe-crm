@@ -87,6 +87,19 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
   const terminal = (terminalRow ?? null) as PreAppTerminal | null;
   const documents = (docRows ?? []) as DocumentRow[];
 
+  // The merchant this was approved into, if it has been. Looked up from the
+  // merchant side because that is where the pointer lives, and read under the
+  // caller's own policies — a rep sees their own merchant, an admin sees any.
+  let approvedMerchant: { id: number; dba: string } | null = null;
+  if (preApp.status === "approved") {
+    const { data: merchantRow } = await supabase
+      .from("merchants")
+      .select("id, dba")
+      .eq("pre_app_id", preApp.id)
+      .maybeSingle();
+    approvedMerchant = (merchantRow ?? null) as { id: number; dba: string } | null;
+  }
+
   let agentName: string | null = null;
   if (isAdmin) {
     const { data: agent } = await supabase
@@ -158,6 +171,35 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
           {preApp.status === "draft" && (
             <p className="mt-2 text-muted-foreground">
               This note clears when the pre-app is submitted again.
+            </p>
+          )}
+        </Callout>
+      )}
+
+      {/* Where an approved application ended up. Without this an approved
+          pre-app was a dead end: it created a merchant and then gave no way to
+          reach it. The null case is real — merchants approved before
+          20260813162634 recorded no pointer — so this says so rather than
+          rendering a broken link. */}
+      {preApp.status === "approved" && (
+        <Callout tone="success" className="p-4">
+          <p className="font-medium">Approved</p>
+          {approvedMerchant === null ? (
+            <p className="text-muted-foreground">
+              The merchant created from this application is not linked to it.
+              Approvals only started recording the link recently.
+            </p>
+          ) : (
+            <p className="text-muted-foreground">
+              Merchant{" "}
+              <Link
+                href={`/merchants/${approvedMerchant.id}`}
+                className="underline underline-offset-4"
+              >
+                {approvedMerchant.dba}
+              </Link>{" "}
+              was created from this. Its details were copied across at approval
+              — editing this application does not change it.
             </p>
           )}
         </Callout>

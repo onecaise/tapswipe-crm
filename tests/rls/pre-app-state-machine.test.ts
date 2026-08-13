@@ -468,6 +468,36 @@ describe("approve_pre_app succeeds under the guard trigger", () => {
     expect(await statusOf(draftId)).toBe("approved");
   });
 
+  it("records which pre-app the merchant was approved from", async () => {
+    // Provenance, not a live link: every other column is copied at approval and
+    // nothing syncs after. The pointer is what lets both pages say so.
+    await asUser(db, ADMIN_ID);
+    const merchantId = await call(`approve_pre_app(${submittedId})`);
+
+    await asPlatform(db);
+    const [m] = await rows<{ pre_app_id: number }>(
+      db,
+      `select pre_app_id from merchants where id = ${merchantId}`,
+    );
+    expect(m.pre_app_id).toBe(submittedId);
+  });
+
+  it("keeps the merchant when its pre-app is deleted, dropping the pointer", async () => {
+    // `on delete set null`, matching ghost_sheets.lead_id. pre_apps has an
+    // admin-only DELETE policy and without the referential action that delete
+    // fails outright against any merchant approved from the row.
+    await asUser(db, ADMIN_ID);
+    const merchantId = await call(`approve_pre_app(${submittedId})`);
+    await db.exec(`delete from pre_apps where id = ${submittedId}`);
+
+    await asPlatform(db);
+    const [m] = await rows<{ pre_app_id: number | null }>(
+      db,
+      `select pre_app_id from merchants where id = ${merchantId}`,
+    );
+    expect(m.pre_app_id).toBeNull();
+  });
+
   it("applies the guard to the table owner as well, not just client roles", async () => {
     // Worth pinning: a service-role Edge Function connection has no
     // auth.uid(), so is_admin() is false there too. Any future privileged code
