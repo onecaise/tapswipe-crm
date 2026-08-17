@@ -318,10 +318,103 @@ describe("create-user", () => {
       { full_name: "", email: "a@b.co", role: "agent" },
       { full_name: "No Email", email: "not-an-email", role: "agent" },
       { full_name: "Bad Role", email: "live-bad-role@tapswipe.test", role: "superuser" },
+      {
+        full_name: "Long Number",
+        email: "live-long-number@tapswipe.test",
+        role: "agent",
+        agent_number: "x".repeat(33),
+      },
     ]) {
       const response = await invoke("create-user", body, fixtures.tokens.admin);
       expect(response.status, response.raw).toBe(400);
     }
+  });
+
+  it("records an agent number, and refuses one already taken", async () => {
+    const numbered = "live-agent-number@tapswipe.test";
+    const clashing = "live-agent-number-clash@tapswipe.test";
+
+    const created = await invoke(
+      "create-user",
+      {
+        full_name: "Live Numbered Rep",
+        email: numbered,
+        role: "agent",
+        agent_number: "LIVE-4471",
+      },
+      fixtures.tokens.admin,
+    );
+    expect(created.status, created.raw).toBe(201);
+
+    const userId = String(created.body.user_id);
+    createdUserIds.push(userId);
+
+    const admin = adminClient();
+    const { data: profile } = await admin
+      .from("profiles")
+      .select("agent_number")
+      .eq("id", userId)
+      .single();
+    expect(profile?.agent_number).toBe("LIVE-4471");
+
+    // The 409 must land BEFORE createUser. If it did not, the unique index would
+    // catch the duplicate on the profiles insert instead — after the auth.users
+    // row exists — sending a fixable mistake down the rollback path and
+    // reporting it as "Could not create the profile: duplicate key value…".
+    const duplicate = await invoke(
+      "create-user",
+      {
+        full_name: "Live Clashing Rep",
+        email: clashing,
+        role: "agent",
+        agent_number: "LIVE-4471",
+      },
+      fixtures.tokens.admin,
+    );
+
+    expect(duplicate.status, duplicate.raw).toBe(409);
+    expect(String(duplicate.body.error)).toMatch(/already assigned/i);
+
+    // And nothing was left behind: no auth user for the rejected email at all,
+    // which is what distinguishes "refused early" from "refused and rolled back".
+    const { data: users } = await admin.auth.admin.listUsers({ perPage: 1000 });
+    expect(
+      (users?.users ?? []).some((user) => user.email === clashing),
+    ).toBe(false);
+  });
+
+  it("stores null rather than '' for a blank agent number", async () => {
+    // Two reps created with a blank field must not collide. They would if '' were
+    // stored, because the partial unique index treats '' as an ordinary value —
+    // so the second create would fail on a constraint nobody typed into.
+    const ids: string[] = [];
+
+    for (const email of [
+      "live-blank-number-a@tapswipe.test",
+      "live-blank-number-b@tapswipe.test",
+    ]) {
+      const response = await invoke(
+        "create-user",
+        { full_name: "Live Blank Number", email, role: "agent", agent_number: "   " },
+        fixtures.tokens.admin,
+      );
+      expect(response.status, response.raw).toBe(201);
+
+      const id = String(response.body.user_id);
+      ids.push(id);
+      createdUserIds.push(id);
+    }
+
+    const { data } = await adminClient()
+      .from("profiles")
+      .select("agent_number")
+      .in("id", ids);
+
+    expect(data ?? []).toHaveLength(2);
+    expect(
+      (data ?? []).every((row) => row.agent_number === null),
+      "a blank agent number must be stored as null",
+    ).toBe(true);
   });
 });
 
@@ -427,6 +520,58 @@ describe("set_user_role through PostgREST", () => {
     const { error } = await asAgent.rpc("set_user_role", {
       target_user_id: fixtures.userIds.intruder,
       new_role: "admin",
+    });
+
+    expect(error).not.toBeNull();
+    expect(error?.message).toMatch(/admin only/i);
+  });
+});
+
+describe("set_agent_number through PostgREST", () => {
+  // Same division of labour as set_user_role above: the guards are covered
+  // exhaustively in tests/rls/set-agent-number.test.ts, and what only this suite
+  // can prove is that the RPC is reachable over the Data API with a real JWT and
+  // that `authenticated` actually holds EXECUTE on it. A missing grant is
+  // invisible below PostgREST — which is exactly how this repo once shipped with
+  // no Data API grants at all.
+  it("lets an admin set and clear a number over HTTP", async () => {
+    const { userClient } = await import("./helpers/stack");
+    const asAdmin = userClient(fixtures.tokens.admin);
+    const admin = adminClient();
+
+    const readNumber = async () => {
+      const { data } = await admin
+        .from("profiles")
+        .select("agent_number")
+        .eq("id", fixtures.userIds.intruder)
+        .single();
+      return data?.agent_number ?? null;
+    };
+
+    const set = await asAdmin.rpc("set_agent_number", {
+      target_user_id: fixtures.userIds.intruder,
+      new_agent_number: "LIVE-9902",
+    });
+    expect(set.error).toBeNull();
+    expect(await readNumber()).toBe("LIVE-9902");
+
+    // Blank clears, and stores null rather than '' — the same normalisation
+    // create-user applies, asserted here against the RPC's own copy of it.
+    const cleared = await asAdmin.rpc("set_agent_number", {
+      target_user_id: fixtures.userIds.intruder,
+      new_agent_number: "",
+    });
+    expect(cleared.error).toBeNull();
+    expect(await readNumber()).toBeNull();
+  });
+
+  it("refuses an agent over HTTP", async () => {
+    const { userClient } = await import("./helpers/stack");
+    const asAgent = userClient(fixtures.tokens.owner);
+
+    const { error } = await asAgent.rpc("set_agent_number", {
+      target_user_id: fixtures.userIds.intruder,
+      new_agent_number: "LIVE-0001",
     });
 
     expect(error).not.toBeNull();

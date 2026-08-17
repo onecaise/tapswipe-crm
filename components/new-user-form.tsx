@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { CheckIcon, CopyIcon, UserPlusIcon } from "lucide-react";
 
@@ -20,12 +20,41 @@ import { Label } from "@/components/ui/label";
  * the success state replaces the form rather than closing over it, and says so.
  * (This is also why this is a page rather than a dialog: a dialog that can be
  * dismissed is the wrong container for a secret with no second viewing.)
+ *
+ * Two search params, both sent by the residuals import review screen when an
+ * unrecognised Agent # turns out to belong to nobody yet: `agent_number`
+ * pre-fills the field, and `returnTo` offers a way back to the batch that is
+ * still waiting on it. See RESIDUALS_SPEC §8.3.
  */
+
+/**
+ * The only shape of `returnTo` this form will link to.
+ *
+ * A search param that becomes an href is an open-redirect if it is taken on
+ * trust, and "back to where you came from" is not worth an off-site link on the
+ * screen that hands out credentials. Only the import batch pages send one, so
+ * only they are accepted — anything else falls back to the users list.
+ */
+const RETURN_TO = /^\/payouts\/import\/\d+$/;
+
 export function NewUserForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const returnToParam = searchParams.get("returnTo");
+  const returnTo =
+    returnToParam !== null && RETURN_TO.test(returnToParam)
+      ? returnToParam
+      : null;
 
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
+  // Pre-filled once, from the param, then owned by the input. Read with the
+  // initialiser rather than an effect so typing over it is not undone on the
+  // next render.
+  const [agentNumber, setAgentNumber] = useState(
+    () => searchParams.get("agent_number")?.trim() ?? "",
+  );
   const [role, setRole] = useState<Role>("agent");
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +68,7 @@ export function NewUserForm() {
 
     const { data, error: callError } = await callAdminFunction<CreatedUser>(
       "create-user",
-      { full_name: fullName, email, role },
+      { full_name: fullName, email, role, agent_number: agentNumber },
     );
 
     if (callError || !data) {
@@ -105,7 +134,15 @@ export function NewUserForm() {
         )}
 
         <div className="flex gap-2">
-          <Button asChild size="sm">
+          {/* The batch that sent us here is still sitting on the blocked rows
+              this account just unblocked, so returning to it is the next step
+              rather than the users list. */}
+          {returnTo !== null && (
+            <Button asChild size="sm">
+              <Link href={returnTo}>Back to the import</Link>
+            </Button>
+          )}
+          <Button asChild size="sm" variant={returnTo !== null ? "outline" : "default"}>
             <Link href="/admin/users">Back to users</Link>
           </Button>
           <Button
@@ -116,6 +153,7 @@ export function NewUserForm() {
               setCreated(null);
               setFullName("");
               setEmail("");
+              setAgentNumber("");
               setRole("agent");
             }}
           >
@@ -152,6 +190,22 @@ export function NewUserForm() {
         <p className="text-xs text-muted-foreground">
           Their sign-in identity. One account per person — the whole access model
           depends on it naming exactly one human.
+        </p>
+      </div>
+
+      <div className="grid gap-2">
+        <Label htmlFor="agent_number">Agent # (optional)</Label>
+        <Input
+          id="agent_number"
+          value={agentNumber}
+          onChange={(event) => setAgentNumber(event.target.value)}
+          maxLength={32}
+          placeholder="4471"
+        />
+        <p className="text-xs text-muted-foreground">
+          How the processor names this rep in a residual report. Leave it blank if
+          you don&apos;t know it yet — you can set it later from the users list,
+          and an import will prompt for it when it needs one.
         </p>
       </div>
 

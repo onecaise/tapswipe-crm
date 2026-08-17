@@ -44,8 +44,37 @@ create table profiles (
   -- loads this row on every request, so reading it costs nothing, and because a
   -- column is assertable in the hermetic test suite where app_metadata is not.
   must_change_password boolean not null default false,
+  -- The rep's identifier in a processor's residual report, as it appears in the
+  -- "Agent #" column of the monthly XLSX. This is the only join between that
+  -- file and this database: the spreadsheet has never heard of a uuid.
+  --
+  -- Nullable, and staying that way. Every profile that predates this column has
+  -- no number, and there is nothing to backfill from -- a migration that invents
+  -- agent numbers would be inventing the key that decides who gets paid. An
+  -- admin fills them in from Manage Users, or on the import review screen when
+  -- an unrecognised number turns up (RESIDUALS_SPEC §8.3).
+  --
+  -- Text, not int. Processor codes are not arithmetic: leading zeros are
+  -- significant ('0471' is not 471), and some carry letters. Nothing adds or
+  -- compares them numerically.
+  --
+  -- Uniqueness is a partial index rather than a column constraint -- see below.
+  agent_number text,
   created_at timestamptz default now()
 );
+
+-- One rep per agent number, but many reps with none.
+--
+-- A plain `unique` would in fact allow multiple NULLs too (Postgres does not
+-- treat NULLs as equal), so this is not correcting a mistake -- it is stating
+-- the intent, and not indexing the nulls that every existing row carries.
+--
+-- Load-bearing for the residuals import: the whole resolution step is a lookup
+-- of one agent number expecting at most one rep. Two reps sharing a number
+-- would make it ambiguous which of them a merchant's residual belongs to, and
+-- the import would have no honest answer.
+create unique index if not exists profiles_agent_number_key
+  on profiles (agent_number) where agent_number is not null;
 
 -- Role-check helper used in every policy below. security definer avoids
 -- recursive RLS lookups (a policy on profiles querying profiles itself).
@@ -252,10 +281,103 @@ begin
 end;
 $$;
 
+-- ---------------------------------------------------------------------
+-- SET AGENT NUMBER — Tier 2, the same shape as set_user_role above and
+-- for the same two reasons: profiles has no UPDATE policy at all, and
+-- audit_log has no INSERT policy for `authenticated`.
+--
+-- This is a commission key. Which rep an agent number points at decides
+-- who gets paid for a merchant's residual, so a change here is worth a
+-- trail even though the column looks like an innocuous label -- and
+-- bundling the write with its audit row means the two cannot come apart.
+--
+-- Deliberately NOT guarded against a self-target, unlike set_user_role.
+-- An admin who also carries a book has an agent number like anyone else,
+-- and setting their own is an ordinary act that removes no privilege and
+-- loses them no screen. The guard there exists to make zero-active-admins
+-- unreachable; there is no equivalent trap here.
+--
+-- Passing null (or blank, or whitespace) clears the number. Empty string
+-- is normalised to null rather than stored, because '' is a value the
+-- unique index would enforce: the second rep cleared that way would
+-- collide with the first and the error would name a constraint nobody
+-- typed.
+--
+-- The duplicate check below is for the message, not the guarantee. The
+-- partial unique index on profiles is the authority and closes the race;
+-- this exists so an admin reads "already assigned to another rep" rather
+-- than a raw index violation on a screen where they cannot see the other
+-- rep's row.
+-- ---------------------------------------------------------------------
+create or replace function set_agent_number(
+  target_user_id uuid,
+  new_agent_number text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  normalised text;
+  target profiles;
+begin
+  if not is_admin() then
+    raise exception 'admin only' using errcode = 'PT403';
+  end if;
+
+  normalised := nullif(btrim(coalesce(new_agent_number, '')), '');
+
+  -- Matches isAgentNumber() in supabase/functions/_shared/admin-users.ts, which
+  -- create-user applies to the same column. Both sides trim and cap at 32; keep
+  -- them in step.
+  if normalised is not null and length(normalised) > 32 then
+    raise exception 'agent number must be 32 characters or fewer'
+      using errcode = 'PT400';
+  end if;
+
+  select * into target from profiles where id = target_user_id;
+  if not found then
+    raise exception 'user not found' using errcode = 'PT404';
+  end if;
+
+  -- `is not distinct from` rather than `=`, so clearing an already-empty number
+  -- is the no-op it looks like instead of falling through to write an audit row
+  -- saying something changed.
+  if target.agent_number is not distinct from normalised then
+    return;
+  end if;
+
+  if normalised is not null and exists (
+    select 1 from profiles
+     where agent_number = normalised and id <> target_user_id
+  ) then
+    raise exception 'agent number % is already assigned to another rep',
+      normalised using errcode = 'PT409';
+  end if;
+
+  update profiles set agent_number = normalised where id = target_user_id;
+
+  -- Distinct verbs, for the reason set_user_role gives: audit_log has no detail
+  -- column, so "which direction" has to live in `action` or be lost.
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (
+    auth.uid(),
+    case when normalised is null
+         then 'clear_agent_number'
+         else 'set_agent_number' end,
+    'profiles',
+    target_user_id::text
+  );
+end;
+$$;
+
 revoke all on function clear_must_change_password() from public;
 grant execute on function clear_must_change_password() to authenticated, service_role;
 revoke all on function set_user_role(uuid, text) from public;
 grant execute on function set_user_role(uuid, text) to authenticated, service_role;
+revoke all on function set_agent_number(uuid, text) from public;
+grant execute on function set_agent_number(uuid, text) to authenticated, service_role;
 
 -- ---------------------------------------------------------------------
 -- MERCHANTS

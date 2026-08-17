@@ -5,6 +5,7 @@ import { ArrowLeftIcon, UserPlusIcon } from "lucide-react";
 import { requireAdmin, type Role } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { formatText } from "@/lib/format";
+import { AgentNumberCell } from "@/components/agent-number-cell";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { StatusBadge } from "@/components/status-badge";
@@ -24,6 +25,7 @@ type ProfileRow = {
   id: string;
   full_name: string;
   email: string | null;
+  agent_number: string | null;
   role: Role;
   is_active: boolean;
   must_change_password: boolean;
@@ -45,7 +47,7 @@ async function UsersTable() {
   const { data, error } = await supabase
     .from("profiles")
     .select(
-      "id, full_name, email, role, is_active, must_change_password, created_at",
+      "id, full_name, email, agent_number, role, is_active, must_change_password, created_at",
     )
     .order("created_at", { ascending: true });
 
@@ -64,6 +66,7 @@ async function UsersTable() {
       <TableHeader>
         <TableRow>
           <TableHead>Name</TableHead>
+          <TableHead>Agent #</TableHead>
           <TableHead>Role</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Created</TableHead>
@@ -73,7 +76,7 @@ async function UsersTable() {
       <TableBody>
         {profiles.length === 0 ? (
           <TableRow>
-            <TableCell colSpan={5} className="text-muted-foreground">
+            <TableCell colSpan={6} className="text-muted-foreground">
               No users found.
             </TableCell>
           </TableRow>
@@ -98,6 +101,16 @@ async function UsersTable() {
                     {formatText(profile.email)}
                   </span>
                 </span>
+              </TableCell>
+              <TableCell>
+                {/* How a processor's residual report names this rep. Blank for
+                    everyone until someone fills it in — the column is new and
+                    there was nothing to backfill it from. */}
+                <AgentNumberCell
+                  userId={profile.id}
+                  fullName={profile.full_name}
+                  agentNumber={profile.agent_number}
+                />
               </TableCell>
               <TableCell>
                 {/* A role is not a status, so it gets no status colour and

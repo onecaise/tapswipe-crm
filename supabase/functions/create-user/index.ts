@@ -17,6 +17,7 @@ import {
   callerIsActive,
   callerIsAdmin,
   generateTempPassword,
+  isAgentNumber,
   isEmail,
   isFullName,
   isRole,
@@ -52,7 +53,12 @@ export default {
       return json({ error: "Body must be JSON" }, 400);
     }
 
-    const { full_name: fullName, email, role } = body;
+    const {
+      full_name: fullName,
+      email,
+      role,
+      agent_number: agentNumber,
+    } = body;
 
     if (!isFullName(fullName)) {
       return json({ error: "full_name is required" }, 400);
@@ -64,11 +70,67 @@ export default {
       return json({ error: "role must be 'agent' or 'admin'" }, 400);
     }
 
+    // Optional, and absent is the norm: a rep can be created before anyone knows
+    // what the processor will call them. Blank and whitespace are treated as
+    // absent rather than stored, because '' is a value the partial unique index
+    // on profiles.agent_number enforces — the second rep created with an empty
+    // field would collide with the first.
+    const normalisedAgentNumber =
+      typeof agentNumber === "string" && agentNumber.trim() !== ""
+        ? agentNumber.trim()
+        : null;
+
+    if (
+      normalisedAgentNumber !== null &&
+      !isAgentNumber(normalisedAgentNumber)
+    ) {
+      return json(
+        { error: "agent_number must be 32 characters or fewer" },
+        400,
+      );
+    }
+
     // Normalised so 'Rep@Tapswipe.com' and 'rep@tapswipe.com' cannot become two
     // accounts for one person — the access model depends on agent_id naming
     // exactly one human.
     const normalisedEmail = email.trim().toLowerCase();
     const temporaryPassword = generateTempPassword();
+
+    // Checked BEFORE createUser, deliberately.
+    //
+    // The unique index is the real authority and would catch this anyway — but it
+    // would catch it on the profiles insert, i.e. after the auth.users row
+    // exists, sending a duplicate agent number down the rollback path and
+    // reporting it as "Could not create the profile: duplicate key value violates
+    // unique constraint …". That is a fixable mistake dressed as an internal
+    // failure. Failing here costs one query and says what is wrong.
+    //
+    // Through the caller-scoped client, so RLS is still what decides what is
+    // readable. Safe as a completeness check only because the caller is already
+    // a verified active admin and admins see every profiles row; the index, not
+    // this query, is what closes the race.
+    if (normalisedAgentNumber !== null) {
+      const { data: clash, error: clashError } = await ctx.supabase
+        .from("profiles")
+        .select("id")
+        .eq("agent_number", normalisedAgentNumber)
+        .maybeSingle();
+
+      if (clashError) {
+        return json(
+          { error: `Could not check the agent number: ${clashError.message}` },
+          500,
+        );
+      }
+      if (clash) {
+        return json(
+          {
+            error: `Agent # ${normalisedAgentNumber} is already assigned to another rep`,
+          },
+          409,
+        );
+      }
+    }
 
     // Authorization is settled, so the service role may be used now.
     //
@@ -111,6 +173,10 @@ export default {
         // name apart. Taken from `created.user` rather than the request body so
         // it matches what GoTrue actually stored, normalisation included.
         email: created.user.email ?? null,
+        // The join to a processor's residual report (RESIDUALS_SPEC §3.1). Null
+        // is the ordinary case — it is filled in later from Manage Users or from
+        // the import review screen, whichever comes first.
+        agent_number: normalisedAgentNumber,
         role,
         is_active: true,
         // Forces the rep to replace the password the admin knows. The (app)
@@ -169,10 +235,13 @@ export default {
   curl -i --location --request POST 'http://127.0.0.1:54321/functions/v1/create-user' \
     --header 'Authorization: Bearer <ADMIN_ACCESS_TOKEN>' \
     --header 'Content-Type: application/json' \
-    --data '{"full_name":"New Rep","email":"rep@tapswipe.test","role":"agent"}'
+    --data '{"full_name":"New Rep","email":"rep@tapswipe.test","role":"agent","agent_number":"4471"}'
+
+  agent_number is optional; omit it, or send "" / null, for a rep with none.
 
   Expected: 201 with { user_id, email, temporary_password }
             409 if that email already has an account
+            409 if that agent number belongs to another rep
             403 if the caller is not an active admin
             401 if there is no valid JWT
 */

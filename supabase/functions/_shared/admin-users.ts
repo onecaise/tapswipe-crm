@@ -151,6 +151,33 @@ export function isFullName(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+/** The cap set_agent_number() enforces in SQL. Keep the two in step. */
+export const AGENT_NUMBER_MAX_LENGTH = 32;
+
+/**
+ * A processor's rep code, as it appears in the "Agent #" column of a residual
+ * report.
+ *
+ * Deliberately permissive about *shape*: no digits-only rule, because processors
+ * issue codes with letters and hyphens, and a stricter regex here would reject a
+ * real code on the one screen that can record it. The only rules are the ones the
+ * database also enforces — trimmed, non-empty, and within the length the column's
+ * consumers expect.
+ *
+ * Duplicated in SQL, not shared: set_agent_number() in
+ * 20260817101500_agent_number.sql applies the same trim and the same 32-character
+ * cap. Nothing type-checks the pair (the RPC is the other write path to this
+ * column), so change both together. The failure mode if they drift is
+ * one-directional and confusing: create-user accepts a value the RPC would
+ * refuse, or vice versa, and the admin sees an error on one screen but not the
+ * other for the same string.
+ */
+export function isAgentNumber(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= AGENT_NUMBER_MAX_LENGTH;
+}
+
 /**
  * Records an admin action against a user.
  *
