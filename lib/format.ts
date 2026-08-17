@@ -17,6 +17,32 @@ export function formatPct(value: number | null | undefined): string {
 }
 
 /**
+ * US dollars, for the residual ledger and the payout summary.
+ *
+ * PostgREST sends `numeric` as a string to preserve exactness, so this takes both
+ * and does the coercion in one place rather than at every call site. A string that
+ * is not a number returns the em dash rather than "$NaN" — for a money column,
+ * looking absent is a better failure than looking like a figure.
+ *
+ * Negative values render as `-$88.40`, not `($88.40)`. The accounting-parentheses
+ * convention reads as a typo in a web table, and a clawback is a normal month
+ * here rather than an exception worth a second notation.
+ */
+export function formatMoney(
+  value: number | string | null | undefined,
+): string {
+  if (value === null || value === undefined || value === "") return EMPTY;
+
+  const amount = typeof value === "string" ? Number(value) : value;
+  if (!Number.isFinite(amount)) return EMPTY;
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(amount);
+}
+
+/**
  * A stored lowercase vocabulary word, for display beside a StatusBadge.
  *
  * StatusBadge capitalises through CSS, so a detail page showed "Open" in the
@@ -68,6 +94,37 @@ export function formatDate(value: string | null | undefined): string {
   if (!value) return EMPTY;
   const date = parseDisplayDate(value);
   return date === null ? EMPTY : date.toLocaleDateString();
+}
+
+/**
+ * A residual period — always the first of a month — as "July 2026".
+ *
+ * Built on parseDisplayDate, and that is the whole reason this exists rather than
+ * being inlined at each call site. The date-only-is-UTC bug documented above
+ * shifts a calendar date one day earlier everywhere west of UTC; on the FIRST of a
+ * month that lands in the *previous month*, so December 2026 would render as
+ * "November 2026" and January 2027 as "December 2026". A date off by a day gets
+ * noticed. A commission statement headed with the wrong month and year does not,
+ * until someone reconciles it against the processor's own report.
+ */
+export function formatPeriod(value: string | null | undefined): string {
+  if (!value) return EMPTY;
+  const date = parseDisplayDate(value);
+  if (date === null) return EMPTY;
+  return date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+/**
+ * The `YYYY-MM` form a period takes in a route segment, from a stored `date`.
+ *
+ * Same local-time reasoning as formatPeriod, with the same consequence if it is
+ * got wrong: every period would link to the month before its own.
+ */
+export function periodParam(value: string): string {
+  const date = parseDisplayDate(value);
+  if (date === null) return "";
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `${date.getFullYear()}-${month}`;
 }
 
 /** A `time` column, as PostgREST sends it: "HH:MM" or "HH:MM:SS". */

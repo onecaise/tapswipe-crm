@@ -1,4 +1,5 @@
 import {
+  BanknoteIcon,
   BugIcon,
   ClipboardListIcon,
   FolderIcon,
@@ -69,6 +70,13 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       // It sat under "Admin" and gave agents a one-item section with that
       // header over a page they use daily.
       { label: "Documents", href: "/documents", icon: FolderIcon },
+      // Also not admin-only, and for the same reason. Importing residuals and
+      // entering the figures is admin work, but a rep reading their own
+      // residuals is the point of putting them in the CRM at all — the select
+      // policy on rep_payout_rows is own-or-admin like every other list here.
+      // The import pages live under /payouts/import and need no entry of their
+      // own: isNavItemActive is a prefix match, so they keep this item lit.
+      { label: "Payouts", href: "/payouts", icon: BanknoteIcon },
     ],
   },
   {
