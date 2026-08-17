@@ -715,16 +715,37 @@ verified independently, per the house rule; stripping the page guard must still 
 3. **Whether a MID can legitimately appear twice for one rep in one period** — split by card
    type, say. The unique key and `duplicate_in_file` both assume not. Worth checking against
    a real file before commit 2.
-4. **Whether "Volume" is dollars or transaction count.** Specified as `numeric(14,2)` money
-   and formatted with `formatMoney`; if it is a count, the type and the formatter both change.
+4. ~~**Whether "Volume" is dollars or transaction count.**~~ **Settled 2026-08-17: dollars.**
+   `numeric(14,2)`, rendered with `formatMoney`, consistent with Average ticket beside it.
 5. **Whether a rep should see a period before its figures are filled in.** Currently yes:
    rows commit with null residual and split, so a rep can see a merchant list with blank
    money. The alternative is hiding a period from reps until complete, which needs a
    per-period published flag and is not specified here.
 6. **Server-side PDF generation** (decision 25) — a follow-up once the print layout has
    settled from real use, reusing the same layout.
-7. **SheetJS distribution under Deno.** The import specifier and pinned version must be
-   settled in commit 4 and confirmed to survive `functions deploy`, not just
-   `functions serve`. If it cannot, the fallback is client-side parse plus server-side
-   revalidation — which reintroduces the duplicated-validator hazard decision 23 avoids, so
-   it is a fallback, not an option.
+7. ~~**SheetJS distribution under Deno.**~~ **Settled 2026-08-17, mostly.** Pinned to
+   `https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs` in
+   `parse-residual-import/deno.json`, and **verified loading and parsing under the local
+   edge runtime** — a real workbook round-tripped through upload → parse → staging rows.
+   *Not* `npm:xlsx`: the npm registry's latest is 0.18.5, which carries two high-severity
+   advisories (prototype pollution and ReDoS) fixed only in SheetJS's own 0.19.3/0.20.2
+   builds, because they stopped publishing to npm. Shipping a known-vulnerable parser to
+   read uploaded files was not worth the convenience, and "only admins can upload" is a
+   thin last line of defence. **Still outstanding: confirming a remote-URL import survives
+   `functions deploy`**, which only a deploy proves. If it does not, vendor the single
+   `xlsx.mjs` file into the function directory rather than falling back to `npm:xlsx`.
+   `xlsx@0.20.3` is also a **devDependency**, installed from the same CDN tarball, used
+   only to *build* fixture workbooks in tests. That does not weaken decision 23: it never
+   enters a shipped bundle, and pinning both sides to one version means fixtures and parser
+   cannot disagree.
+
+8. **Deleting a user requires clearing five payout FKs first.** All five references to
+   `profiles` from these tables are `NO ACTION` — `rep_payout_rows.agent_id`,
+   `rep_payout_import_rows.agent_id`, `rep_payout_batches.imported_by`, and both
+   `rep_payout_row_history.agent_id` and `.changed_by`. Found the hard way: a probe script's
+   teardown deleted the profile without clearing staging rows, the delete failed on the FK
+   *without being checked*, and the leftover rep silently resolved an agent number a later
+   run expected to be unknown — which looked like a parser bug. Production never deletes
+   users (§8: deactivation, never deletion), so only tests pay this, but
+   `tests/live/residual-import.test.ts` and `deleteUserCompletely()` must clear all five
+   before `deleteUser`, and must check the error rather than assuming it worked.

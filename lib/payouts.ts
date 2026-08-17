@@ -15,6 +15,18 @@ import type { StatusIntent } from "@/components/status-badge";
  * reducers here are the one place that converts, and they do it explicitly.
  */
 
+/**
+ * The private bucket holding uploaded import files.
+ *
+ * Mirrors RESIDUAL_BUCKET in supabase/functions/_shared/residual-imports.ts. Two
+ * copies because the browser cannot import from `supabase/functions` (Deno import
+ * maps, and tsconfig excludes the directory) — the same one-line duplication
+ * lib/documents.ts carries for the `documents` bucket, and for the same reason.
+ * The bucket has no storage policies, so a wrong name here fails loudly on the
+ * signed-URL call rather than reaching anything it should not.
+ */
+export const RESIDUAL_BUCKET = "residual-imports";
+
 export const PAYOUT_BATCH_STATUSES = [
   "review",
   "committed",
@@ -211,6 +223,131 @@ function toNumber(value: string | null): number {
 function round2(value: number): number {
   const scaled = Math.round(Math.abs(value) * 100) / 100;
   return value < 0 ? -scaled : scaled;
+}
+
+/** A staged row, as the review screen reads it. */
+export type PayoutImportRow = {
+  id: number;
+  row_number: number;
+  period_raw: string | null;
+  agent_number_raw: string | null;
+  mid_raw: string | null;
+  merchant_name_raw: string | null;
+  volume_raw: string | null;
+  average_ticket_raw: string | null;
+  total_cost_raw: string | null;
+  residual_income_raw: string | null;
+  rep_split_raw: string | null;
+  period: string | null;
+  agent_id: string | null;
+  merchant_id: number | null;
+  blocker: string | null;
+  error: string | null;
+};
+
+export const PAYOUT_IMPORT_ROW_COLUMNS =
+  "id, row_number, period_raw, agent_number_raw, mid_raw, merchant_name_raw, volume_raw, average_ticket_raw, total_cost_raw, residual_income_raw, rep_split_raw, period, agent_id, merchant_id, blocker, error";
+
+/** An unrecognised agent number, and what it would import if it resolved. */
+export type UnknownAgentGroup = {
+  agentNumber: string | null;
+  rowCount: number;
+  /** A few merchant names, as a hint for whose book this is. */
+  sampleMerchants: string[];
+};
+
+/** A blocker that can only be fixed by correcting the file and re-uploading. */
+export type FileProblem = {
+  blocker: string;
+  rows: { rowNumber: number; detail: string }[];
+};
+
+export type ImportReview = {
+  total: number;
+  clean: number;
+  blocked: number;
+  /** Fixable in place: create the rep, or give an existing one the number. */
+  unknownAgents: UnknownAgentGroup[];
+  /** Everything else — the fix is a corrected upload. */
+  fileProblems: FileProblem[];
+  /** True when nothing blocks the batch and it can be committed. */
+  ready: boolean;
+};
+
+/** How many merchant names to show as a hint per unknown agent number. */
+const SAMPLE_LIMIT = 3;
+
+/**
+ * Shapes staged rows into what the review screen renders.
+ *
+ * Pure, so the grouping is unit-testable without a database — and it is worth
+ * testing, because the screen's whole job is to be unambiguous about which
+ * problems an admin can fix here and which need the spreadsheet corrected.
+ *
+ * Unknown agent numbers are grouped and everything else is listed per row, which
+ * reflects how each is actually resolved: one action fixes all twelve rows of an
+ * unrecognised rep, whereas a bad figure on row 22 is its own edit in Excel.
+ */
+export function reviewImportRows(
+  rows: readonly PayoutImportRow[],
+): ImportReview {
+  const unknown = new Map<string, UnknownAgentGroup>();
+  const problems = new Map<string, FileProblem>();
+
+  for (const row of rows) {
+    if (row.blocker === null) continue;
+
+    if (row.blocker === FIXABLE_BLOCKER) {
+      // Keyed on the empty string when the cell was blank, so rows with no agent
+      // number at all group together instead of each becoming its own entry.
+      const key = row.agent_number_raw ?? "";
+      const group = unknown.get(key) ?? {
+        agentNumber: row.agent_number_raw,
+        rowCount: 0,
+        sampleMerchants: [],
+      };
+      group.rowCount += 1;
+      if (
+        group.sampleMerchants.length < SAMPLE_LIMIT &&
+        row.merchant_name_raw !== null
+      ) {
+        group.sampleMerchants.push(row.merchant_name_raw);
+      }
+      unknown.set(key, group);
+      continue;
+    }
+
+    const problem = problems.get(row.blocker) ?? {
+      blocker: row.blocker,
+      rows: [],
+    };
+    problem.rows.push({
+      rowNumber: row.row_number,
+      // The message the parser wrote, which quotes the offending cell. Falling
+      // back to the code rather than to an empty string: a blocker added in SQL
+      // and not in blockerMessage should look raw, not blank.
+      detail: row.error ?? row.blocker,
+    });
+    problems.set(row.blocker, problem);
+  }
+
+  const blocked = rows.filter((row) => row.blocker !== null).length;
+
+  return {
+    total: rows.length,
+    clean: rows.length - blocked,
+    blocked,
+    unknownAgents: [...unknown.values()].sort(
+      (a, b) => b.rowCount - a.rowCount,
+    ),
+    fileProblems: [...problems.values()].sort((a, b) =>
+      a.blocker.localeCompare(b.blocker),
+    ),
+    // A batch with no rows at all is NOT ready. Committing it would flip a batch
+    // to 'committed' having imported nothing, which reads as a successful import
+    // of an empty month.
+    ready: rows.length > 0 && blocked === 0,
+  };
 }
 
 /** One period's worth of rows, as the periods list shows it. */

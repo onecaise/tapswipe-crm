@@ -505,3 +505,21 @@ entrypoint = "./functions/create-download-url/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/create-download-url/*.html" ]
+
+# Signs uploads into, and downloads out of, the `residual-imports` bucket.
+# Admin-only. verify_jwt = false like every other function here, so it
+# authenticates the caller itself.
+[functions.residual-import-file-url]
+enabled = true
+verify_jwt = false
+import_map = "./functions/residual-import-file-url/deno.json"
+entrypoint = "./functions/residual-import-file-url/index.ts"
+
+# Reads a batch's uploaded XLSX and stages its rows. The only function with a
+# third-party dependency (SheetJS, via npm: in its deno.json) — the parsing rules
+# themselves live in _shared/residuals.ts, which stays dependency-free.
+[functions.parse-residual-import]
+enabled = true
+verify_jwt = false
+import_map = "./functions/parse-residual-import/deno.json"
+entrypoint = "./functions/parse-residual-import/index.ts"

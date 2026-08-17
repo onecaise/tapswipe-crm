@@ -11,7 +11,9 @@ import {
   blockerLabel,
   parsePeriodParam,
   payoutTotals,
+  reviewImportRows,
   summarizeByPeriod,
+  type PayoutImportRow,
 } from "@/lib/payouts";
 
 /**
@@ -325,6 +327,164 @@ describe("batchStatusIntent", () => {
     expect(batchStatusIntent("committed")).toBe("success");
     expect(batchStatusIntent("review")).toBe("warning");
     expect(batchStatusIntent("abandoned")).toBe("neutral");
+  });
+});
+
+describe("reviewImportRows", () => {
+  /** A staged row, varied one field at a time. */
+  function staged(over: Partial<PayoutImportRow> = {}): PayoutImportRow {
+    return {
+      id: 1,
+      row_number: 2,
+      period_raw: "Jul-26",
+      agent_number_raw: "4471",
+      mid_raw: "MID-1",
+      merchant_name_raw: "Joe's Diner",
+      volume_raw: "1000",
+      average_ticket_raw: "10",
+      total_cost_raw: "25",
+      residual_income_raw: null,
+      rep_split_raw: null,
+      period: "2026-07-01",
+      agent_id: "aaaa",
+      merchant_id: null,
+      blocker: null,
+      error: null,
+      ...over,
+    };
+  }
+
+  it("reports a clean batch as ready", () => {
+    const review = reviewImportRows([staged(), staged({ id: 2, mid_raw: "MID-2" })]);
+
+    expect(review).toMatchObject({
+      total: 2,
+      clean: 2,
+      blocked: 0,
+      ready: true,
+    });
+    expect(review.unknownAgents).toEqual([]);
+    expect(review.fileProblems).toEqual([]);
+  });
+
+  it("is NOT ready when the batch has no rows", () => {
+    // Committing an empty batch would flip it to 'committed' having imported
+    // nothing, which reads as a successful import of an empty month.
+    expect(reviewImportRows([])).toMatchObject({ total: 0, ready: false });
+  });
+
+  it("groups unknown agent numbers, because one action fixes all their rows", () => {
+    const review = reviewImportRows([
+      staged({
+        id: 1,
+        agent_number_raw: "7788",
+        agent_id: null,
+        blocker: "unknown_agent",
+        merchant_name_raw: "Bayside Auto",
+      }),
+      staged({
+        id: 2,
+        row_number: 3,
+        agent_number_raw: "7788",
+        agent_id: null,
+        blocker: "unknown_agent",
+        merchant_name_raw: "Bayside Tyres",
+      }),
+    ]);
+
+    expect(review.unknownAgents).toHaveLength(1);
+    expect(review.unknownAgents[0]).toMatchObject({
+      agentNumber: "7788",
+      rowCount: 2,
+      sampleMerchants: ["Bayside Auto", "Bayside Tyres"],
+    });
+    expect(review.ready).toBe(false);
+  });
+
+  it("orders unknown agents by how many rows they hold", () => {
+    const review = reviewImportRows([
+      staged({ id: 1, agent_number_raw: "1", agent_id: null, blocker: "unknown_agent" }),
+      staged({ id: 2, agent_number_raw: "2", agent_id: null, blocker: "unknown_agent" }),
+      staged({ id: 3, agent_number_raw: "2", agent_id: null, blocker: "unknown_agent" }),
+    ]);
+
+    expect(review.unknownAgents.map((g) => g.agentNumber)).toEqual(["2", "1"]);
+  });
+
+  it("caps the merchant hint at three names", () => {
+    const rows = Array.from({ length: 6 }, (_, i) =>
+      staged({
+        id: i + 1,
+        agent_number_raw: "7788",
+        agent_id: null,
+        blocker: "unknown_agent",
+        merchant_name_raw: `Shop ${i}`,
+      }),
+    );
+
+    const review = reviewImportRows(rows);
+    expect(review.unknownAgents[0].sampleMerchants).toEqual([
+      "Shop 0",
+      "Shop 1",
+      "Shop 2",
+    ]);
+    expect(review.unknownAgents[0].rowCount).toBe(6);
+  });
+
+  it("groups rows with a blank agent number together", () => {
+    // Keyed on the empty string rather than on null, or each blank row becomes its
+    // own entry and a file missing the column entirely renders forty groups.
+    const review = reviewImportRows([
+      staged({ id: 1, agent_number_raw: null, agent_id: null, blocker: "unknown_agent" }),
+      staged({ id: 2, agent_number_raw: null, agent_id: null, blocker: "unknown_agent" }),
+    ]);
+
+    expect(review.unknownAgents).toHaveLength(1);
+    expect(review.unknownAgents[0].agentNumber).toBeNull();
+  });
+
+  it("lists other blockers per row, because each needs its own fix in the file", () => {
+    const review = reviewImportRows([
+      staged({
+        id: 1,
+        row_number: 5,
+        blocker: "unparseable_period",
+        error: 'Could not read "Q3 2026" as a month.',
+      }),
+      staged({
+        id: 2,
+        row_number: 9,
+        blocker: "bad_number",
+        error: "One of the figures on this row could not be read as a number.",
+      }),
+    ]);
+
+    expect(review.fileProblems).toHaveLength(2);
+    const periods = review.fileProblems.find(
+      (p) => p.blocker === "unparseable_period",
+    );
+    expect(periods?.rows).toEqual([
+      { rowNumber: 5, detail: 'Could not read "Q3 2026" as a month.' },
+    ]);
+  });
+
+  it("falls back to the code when a blocker has no message", () => {
+    // A blocker added in SQL but not in blockerMessage should look raw, not blank.
+    const review = reviewImportRows([
+      staged({ blocker: "something_new", error: null }),
+    ]);
+
+    expect(review.fileProblems[0].rows[0].detail).toBe("something_new");
+  });
+
+  it("counts a mixed batch correctly", () => {
+    const review = reviewImportRows([
+      staged({ id: 1 }),
+      staged({ id: 2, agent_id: null, blocker: "unknown_agent" }),
+      staged({ id: 3, blocker: "bad_number" }),
+    ]);
+
+    expect(review).toMatchObject({ total: 3, clean: 1, blocked: 2, ready: false });
   });
 });
 
