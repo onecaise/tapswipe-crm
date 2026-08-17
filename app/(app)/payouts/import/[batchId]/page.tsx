@@ -19,6 +19,7 @@ import { Callout } from "@/components/callout";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { ResidualBatchActions } from "@/components/residual-batch-actions";
+import { ResidualCommitButton } from "@/components/residual-commit-button";
 import { StatCard } from "@/components/stat-card";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -273,6 +274,18 @@ async function BatchReview({
               <p className="font-medium">
                 All {review.total} rows resolved. This import is ready.
               </p>
+              <p className="mt-1 text-muted-foreground">
+                Committing merges by period, agent # and MID — so a row that is
+                already in the ledger is updated rather than duplicated, and any
+                residual income or split entered by hand is kept unless this file
+                supplies one.
+              </p>
+              <div className="mt-3">
+                <ResidualCommitButton
+                  batchId={batch.id}
+                  rowCount={review.total}
+                />
+              </div>
             </Callout>
           )}
         </>

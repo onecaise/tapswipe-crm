@@ -225,6 +225,54 @@ function round2(value: number): number {
   return value < 0 ? -scaled : scaled;
 }
 
+export type FigureInput =
+  | { ok: true; value: number | null }
+  | { ok: false; message: string };
+
+/**
+ * Reads what an admin typed into one money or percentage cell.
+ *
+ * **Not a copy of parseNumberCell in `_shared/residuals.ts`, and not required to
+ * agree with it.** That one reads whatever Excel emitted across a whole sheet —
+ * serial dates, accounting parentheses, currency symbols, thousands separators.
+ * This reads a single value a person just typed into one input, so it accepts far
+ * less on purpose: a stray `(1,234)` in a hand-typed cell is more likely a mistake
+ * than an intentional negative, and there is a human right there to correct it. A
+ * leading `$` and separators are still tolerated, because pasting from the
+ * spreadsheet is the obvious way to fill these in.
+ *
+ * Empty means null — "not worked out yet" — never zero.
+ *
+ * The database remains the authority on range: rep_split_pct has a 0..100 CHECK.
+ * The bound is repeated here only so the admin gets a sentence instead of a raw
+ * constraint-violation message on a screen where they cannot see the constraint.
+ */
+export function parseFigureInput(
+  text: string,
+  field: "residual_income" | "rep_split_pct",
+): FigureInput {
+  const cleaned = text.trim().replace(/[$,\s]/g, "").replace(/%$/, "");
+  if (cleaned === "") return { ok: true, value: null };
+
+  if (!/^-?\d*\.?\d+$/.test(cleaned)) {
+    return { ok: false, message: "Enter a number, or leave it blank." };
+  }
+
+  const value = Number(cleaned);
+  if (!Number.isFinite(value)) {
+    return { ok: false, message: "Enter a number, or leave it blank." };
+  }
+
+  if (field === "rep_split_pct" && (value < 0 || value > 100)) {
+    return { ok: false, message: "A split has to be between 0 and 100." };
+  }
+
+  // Rounded here as well as in the database, so the value the admin sees after a
+  // save is the value they will see on reload.
+  const scaled = Math.round(Math.abs(value) * 100) / 100;
+  return { ok: true, value: value < 0 ? -scaled : scaled };
+}
+
 /** A staged row, as the review screen reads it. */
 export type PayoutImportRow = {
   id: number;

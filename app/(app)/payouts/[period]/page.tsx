@@ -20,6 +20,9 @@ import {
 } from "@/lib/payouts";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
+import { PayoutBulkSplit } from "@/components/payout-bulk-split";
+import { PayoutFigureCell } from "@/components/payout-figure-cell";
+import { PayoutPeriodDelete } from "@/components/payout-period-delete";
 import { StatCard } from "@/components/stat-card";
 import { Button } from "@/components/ui/button";
 import {
@@ -87,7 +90,8 @@ async function PeriodLedger({
   // paid out before anyone notices.
   if (period === null) notFound();
 
-  await requireUser();
+  const profile = await requireUser();
+  const isAdmin = profile.role === "admin";
   const supabase = await createClient();
 
   const { data, error } = await supabase
@@ -134,6 +138,15 @@ async function PeriodLedger({
       <PageHeader
         title={formatPeriod(period)}
         subtitle="Residual income per merchant, grouped by rep."
+        action={
+          isAdmin ? (
+            <PayoutPeriodDelete
+              period={period}
+              rowCount={overall.rows}
+              filledCount={overall.rows - overall.unfilled}
+            />
+          ) : undefined
+        }
       />
 
       <div className="grid gap-3 sm:grid-cols-4">
@@ -161,15 +174,28 @@ async function PeriodLedger({
                   {group.rep?.agent_number ?? EMPTY}
                 </span>
               </h2>
-              <p className="text-sm text-muted-foreground">
-                {totals.rows} merchant{totals.rows === 1 ? "" : "s"} ·{" "}
-                <span className="font-medium text-foreground">
-                  {formatMoney(totals.repPayout)}
-                </span>
-                {totals.unfilled > 0 && (
-                  <> · {totals.unfilled} awaiting figures</>
+              <div className="flex flex-col items-end gap-1.5">
+                <p className="text-sm text-muted-foreground">
+                  {totals.rows} merchant{totals.rows === 1 ? "" : "s"} ·{" "}
+                  <span className="font-medium text-foreground">
+                    {formatMoney(totals.repPayout)}
+                  </span>
+                  {totals.unfilled > 0 && (
+                    <> · {totals.unfilled} awaiting figures</>
+                  )}
+                </p>
+                {/* The common case in one action: a rep's split is usually the
+                    same percentage on every merchant, and typing it forty times
+                    is how a wrong one gets missed. */}
+                {isAdmin && (
+                  <PayoutBulkSplit
+                    period={period}
+                    agentId={group.agentId}
+                    repName={group.rep?.full_name ?? "this rep"}
+                    rowCount={totals.rows}
+                  />
                 )}
-              </p>
+              </div>
             </div>
 
             <Table>
@@ -212,14 +238,37 @@ async function PeriodLedger({
                     <TableCell>
                       <Money value={row.total_cost} />
                     </TableCell>
+                    {/* The two hand-entered figures: editable for an admin, read
+                        for a rep. Not a security boundary — update on
+                        rep_payout_rows is admin-only by policy, so a rep who
+                        reached the control would have their write filtered to
+                        nothing, which is what the cell's count check catches. */}
                     <TableCell>
-                      <Money value={row.residual_income} />
+                      {isAdmin ? (
+                        <PayoutFigureCell
+                          rowId={row.id}
+                          field="residual_income"
+                          value={row.residual_income}
+                          merchantName={row.merchant_name}
+                        />
+                      ) : (
+                        <Money value={row.residual_income} />
+                      )}
                     </TableCell>
                     <TableCell>
-                      {formatPct(
-                        row.rep_split_pct === null
-                          ? null
-                          : Number(row.rep_split_pct),
+                      {isAdmin ? (
+                        <PayoutFigureCell
+                          rowId={row.id}
+                          field="rep_split_pct"
+                          value={row.rep_split_pct}
+                          merchantName={row.merchant_name}
+                        />
+                      ) : (
+                        formatPct(
+                          row.rep_split_pct === null
+                            ? null
+                            : Number(row.rep_split_pct),
+                        )
                       )}
                     </TableCell>
                     <TableCell className="font-medium">

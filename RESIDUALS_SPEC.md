@@ -428,27 +428,52 @@ caller-scoped client), and an admin may read every `profiles` and `merchants` ro
 the admin client buys only the ability to resolve without 40 round trips. It must not be
 used to *decide* anything.
 
-### 7.3 `commit-residual-import` — admin only
+### 7.3 Committing is a `security definer` RPC, not an Edge Function
 
-`{ batch_id }` →
+**Revised 2026-08-17, before implementation.** This was specified as
+`commit-residual-import`, an eighth Edge Function. It is instead
+`commit_residual_import(batch_id_input int)`, a `security definer` plpgsql RPC — the same
+shape and for the same reasons as `approve_pre_app`, which this closely resembles (creates
+rows the caller may not insert, flips a parent's status, writes `audit_log`, guards itself
+with an explicit `is_admin()`).
 
-1. Refuses with `409` if the batch is not `review`, or if any staging row has a `blocker`.
-   The error names the counts; the review screen is where the detail lives.
-2. Upserts each staging row into `rep_payout_rows` on `(period, agent_id, mid)`:
-   file-sourced columns always written; `residual_income` and `rep_split_pct` written **only
-   when the staging row carries a non-null value** (decision 12), so a fresh processor file
-   never clears hand-entered figures and a round-trip export fills them in.
-3. Deletes the batch's staging rows, sets `status = 'committed'` and `committed_at`.
-4. Writes one `audit_log` row: `action = 'commit_residual_import'`, `table_name =
+Four reasons, in order of weight:
+
+1. **Atomicity, which the Edge Function could not have.** supabase-js has no client-side
+   transaction, so the function would have had to insert the ledger rows, then delete the
+   staging rows, then flip the batch status as three separate round trips — with a real
+   window where a period is half-imported. In SQL it is one statement sequence in one
+   transaction: it all lands or none of it does. For a commission import that is not a
+   nicety.
+2. **No pagination to get wrong.** PostgREST caps a response (`[api] max_rows`), so the
+   function would have had to page through staging rows and silently import a prefix if
+   anyone forgot. `insert … select` has no such limit.
+3. **The audit row can fail closed.** Inside the transaction, a failed `audit_log` insert
+   rolls the whole import back — so the `auditWriteFailed` asymmetry this spec previously
+   described simply does not arise. `submit-pre-app-secrets` has to be best-effort because
+   its ciphertext is already written when it audits; nothing is written here until commit.
+4. **`auth.uid()` survives `security definer`**, so the history rows the upsert triggers are
+   attributed to the admin who committed, rather than to nobody. That is strictly better
+   provenance than a service-role write would have given.
+
+What it does:
+
+1. `is_admin()` or `raise` — the guard is hand-written, because `definer` bypasses RLS.
+2. Refuses unless the batch is `review`, and refuses if any staging row has a `blocker` or
+   if there are no staging rows at all. Distinct error codes, so the UI can say which.
+3. Upserts staging rows into `rep_payout_rows` on `(period, agent_id, mid)`. File-sourced
+   columns always written; `residual_income` and `rep_split_pct` via
+   `coalesce(excluded.<col>, rep_payout_rows.<col>)` — **written only when the file supplied
+   a value** (decision 12), so a fresh processor file never clears a hand-entered figure and
+   a round-trip export fills them in.
+4. Deletes the batch's staging rows, sets `status = 'committed'` and `committed_at`.
+5. Writes one `audit_log` row: `action = 'commit_residual_import'`, `table_name =
    'rep_payout_batches'`, `row_id = batch_id`.
 
-**The audit write is best-effort and reports `auditWriteFailed`**, matching
-`submit-pre-app-secrets` and not the fail-closed trigger: by the time it runs the rows are
-committed, so failing the response would claim nothing happened when 40 rows exist.
-
-Steps 2 and 3 are one `postgres` transaction where possible. If they cannot be — supabase-js
-has no client-side transaction — step 2 is an upsert, which is idempotent under the unique
-key, so a retry after a step-3 failure converges. Note that in the function.
+Consequence for §5.2: the note on `rep_payout_row_history.changed_by` saying the commit step
+runs with no `auth.uid()` is **wrong under this design** and is corrected — a commit is
+attributed to the committing admin. `changed_by` stays nullable for a genuine service-role
+write, which nothing currently performs.
 
 ### 7.4 `export-residuals` — any active caller
 
@@ -651,6 +676,7 @@ code becomes English.
 | --- | --- | --- |
 | `tests/rls/rep-payouts.test.ts` | PGlite | Scoping on all four tables per persona — own / admin / other agent / unauthenticated / **deactivated**. `rep_payout_rows` has no insert policy (an `authenticated` insert is refused, not filtered). Admin-only select on `rep_payout_row_history`. The unique merge key rejects a duplicate. Both `check >= 0` columns and the 0–100 split range. `total_cost` and `residual_income` accept negatives. `rep_payout` computes, rounds, and is null when either input is null. A load-bearing case that mutates a policy to prove the test is not vacuous, per `documents.test.ts`. |
 | `tests/rls/payout-history-trigger.test.ts` | PGlite | An update to either money field writes exactly one history row per changed field, with the right old/new/`changed_by`; an update touching neither writes none; the history row survives deleting its `rep_payout_rows` row and still reads (period/agent/mid denormalized); and the **fail-closed** case — break the history insert and assert the parent update rolls back, mirroring `audit-trigger.test.ts`. |
+| `tests/rls/commit-residual-import.test.ts` | PGlite | The RPC (§7.3): admin-only, and nothing written when it refuses; refuses a blocked batch, an empty one, one already committed, one that does not exist, and a second commit. Then the merge — file columns overwritten, hand-entered figures **kept** when the file has none and **written** when it supplies them, no duplicate row, two reps' rows for one MID kept apart, history written for a figure a re-import changed and none for a file-only change. Plus the catalog facts: `prosecdef`, the `is_admin()` guard, `search_path`, and the literal `coalesce(excluded.residual_income` — because reversing that one expression is silent. |
 | `tests/rls/set-agent-number.test.ts` | PGlite | Admin sets, changes and clears; an agent calling it is refused (not silently ignored); a duplicate number raises; `audit_log` gets the right `action` in each direction; `prosecdef` is true on this one and the `is_admin()` guard is present. |
 | `tests/rls/grants.test.ts` | PGlite | Extended: `anon` has nothing on the four tables; `authenticated` has no insert on `rep_payout_rows` and no insert/update/delete on the history table; the two new functions are not executable by `anon`; `usage` on both new sequences is `service_role` only. |
 | `tests/unit/residuals-parse.test.ts` | vitest | Every accepted Period form → the right first-of-month, including the Excel serial and the two-digit year; rejected forms (`"Q3 2026"`, a bare month) → `unparseable_period`. Number coercion: separators, `$`, `%`, parens-negative, empty vs `-` → **null, not zero**. Header matching case/whitespace-insensitively; a missing required header fails the parse. Blocker precedence in the §6 order. |

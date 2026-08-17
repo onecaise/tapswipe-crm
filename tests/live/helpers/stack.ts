@@ -214,6 +214,31 @@ export const MISSING_ID = 987654;
 export const BUCKET = "documents";
 
 /**
+ * The second private bucket, holding uploaded residual reports.
+ *
+ * Like `documents` it is created out-of-band — neither is in any migration — so a
+ * freshly started local stack has neither and every signing call 404s until
+ * provisionFixtures() creates them.
+ */
+export const RESIDUAL_BUCKET = "residual-imports";
+
+/**
+ * Agent numbers given to the personas, so an import file can name them.
+ *
+ * Only the two active agents get one. The admin and the deactivated agent are
+ * deliberately left without: an unrecognised number has to be reachable in a test
+ * without inventing a fifth persona, and a resolved-but-deactivated rep is its own
+ * case that a test opts into by assigning one.
+ */
+export const PERSONA_AGENT_NUMBERS: Partial<Record<PersonaKey, string>> = {
+  owner: "LIVE-4471",
+  intruder: "LIVE-9902",
+};
+
+/** An agent number no persona holds, for the unknown_agent path. */
+export const UNKNOWN_AGENT_NUMBER = "LIVE-0000";
+
+/**
  * Creates the bucket, four users, four merchants and four documents, and signs
  * everyone in.
  *
@@ -229,13 +254,15 @@ export async function provisionFixtures(): Promise<Fixtures> {
 
   await teardownFixtures();
 
-  // The bucket is created out-of-band in production (it isn't in any
-  // migration), so it has to be created here too or every signing call 404s.
-  const { error: bucketError } = await admin.storage.createBucket(BUCKET, {
-    public: false,
-  });
-  if (bucketError && !/exists/i.test(bucketError.message)) {
-    throw new Error(`Could not create bucket: ${bucketError.message}`);
+  // Both buckets are created out-of-band in production (neither is in any
+  // migration), so they have to be created here too or every signing call 404s.
+  for (const bucket of [BUCKET, RESIDUAL_BUCKET]) {
+    const { error: bucketError } = await admin.storage.createBucket(bucket, {
+      public: false,
+    });
+    if (bucketError && !/exists/i.test(bucketError.message)) {
+      throw new Error(`Could not create bucket ${bucket}: ${bucketError.message}`);
+    }
   }
 
   const userIds = {} as Record<PersonaKey, string>;
@@ -265,6 +292,9 @@ export async function provisionFixtures(): Promise<Fixtures> {
       full_name: persona.fullName,
       role: persona.role,
       is_active: persona.isActive,
+      // Only the two active agents get one, so an import file can name them and
+      // an unrecognised number is still reachable without a fifth persona.
+      agent_number: PERSONA_AGENT_NUMBERS[persona.key] ?? null,
     });
     if (profileError) {
       throw new Error(
@@ -356,11 +386,62 @@ export async function provisionFixtures(): Promise<Fixtures> {
 }
 
 /**
+ * Clears every payout row that references `userId`, in FK order.
+ *
+ * FIVE references to profiles, all NO ACTION: rep_payout_rows.agent_id,
+ * rep_payout_import_rows.agent_id, rep_payout_batches.imported_by, and both
+ * rep_payout_row_history.agent_id and .changed_by. Any one of them still present
+ * makes deleteUser fail on the FK — and this is not hypothetical: it has already
+ * happened once. A probe script's teardown deleted the profile without clearing
+ * staging rows, did not check the error, and the surviving rep then resolved an
+ * agent number the next run expected to be unknown. It presented as a parser bug.
+ *
+ * Order matters: history and staging first (they reference profiles directly),
+ * then ledger rows, then batches — a batch cannot go while ledger rows point at it
+ * either, since rep_payout_rows.batch_id is `set null` but the delete would still
+ * have to run.
+ *
+ * Called by both teardownFixtures and deleteUserCompletely, so ad-hoc accounts
+ * created inside a test get the same treatment.
+ */
+async function clearPayoutRows(
+  admin: SupabaseClient,
+  userId: string,
+): Promise<void> {
+  await admin.from("rep_payout_row_history").delete().eq("agent_id", userId);
+  await admin.from("rep_payout_row_history").delete().eq("changed_by", userId);
+  await admin.from("rep_payout_import_rows").delete().eq("agent_id", userId);
+  await admin.from("rep_payout_rows").delete().eq("agent_id", userId);
+
+  // Ledger rows belonging to OTHER reps can still point at a batch this user
+  // imported (batch_id), so those have to be detached before the batch goes.
+  // `set null` on the FK means an update, not a cascade.
+  const { data: batches } = await admin
+    .from("rep_payout_batches")
+    .select("id")
+    .eq("imported_by", userId);
+  const batchIds = (batches ?? []).map((batch) => batch.id as number);
+
+  if (batchIds.length > 0) {
+    await admin
+      .from("rep_payout_rows")
+      .update({ batch_id: null })
+      .in("batch_id", batchIds);
+    await admin
+      .from("rep_payout_import_rows")
+      .delete()
+      .in("batch_id", batchIds);
+    await admin.from("rep_payout_batches").delete().eq("imported_by", userId);
+  }
+}
+
+/**
  * Removes everything provisionFixtures created, in FK order.
  *
  * merchants.agent_id and documents.agent_id reference profiles with no ON
  * DELETE clause, so deleting the auth user first would fail on the profiles
- * cascade. Storage objects are removed by prefix, keyed on the user id.
+ * cascade. The five rep_payout references are the same trap with five doors —
+ * see clearPayoutRows. Storage objects are removed by prefix, keyed on the user id.
  */
 export async function teardownFixtures(): Promise<void> {
   const admin = adminClient();
@@ -421,7 +502,35 @@ export async function teardownFixtures(): Promise<void> {
     await admin.from("audit_log").delete().eq("actor_id", user.id);
     await admin.from("audit_log").delete().eq("row_id", user.id);
 
-    await admin.auth.admin.deleteUser(user.id);
+    await clearPayoutRows(admin, user.id);
+
+    // Residual import files, removed by the {batch_id}/ prefix. Listed rather
+    // than guessed at, because the filename is whatever was uploaded.
+    const { data: batchDirs } = await admin.storage
+      .from(RESIDUAL_BUCKET)
+      .list("", { limit: 1000 });
+    for (const dir of batchDirs ?? []) {
+      const { data: files } = await admin.storage
+        .from(RESIDUAL_BUCKET)
+        .list(dir.name, { limit: 1000 });
+      const paths = (files ?? []).map((f) => `${dir.name}/${f.name}`);
+      if (paths.length > 0) {
+        await admin.storage.from(RESIDUAL_BUCKET).remove(paths);
+      }
+    }
+
+    const { error: deleteError } = await admin.auth.admin.deleteUser(user.id);
+    // Checked, not ignored. A silent FK failure here leaves the persona behind and
+    // the next run dies on "user already registered", which says nothing about the
+    // real cause — and a surviving persona can make a later assertion pass or fail
+    // for reasons unrelated to the code under test.
+    if (deleteError) {
+      throw new Error(
+        `Could not delete ${user.email}: ${deleteError.message}. ` +
+          "Something still references their profiles row — check the five " +
+          "rep_payout FKs and audit_log.",
+      );
+    }
   }
 }
 
@@ -435,7 +544,12 @@ export async function deleteUserCompletely(userId: string): Promise<void> {
   const admin = adminClient();
   await admin.from("audit_log").delete().eq("actor_id", userId);
   await admin.from("audit_log").delete().eq("row_id", userId);
-  await admin.auth.admin.deleteUser(userId);
+  await clearPayoutRows(admin, userId);
+
+  const { error } = await admin.auth.admin.deleteUser(userId);
+  if (error) {
+    throw new Error(`Could not delete ${userId}: ${error.message}`);
+  }
 }
 
 export type FunctionResponse = {

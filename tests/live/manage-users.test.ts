@@ -340,7 +340,11 @@ describe("create-user", () => {
         full_name: "Live Numbered Rep",
         email: numbered,
         role: "agent",
-        agent_number: "LIVE-4471",
+        // Deliberately not one of PERSONA_AGENT_NUMBERS. The personas now hold
+        // LIVE-4471 and LIVE-9902 so the residual suite can name them in an import
+        // file, and reusing one here made this test collide with the fixture — the
+        // 409 fired for the right reason on the wrong row.
+        agent_number: "LIVE-CU-0042",
       },
       fixtures.tokens.admin,
     );
@@ -355,7 +359,7 @@ describe("create-user", () => {
       .select("agent_number")
       .eq("id", userId)
       .single();
-    expect(profile?.agent_number).toBe("LIVE-4471");
+    expect(profile?.agent_number).toBe("LIVE-CU-0042");
 
     // The 409 must land BEFORE createUser. If it did not, the unique index would
     // catch the duplicate on the profiles insert instead — after the auth.users
@@ -367,7 +371,11 @@ describe("create-user", () => {
         full_name: "Live Clashing Rep",
         email: clashing,
         role: "agent",
-        agent_number: "LIVE-4471",
+        // Deliberately not one of PERSONA_AGENT_NUMBERS. The personas now hold
+        // LIVE-4471 and LIVE-9902 so the residual suite can name them in an import
+        // file, and reusing one here made this test collide with the fixture — the
+        // 409 fired for the right reason on the wrong row.
+        agent_number: "LIVE-CU-0042",
       },
       fixtures.tokens.admin,
     );
