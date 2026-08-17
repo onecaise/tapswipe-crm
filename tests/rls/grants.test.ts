@@ -168,6 +168,36 @@ describe("grant surface after all migrations", () => {
       "SELECT",
     ]);
 
+    // rep_payout_rows: no INSERT. Rows are created only by
+    // commit-residual-import under the service role, so an INSERT grant would be
+    // backed by no policy — a ledger of what a processor reported must not be
+    // writable a row at a time from a browser. UPDATE and DELETE are granted and
+    // admin-gated by policy: inline editing of the two money figures, and the
+    // whole-period escape hatch.
+    expect(
+      await tablePrivileges(db, "authenticated", "rep_payout_rows"),
+    ).toEqual(["DELETE", "SELECT", "UPDATE"]);
+
+    // rep_payout_batches: SELECT to list them, UPDATE to abandon one. No INSERT
+    // because the Storage key contains the batch id, so the row is created
+    // server-side before the upload exists; no DELETE because a batch is the
+    // record that an import happened.
+    expect(
+      await tablePrivileges(db, "authenticated", "rep_payout_batches"),
+    ).toEqual(["SELECT", "UPDATE"]);
+
+    // The staging table and the history table are read-only to every client.
+    // Every write to either comes from a service-role Edge Function or from
+    // log_payout_row_change(), which is security definer and bypasses grants
+    // entirely — which is precisely what lets the history table have no client
+    // write path at all.
+    for (const table of ["rep_payout_import_rows", "rep_payout_row_history"]) {
+      expect(
+        await tablePrivileges(db, "authenticated", table),
+        `${table} should be SELECT-only for authenticated`,
+      ).toEqual(["SELECT"]);
+    }
+
     // Zero-policy RLS already denies these; the absent grant is the second
     // lock, so that a policy added by mistake still opens nothing.
     for (const secrets of [
@@ -206,6 +236,10 @@ describe("grant surface after all migrations", () => {
       "tasks",
       "bug_reports",
       "audit_log",
+      "rep_payout_batches",
+      "rep_payout_import_rows",
+      "rep_payout_rows",
+      "rep_payout_row_history",
     ]) {
       expect(
         await nonDmlPrivileges(db, "authenticated", table),
@@ -249,6 +283,32 @@ describe("grant surface after all migrations", () => {
       await sequencePrivileges(db, "authenticated", "audit_log_id_seq"),
       "authenticated should hold nothing on audit_log_id_seq",
     ).toEqual([]);
+
+    // The four rep_payout sequences hold nothing either, for the same reason:
+    // none of those tables grants INSERT to authenticated, so nothing it can do
+    // consumes them. Granting USAGE anyway would leave nextval() reachable
+    // through any security invoker RPC, burning ids and putting gaps in a ledger
+    // of what a processor reported.
+    for (const sequence of [
+      "rep_payout_batches_id_seq",
+      "rep_payout_import_rows_id_seq",
+      "rep_payout_rows_id_seq",
+      "rep_payout_row_history_id_seq",
+    ]) {
+      expect(
+        await sequencePrivileges(db, "authenticated", sequence),
+        `authenticated should hold nothing on ${sequence}`,
+      ).toEqual([]);
+
+      // service_role does hold it, because that is the role every insert to these
+      // tables actually runs as. Asserted because the migration has to grant it
+      // explicitly: 20260805200000's `grant all on all sequences` applied to the
+      // sequences that existed then and is not a standing rule.
+      expect(
+        await sequencePrivileges(db, "service_role", sequence),
+        `service_role must hold USAGE on ${sequence}`,
+      ).toContain("USAGE");
+    }
 
     await db.close();
   });
@@ -362,6 +422,7 @@ describe("grant surface after all migrations", () => {
       "set_updated_at()",
       "pre_apps_guard_transitions()",
       "log_cross_agent_change()",
+      "log_payout_row_change()",
     ]) {
       expect(
         await canExecute(db, "authenticated", signature),
@@ -382,6 +443,29 @@ describe("grant surface after all migrations", () => {
     expect(await canExecute(db, "anon", "public.approve_pre_app(int)")).toBe(
       false,
     );
+
+    // The payout tables enumerated rather than sampled, for the reason this whole
+    // file enumerates: the failure mode is an omission, and these four are the
+    // newest tables in the schema — the ones most likely to have been added
+    // without their grant lines.
+    for (const table of [
+      "rep_payout_batches",
+      "rep_payout_import_rows",
+      "rep_payout_rows",
+      "rep_payout_row_history",
+    ]) {
+      expect(
+        await tablePrivileges(db, "anon", table),
+        `anon must hold nothing on ${table}`,
+      ).toEqual([]);
+    }
+
+    // set_agent_number writes profiles and audit_log as the owner, so an anon
+    // EXECUTE would be a straight privilege escalation on the column that decides
+    // who gets paid.
+    expect(
+      await canExecute(db, "anon", "public.set_agent_number(uuid, text)"),
+    ).toBe(false);
 
     const [seq] = await rows<{ ok: boolean }>(
       db,

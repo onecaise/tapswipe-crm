@@ -243,11 +243,18 @@ committed_at timestamptz
 ```
 
 **Deliberate deviation from the four-things rule:** the ownership column is `imported_by`,
-not `agent_id`, and the policies are `is_admin()` on all four verbs. A batch belongs to no
-rep. Naming the importing admin `agent_id` would make the standard policy expression
-`(agent_id = auth.uid() and is_active_agent()) or is_admin()` accidentally *meaningful* —
-and wrong, since it would let a rep read a batch merely because an admin's uuid happened to
-match. The rule exists to stop a rep-owned table from being unscoped; this table has no rep.
+not `agent_id`. A batch belongs to no rep. Naming the importing admin `agent_id` would make
+the standard policy expression `(agent_id = auth.uid() and is_active_agent()) or is_admin()`
+accidentally *meaningful* — and wrong, since it would let a rep read a batch merely because
+an admin's uuid happened to match. The rule exists to stop a rep-owned table from being
+unscoped; this table has no rep.
+
+Policies: select and update `is_admin()` — the import page lists batches, and "Abandon
+batch" is a status update. **No insert or delete policy**: batches are created by
+`residual-import-file-url` under the service role, and are never deleted (a batch is the
+record that an import happened, which is the point of keeping the file). Grants therefore
+`select, update` to `authenticated`, `all` to `service_role`, and `usage` on the sequence to
+`service_role` only.
 
 **`rep_payout_import_rows`** — staging. Every cell kept as text exactly as parsed, alongside
 its resolved value, so the review screen can show what the file said next to what it means.
@@ -269,8 +276,16 @@ blocker text check (blocker in
 error text                              -- human-readable, null when clean
 ```
 
-Admin-only on all four verbs. `on delete cascade` from the batch is right here and only
-here: staging rows have no meaning without their batch.
+**Select policy only, `is_admin()`.** Every write to this table comes from
+`parse-residual-import` or `commit-residual-import` under the service role — the review
+screen only reads it, and the one fixable blocker is fixed by re-parsing rather than by
+editing a staging row (§8.3). Granting insert/update/delete to `authenticated` would be dead
+weight of exactly the kind the grants section warns about: the privilege check passes, RLS
+filters the statement to nothing, and the caller sees a save that did nothing. So `select` to
+`authenticated`, `all` to `service_role`, `usage` on the sequence to `service_role` only.
+
+`on delete cascade` from the batch is right here and only here: staging rows have no meaning
+without their batch.
 
 **`rep_payout_rows`** — the ledger. Clean, typed, committed, no status column (decision 8).
 

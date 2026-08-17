@@ -1146,6 +1146,330 @@ create policy "admin reads audit log" on audit_log
 -- writes come only from service-role Edge Functions / triggers, not clients
 
 -- =====================================================================
+-- REP PAYOUTS / RESIDUALS — the per-merchant monthly residual ledger,
+-- plus the staging area an import waits in. Spec: RESIDUALS_SPEC.md.
+--
+-- Four tables, and the split between them is the design:
+--
+--   rep_payout_batches      one uploaded file
+--   rep_payout_import_rows  its cells, as parsed, until they are clean
+--   rep_payout_rows         the ledger -- clean, typed, committed
+--   rep_payout_row_history  every change to the two money figures
+--
+-- Why a separate staging table rather than a `status` column on the
+-- ledger: nothing lands in rep_payout_rows until every row of the batch
+-- resolves, and a batch can wait days while someone creates a rep. With
+-- one table and a status flag, every read, total, export and payout
+-- summary would have to remember `where status = 'committed'` -- and the
+-- one that forgot would show draft figures as real payouts. Here the
+-- ledger has no draft state to filter out, because drafts are not in it.
+--
+-- What the processor supplies and what it does not. The monthly XLSX has
+-- seven columns: Period, Agent #, MID, Merchant name, Volume, Average
+-- ticket, Total cost. The two numbers that decide what a rep is owed --
+-- residual income and the rep's split -- are worked out by hand and typed
+-- in afterwards. So they are nullable, and null means "not worked out
+-- yet" rather than zero. Everything downstream has to keep that
+-- distinction: a period with blank figures is normal, not broken.
+-- =====================================================================
+create table rep_payout_batches (
+  id serial primary key,
+  -- The importing admin, and NOT called agent_id, deliberately.
+  --
+  -- Every other table here follows the rule that a new table carries
+  -- `agent_id uuid references profiles(id) not null` so that the standard policy
+  -- expression scopes it. A batch belongs to no rep at all -- it belongs to the
+  -- file. Naming this column agent_id would make
+  -- `(agent_id = auth.uid() and is_active_agent()) or is_admin()` accidentally
+  -- MEANINGFUL here, and wrong: a rep would read a batch whenever an admin's uuid
+  -- happened to match theirs. The rule exists to stop a rep-owned table from
+  -- being unscoped, and this table has no rep to scope to.
+  imported_by uuid references profiles(id) not null,
+  -- Key in the `residual-imports` bucket, not the `documents` one. See the
+  -- storage note at the end of this file for why it needed its own bucket.
+  file_key text not null,
+  file_name text not null,
+  -- 'abandoned' exists because a batch is allowed to wait indefinitely: an
+  -- unrecognised agent number can take a day to sort out. Without it the import
+  -- page would accumulate stale 'review' rows with no way to say "not this one".
+  status text not null default 'review'
+    check (status in ('review', 'committed', 'abandoned')),
+  row_count int not null default 0,
+  uploaded_at timestamptz default now(),
+  committed_at timestamptz
+);
+
+alter table rep_payout_batches enable row level security;
+
+-- Admin-only, and only the two verbs a client actually performs: the import page
+-- lists batches, and "Abandon batch" is a status update. There is deliberately
+-- no INSERT policy -- batches are created by residual-import-file-url under the
+-- service role, because the Storage key contains the batch id and so the row has
+-- to exist before the upload does -- and no DELETE policy, because a batch is the
+-- record that an import happened. Deleting one would throw away the provenance
+-- the retained file exists to provide.
+create policy "admin only select" on rep_payout_batches
+  for select using (is_admin());
+create policy "admin abandons" on rep_payout_batches
+  for update using (is_admin()) with check (is_admin());
+
+-- ---------------------------------------------------------------------
+-- REP PAYOUT IMPORT ROWS — staging.
+--
+-- Every cell is kept twice: once as the text the file actually contained
+-- (*_raw) and once as the resolved, typed value. The review screen needs
+-- both, because "Q3 2026" is only explicable next to the cell it came
+-- from, and an admin comparing the screen to the spreadsheet is comparing
+-- against the raw text.
+--
+-- The raw copy is also the reason a re-parse is safe to offer: nothing
+-- here has been interpreted destructively, so parsing again after an
+-- agent number is created reaches the same conclusions plus one.
+-- ---------------------------------------------------------------------
+create table rep_payout_import_rows (
+  id serial primary key,
+  batch_id int references rep_payout_batches(id) on delete cascade not null,
+  -- 1-based spreadsheet row, so an error can name where to look. Not the array
+  -- index: an admin fixing the file counts rows in Excel, where the header is
+  -- row 1.
+  row_number int not null,
+  period_raw text,
+  agent_number_raw text,
+  mid_raw text,
+  merchant_name_raw text,
+  volume_raw text,
+  average_ticket_raw text,
+  total_cost_raw text,
+  -- Absent from a fresh processor file; present when a round-trip export is fed
+  -- back in to bulk-fill the figures. That asymmetry is the whole reason the
+  -- commit step distinguishes "the file said nothing" from "the file said zero".
+  residual_income_raw text,
+  rep_split_raw text,
+  -- Resolved values. Null wherever the raw text could not be resolved, in which
+  -- case `blocker` says why.
+  period date,
+  agent_id uuid references profiles(id),
+  merchant_id int references merchants(id) on delete set null,
+  volume numeric(14,2),
+  average_ticket numeric(14,2),
+  total_cost numeric(14,2),
+  residual_income numeric(14,2),
+  rep_split_pct numeric(5,2),
+  -- A code, so the UI can group and count, plus prose for the row itself. Only
+  -- 'unknown_agent' is fixable from the review screen; the rest are file problems
+  -- and the fix is a corrected upload.
+  blocker text check (blocker in (
+    'unknown_agent', 'unparseable_period', 'bad_number',
+    'missing_mid', 'duplicate_in_file'
+  )),
+  error text
+);
+
+alter table rep_payout_import_rows enable row level security;
+
+-- SELECT only. Every write comes from parse-residual-import or
+-- commit-residual-import under the service role; the review screen reads, and the
+-- one fixable blocker is fixed by re-parsing rather than by editing a staging
+-- row. Granting the other verbs would be dead weight of exactly the kind the
+-- GRANTS section warns about -- privilege check passes, RLS filters to nothing,
+-- caller sees a save that did nothing.
+create policy "admin only select" on rep_payout_import_rows
+  for select using (is_admin());
+
+-- ---------------------------------------------------------------------
+-- REP PAYOUT ROWS — the ledger.
+-- ---------------------------------------------------------------------
+create table rep_payout_rows (
+  id serial primary key,
+  agent_id uuid references profiles(id) not null,
+  -- Always the first of the month. The file says "Jul-26" or "07/2026" or an
+  -- Excel serial; the parser normalises all of them, and an unparseable value
+  -- blocks its row rather than guessing. Storing a date rather than the label
+  -- means periods sort correctly and one period has exactly one spelling.
+  period date not null,
+  -- From the file, and authoritative. NOT a foreign key to merchants: a residual
+  -- report legitimately contains merchants nobody has entered into the CRM, and
+  -- blocking payroll over a data-entry gap is the wrong trade.
+  mid text not null,
+  merchant_name text,
+  -- The soft link, resolved by MID lookup at import. Null when no merchant
+  -- matched, which is an ordinary state and not an error. `set null` on delete so
+  -- that deleting a merchant cannot wedge on an FK from the ledger.
+  merchant_id int references merchants(id) on delete set null,
+  -- Volume and average ticket must be non-negative: a negative there is a parse
+  -- error, not a business fact.
+  volume numeric(14,2) check (volume >= 0),
+  average_ticket numeric(14,2) check (average_ticket >= 0),
+  -- Cost and residual income are signed on purpose. Clawbacks and adjustments
+  -- are real, a negative month happens, and a CHECK that rejected one would turn
+  -- valid processor data into a blocked row nobody could explain.
+  total_cost numeric(14,2),
+  residual_income numeric(14,2),
+  rep_split_pct numeric(5,2)
+    check (rep_split_pct >= 0 and rep_split_pct <= 100),
+  -- Derived, stored, and never independently editable -- which is the point. A
+  -- third money column an admin could type into would eventually disagree with
+  -- the two it is computed from, and there would be no way to tell which was
+  -- right. Null when either input is null, which reads correctly as "not worked
+  -- out yet" rather than as a payout of zero.
+  rep_payout numeric(14,2) generated always as
+    (round(residual_income * rep_split_pct / 100, 2)) stored,
+  -- Provenance of the last write, not an ownership link. `set null` on delete so
+  -- an old batch can be tidied away without taking ledger rows with it.
+  batch_id int references rep_payout_batches(id) on delete set null,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  -- The merge key. A second upload for a period upserts on this, so re-importing
+  -- a corrected file updates rows rather than duplicating them.
+  --
+  -- Keyed on agent_id rather than on the agent number the file carried:
+  -- profiles.agent_number is unique so the two are equivalent today, but keying
+  -- on the uuid means reassigning a number later does not orphan history.
+  unique (period, agent_id, mid)
+);
+
+alter table rep_payout_rows enable row level security;
+
+-- The one table in this group with the usual own-or-admin read: a rep sees their
+-- own residuals. Everything that writes is admin-only, because the figures are
+-- entered by whoever runs payouts, not by the rep being paid.
+create policy "select own or admin" on rep_payout_rows
+  for select using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
+-- Inline editing of the two money fields, and the per-agent bulk split.
+create policy "admin only update" on rep_payout_rows
+  for update using (is_admin()) with check (is_admin());
+-- Whole-period delete, the escape hatch for an import that was simply wrong.
+-- Individual rows are not deletable by design -- a wrong merchant line is a
+-- correction, made by editing, which the history table then records.
+create policy "admin only delete" on rep_payout_rows
+  for delete using (is_admin());
+-- No INSERT policy. Rows are created only by commit-residual-import under the
+-- service role, the same arrangement profiles and audit_log have: a ledger of
+-- what a processor reported should not be writable a row at a time from a
+-- browser.
+
+-- ---------------------------------------------------------------------
+-- REP PAYOUT ROW HISTORY — old value, new value, who, when, for the two
+-- figures a human types.
+--
+-- Corrections overwrite in place rather than appending superseding rows.
+-- The alternative was considered and rejected: with immutable versions,
+-- every read, export, total and payout summary would need a
+-- latest-per-key filter, and the one that got it wrong would be a wrong
+-- payout. This keeps the ledger simple to read and puts the trail beside
+-- it.
+--
+-- Deliberately NOT reached by log_cross_agent_change(). On this table
+-- every write is by definition an admin acting on a rep's row, so that
+-- trigger would fire on 100% of writes -- forty audit_log rows for one
+-- import -- and would still not record what the figure changed FROM,
+-- because audit_log has no detail column. Same principle that excludes
+-- documents from it: audit where the event is.
+-- ---------------------------------------------------------------------
+create table rep_payout_row_history (
+  id serial primary key,
+  -- NO foreign key, deliberately. The whole point is that this outlives its
+  -- subject: deleting a period must not erase the record that its figures were
+  -- edited, and `on delete cascade` would do exactly that while
+  -- `on delete restrict` would make the period undeletable. Same
+  -- no-FK-on-purpose shape as notes.owner_id and documents.owner_id.
+  row_id int not null,
+  -- Denormalised so a history row still says what it is about after the ledger
+  -- row is gone. Without these, a surviving history row would be a value change
+  -- attached to an integer that no longer resolves to anything.
+  period date not null,
+  agent_id uuid references profiles(id) not null,
+  mid text not null,
+  field text not null check (field in ('residual_income', 'rep_split_pct')),
+  old_value numeric(14,2),
+  new_value numeric(14,2),
+  -- Null for a service-role write, exactly as audit_log.actor_id is: the commit
+  -- step runs with no auth.uid(), so a round-trip import that fills in figures is
+  -- recorded as a server write rather than attributed to nobody in particular.
+  --
+  -- Plain `references profiles(id)` with no ON DELETE, matching audit_log. That
+  -- makes a user un-deletable while their history rows exist, which production
+  -- never does (deactivation, never deletion) -- but a live test must clear these
+  -- rows before deleting its users, or teardown fails on the FK.
+  changed_by uuid references profiles(id),
+  changed_at timestamptz default now()
+);
+
+alter table rep_payout_row_history enable row level security;
+
+-- Admin-only, and SELECT-only. A rep reads their own figures; the edit history
+-- behind them is a payroll-administration record, not a rep-facing one. No
+-- insert, update or delete policy at all -- the trigger below is `security
+-- definer` and so bypasses both RLS and grants, which is what lets this table
+-- have no client write path whatsoever.
+create policy "admin only select" on rep_payout_row_history
+  for select using (is_admin());
+
+-- ---------------------------------------------------------------------
+-- log_payout_row_change() — writes the history rows above.
+--
+-- `security definer` for the same reason log_cross_agent_change() is:
+-- rep_payout_row_history has no INSERT policy, so a security invoker
+-- trigger would have its insert refused by RLS and would fail the
+-- caller's UPDATE outright.
+--
+-- FAILS CLOSED, intentionally. AFTER ROW, no EXCEPTION block, so a
+-- failure to record the change rolls back the change itself. Same trade
+-- log_cross_agent_change() makes and for the same reason: nothing has
+-- been handed over yet, so refusing the edit is both possible and
+-- correct. An unrecorded change to a commission figure is worse than a
+-- failed one, because the failure is visible and the gap is not.
+--
+-- One row per changed field, not one per statement, so "what changed"
+-- needs no parsing. `is distinct from` rather than <> so that a change
+-- to or from NULL -- which is most of the first edits, since both columns
+-- arrive empty -- is recorded rather than skipped.
+--
+-- Only the two hand-entered columns are watched. The file-sourced columns
+-- change on every re-import by design, and recording those would bury the
+-- entries that matter under the ones that don't -- the same argument that
+-- keeps a rep's own edits out of the cross-agent trail.
+-- ---------------------------------------------------------------------
+create or replace function log_payout_row_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.residual_income is distinct from old.residual_income then
+    insert into rep_payout_row_history
+      (row_id, period, agent_id, mid, field, old_value, new_value, changed_by)
+    values (old.id, old.period, old.agent_id, old.mid, 'residual_income',
+            old.residual_income, new.residual_income, auth.uid());
+  end if;
+
+  if new.rep_split_pct is distinct from old.rep_split_pct then
+    insert into rep_payout_row_history
+      (row_id, period, agent_id, mid, field, old_value, new_value, changed_by)
+    values (old.id, old.period, old.agent_id, old.mid, 'rep_split_pct',
+            old.rep_split_pct, new.rep_split_pct, auth.uid());
+  end if;
+
+  -- AFTER trigger: the return value is ignored.
+  return null;
+end;
+$$;
+
+revoke all on function log_payout_row_change() from public;
+-- Deliberately NOT granted to authenticated: a trigger fires whether or not the
+-- querying role holds EXECUTE. Same treatment as set_updated_at() and
+-- log_cross_agent_change().
+
+create trigger rep_payout_rows_log_changes
+  after update on rep_payout_rows
+  for each row execute function log_payout_row_change();
+
+-- rep_payout_rows also carries updated_at, so it gets a set_updated_at trigger
+-- too -- attached in the updated_at section below, with the other three, rather
+-- than here: that function is defined further down this file.
+
+-- =====================================================================
 -- INDEXES — every RLS policy filters on agent_id, so every query does too
 -- (§14.8). Added while the tables are empty, where it costs nothing.
 -- =====================================================================
@@ -1158,6 +1482,7 @@ create index idx_support_tickets_agent_id on support_tickets(agent_id);
 create index idx_notes_agent_id on notes(agent_id);
 create index idx_tasks_agent_id on tasks(agent_id);
 create index idx_bug_reports_agent_id on bug_reports(agent_id);
+create index idx_rep_payout_rows_agent_id on rep_payout_rows(agent_id);
 
 -- columns the list pages actually filter on
 create index idx_merchants_status on merchants(status);
@@ -1184,6 +1509,20 @@ create index idx_leads_next_followup_date on leads(next_followup_date);
 create index idx_documents_owner on documents(owner_type, owner_id);
 create index idx_notes_owner on notes(owner_type, owner_id);
 create index idx_tasks_owner on tasks(owner_type, owner_id);
+
+-- The payout tables. Note what is deliberately NOT here: an index on
+-- rep_payout_rows(period), even though every page filters on it. The
+-- `unique (period, agent_id, mid)` constraint already creates a btree index with
+-- period as its LEADING column, so it serves `where period = $1` and
+-- `where period = $1 and agent_id = $2` on its own. A second index on period
+-- would be dead weight on every write. agent_id does need its own (above),
+-- because it is not the leading column of that constraint and a rep's own read
+-- filters on it alone.
+--
+-- Staging is always read one batch at a time -- the review screen is
+-- `where batch_id = $1` -- and history is always read for one ledger row.
+create index idx_rep_payout_import_rows_batch on rep_payout_import_rows(batch_id);
+create index idx_rep_payout_row_history_row on rep_payout_row_history(row_id);
 
 -- child tables reach their access check through
 -- `exists (select 1 from pre_apps where pre_apps.id = pre_app_id ...)`,
@@ -1225,6 +1564,10 @@ create trigger leads_set_updated_at
 
 create trigger pre_apps_set_updated_at
   before update on pre_apps
+  for each row execute function set_updated_at();
+
+create trigger rep_payout_rows_set_updated_at
+  before update on rep_payout_rows
   for each row execute function set_updated_at();
 
 -- =====================================================================
@@ -1429,6 +1772,33 @@ create trigger documents_audit_cross_agent
 create trigger bug_reports_audit_cross_agent
   after insert or update or delete on bug_reports
   for each row execute function log_cross_agent_change();
+
+-- The rep_payout tables are the deliberate exclusion, and the reasoning is the
+-- same shape as the one that kept documents out at first -- audit where the event
+-- is -- but it reaches a different conclusion, so it is worth stating rather than
+-- inferring.
+--
+-- rep_payout_rows carries agent_id and would work with this function unchanged.
+-- The problem is that it would fire on EVERY write. This is a table an admin
+-- maintains on a rep's behalf by definition: nobody but an admin can write it at
+-- all (no INSERT policy, admin-only UPDATE and DELETE), so `actor is distinct
+-- from row_agent_id` is true for all of them. One forty-row import would write
+-- forty cross_agent_insert rows, a period delete another forty, and every typed
+-- figure one more -- burying the entries that matter under the ones that don't,
+-- which is the exact failure the "only cross-agent mutations" rule above exists
+-- to avoid.
+--
+-- And it would still not record what a figure changed FROM, because audit_log has
+-- no detail column. So the trail is split by granularity instead: one audit_log
+-- row per committed batch and per deleted period (written by the Edge Function
+-- and by the delete path, where the event is), and rep_payout_row_history for the
+-- value changes, where before-and-after actually fits.
+--
+-- rep_payout_batches, rep_payout_import_rows and rep_payout_row_history are
+-- excluded for the simpler reason: none of them has an agent_id column, so this
+-- function would read NULL, find every actor `distinct from` it, and log
+-- everything -- the same trap support_ticket_replies needed its own function to
+-- avoid.
 
 -- ---------------------------------------------------------------------
 -- support_ticket_replies gets its OWN function, not the one above.
@@ -2306,6 +2676,28 @@ grant select, insert, delete on support_ticket_replies to authenticated;
 -- holds the privilege but no policy admits their write.
 grant select, insert, update on bug_reports to authenticated;
 
+-- rep_payout_rows: no INSERT. Rows are created only by commit-residual-import
+-- under the service role, so an INSERT grant here would be backed by no policy at
+-- all. UPDATE is the inline editing of the two money figures and the per-agent
+-- bulk split; DELETE is the whole-period escape hatch. Both are admin-only by
+-- policy, so a rep holds the privileges and no policy admits their write.
+grant select, update, delete on rep_payout_rows to authenticated;
+
+-- rep_payout_batches: SELECT to list them, UPDATE to abandon one. No INSERT (the
+-- Storage key contains the batch id, so residual-import-file-url creates the row
+-- server-side before the upload exists) and no DELETE (a batch is the record that
+-- an import happened).
+grant select, update on rep_payout_batches to authenticated;
+
+-- rep_payout_import_rows and rep_payout_row_history: SELECT only. Every write to
+-- either comes from a service-role Edge Function or from the
+-- log_payout_row_change trigger, which is `security definer` and so bypasses both
+-- RLS and grants. The history table is admin-read for a reason worth stating: a
+-- rep reads their own figures, but the edit trail behind them is a payroll
+-- record, not a rep-facing one.
+grant select on rep_payout_import_rows to authenticated;
+grant select on rep_payout_row_history to authenticated;
+
 -- profiles: SELECT only, matching its single SELECT policy. Every write is a
 -- security definer RPC or a service-role Edge Function, both of which bypass
 -- grants entirely, so nothing legitimate loses access here. The INSERT/UPDATE/
@@ -2346,6 +2738,13 @@ grant usage on
   tasks_id_seq,
   bug_reports_id_seq
 to authenticated;
+-- The four rep_payout sequences are deliberately absent, for the same reason
+-- audit_log_id_seq is: nothing `authenticated` can do consumes them. None of the
+-- four tables grants INSERT to authenticated -- every row is created by a
+-- service-role Edge Function or a security definer trigger, both of which run as
+-- a role that already holds it. Granting USAGE anyway would leave nextval()
+-- reachable through any security invoker RPC, burning ids and putting gaps in a
+-- ledger of what a processor reported.
 -- audit_log_id_seq is deliberately absent, to match audit_log's SELECT-only
 -- grant above. Nothing `authenticated` can do consumes it: every audit_log
 -- insert comes from a security definer function (running as the owner) or a
@@ -2704,11 +3103,33 @@ $$;
 
 -- =====================================================================
 -- NOTE ON SUPABASE STORAGE (not SQL — set up in the dashboard/CLI)
--- Create one private bucket named `documents`. Do not add public storage
--- policies referencing these tables — all upload/download access goes
--- through the create-upload-url / create-download-url Edge Functions,
--- which check the `documents` table's agent_id (or is_admin()) before
--- minting a short-lived signed URL with the service-role client.
+-- Create TWO private buckets, `documents` and `residual-imports`. Neither
+-- gets public storage policies referencing these tables — all
+-- upload/download access goes through Edge Functions that authorize the
+-- caller first and only then mint a short-lived signed URL with the
+-- service-role client.
+--
+--   documents         create-upload-url / create-download-url, which check
+--                     the `documents` table's agent_id (or is_admin()).
+--                     Keys: {agent_id}/{owner_type}/{owner_id}/{uuid}.
+--
+--   residual-imports  residual-import-file-url, admin-only. Keys:
+--                     {batch_id}/{file_name}. Holds the raw XLSX behind
+--                     every rep_payout_batches row, so a committed period
+--                     can always be traced back to the file it came from.
+--
+-- Why a second bucket rather than a new `documents.owner_type`: that
+-- table's access model resolves a PARENT RECORD's agent_id
+-- (resolveParentAgentId), and a residual import file has no owning rep --
+-- it spans every rep in the report. Widening owner_type would have meant
+-- either a rep-owned table holding rows that belong to no rep, or filing
+-- the file under the importing admin, which is a fact about who clicked
+-- rather than about the data. Two buckets, two access stories, neither
+-- bent to fit the other.
+--
+-- Neither bucket is in any migration, so a freshly started local stack has
+-- neither and every signing call 404s until they exist.
+-- tests/live/helpers/stack.ts creates both as part of provisioning.
 -- =====================================================================
 
 -- =====================================================================

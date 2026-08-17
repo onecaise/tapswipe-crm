@@ -449,3 +449,166 @@ export async function rows<T>(db: TestDb, sql: string): Promise<T[]> {
   const result = await db.query<T>(sql);
   return result.rows;
 }
+
+/** The two periods seedPayouts() writes, as PostgREST would send them. */
+export const PAYOUT_PERIOD = "2026-07-01";
+export const PAYOUT_PERIOD_PRIOR = "2026-06-01";
+
+/** Agent numbers seedPayouts() assigns, matching a processor's "Agent #". */
+export const AGENT_NUMBER = "4471";
+export const OTHER_AGENT_NUMBER = "9902";
+
+export type PayoutFixtures = {
+  /** Ledger row ids, by the shape each one is there to exercise. */
+  rowIds: {
+    /** AGENT_ID, current period, both money figures filled, MID matches a merchant. */
+    filled: number;
+    /** AGENT_ID, current period, figures null, MID matches nothing in merchants. */
+    blank: number;
+    /** AGENT_ID, prior period. */
+    prior: number;
+    /** OTHER_AGENT_ID, current period. */
+    other: number;
+  };
+  batchIds: {
+    /** status 'review', with one clean row and one unknown_agent blocker. */
+    review: number;
+    /** status 'committed'. */
+    committed: number;
+  };
+};
+
+/**
+ * Seeds the rep_payout tables, and returns the ids it created.
+ *
+ * A separate helper rather than part of seed(), for the same reason seed() sets no
+ * agent_number: seed() is also run against a migration SUBSET that predates these
+ * tables (see tests/rls/deactivation.test.ts, which calls it with
+ * `createTestDb([INITIAL_MIGRATION])`). Anything it touched that a prefix has not
+ * created yet fails those suites with "relation does not exist", pointing nowhere
+ * near the cause.
+ *
+ * Ids are returned rather than assumed. resetData() does clear these tables — the
+ * `cascade` from profiles reaches them — but it does not name them, so their
+ * sequences are not restarted and the ids drift upward test after test. Same
+ * arrangement, and the same reason, as support_ticket_replies.
+ *
+ * Shape of the fixture, and why each part is there:
+ *
+ *   - Both agents have rows in the current period, so a policy bug returning
+ *     "every row belonging to any agent" is distinguishable from one correctly
+ *     returning "only mine".
+ *   - AGENT_ID has a row in a SECOND period, so "filtered by period" and
+ *     "filtered by owner" cannot be mistaken for one another.
+ *   - One row has both money figures and one has neither, because null is a
+ *     first-class state here ("not worked out yet") and the generated rep_payout
+ *     column must be null for it.
+ *   - One MID matches a seeded merchant and one matches nothing, since an
+ *     unmatched MID is ordinary rather than an error.
+ *   - The review batch carries one clean row and one blocked row, so "this batch
+ *     cannot commit" is not the same thing as "this batch is empty".
+ */
+export async function seedPayouts(db: TestDb): Promise<PayoutFixtures> {
+  await asPlatform(db);
+
+  await db.exec(`
+    update profiles set agent_number = '${AGENT_NUMBER}' where id = '${AGENT_ID}';
+    update profiles set agent_number = '${OTHER_AGENT_NUMBER}' where id = '${OTHER_AGENT_ID}';
+  `);
+
+  // merchant_id is resolved by MID lookup rather than a hardcoded serial, exactly
+  // as the importer resolves it.
+  await db.exec(`
+    insert into rep_payout_rows
+      (agent_id, period, mid, merchant_name, merchant_id,
+       volume, average_ticket, total_cost, residual_income, rep_split_pct)
+    values
+      ('${AGENT_ID}', '${PAYOUT_PERIOD}', 'MID-AGENT-1', 'Agent Active Co',
+        (select id from merchants where mid = 'MID-AGENT-1'),
+        12400.00, 62.00, 310.00, 88.40, 60.00),
+      ('${AGENT_ID}', '${PAYOUT_PERIOD}', 'MID-UNMATCHED', 'Corner Mart',
+        null, 4200.00, 21.00, 105.00, null, null),
+      ('${AGENT_ID}', '${PAYOUT_PERIOD_PRIOR}', 'MID-AGENT-1', 'Agent Active Co',
+        (select id from merchants where mid = 'MID-AGENT-1'),
+        11800.00, 59.00, 295.00, 84.10, 60.00),
+      ('${OTHER_AGENT_ID}', '${PAYOUT_PERIOD}', 'MID-OTHER-1', 'Other Active Co',
+        (select id from merchants where mid = 'MID-OTHER-1'),
+        9900.00, 45.00, 250.00, 71.20, 50.00);
+
+    insert into rep_payout_batches
+      (imported_by, file_key, file_name, status, row_count, committed_at)
+    values
+      ('${ADMIN_ID}', 'seed-review/July-2026.xlsx', 'July-2026.xlsx',
+        'review', 2, null),
+      ('${ADMIN_ID}', 'seed-done/June-2026.xlsx', 'June-2026.xlsx',
+        'committed', 1, now());
+  `);
+
+  const [{ id: reviewBatch }] = await rows<{ id: number }>(
+    db,
+    `select id from rep_payout_batches where status = 'review' order by id desc limit 1`,
+  );
+  const [{ id: committedBatch }] = await rows<{ id: number }>(
+    db,
+    `select id from rep_payout_batches where status = 'committed' order by id desc limit 1`,
+  );
+
+  await db.exec(`
+    insert into rep_payout_import_rows
+      (batch_id, row_number,
+       period_raw, agent_number_raw, mid_raw, merchant_name_raw,
+       volume_raw, average_ticket_raw, total_cost_raw,
+       period, agent_id, merchant_id, volume, average_ticket, total_cost,
+       blocker, error)
+    values
+      -- Clean: resolves to a real rep, ready to commit.
+      (${reviewBatch}, 2, 'Jul-26', '${AGENT_NUMBER}', 'MID-AGENT-2',
+        'Agent Inactive Co', '5,100.00', '34.00', '$128.00',
+        '${PAYOUT_PERIOD}', '${AGENT_ID}',
+        (select id from merchants where mid = 'MID-AGENT-2'),
+        5100.00, 34.00, 128.00,
+        null, null),
+      -- Blocked: an agent number nobody holds. The one blocker that is fixable
+      -- from the review screen rather than by re-uploading the file.
+      (${reviewBatch}, 3, 'Jul-26', '7788', 'MID-STRANGER', 'Bayside Auto',
+        '2,300.00', '18.00', '$61.00',
+        '${PAYOUT_PERIOD}', null, null, 2300.00, 18.00, 61.00,
+        'unknown_agent', 'No rep has agent # 7788.');
+  `);
+
+  const ledger = await rows<{ id: number; agent_id: string; period: string; mid: string }>(
+    db,
+    `select id, agent_id, period::text as period, mid
+       from rep_payout_rows order by id asc`,
+  );
+
+  const find = (agentId: string, period: string, mid: string): number => {
+    const row = ledger.find(
+      (r) => r.agent_id === agentId && r.period === period && r.mid === mid,
+    );
+    if (!row) {
+      throw new Error(
+        `seedPayouts: no ledger row for ${agentId} / ${period} / ${mid}`,
+      );
+    }
+    return row.id;
+  };
+
+  // Owner writes have no auth.uid(), so anything the fixture triggers would be
+  // attributed to nobody. Nothing above fires log_payout_row_change (it is an
+  // AFTER UPDATE trigger and these are inserts), but audit_log and the history
+  // table are both cleared for the same reason seed() clears audit_log: fixture
+  // setup is not application activity, and an assertion of the form "no history
+  // row was written" must not already be false.
+  await db.exec(`delete from audit_log; delete from rep_payout_row_history;`);
+
+  return {
+    rowIds: {
+      filled: find(AGENT_ID, PAYOUT_PERIOD, "MID-AGENT-1"),
+      blank: find(AGENT_ID, PAYOUT_PERIOD, "MID-UNMATCHED"),
+      prior: find(AGENT_ID, PAYOUT_PERIOD_PRIOR, "MID-AGENT-1"),
+      other: find(OTHER_AGENT_ID, PAYOUT_PERIOD, "MID-OTHER-1"),
+    },
+    batchIds: { review: reviewBatch, committed: committedBatch },
+  };
+}
