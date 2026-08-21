@@ -159,12 +159,21 @@ describe("dashboard_counts is scoped by the caller's own RLS", () => {
     // counted is the status filter working rather than a coincidence.
     expect((await counts(db, AGENT_ID)).open_tickets).toBe(1);
 
+    // Promotes the PENDING ticket, not the closed one. It used to reopen the
+    // closed ticket, which support_tickets_guard_close (20260821113000) now
+    // refuses — closing is one-way. The assertion is unchanged in substance:
+    // moving a ticket into 'open' has to move this number, which is what proves
+    // the count is a live status filter rather than a fixture constant.
     await asPlatform(db);
     await db.exec(
       `update support_tickets set status = 'open'
-        where agent_id = '${AGENT_ID}' and status = 'closed'`,
+        where agent_id = '${AGENT_ID}' and status = 'pending'`,
     );
 
+    // 2 of 3, not 3 of 3: the closed ticket is still the agent's and still
+    // visible to them, and is excluded because of its status alone. That is the
+    // other half of this test's name, and it is now permanent rather than
+    // incidental — nothing can move that row back into this figure.
     expect((await counts(db, AGENT_ID)).open_tickets).toBe(2);
   });
 });

@@ -6,7 +6,7 @@ import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import {
   DEFAULT_TICKET_PRIORITY,
-  SUPPORT_TICKET_STATUSES,
+  SUPPORT_TICKET_FORM_STATUSES,
   TICKET_CATEGORIES,
   supportTicketPriorityOptions,
   type SupportTicket,
@@ -34,8 +34,14 @@ const SELECT_CLASS =
  *
  * Three field kinds, matching what the database actually enforces:
  *
- *  - `status` is a native <select> over the check constraint's vocabulary, like
- *    merchant-form's status.
+ *  - `status` is a native <select>, but over SUPPORT_TICKET_FORM_STATUSES rather
+ *    than the whole check constraint — "closed" is missing on purpose. Closing
+ *    is irreversible as of migration 20260821113000, so it lives behind the
+ *    confirmation step in support-ticket-close.tsx instead of being one option
+ *    among several saved by the same button as a spelling fix. On an
+ *    already-closed ticket the control is dropped entirely: every value it could
+ *    offer is one the guard trigger refuses. This is the deliberate difference
+ *    from merchant-form's status, where every transition is reversible.
  *  - `priority` is also a <select>, but over a TypeScript vocabulary rather than
  *    a constraint — the column stays free text. It was a <datalist> until the
  *    field turned out to read as fixed: Chrome renders one as a plain textbox,
@@ -67,6 +73,9 @@ export function SupportTicketForm({
   merchants: MerchantOption[];
 }) {
   const isEdit = ticket !== undefined;
+  // Read from the prop, not from the `status` state below: this asks what the
+  // ticket IS, which nothing on this form can change.
+  const isClosed = ticket?.status === "closed";
   const router = useRouter();
 
   const [subject, setSubject] = useState(ticket?.subject ?? "");
@@ -234,20 +243,38 @@ export function SupportTicketForm({
 
               <div className="grid gap-2">
                 <Label htmlFor="status">Status</Label>
-                <select
-                  id="status"
-                  className={SELECT_CLASS}
-                  value={status}
-                  onChange={(e) =>
-                    setStatus(e.target.value as SupportTicketStatus)
-                  }
-                >
-                  {SUPPORT_TICKET_STATUSES.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
+                {isClosed ? (
+                  // No control at all on a closed ticket. Every value the select
+                  // could offer is one the database refuses, so a disabled
+                  // dropdown would just be a puzzle — this says what the state
+                  // is and that it is final. `status` stays 'closed' in state,
+                  // so the payload re-sends it unchanged and the guard passes.
+                  <p className="text-sm text-muted-foreground">
+                    Closed, and closing cannot be undone. Other fields here can
+                    still be corrected.
+                  </p>
+                ) : (
+                  <select
+                    id="status"
+                    className={SELECT_CLASS}
+                    value={status}
+                    onChange={(e) =>
+                      setStatus(e.target.value as SupportTicketStatus)
+                    }
+                  >
+                    {SUPPORT_TICKET_FORM_STATUSES.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {!isClosed && isEdit && (
+                  <p className="text-xs text-muted-foreground">
+                    Closing is done from the ticket itself — it is permanent, so
+                    it asks first.
+                  </p>
+                )}
               </div>
             </div>
           </fieldset>

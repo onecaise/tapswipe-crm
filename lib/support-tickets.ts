@@ -18,6 +18,31 @@ export const SUPPORT_TICKET_STATUSES = ["open", "pending", "closed"] as const;
 
 export type SupportTicketStatus = (typeof SUPPORT_TICKET_STATUSES)[number];
 
+/**
+ * The statuses the edit form's <select> may offer — the full vocabulary minus
+ * "closed".
+ *
+ * Not a narrower copy of the constraint: it is the set of statuses that are
+ * freely interchangeable. `open` and `pending` move back and forth as often as a
+ * ticket needs, and the database guards neither direction. `closed` is different
+ * on both counts, so it is deliberately not here:
+ *
+ *  - It is one-way. `support_tickets_guard_close()` (migration 20260821113000)
+ *    raises PT409 on any transition out of `closed`, so a select offering all
+ *    three would let someone pick a value the database refuses — surfacing as a
+ *    409 on a form that gave no hint the option was special.
+ *  - It deserves a confirmation step, which a dropdown cannot give. Closing is
+ *    irreversible and belongs behind components/support-ticket-close.tsx, not
+ *    saved by the same button as a typo fix in the sub-category.
+ *
+ * SUPPORT_TICKET_STATUSES stays the full three, because the filter tabs, the
+ * badges and the status intent mapper all still need to *read* a closed ticket.
+ * This is only about what a form may write.
+ */
+export const SUPPORT_TICKET_FORM_STATUSES = SUPPORT_TICKET_STATUSES.filter(
+  (status) => status !== "closed",
+);
+
 /** Filter values accepted by the list page: a real status, or "all". */
 export const SUPPORT_TICKET_FILTERS = [
   "all",

@@ -935,6 +935,79 @@ create policy "admin delete only" on support_tickets
   for delete using (is_admin());
 
 -- ---------------------------------------------------------------------
+-- CLOSING A TICKET IS ONE-WAY.
+--
+-- Closing needs no new access: the "update own or admin" policy above already
+-- carries it, so the owning rep closes their own ticket and an admin closes
+-- anyone's. That is the whole authorization story, and there is deliberately no
+-- close_support_ticket() RPC -- nothing in a close touches something the caller
+-- may not already touch, there is no side effect to keep on one path (contrast
+-- approve_pre_app creating a merchant), and an admin closing someone else's
+-- ticket is already audited by log_cross_agent_change().
+--
+-- What the policy cannot express is FINALITY. Reopening is refused, and neither
+-- of the two declarative places can say so:
+--
+--   * RLS sees only the row as it will be. A policy's USING clause reads the
+--     existing row but cannot compare it to NEW, so "was closed, is now open"
+--     is not a statement it can make.
+--   * A CHECK constraint sees one row in isolation. 'open' is a legal value on
+--     its own -- what is illegal is arriving there FROM 'closed'.
+--
+-- So it is a BEFORE UPDATE trigger, for the same reason
+-- pre_apps_guard_transitions() is one. That function is the near neighbour and
+-- the differences are deliberate: it funnels status through four RPCs and blocks
+-- every direct write, because a pre-app transition has consequences (a merchant
+-- row, a decline reason, a submission date). This one blocks exactly one
+-- transition and leaves open <-> pending alone, because a ticket moving between
+-- "working it" and "waiting on someone" is ordinary traffic that happens several
+-- times in a ticket's life.
+--
+-- `new.status <> 'closed'` rather than `new.status is distinct from old.status`:
+-- the edit form PATCHes every field it renders, so saving a priority change on a
+-- closed ticket sends status = 'closed' again. A guard that fired on any UPDATE
+-- touching a closed row would make closed tickets wholly immutable, which is a
+-- different (and unasked-for) decision -- and it would fail as an unexplainable
+-- error on a form that never showed a status control.
+--
+-- The escape hatch for a mistaken close is the admin-only DELETE above, and it
+-- is a poor one: it takes the reply thread with it (support_ticket_replies
+-- cascades) and the follow-up is a new ticket. That is the accepted cost of
+-- finality. If reopening is ever wanted, the honest change is a reopen path with
+-- its own is_admin() guard and an audit_log row -- not loosening this trigger,
+-- which would leave the transition unrecorded.
+--
+-- NOT security definer, and it does not need to be: it reads OLD and NEW, which
+-- are handed to it, and calls nothing. `set search_path = public` regardless, so
+-- a temp-table shadow cannot redirect anything it does resolve.
+-- ---------------------------------------------------------------------
+create or replace function support_tickets_guard_close()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if old.status = 'closed' and new.status <> 'closed' then
+    raise exception 'a closed ticket cannot be reopened'
+      using errcode = 'PT409';
+  end if;
+
+  return new;
+end;
+$$;
+
+-- Privilege lines even for a trigger function: Postgres grants EXECUTE to
+-- PUBLIC on every new function and PUBLIC includes anon. A trigger function is
+-- harmless to call directly (it raises outside a trigger context), but the rule
+-- in the grants block holds with no exceptions so the surface stays greppable.
+revoke all on function support_tickets_guard_close() from public;
+grant execute on function support_tickets_guard_close() to authenticated, service_role;
+
+create trigger support_tickets_guard_close
+  before update on support_tickets
+  for each row execute function support_tickets_guard_close();
+
+-- ---------------------------------------------------------------------
 -- SUPPORT TICKET REPLIES — the conversation on a ticket.
 --
 -- A child of support_tickets rather than a use of `notes`, and the reason is

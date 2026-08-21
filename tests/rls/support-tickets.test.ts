@@ -398,6 +398,283 @@ describe("support ticket priority", () => {
   });
 });
 
+/**
+ * Closing a ticket, and the finality of it.
+ *
+ * Two separate rules, and they are enforced at two different layers on purpose:
+ *
+ *  - WHO may close is RLS. "update own or admin" already carried it, so these
+ *    assertions pin the decision rather than a new mechanism — an owner and an
+ *    admin can, a non-owning agent and a deactivated one cannot.
+ *  - THAT IT IS FINAL is the support_tickets_guard_close() trigger from
+ *    20260821113000, because neither RLS nor a CHECK can compare OLD to NEW.
+ *
+ * The distinction shows up in the failure MODE, which is why these assert on it
+ * rather than only on the resulting row. A blocked close is RLS, so it is
+ * *filtered*: the statement succeeds and changes nothing, which is why the form
+ * passes count: "exact". A blocked reopen is the trigger, so it *raises*.
+ */
+describe("closing a support ticket", () => {
+  const statusOf = async (subject: string): Promise<string> => {
+    await asPlatform(db);
+    const [row] = await rows<{ status: string }>(
+      db,
+      `select status from support_tickets where subject = '${subject}'`,
+    );
+    return row.status;
+  };
+
+  it("lets the owning agent close their own ticket", async () => {
+    await asUser(db, AGENT_ID);
+    await db.exec(
+      `update support_tickets set status = 'closed'
+        where subject = 'Terminal will not batch';`,
+    );
+
+    expect(await statusOf("Terminal will not batch")).toBe("closed");
+  });
+
+  it("lets an admin close a ticket they do not own", async () => {
+    await asUser(db, ADMIN_ID);
+    await db.exec(
+      `update support_tickets set status = 'closed'
+        where subject = 'Reprint receipts';`,
+    );
+
+    expect(await statusOf("Reprint receipts")).toBe("closed");
+  });
+
+  it("does not let a non-owning agent close someone else's ticket", async () => {
+    await asUser(db, AGENT_ID);
+    // 'Reprint receipts' belongs to OTHER_AGENT_ID. Filtered by the USING
+    // clause, so this raises nothing and touches nothing.
+    await db.exec(
+      `update support_tickets set status = 'closed'
+        where subject = 'Reprint receipts';`,
+    );
+
+    expect(await statusOf("Reprint receipts")).toBe("open");
+  });
+
+  it("does not let a deactivated agent close their own ticket", async () => {
+    await asPlatform(db);
+    await db.exec(
+      `update profiles set is_active = false where id = '${AGENT_ID}';`,
+    );
+
+    await asUser(db, AGENT_ID);
+    // The is_active_agent() half of the policy. A deactivated rep keeps a
+    // working token until it expires, so the check has to be per request.
+    await db.exec(
+      `update support_tickets set status = 'closed'
+        where subject = 'Terminal will not batch';`,
+    );
+
+    expect(await statusOf("Terminal will not batch")).toBe("open");
+  });
+
+  it("refuses to reopen a closed ticket, for its owner", async () => {
+    await asUser(db, AGENT_ID);
+
+    // 'Old chargeback question' is seeded closed and owned by this agent, so
+    // RLS permits the write and the trigger is the only thing standing here.
+    // That ordering is the point: a rejection that came from RLS instead would
+    // pass this assertion for the wrong reason, which is what the admin case
+    // below rules out.
+    await expect(
+      db.exec(
+        `update support_tickets set status = 'open'
+          where subject = 'Old chargeback question';`,
+      ),
+    ).rejects.toThrow(/closed ticket cannot be reopened/i);
+
+    expect(await statusOf("Old chargeback question")).toBe("closed");
+  });
+
+  it("refuses to reopen a closed ticket, for an admin too", async () => {
+    await asUser(db, ADMIN_ID);
+
+    await expect(
+      db.exec(
+        `update support_tickets set status = 'pending'
+          where subject = 'Old chargeback question';`,
+      ),
+    ).rejects.toThrow(/closed ticket cannot be reopened/i);
+
+    expect(await statusOf("Old chargeback question")).toBe("closed");
+  });
+
+  it("refuses a reopen even for the platform owner, so no write path exists", async () => {
+    // Postgres bypasses RLS for a table's owner, and a service-role Edge
+    // Function would too. The trigger is not a policy, so it still fires —
+    // this is what makes "final" a property of the table rather than of the
+    // client that happens to be asking.
+    await asPlatform(db);
+
+    await expect(
+      db.exec(
+        `update support_tickets set status = 'open'
+          where subject = 'Old chargeback question';`,
+      ),
+    ).rejects.toThrow(/closed ticket cannot be reopened/i);
+  });
+
+  it("still allows other fields to be edited on a closed ticket", async () => {
+    await asUser(db, AGENT_ID);
+
+    // The form PATCHes every field it renders, so a priority change on a closed
+    // ticket re-sends status = 'closed'. If the guard had been written as
+    // `new.status is distinct from old.status` this would raise, and closed
+    // tickets would be wholly immutable — a decision nobody took.
+    await db.exec(
+      `update support_tickets set priority = 'Low', status = 'closed'
+        where subject = 'Old chargeback question';`,
+    );
+
+    await asPlatform(db);
+    const [row] = await rows<{ priority: string; status: string }>(
+      db,
+      `select priority, status from support_tickets
+        where subject = 'Old chargeback question'`,
+    );
+    expect(row).toEqual({ priority: "Low", status: "closed" });
+  });
+
+  it("leaves open <-> pending free in both directions", async () => {
+    await asUser(db, AGENT_ID);
+
+    // Ordinary traffic, not a transition worth guarding: a ticket moves between
+    // "working it" and "waiting on someone" repeatedly in its life.
+    await db.exec(
+      `update support_tickets set status = 'pending'
+        where subject = 'Terminal will not batch';`,
+    );
+    expect(await statusOf("Terminal will not batch")).toBe("pending");
+
+    await asUser(db, AGENT_ID);
+    await db.exec(
+      `update support_tickets set status = 'open'
+        where subject = 'Terminal will not batch';`,
+    );
+    expect(await statusOf("Terminal will not batch")).toBe("open");
+  });
+});
+
+/**
+ * What closing actually does to the list — the reason the feature exists.
+ *
+ * The list page reads SUPPORT_TICKET_LIST_COLUMNS with
+ * DEFAULT_SUPPORT_TICKET_FILTER = "open", so these run the real query rather
+ * than asserting on a status column in isolation. Closing has to remove the row
+ * from the default view and leave it reachable under the "closed" tab; a change
+ * that broke either half would leave the status correct and the page wrong.
+ */
+describe("closing a ticket changes what the list shows", () => {
+  it("drops the ticket out of the default open queue and into closed", async () => {
+    await asUser(db, AGENT_ID);
+
+    expect((await rows<TicketRow>(db, listQuery("open"))).map((t) => t.subject))
+      .toEqual(["Terminal will not batch"]);
+
+    await db.exec(
+      `update support_tickets set status = 'closed'
+        where subject = 'Terminal will not batch';`,
+    );
+
+    await asUser(db, AGENT_ID);
+    expect(await rows<TicketRow>(db, listQuery("open"))).toHaveLength(0);
+
+    // Not gone, just no longer in the queue — the "closed" tab is where a rep
+    // goes looking for it, and "all" still holds every one of theirs.
+    expect(
+      (await rows<TicketRow>(db, listQuery("closed"))).map((t) => t.subject).sort(),
+    ).toEqual(["Old chargeback question", "Terminal will not batch"]);
+    expect(await rows<TicketRow>(db, listQuery())).toHaveLength(3);
+  });
+
+  it("removes it from the admin's open queue without touching the other rep's", async () => {
+    await asUser(db, ADMIN_ID);
+    await db.exec(
+      `update support_tickets set status = 'closed'
+        where subject = 'Terminal will not batch';`,
+    );
+
+    await asUser(db, ADMIN_ID);
+    // The other agent's open ticket surviving is what proves the close was
+    // scoped to one row rather than to a status.
+    expect((await rows<TicketRow>(db, listQuery("open"))).map((t) => t.subject))
+      .toEqual(["Reprint receipts"]);
+
+    // And the owning rep sees their own queue empty, from their own side.
+    await asUser(db, AGENT_ID);
+    expect(await rows<TicketRow>(db, listQuery("open"))).toHaveLength(0);
+  });
+
+  it("keeps a closed ticket out of the dashboard's open count", async () => {
+    // dashboard_counts() counts support_tickets where status = 'open'
+    // (20260810180000:54) and is security invoker, so it is scoped to the
+    // caller's own book. That number feeds the sidebar's count pill and the
+    // dashboard card, so a close has to move it too. bigint comes back as a
+    // string from PGlite, hence Number().
+    const openCount = async (userId: string): Promise<number> => {
+      await asUser(db, userId);
+      const [row] = await rows<{ open_tickets: string }>(
+        db,
+        `select open_tickets from dashboard_counts()`,
+      );
+      return Number(row.open_tickets);
+    };
+
+    // The agent's own single open ticket, and the company's two.
+    expect(await openCount(AGENT_ID)).toBe(1);
+    expect(await openCount(ADMIN_ID)).toBe(2);
+
+    await asUser(db, AGENT_ID);
+    await db.exec(
+      `update support_tickets set status = 'closed'
+        where subject = 'Terminal will not batch';`,
+    );
+
+    expect(await openCount(AGENT_ID)).toBe(0);
+    // The other rep's open ticket is still counted for the admin, so the close
+    // moved exactly one row out of the figure.
+    expect(await openCount(ADMIN_ID)).toBe(1);
+  });
+});
+
+describe("support tickets close tests are load-bearing", () => {
+  it("would catch the close guard being dropped", async () => {
+    // Without this, every reopen-refused assertion above could be passing for
+    // some incidental reason and nothing would say so. Dropping the trigger has
+    // to make the reopen succeed — that is what proves the trigger, and not the
+    // policies or the check constraint, is what enforces finality.
+    const broken = await createTestDb();
+    await resetData(broken);
+    await asPlatform(broken);
+    await broken.exec(
+      `drop trigger support_tickets_guard_close on support_tickets;`,
+    );
+
+    await asUser(broken, AGENT_ID);
+    await broken.exec(
+      `update support_tickets set status = 'open'
+        where subject = 'Old chargeback question';`,
+    );
+
+    await asPlatform(broken);
+    const [row] = await rows<{ status: string }>(
+      broken,
+      `select status from support_tickets where subject = 'Old chargeback question'`,
+    );
+    // Reopened, and RLS never objected — the owning rep's UPDATE policy covers
+    // this write. So the trigger is the only thing standing between a closed
+    // ticket and an open one.
+    expect(row.status).toBe("open");
+
+    await broken.close();
+  });
+});
+
 describe("support tickets scoping test is load-bearing", () => {
   it("would catch a fail-open select policy", async () => {
     const broken = await createTestDb();

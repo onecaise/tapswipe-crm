@@ -22,6 +22,7 @@ import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { LoadingState } from "@/components/loading-state";
+import { SupportTicketClose } from "@/components/support-ticket-close";
 import { TicketRepliesPanel } from "@/components/ticket-replies-panel";
 import { Button } from "@/components/ui/button";
 
@@ -167,6 +168,12 @@ async function TicketDetail({ params }: { params: Promise<{ id: string }> }) {
           {agentName !== null && <Field label="Agent">{agentName}</Field>}
         </dl>
       </section>
+
+      {/* Above the replies rather than below: closing is the decision this page
+          exists to support, and burying it under a thread of unknown length
+          hides it. No role branch here — RLS already established that the viewer
+          is the owning rep or an admin, and both may close. */}
+      <SupportTicketClose ticketId={ticket.id} status={ticket.status} />
 
       {repliesError === null ? (
         <TicketRepliesPanel
