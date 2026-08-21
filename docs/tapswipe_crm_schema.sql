@@ -60,6 +60,29 @@ create table profiles (
   --
   -- Uniqueness is a partial index rather than a column constraint -- see below.
   agent_number text,
+  -- When this user last opened the notifications panel behind the topbar bell.
+  -- Everything the bell reports is derived from this one comparison: a support
+  -- ticket or ghost sheet with created_at greater than this is "new to me".
+  --
+  -- A column on profiles rather than a notifications table, for the reason
+  -- must_change_password gives above: requireUser() already loads this row on
+  -- every request, so reading it is free, and a table would need its own RLS,
+  -- its own four policies and its own grants to hold one timestamp per user.
+  -- There is also nothing to store per item -- no notification rows are ever
+  -- created, so none can go stale, be missed, or need cleaning up. The two
+  -- source tables already carry the timestamps, and this is the watermark.
+  --
+  -- NULLABLE, and null is a real state meaning "has never opened it". Read it
+  -- as coalesce(last_viewed_notifications_at, created_at) -- the profile's own
+  -- creation date -- so a rep who has never opened the panel sees what arrived
+  -- since their account existed rather than the entire history of the company.
+  -- Defaulting the column to now() instead would have been wrong in the other
+  -- direction: every existing profile would be marked as having just read
+  -- everything, silently swallowing whatever was genuinely new at deploy time.
+  --
+  -- Advanced ONLY by mark_notifications_viewed() below. It is never written by
+  -- a client, because profiles has no update policy at all.
+  last_viewed_notifications_at timestamptz,
   created_at timestamptz default now()
 );
 
@@ -178,6 +201,73 @@ set search_path = public
 as $$
 begin
   update profiles set must_change_password = false where id = auth.uid();
+end;
+$$;
+
+-- ---------------------------------------------------------------------
+-- MARK NOTIFICATIONS VIEWED — advances the caller's own watermark, and
+-- returns the value it replaced.
+--
+-- Third instance of the same narrow pattern as update_own_full_name and
+-- clear_must_change_password: one column, the caller's own row, `security
+-- definer` only because profiles has no update policy for anyone. It cannot
+-- name another user's row -- there is no parameter to name one with.
+--
+-- RETURNS THE PREVIOUS VALUE, and that is the whole point of it being an RPC
+-- rather than two statements. Opening the panel has to do two things that must
+-- not come apart: report what is new, and record that it has been seen. Doing
+-- them as a separate read and write leaves a window in which a ticket created
+-- between them is marked as read without ever being shown -- silently, and
+-- exactly once, so nobody could reproduce it. Returning the old watermark makes
+-- the read-and-advance atomic: the caller lists items created after the value
+-- it got back, and that value can never be handed out twice.
+--
+-- coalesce(..., created_at) is applied here rather than left to the caller, so
+-- the "never opened it" rule lives in one place. It is also why this returns a
+-- non-null timestamptz.
+--
+-- Gated on is_active_agent() -- which despite the name means "any active user",
+-- admins included -- matching update_own_full_name. A deactivated user has no
+-- readable rows for the panel to show and is bounced by requireUser() long
+-- before this, so the gate costs nothing; it is here so the function cannot
+-- become the one write a deactivated session can still land.
+--
+-- No audit_log row. The other definer functions here write one when they change
+-- something another person can see; a private read receipt is not that, and
+-- one row per bell click would bury the trail that matters.
+-- ---------------------------------------------------------------------
+create or replace function mark_notifications_viewed()
+returns timestamptz
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  previous timestamptz;
+begin
+  if not is_active_agent() then
+    raise exception 'account is deactivated';
+  end if;
+
+  -- Read BEFORE the write, deliberately. `returning` on an UPDATE yields the
+  -- NEW row, so returning the column directly from the update below would hand
+  -- back now() and the panel would always render empty. Two statements in one
+  -- plpgsql body are still atomic -- the function is a single transaction -- so
+  -- this buys correctness without giving up the read-and-advance guarantee.
+  select coalesce(last_viewed_notifications_at, created_at)
+    into previous
+    from profiles
+   where id = auth.uid();
+
+  -- `for update` is not needed above: two concurrent bell clicks from the same
+  -- user would both advance the watermark to a now() a millisecond apart, and
+  -- the loser's items are shown in the panel it already returned. There is no
+  -- state to corrupt, only a receipt to overwrite with a near-identical one.
+  update profiles
+     set last_viewed_notifications_at = now()
+   where id = auth.uid();
+
+  return previous;
 end;
 $$;
 

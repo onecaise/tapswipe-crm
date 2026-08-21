@@ -61,6 +61,11 @@ const ADMIN: Profile = {
   role: "admin",
   is_active: true,
   must_change_password: false,
+  // Both added with the notifications watermark (20260821154500). null here
+  // means "has never opened the panel", which is the state these redirect
+  // tests care nothing about — they assert routing, not the bell.
+  last_viewed_notifications_at: null,
+  created_at: "2026-08-01T00:00:00Z",
 };
 
 const AGENT: Profile = {
@@ -69,6 +74,8 @@ const AGENT: Profile = {
   role: "agent",
   is_active: true,
   must_change_password: false,
+  last_viewed_notifications_at: null,
+  created_at: "2026-08-01T00:00:00Z",
 };
 
 async function expectRedirect(fn: () => Promise<unknown>, url: string) {

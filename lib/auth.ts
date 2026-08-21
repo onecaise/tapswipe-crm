@@ -18,6 +18,21 @@ export type Profile = {
    * admin knows from staying usable.
    */
   must_change_password: boolean;
+  /**
+   * When this user last opened the notifications panel behind the topbar bell,
+   * or null if they never have. Everything the bell reports is derived from
+   * comparing it to created_at on support_tickets and ghost_sheets.
+   *
+   * Read it through notificationsFloor() in lib/notifications.ts rather than
+   * directly -- null means "never opened", which has to fall back to the
+   * profile's own creation date rather than to the beginning of time.
+   *
+   * Advanced only by the mark_notifications_viewed() RPC; profiles has no
+   * update policy, so nothing else can write it.
+   */
+  last_viewed_notifications_at: string | null;
+  /** Needed as the floor when last_viewed_notifications_at is null. */
+  created_at: string | null;
 };
 
 /**
@@ -43,7 +58,9 @@ export async function getCurrentProfile(): Promise<Profile | null> {
 
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, full_name, role, is_active, must_change_password")
+    .select(
+      "id, full_name, role, is_active, must_change_password, last_viewed_notifications_at, created_at",
+    )
     .eq("id", userId)
     .maybeSingle();
 

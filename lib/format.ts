@@ -152,3 +152,37 @@ export function formatClockTime(value: string | null | undefined): string {
   const hour12 = hours % 12 === 0 ? 12 : hours % 12;
   return `${hour12}:${minutes} ${suffix}`;
 }
+
+/**
+ * A `timestamptz` as date and time, e.g. "8/21/2026, 2:14 PM".
+ *
+ * The first place this app shows the *time* half of a timestamp: every other
+ * created_at is rendered with formatDate, where the date is the whole point. The
+ * notifications panel needs more resolution, because "what is new since you last
+ * looked" is frequently several items on the same day, and three rows all
+ * reading "8/21/2026" cannot be ordered by eye.
+ *
+ * Safe to hand straight to `new Date()`, unlike the date-only values
+ * parseDisplayDate exists for: a timestamptz carries its zone, so there is a
+ * correct instant to convert and no midnight to shift across. That is why this
+ * does NOT go through parseDisplayDate — doing so would route it into the
+ * DATE_ONLY branch's local-midnight construction for no reason.
+ *
+ * Deliberately not a relative formatter ("3 minutes ago"). That reads better for
+ * exactly as long as the page is fresh, then quietly starts lying: without a
+ * ticking clock it is frozen at render time, and with one it is a re-render per
+ * second in the topbar of every page. An absolute stamp is right whenever it is
+ * read.
+ */
+export function formatDateTime(value: string | null | undefined): string {
+  if (!value) return EMPTY;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return EMPTY;
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}

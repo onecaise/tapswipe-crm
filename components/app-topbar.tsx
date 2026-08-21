@@ -1,6 +1,11 @@
 import { BellIcon } from "lucide-react";
+import { Suspense } from "react";
 
 import { GlobalSearch } from "@/components/global-search";
+import { NotificationsBell } from "@/components/notifications-bell";
+import { requireUser } from "@/lib/auth";
+import { countNotifications, notificationsFloor } from "@/lib/notifications";
+import { createClient } from "@/lib/supabase/server";
 
 /**
  * The 60px bar above the main content.
@@ -8,24 +13,50 @@ import { GlobalSearch } from "@/components/global-search";
  * Deliberately neutral — white, no red or black fill — so it doesn't compete
  * with the sidebar for attention.
  *
- * The bell is still presentational: there is no notifications table yet, so
- * `unreadCount` has no caller. The dot is wired to it so switching it on later
- * is passing a number, not restyling anything.
+ * The bell is no longer presentational. Its badge is a per-caller count, which
+ * makes it dynamic data, so it streams inside a Suspense boundary the same way
+ * the sidebar's nav and ticket pill do — cacheComponents rejects an unsuspended
+ * profile read. The fallback is the bell with a zero count rather than nothing:
+ * the icon is part of the bar's layout, and having it pop in afterwards shifts
+ * the header. A count that briefly reads zero is the right failure — it
+ * understates, and understating is what the real value does the rest of the time
+ * anyway.
  */
-export function AppTopbar({ unreadCount = 0 }: { unreadCount?: number }) {
+export function AppTopbar() {
   return (
     <header className="sticky top-0 z-10 flex h-[60px] shrink-0 items-center justify-between gap-4 border-b bg-card px-7">
       <GlobalSearch />
 
-      <div className="relative shrink-0">
-        <BellIcon size={18} className="text-muted-foreground" aria-hidden />
-        {unreadCount > 0 && (
-          <>
-            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-primary" />
-            <span className="sr-only">{unreadCount} unread notifications</span>
-          </>
-        )}
-      </div>
+      <Suspense fallback={<BellFallback />}>
+        <BellWithCount />
+      </Suspense>
     </header>
+  );
+}
+
+async function BellWithCount() {
+  const profile = await requireUser();
+  const supabase = await createClient();
+
+  // Tier 1 read: RLS scopes both counts inside countNotifications, so an agent's
+  // badge counts their own new rows and an admin's counts the company's. No role
+  // branch here, and none wanted — see lib/notifications.ts.
+  const count = await countNotifications(supabase, notificationsFloor(profile));
+
+  return <NotificationsBell initialCount={count} />;
+}
+
+/**
+ * The same 36px hit area the real bell occupies, so nothing moves when it
+ * arrives. Not the live component with initialCount={0}: that would mount, be
+ * clickable, and advance the watermark against a count it never knew.
+ */
+function BellFallback() {
+  return (
+    <div className="relative shrink-0">
+      <div className="flex h-9 w-9 items-center justify-center rounded-md">
+        <BellIcon size={18} className="text-muted-foreground" aria-hidden />
+      </div>
+    </div>
   );
 }
