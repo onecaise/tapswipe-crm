@@ -47,3 +47,14 @@ next-env.d.ts
 # supabase cli scratch
 supabase/.temp/
 supabase/.branches/
+
+# playwright e2e
+#
+# .auth holds real session cookies for the fixture personas, written by
+# e2e/auth.setup.ts. Local throwaway accounts, but a session token is a session
+# token and none of these belong in git.
+/e2e/.auth/
+/playwright-report/
+/test-results/
+/blob-report/
+/playwright/.cache/

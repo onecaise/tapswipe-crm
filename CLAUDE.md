@@ -28,6 +28,8 @@ npx tsc --noEmit       # type-check only
 npm test               # hermetic suite — PGlite + pure logic, no Docker (509 tests)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (68 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED project (4 tests)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (46 tests)
+npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
 npx supabase db reset                    # rebuild local DB from migrations/ (there is no seed.sql)
@@ -43,13 +45,14 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 
 **Never run `npx supabase config push`.** It has no `--dry-run`, and `config.toml`'s `[auth]` block holds local-dev values, so pushing it would set the production Site URL to `http://127.0.0.1:3000`, replace the redirect allow-list, clamp `[auth.rate_limit].email_sent` to 2 auth emails per hour project-wide, and turn off email confirmations. `config.toml` governs the **local stack only** — deployed Auth settings are a separate surface, changed in the Dashboard or via a targeted Management API `PATCH .../config/auth` with only the field you mean.
 
-### Tests — three suites, three different targets
+### Tests — four suites, four different targets
 
 | Suite | Target | Needs |
 | --- | --- | --- |
 | `npm test` | the migrations themselves | nothing (in-process Postgres) |
 | `npm run test:live` | the local Supabase stack | Docker, `supabase start`, `functions serve` |
 | `npm run test:deployed` | the hosted project in `.env.local` | network |
+| `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, Chromium |
 
 - **`npm test`** — vitest + `@electric-sql/pglite`, applying `supabase/migrations/` over a deliberately minimal auth shim (`tests/helpers/db.ts`: three Data API roles, `auth.users`, `auth.uid()` reading the `request.jwt.claims` GUC). Covers RLS policies (`tests/rls/*`) and the grant surface (`tests/rls/grants.test.ts`). **Run this for any schema change.** Queries must run as `authenticated`, not the owner — Postgres bypasses RLS for a table's owner, so an owner-run test passes regardless of policy.
 - **Never write a literal `\xHH`-shaped escape inside a JS template literal**, including inside text meant to read as a SQL comment. `tests/helpers/db.ts` builds SQL in template literals, so JavaScript consumes the escape before Postgres ever sees the string: `\x00` becomes a real NUL byte, which desyncs the wire protocol and fails dozens of *unrelated* tests with a bare `invalid message format` from the pg-protocol parser, naming no statement and pointing nowhere near the cause. (It cost an hour once, in a comment that existed to warn about exactly this.) For `bytea` fixtures use `decode('0011', 'hex')` — no backslash to get wrong.
@@ -57,8 +60,12 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 - **Call `warmFunctions([...])` in a live test's `beforeAll`, before any status-code assertion.** The CLI rewrites a function's `.npmrc` the first time that function is invoked in a `functions serve` session; its own file watcher sees the write and restarts the runtime, which `502`s whatever is in flight. On a cold serve this produced 24 failures across the suite, every one reading `expected 502 to be 200` and pointing nowhere near the cause. All three live files warm the functions they exercise.
 - **A live test that writes `audit_log` must clean it up before deleting its users.** `audit_log.actor_id references profiles(id)` with **no `ON DELETE`**, so `deleteUser` fails on the FK while those rows exist — the persona survives teardown and the next run dies on "user already registered". `teardownFixtures()` and `deleteUserCompletely()` both delete by `actor_id` and by `row_id` first. The FK is deliberately left strict: production never deletes users (§8), so only tests pay for it.
 - **`npm run test:deployed`** — read-only Auth-config assertions against production. A red result means the deployed project drifted, not that code broke. Uses only the publishable key.
+- **`npm run test:e2e`** — Playwright + Chromium against `next dev` on the local stack (`playwright.config.ts`, specs in `e2e/`). Covers only what needs a browser: **layout, paint, and client state across a refresh.** `e2e/fixtures/seed.ts` provisions its own personas and its own periods (deliberately in **2027**, so it never collides with the `seed-dev-*` scripts' 2026), and `e2e/auth.setup.ts` signs each persona in once into `e2e/.auth/*.json` — so no spec logs in and no spec holds a password. Reuses a running dev server.
+- **Do not put RLS, PostgREST or pure-logic assertions in `e2e/`.** They are faster and more precise in the other three, and a browser copy is just a slower flakier duplicate. The rule of thumb: a spec belongs there only if a person could **only** find it by looking.
+- **A geometric bug needs a geometric assertion, and bounding boxes are usually the wrong one.** The `StatCard` clipping bug (a figure painted outside its card, hidden by the next card's opaque background) passed a bounding-box comparison: a block element's box is constrained by its parent, so the *ink* overflows while `getBoundingClientRect` reports the parent's width unchanged — measured, 213px box against a 270px `scrollWidth`. `scrollWidth > clientWidth` is what actually detects it. A text assertion cannot see it either, which is how it shipped.
+- **Prove an e2e spec is non-vacuous by reverting the fix.** Cheap here and worth doing every time, because a spec that drives a whole page can pass for reasons unrelated to what it claims. All seven specs covering the three browser-only payouts bugs were checked this way: revert the fix, watch exactly those specs go red, restore. Two of them were rewritten as a result of that check — they had passed against the reverted bug.
 
-Why three and not one: the PGlite suite was 100% green while two deployment-breaking bugs sat in the repo — no Data API grants at all, and an `[auth.email] enable_signup = false` that disabled password login. Neither is visible below PostgREST/GoTrue.
+Why four and not one: each suite is green while the next one's class of bug sits in the repo. The PGlite suite was 100% green with no Data API grants at all and an `[auth.email] enable_signup = false` that disabled password login — neither visible below PostgREST/GoTrue. All three of those were green while `/payouts` shipped a stale editable cell (the page showing `410 × 50% = $174.25`), a clipped money figure, and six columns pushed off screen by one long merchant name — none visible without a browser.
 
 ### Build/lint exclusions are deliberate
 

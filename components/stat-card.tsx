@@ -24,7 +24,14 @@ export function StatCard({
     // number, which is the dangerous failure: a payouts period total of
     // $1,000,000,021,334.56 rendered as "$1,000,000,021,334.5" is not obviously
     // truncated, it is just a smaller, wrong, entirely plausible figure.
-    <div className="min-w-0 rounded-xl border bg-card px-4 py-3.5">
+    // data-slot matches the convention components/ui/table.tsx already uses. It
+    // exists so the e2e specs can locate a whole card and compare its box to its
+    // figure's box — the clipping bug was geometric, and asserting on text would
+    // have passed against it.
+    <div
+      data-slot="stat-card"
+      className="min-w-0 rounded-xl border bg-card px-4 py-3.5"
+    >
       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </p>
