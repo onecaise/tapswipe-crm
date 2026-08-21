@@ -807,6 +807,26 @@ verified independently, per the house rule; stripping the page guard must still 
    deploy fail at the bundling step with `Module not found … failed to create the graph`. So
    `deploy` resolves and inlines the URL at bundle time — it is not deferred to runtime,
    which was the actual risk. No vendoring needed.
+
+   **Deployed for real to `tapswipe-crm-dev` on 2026-08-21** and accepted by the platform:
+   `functions list` reports `parse-residual-import` as `status: ACTIVE`, `version: 1`,
+   `import_map: true`, and — worth recording, because CLAUDE.md asserts it —
+   **`verify_jwt: false`**, confirming `deploy` really does carry that setting up from
+   `config.toml` rather than falling back to the platform default.
+
+   **Not yet invoked on dev**, for a reason unrelated to this module: *every* Edge Function on
+   that project currently answers `401 {"message":"Invalid credentials","code":
+   "INVALID_CREDENTIALS"}`, including ones deployed weeks earlier (`create-user`,
+   `create-upload-url`, `read-pre-app-secrets`). The response is byte-identical with a valid
+   publishable key, with the legacy anon JWT, and **with no headers at all**, which is what
+   rules out credential validation as the cause. Routing is fine — an unknown slug still
+   returns `404 NOT_FOUND` — and the same anon key works against REST on the same project
+   (PostgREST answers `42501 permission denied`, which is the correct answer for `anon`). So
+   the gateway refuses to invoke anything on this project. It first appeared immediately
+   after the project was restored from `INACTIVE`, so a post-restore artifact is the leading
+   theory; it needs a look at the project's API settings in the dashboard. **The end-to-end
+   run on dev is blocked on that, not on anything in this spec** — the same cycle passes
+   against the local stack in `tests/live/residual-import.test.ts`.
    `xlsx@0.20.3` is also a **devDependency**, installed from the same CDN tarball, used
    only to *build* fixture workbooks in tests. That does not weaken decision 23: it never
    enters a shipped bundle, and pinning both sides to one version means fixtures and parser
