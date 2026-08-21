@@ -779,9 +779,10 @@ verified independently, per the house rule; stripping the page guard must still 
 2. **One agent number per rep** (decision 1). If reps hold different codes per processor,
    this becomes the mapping table and decisions 1, 6 and 9 change with it. Cheap now,
    expensive after real data exists.
-3. **Whether a MID can legitimately appear twice for one rep in one period** — split by card
-   type, say. The unique key and `duplicate_in_file` both assume not. Worth checking against
-   a real file before commit 2.
+3. ~~**Whether a MID can legitimately appear twice for one rep in one period.**~~ **Settled
+   2026-08-21: it cannot.** A MID maps to exactly one row per rep per period, so the
+   `unique (period, agent_id, mid)` merge key and the `duplicate_in_file` blocker are both
+   correct as built. No change.
 4. ~~**Whether "Volume" is dollars or transaction count.**~~ **Settled 2026-08-17: dollars.**
    `numeric(14,2)`, rendered with `formatMoney`, consistent with Average ticket beside it.
 5. **Whether a rep should see a period before its figures are filled in.** Currently yes:
@@ -798,9 +799,14 @@ verified independently, per the house rule; stripping the page guard must still 
    advisories (prototype pollution and ReDoS) fixed only in SheetJS's own 0.19.3/0.20.2
    builds, because they stopped publishing to npm. Shipping a known-vulnerable parser to
    read uploaded files was not worth the convenience, and "only admins can upload" is a
-   thin last line of defence. **Still outstanding: confirming a remote-URL import survives
-   `functions deploy`**, which only a deploy proves. If it does not, vendor the single
-   `xlsx.mjs` file into the function directory rather than falling back to `npm:xlsx`.
+   thin last line of defence. **Settled fully on 2026-08-21: the remote-URL import DOES
+   survive `functions deploy`.** `supabase functions deploy parse-residual-import` bundled
+   successfully at 1.1 MB, against 835 kB for `residual-import-file-url`, which shares every
+   other dependency and imports no SheetJS. Proved rather than inferred from the size, with a
+   negative control: pointing the same specifier at a non-existent CDN version made the
+   deploy fail at the bundling step with `Module not found … failed to create the graph`. So
+   `deploy` resolves and inlines the URL at bundle time — it is not deferred to runtime,
+   which was the actual risk. No vendoring needed.
    `xlsx@0.20.3` is also a **devDependency**, installed from the same CDN tarball, used
    only to *build* fixture workbooks in tests. That does not weaken decision 23: it never
    enters a shipped bundle, and pinning both sides to one version means fixtures and parser
