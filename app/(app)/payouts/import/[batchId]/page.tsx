@@ -5,7 +5,7 @@ import { ArrowLeftIcon } from "lucide-react";
 
 import { requireAdmin } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
-import { formatDate, formatText } from "@/lib/format";
+import { EMPTY, formatDate, formatText } from "@/lib/format";
 import {
   PAYOUT_BATCH_COLUMNS,
   PAYOUT_IMPORT_ROW_COLUMNS,
@@ -138,15 +138,45 @@ async function BatchReview({
         </Callout>
       ) : (
         <>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <StatCard label="Rows in the file" value={review.total} />
-            <StatCard label="Ready" value={review.clean} />
-            <StatCard
-              label="Blocked"
-              value={review.blocked}
-              accent={review.blocked > 0}
-            />
-          </div>
+          {/* Two different questions, so two different sets of figures.
+              `review` is derived from the STAGING rows, and commit deletes those
+              — so a committed batch reported "Rows in the file 0 / Ready 0 /
+              Blocked 0", making a successful import of N rows look like an empty
+              one. That is exactly the confusion the RPC's `staged = 0` guard
+              exists to prevent, reintroduced on the page that reports the
+              result. rep_payout_batches.row_count is the surviving record of
+              what was committed, so a settled batch reads from that; only a
+              batch still in review has staging rows to describe. */}
+          {batch.status === "review" ? (
+            <div className="grid gap-3 sm:grid-cols-3">
+              <StatCard label="Rows in the file" value={review.total} />
+              <StatCard label="Ready" value={review.clean} />
+              <StatCard
+                label="Blocked"
+                value={review.blocked}
+                accent={review.blocked > 0}
+              />
+            </div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <StatCard
+                label={
+                  batch.status === "committed"
+                    ? "Rows imported"
+                    : "Rows in the file"
+                }
+                value={batch.row_count}
+              />
+              <StatCard
+                label="Committed"
+                value={
+                  batch.committed_at === null
+                    ? EMPTY
+                    : formatDate(batch.committed_at)
+                }
+              />
+            </div>
+          )}
 
           {review.unknownAgents.length > 0 && (
             <section className="flex flex-col gap-2">

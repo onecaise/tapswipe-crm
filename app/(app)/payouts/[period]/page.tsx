@@ -41,9 +41,13 @@ import {
  *
  * Role-aware through RLS rather than through a branch here: an admin's query
  * returns every rep's rows and a rep's returns their own, so the grouping code is
- * the same and a rep simply gets one group. The figures are read-only in this
- * commit; inline editing and the per-agent bulk split arrive with
- * commit-residual-import.
+ * the same and a rep simply gets one group.
+ *
+ * The `isAdmin` branches below are about affordances, NOT access: the update
+ * policy on rep_payout_rows is admin-only, so a rep who reached an editable cell
+ * would have their write filtered to zero rows — which is what the cell's
+ * `count === 0` check reports. Verified by calling PATCH directly as each role:
+ * both agents come back with a zero affected-row count, the admin with one.
  */
 
 type Rep = { id: string; full_name: string; agent_number: string | null };
@@ -119,11 +123,17 @@ async function PeriodLedger({
   if (rows.length === 0) notFound();
 
   const agentIds = [...new Set(rows.map((row) => row.agent_id))];
-  const { data: repData } = await supabase
+  const { data: repData, error: repError } = await supabase
     .from("profiles")
     .select("id, full_name, agent_number")
     .in("id", agentIds);
 
+  // Surfaced rather than swallowed. This error was discarded, and the failure it
+  // produced was silent and wrong-looking rather than absent: an empty map makes
+  // every group render "Unknown rep" with an em-dash agent number, which reads as
+  // corrupted data on a page about who gets paid. The rows are still correct and
+  // still worth showing, so this is a banner above them rather than a thrown
+  // error — but it has to say so.
   const reps = new Map<string, Rep>(
     ((repData ?? []) as Rep[]).map((rep) => [rep.id, rep]),
   );
@@ -133,6 +143,12 @@ async function PeriodLedger({
 
   return (
     <div className="flex flex-col gap-8">
+      {repError !== null && (
+        <p className="text-sm text-destructive">
+          Rep names could not be loaded ({repError.message}). The figures below
+          are still this period&rsquo;s.
+        </p>
+      )}
       {/* The header lives inside the boundary because its title comes from the
           period, which is dynamic data — awaiting params in the default export
           would put that access outside the Suspense boundary and cacheComponents
@@ -236,17 +252,35 @@ async function PeriodLedger({
                       {/* Links through only when the MID matched a merchant
                           record. An unmatched MID is ordinary — a residual
                           report legitimately names merchants nobody entered —
-                          so it renders as plain text rather than a dead link. */}
-                      {row.merchant_id === null ? (
-                        formatText(row.merchant_name)
-                      ) : (
-                        <Link
-                          href={`/merchants/${row.merchant_id}`}
-                          className="underline underline-offset-4"
-                        >
-                          {formatText(row.merchant_name)}
-                        </Link>
-                      )}
+                          so it renders as plain text rather than a dead link.
+
+                          CAPPED AND TRUNCATED, and this is load-bearing rather
+                          than cosmetic. TableCell sets whitespace-nowrap, a
+                          column is as wide as its widest cell, and
+                          merchant_name is free text straight out of a
+                          processor's spreadsheet — so one long trading name
+                          stretched this column past the viewport and pushed all
+                          six money columns out of the horizontally-scrolling
+                          container. The figures are the entire point of the
+                          page and they were invisible on load, with no
+                          scrollbar to say so. `title` keeps the full name
+                          reachable; the MID beside it is the row's real
+                          identity anyway. */}
+                      <span
+                        className="block max-w-[22ch] truncate"
+                        title={row.merchant_name ?? undefined}
+                      >
+                        {row.merchant_id === null ? (
+                          formatText(row.merchant_name)
+                        ) : (
+                          <Link
+                            href={`/merchants/${row.merchant_id}`}
+                            className="underline underline-offset-4"
+                          >
+                            {formatText(row.merchant_name)}
+                          </Link>
+                        )}
+                      </span>
                     </TableCell>
                     <TableCell>{formatMoney(row.volume)}</TableCell>
                     <TableCell>{formatMoney(row.average_ticket)}</TableCell>
@@ -279,11 +313,11 @@ async function PeriodLedger({
                           merchantName={row.merchant_name}
                         />
                       ) : (
-                        formatPct(
-                          row.rep_split_pct === null
-                            ? null
-                            : Number(row.rep_split_pct),
-                        )
+                        // No Number() wrap: rep_split_pct is already a number
+                        // (see the header of lib/payouts.ts). The coercion here
+                        // was residue of the string premise that caused the
+                        // PayoutFigureCell TypeError.
+                        formatPct(row.rep_split_pct)
                       )}
                     </TableCell>
                     <TableCell className="font-medium">

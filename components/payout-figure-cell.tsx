@@ -54,6 +54,35 @@ export function PayoutFigureCell({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // RE-SYNC WHEN THE STORED VALUE CHANGES UNDERNEATH US.
+  //
+  // useState's initialiser runs once per mount, and these cells are keyed on
+  // row.id — stable across a refresh — so React reuses the instance and `text`
+  // kept whatever it was first given, forever. Editing a cell yourself looked
+  // fine (the text you typed already matched), which is why this hid: it only
+  // shows when the value changes from OUTSIDE this cell.
+  //
+  // PayoutBulkSplit is exactly that. Setting a rep's split across a period wrote
+  // 42.5 to eight rows and called router.refresh(); the server re-rendered, the
+  // generated rep_payout column came back correct, and every Split input went on
+  // displaying the old 50. The page then showed 410 x 50% = $174.25 — two
+  // numbers that cannot both be true, on the screen an admin reconciles a
+  // processor's report against. A re-import or a second admin's edit does the
+  // same thing.
+  //
+  // This is React's documented "adjusting state when a prop changes" pattern:
+  // compare against the last prop we saw and set during render rather than in an
+  // effect, so there is no extra commit and no frame showing the stale value. It
+  // deliberately DOES discard in-progress typing when the stored value moves —
+  // the figure being edited is no longer the figure that was there, and silently
+  // keeping the old keystrokes over a value someone else just wrote is worse.
+  const [lastValue, setLastValue] = useState(value);
+  if (value !== lastValue) {
+    setLastValue(value);
+    setText(value === null ? "" : String(value));
+    setError(null);
+  }
+
   // Whether what is typed differs from what is stored, compared as NUMBERS.
   //
   // This is the line the crash was reported on. It previously read

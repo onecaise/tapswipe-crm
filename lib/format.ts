@@ -12,17 +12,34 @@ export function formatText(value: string | null | undefined): string {
   return value.trim() === "" ? EMPTY : value;
 }
 
+/**
+ * A percentage, e.g. `55%` or `33.33%`.
+ *
+ * Guards non-finite the way formatMoney does, and for the same reason: this
+ * renders `rep_split_pct` on the payout ledger, and a cell reading "NaN%" beside
+ * a dollar figure looks like a broken page rather than a missing value. It used
+ * to interpolate whatever it was handed, so a NaN reaching it printed "NaN%" —
+ * unreachable today (the column is numeric and the callers pass it straight
+ * through) but a one-line guard is cheaper than relying on that staying true.
+ *
+ * Deliberately not Intl.NumberFormat: these are stored at 2dp and should render
+ * as typed — `55%`, not `55.00%` — so trailing zeros are not padded on.
+ */
 export function formatPct(value: number | null | undefined): string {
-  return value === null || value === undefined ? EMPTY : `${value}%`;
+  if (value === null || value === undefined) return EMPTY;
+  return Number.isFinite(value) ? `${value}%` : EMPTY;
 }
 
 /**
  * US dollars, for the residual ledger and the payout summary.
  *
- * PostgREST sends `numeric` as a string to preserve exactness, so this takes both
- * and does the coercion in one place rather than at every call site. A string that
- * is not a number returns the em dash rather than "$NaN" — for a money column,
- * looking absent is a better failure than looking like a figure.
+ * Takes `number | string`, but NOT because of the wire format: PostgREST sends
+ * `numeric` as an unquoted JSON number, so every caller reading a money column
+ * passes a number (see the header of lib/payouts.ts, which used to claim the
+ * opposite and cost a production TypeError). The string arm is for callers holding
+ * an unparsed value — form input, a spreadsheet cell — and it earns its keep by
+ * returning the em dash rather than "$NaN": for a money column, looking absent is
+ * a better failure than looking like a figure.
  *
  * Negative values render as `-$88.40`, not `($88.40)`. The accounting-parentheses
  * convention reads as a typo in a web table, and a clawback is a normal month

@@ -454,6 +454,42 @@ describe("the guard and the search_path are load-bearing", () => {
     expect(row.def).toMatch(/coalesce\(excluded\.residual_income/);
   });
 
+  it("locks the batch row it checks the status of", async () => {
+    // Pinned by grep rather than by behaviour, for the same reason the merge rule
+    // above is pinned twice: this suite structurally cannot exercise it. PGlite is
+    // a single connection, and the failure needs two overlapping transactions.
+    //
+    // What it prevents, reproduced against real Postgres before 20260821171000
+    // added the lock (session A holding its transaction open, session B calling in
+    // before A committed):
+    //
+    //   A returned 1        B returned 1
+    //   audit_rows = 2      ledger_rows = 1      status = committed
+    //
+    // Two audit rows for one commit, both callers told they succeeded. The
+    // `batch.status <> 'review'` check below is only a guard if the row it read
+    // cannot change underneath it — an unlocked SELECT lets both transactions see
+    // 'review' and both proceed. The ledger survived on the unique index and the
+    // upsert, which is a good schema covering for this function rather than this
+    // function being correct.
+    //
+    // With the lock, B blocks at the SELECT until A commits and then raises
+    // 'this import is already committed', which is what the sequential
+    // "cannot be committed twice" test above has always asserted.
+    await asPlatform(db);
+    const [locked] = await rows<{ def: string }>(
+      db,
+      `select pg_get_functiondef(p.oid) as def
+         from pg_proc p
+         join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.proname = 'commit_residual_import'`,
+    );
+
+    expect(locked.def).toMatch(
+      /from rep_payout_batches\s+where id = batch_id_input\s+for update/,
+    );
+  });
+
   it("is not executable by anon", async () => {
     await asPlatform(db);
     const [{ ok }] = await rows<{ ok: boolean }>(

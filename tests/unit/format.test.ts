@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { EMPTY, formatDate, formatText, parseDisplayDate } from "@/lib/format";
+import {
+  EMPTY,
+  formatDate,
+  formatMoney,
+  formatPct,
+  formatText,
+  parseDisplayDate,
+} from "@/lib/format";
 import { taskIsOverdue } from "@/lib/annotations";
 
 /**
@@ -92,5 +99,82 @@ describe("taskIsOverdue", () => {
 
   it("is false with no due date", () => {
     expect(taskIsOverdue({ due_date: null, completed: false })).toBe(false);
+  });
+});
+
+/**
+ * formatPct and formatMoney, over the payout ledger's real value range.
+ *
+ * These two render every figure on the residual pages, and the money columns are
+ * signed numeric(14,2) while the split is numeric(5,2) bounded 0..100 — so the
+ * cases below are what the database can actually hand them, not invented extremes.
+ *
+ * The absent-vs-zero distinction is the one that matters most here and is asserted
+ * in both directions: a null residual means "not worked out yet" and must render as
+ * the em dash, while a real 0.00 must render as a figure. Collapsing those would
+ * turn an unfinished period into one that looks complete and paying nothing.
+ */
+describe("formatPct", () => {
+  it("renders a whole and a fractional split as stored", () => {
+    // Not padded to 2dp: these are stored at 2dp and should read as typed.
+    expect(formatPct(55)).toBe("55%");
+    expect(formatPct(33.33)).toBe("33.33%");
+  });
+
+  it("renders the constraint's bounds", () => {
+    expect(formatPct(0)).toBe("0%");
+    expect(formatPct(100)).toBe("100%");
+  });
+
+  it("renders zero as a figure, not as absent", () => {
+    // A 0% split is a real state — it produces a $0.00 payout rather than a null
+    // one — so it must not collapse into the em dash.
+    expect(formatPct(0)).not.toBe(EMPTY);
+  });
+
+  it("renders null and undefined as the em dash", () => {
+    expect(formatPct(null)).toBe(EMPTY);
+    expect(formatPct(undefined)).toBe(EMPTY);
+  });
+
+  it("renders NaN and Infinity as the em dash, not as 'NaN%'", () => {
+    // The guard added alongside the payouts pass. Unreachable from the column
+    // today, but this used to interpolate whatever it was handed, and "NaN%"
+    // beside a dollar figure reads as a broken page rather than a missing value.
+    expect(formatPct(Number.NaN)).toBe(EMPTY);
+    expect(formatPct(Number.POSITIVE_INFINITY)).toBe(EMPTY);
+    expect(formatPct(Number.NEGATIVE_INFINITY)).toBe(EMPTY);
+  });
+});
+
+describe("formatMoney over the ledger's range", () => {
+  it("renders zero as a figure and null as the em dash", () => {
+    expect(formatMoney(0)).toBe("$0.00");
+    expect(formatMoney(null)).toBe(EMPTY);
+    expect(formatMoney(undefined)).toBe(EMPTY);
+  });
+
+  it("renders a negative as -$X, not in accounting parentheses", () => {
+    expect(formatMoney(-820.4)).toBe("-$820.40");
+    expect(formatMoney(-820.4)).not.toContain("(");
+  });
+
+  it("renders the column's largest value in full, with separators", () => {
+    // numeric(14,2)'s ceiling. Must not fall back to scientific notation, and
+    // must keep both cents digits.
+    expect(formatMoney(999999999999.99)).toBe("$999,999,999,999.99");
+    expect(formatMoney(-999999999999.99)).toBe("-$999,999,999,999.99");
+  });
+
+  it("pads to two decimals so a column of figures aligns", () => {
+    expect(formatMoney(60)).toBe("$60.00");
+    expect(formatMoney(88.4)).toBe("$88.40");
+  });
+
+  it("renders NaN and a non-numeric string as the em dash", () => {
+    // Looking absent is a better failure than looking like a figure.
+    expect(formatMoney(Number.NaN)).toBe(EMPTY);
+    expect(formatMoney("not money")).toBe(EMPTY);
+    expect(formatMoney("")).toBe(EMPTY);
   });
 });

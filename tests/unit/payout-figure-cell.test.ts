@@ -109,3 +109,124 @@ describe("PayoutFigureCell renders a numeric value without throwing", () => {
     expect(() => render({ merchantName: null })).not.toThrow();
   });
 });
+
+/**
+ * The value edge cases from the payouts test pass.
+ *
+ * Every one of these is a value the ledger can actually hold — the columns are
+ * numeric(14,2) signed for the money and numeric(5,2) 0..100 for the split — so
+ * each is reachable from a real processor file rather than hypothetical. They are
+ * grouped separately from the crash regressions above because they are asserting a
+ * different thing: not "does it throw" but "does the editable cell round-trip the
+ * stored value faithfully".
+ */
+describe("PayoutFigureCell across the ledger's real value range", () => {
+  it("renders the largest figure numeric(14,2) can hold", () => {
+    // 12 digits before the point is the column's ceiling, and a single row can
+    // legitimately be this big.
+    const html = render({ value: 999999999999.99 });
+    expect(html).toContain('value="999999999999.99"');
+    expect(html).not.toContain("e+");
+  });
+
+  it("renders the largest negative figure without scientific notation", () => {
+    // String(-1e21) would be "-1e+21"; this is well inside the range where
+    // String() stays decimal, and that is worth pinning because the input's value
+    // comes straight from String(value).
+    const html = render({ value: -999999999999.99 });
+    expect(html).toContain('value="-999999999999.99"');
+    expect(html).not.toContain("e+");
+  });
+
+  it("renders an exact zero as 0, not as blank", () => {
+    // The distinction the whole module is careful about: 0 is a figure that has
+    // been worked out and is zero; null is one that has not been worked out. A
+    // cell that showed blank for 0 would erase that.
+    const html = render({ value: 0 });
+    expect(html).toContain('value="0"');
+  });
+
+  it("distinguishes zero from null in the input", () => {
+    expect(render({ value: 0 })).toContain('value="0"');
+    expect(render({ value: null })).toContain('value=""');
+  });
+
+  it("renders a two-decimal value at the column's full precision", () => {
+    expect(render({ value: 0.01 })).toContain('value="0.01"');
+  });
+
+  it("shows no 'was' indicator for zero, which is not a change", () => {
+    // `differsFromStored` compares parsed numbers, so a stored 0 against a typed
+    // "0" must be equal. A truthiness check here would treat 0 as absent.
+    expect(render({ value: 0 })).not.toContain("was ");
+  });
+
+  it("shows no 'was' indicator for a negative stored value", () => {
+    expect(render({ value: -820.4 })).not.toContain("was ");
+  });
+
+  it("never renders the word null or NaN for any value in range", () => {
+    for (const value of [
+      null, 0, 0.01, -0.01, 55, 88.4, 123.45, -820.4,
+      999999999999.99, -999999999999.99,
+    ]) {
+      const html = render({ value });
+      expect(html, `value ${String(value)}`).not.toContain("NaN");
+      expect(html, `value ${String(value)}`).not.toContain(">null<");
+    }
+  });
+
+  it("renders every split the constraint permits, including the bounds", () => {
+    for (const value of [0, 33.33, 55, 100]) {
+      expect(() =>
+        render({ field: "rep_split_pct", value }),
+      ).not.toThrow();
+    }
+  });
+
+  it("escapes a merchant name rather than interpreting it", () => {
+    // merchant_name is free text out of a processor's spreadsheet, and it reaches
+    // the input's aria-label. React escapes it; this pins that it stays escaped.
+    const html = render({ merchantName: "<script>alert('x')</script>" });
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;");
+  });
+});
+
+/**
+ * Re-syncing when the stored value changes from outside the cell.
+ *
+ * renderToStaticMarkup gives a single render, so it cannot re-render an existing
+ * instance with a new prop — the stale-state bug itself needs a live reconciler.
+ * What it CAN pin is the shape of the fix: the value the input is given must be
+ * derived from the `value` prop on every render rather than captured once, so a
+ * fresh render at a new value shows the new value.
+ *
+ * The bug this guards, found by driving the page: PayoutBulkSplit wrote 42.5 to
+ * eight rows and called router.refresh(); the server sent the new value down, the
+ * generated rep_payout column updated, and every Split input kept rendering the
+ * old 50 — because useState's initialiser had already run and these cells are
+ * keyed on a stable row.id. The page showed 410 at 50% producing $174.25.
+ */
+describe("PayoutFigureCell reflects the stored value it is given", () => {
+  it("renders whatever value it is handed, not a captured first value", () => {
+    expect(render({ field: "rep_split_pct", value: 50 })).toContain('value="50"');
+    expect(render({ field: "rep_split_pct", value: 42.5 })).toContain(
+      'value="42.5"',
+    );
+  });
+
+  it("shows no stale 'was' indicator at the new value", () => {
+    // After a bulk split the input and the stored value agree again, so the
+    // mid-edit indicator must be gone. If text had stayed stale, `differsFromStored`
+    // would be true and the cell would claim an edit in progress that nobody made.
+    expect(render({ value: 42.5 })).not.toContain("was ");
+  });
+
+  it("tracks the prop through a null transition in both directions", () => {
+    // Clearing a figure back to null is a real admin action, and null is the
+    // "not worked out yet" state the totals count as unfilled.
+    expect(render({ value: null })).toContain('value=""');
+    expect(render({ value: 42.5 })).toContain('value="42.5"');
+  });
+});

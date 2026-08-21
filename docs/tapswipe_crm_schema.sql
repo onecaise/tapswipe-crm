@@ -1693,7 +1693,16 @@ begin
     raise exception 'admin only' using errcode = 'PT403';
   end if;
 
-  select * into batch from rep_payout_batches where id = batch_id_input;
+  -- `for update` is load-bearing, not defensive habit. Without it two
+  -- concurrent commits of the same batch BOTH observe status = 'review' and
+  -- both proceed: the ledger survives (the upsert on (period, agent_id, mid)
+  -- makes the insert idempotent) but audit_log gets two rows for one commit,
+  -- committed_at is overwritten, and both callers are told they succeeded.
+  -- Reproduced deliberately with two overlapping transactions -- 2 audit rows,
+  -- both returning 1. The status check below is only a guard if the row it read
+  -- cannot change underneath it, so the lock is what makes this function
+  -- genuinely idempotent rather than idempotent-if-you-click-slowly.
+  select * into batch from rep_payout_batches where id = batch_id_input for update;
   if not found then
     raise exception 'import not found' using errcode = 'PT404';
   end if;

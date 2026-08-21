@@ -8,11 +8,26 @@ import type { StatusIntent } from "@/components/status-badge";
  * change this too. The database is the authority; these are copies for the UI's
  * benefit.
  *
- * Note what these types do NOT do: coerce money. Every numeric column arrives from
- * PostgREST as a **string**, because `numeric` is exact and a JS number is not, and
- * the types below say so. Declaring them `number` would type-check happily and
- * then produce "88.4088.40" the first time something added two of them. The
- * reducers here are the one place that converts, and they do it explicitly.
+ * **The wire format, settled: PostgREST sends `numeric` as an unquoted JSON
+ * number.** `{"volume":8000.00}`, and `typeof` is `number`. The six numeric
+ * columns on PayoutRow are therefore typed `number | null`, and that is verified
+ * against a running PostgREST rather than assumed — tests/live/residual-import
+ * asserts the wire types directly, which is the only place the claim can be
+ * checked.
+ *
+ * This paragraph used to assert the exact opposite ("arrives as a **string**,
+ * because numeric is exact and a JS number is not") and warned that typing these
+ * as `number` would produce "88.4088.40". That was backwards, and it is worth
+ * knowing how much it cost, because the shape recurs: the types said `string`, the
+ * pages cast with `as PayoutRow[]`, and `as` is an assertion rather than a check —
+ * so tsc believed this file over the database and PayoutFigureCell shipped calling
+ * `.trim()` on a number. It threw on a plain blur. Commit 0a4160d fixed the types
+ * and the call sites but left this comment standing, still pointing the next
+ * reader at the wrong conclusion, with line 60 below saying "see the note above".
+ *
+ * The lesson that generalises: with no generated database types, a comment like
+ * this one *is* the schema as far as the compiler is concerned. Change it only
+ * against evidence from a running stack.
  */
 
 /**
@@ -160,8 +175,12 @@ export type PayoutTotals = {
  * the same arithmetic. Three things it is careful about, each of which was a real
  * decision rather than defensiveness:
  *
- *   1. **Strings in, numbers out.** `numeric` arrives as a string; `+` on two of
- *      those concatenates. Every value goes through Number() here.
+ *   1. **Non-numbers in, numbers out.** The columns arrive as JSON numbers (see
+ *      the module header — they are NOT strings, whatever this comment used to
+ *      claim), so the coercion in toNumber() is not about the wire format. It is
+ *      there because this reducer is also fed by hand-written fixtures, and
+ *      because null must contribute 0 rather than NaN. One NaN anywhere makes the
+ *      whole period total read NaN, which is a worse failure than one coercion.
  *   2. **Null is not zero.** A row with no residual income yet contributes nothing
  *      to the total AND increments `unfilled`, so a page can say "these figures are
  *      incomplete" rather than presenting a partial total as final. That
