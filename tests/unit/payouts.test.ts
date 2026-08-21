@@ -149,19 +149,19 @@ describe("parsePeriodParam", () => {
 });
 
 describe("payoutTotals", () => {
-  it("sums numeric strings as numbers", () => {
+  it("sums the numbers PostgREST sends", () => {
     const totals = payoutTotals([
       {
-        volume: "12400.00",
-        residual_income: "88.40",
-        rep_split_pct: "60.00",
-        rep_payout: "53.04",
+        volume: 12400.00,
+        residual_income: 88.40,
+        rep_split_pct: 60.00,
+        rep_payout: 53.04,
       },
       {
-        volume: "9900.00",
-        residual_income: "71.20",
-        rep_split_pct: "50.00",
-        rep_payout: "35.60",
+        volume: 9900.00,
+        residual_income: 71.20,
+        rep_split_pct: 50.00,
+        rep_payout: 35.60,
       },
     ]);
 
@@ -178,13 +178,13 @@ describe("payoutTotals", () => {
   it("counts a row with no figures as unfilled, and adds nothing for it", () => {
     const totals = payoutTotals([
       {
-        volume: "1000.00",
-        residual_income: "10.00",
-        rep_split_pct: "50.00",
-        rep_payout: "5.00",
+        volume: 1000.00,
+        residual_income: 10.00,
+        rep_split_pct: 50.00,
+        rep_payout: 5.00,
       },
       {
-        volume: "2000.00",
+        volume: 2000.00,
         residual_income: null,
         rep_split_pct: null,
         rep_payout: null,
@@ -205,8 +205,8 @@ describe("payoutTotals", () => {
     // total that silently excluded a row the page claimed was done.
     const totals = payoutTotals([
       {
-        volume: "1000.00",
-        residual_income: "10.00",
+        volume: 1000.00,
+        residual_income: 10.00,
         rep_split_pct: null,
         rep_payout: null,
       },
@@ -220,16 +220,16 @@ describe("payoutTotals", () => {
     // Clawbacks reduce a total, which is what a clawback is. Nothing is clamped.
     const totals = payoutTotals([
       {
-        volume: "1000.00",
-        residual_income: "50.00",
-        rep_split_pct: "50.00",
-        rep_payout: "25.00",
+        volume: 1000.00,
+        residual_income: 50.00,
+        rep_split_pct: 50.00,
+        rep_payout: 25.00,
       },
       {
-        volume: "0.00",
-        residual_income: "-18.50",
-        rep_split_pct: "60.00",
-        rep_payout: "-11.10",
+        volume: 0.00,
+        residual_income: -18.50,
+        rep_split_pct: 60.00,
+        rep_payout: -11.10,
       },
     ]);
 
@@ -245,8 +245,8 @@ describe("payoutTotals", () => {
       {
         volume: null,
         residual_income: null,
-        rep_split_pct: "50.00",
-        rep_payout: "-0.005",
+        rep_split_pct: 50.00,
+        rep_payout: -0.005,
       },
     ]);
 
@@ -265,19 +265,19 @@ describe("payoutTotals", () => {
 });
 
 describe("summarizeByPeriod", () => {
-  const row = (period: string, payout: string | null) => ({
+  const row = (period: string, payout: number | null) => ({
     period,
-    volume: "1000.00",
-    residual_income: payout === null ? null : "10.00",
-    rep_split_pct: payout === null ? null : "50.00",
+    volume: 1000,
+    residual_income: payout === null ? null : 10,
+    rep_split_pct: payout === null ? null : 50,
     rep_payout: payout,
   });
 
   it("groups by period, newest first", () => {
     const periods = summarizeByPeriod([
-      row("2026-06-01", "5.00"),
-      row("2026-07-01", "6.00"),
-      row("2026-05-01", "4.00"),
+      row("2026-06-01", 5.00),
+      row("2026-07-01", 6.00),
+      row("2026-05-01", 4.00),
     ]);
 
     // Descending on the stored YYYY-MM-DD, which sorts lexicographically — the
@@ -292,9 +292,9 @@ describe("summarizeByPeriod", () => {
 
   it("totals within each period independently", () => {
     const periods = summarizeByPeriod([
-      row("2026-07-01", "6.00"),
-      row("2026-07-01", "4.00"),
-      row("2026-06-01", "1.00"),
+      row("2026-07-01", 6.00),
+      row("2026-07-01", 4.00),
+      row("2026-06-01", 1.00),
     ]);
 
     expect(periods[0]).toMatchObject({
@@ -307,7 +307,7 @@ describe("summarizeByPeriod", () => {
 
   it("carries the unfilled count per period", () => {
     const periods = summarizeByPeriod([
-      row("2026-07-01", "6.00"),
+      row("2026-07-01", 6.00),
       row("2026-07-01", null),
     ]);
 

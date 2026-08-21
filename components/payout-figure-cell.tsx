@@ -39,15 +39,30 @@ export function PayoutFigureCell({
 }: {
   rowId: number;
   field: Field;
-  value: string | null;
+  value: number | null;
   /** For the input's accessible name — a bare "Residual income" repeats 40 times. */
   merchantName: string | null;
 }) {
   const router = useRouter();
 
-  const [text, setText] = useState(value ?? "");
+  // The input's value is a string; the column is a number. Converted here, at the
+  // one boundary between them. This line previously read `useState(value ?? "")`,
+  // which put a NUMBER in `text` while TypeScript inferred `string` from the old
+  // (wrong) prop type — so both parseFigureInput(text) below and the "was" indicator
+  // called .trim() on a number and threw.
+  const [text, setText] = useState(value === null ? "" : String(value));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Whether what is typed differs from what is stored, compared as NUMBERS.
+  //
+  // This is the line the crash was reported on. It previously read
+  // `text.trim() !== value`, which was wrong twice over: it called a string method
+  // on a number, and even with a string it compared raw input against the stored
+  // value textually — so typing "88.4" against a stored 88.40 read as a change and
+  // showed a spurious "was $88.40". Parsing both sides fixes both faults.
+  const typed = parseFigureInput(text, field);
+  const differsFromStored = typed.ok && typed.value !== value;
 
   const label =
     field === "residual_income"
@@ -64,8 +79,8 @@ export function PayoutFigureCell({
     // Nothing changed — including "blank stayed blank" and "88.40 retyped as
     // $88.40". Writing anyway would be a no-op UPDATE that still runs the history
     // trigger on every incidental blur.
-    const stored = value === null ? null : Number(value);
-    if (parsed.value === stored) {
+    // `value` is already the stored number, so no coercion is needed here.
+    if (parsed.value === value) {
       setError(null);
       return;
     }
@@ -117,7 +132,7 @@ export function PayoutFigureCell({
             event.currentTarget.blur();
           }
           if (event.key === "Escape") {
-            setText(value ?? "");
+            setText(value === null ? "" : String(value));
             setError(null);
           }
         }}
@@ -133,7 +148,7 @@ export function PayoutFigureCell({
           typing over 88.4 can still see what it was. Hidden once they match it. */}
       {field === "residual_income" &&
         value !== null &&
-        text.trim() !== value && (
+        differsFromStored && (
           <span className="text-[11px] text-muted-foreground">
             was {formatMoney(value)}
           </span>

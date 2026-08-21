@@ -57,7 +57,7 @@ export type PayoutBlocker = (typeof PAYOUT_BLOCKERS)[number];
 /** The one blocker an admin can resolve without touching the spreadsheet. */
 export const FIXABLE_BLOCKER: PayoutBlocker = "unknown_agent";
 
-/** Numeric strings, as PostgREST sends `numeric`. See the note above. */
+/** One ledger row. The numeric columns are numbers — see the note above. */
 export type PayoutRow = {
   id: number;
   agent_id: string;
@@ -65,13 +65,13 @@ export type PayoutRow = {
   mid: string;
   merchant_name: string | null;
   merchant_id: number | null;
-  volume: string | null;
-  average_ticket: string | null;
-  total_cost: string | null;
-  residual_income: string | null;
-  rep_split_pct: string | null;
+  volume: number | null;
+  average_ticket: number | null;
+  total_cost: number | null;
+  residual_income: number | null;
+  rep_split_pct: number | null;
   /** Generated and stored; null whenever either input is null. Never written. */
-  rep_payout: string | null;
+  rep_payout: number | null;
   batch_id: number | null;
 };
 
@@ -204,10 +204,18 @@ export function payoutTotals(
   };
 }
 
-/** Null, blank and unparseable all contribute nothing rather than NaN. */
-function toNumber(value: string | null): number {
+/**
+ * Null, blank and unparseable all contribute nothing rather than NaN.
+ *
+ * Accepts a string as well as a number even though PayoutRow now correctly says
+ * these columns are numbers. Not hedging about the wire format — that is settled
+ * (see the header) — but this reducer is also fed by hand-written fixtures and
+ * tests, and a total that silently became NaN because one caller passed "60.00"
+ * is a worse failure than one extra coercion.
+ */
+function toNumber(value: number | string | null): number {
   if (value === null || value === "") return 0;
-  const parsed = Number(value);
+  const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 

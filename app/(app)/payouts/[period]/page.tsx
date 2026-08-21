@@ -308,8 +308,8 @@ async function PeriodLedger({
  * badge — every figure in these columns is money, so only the sign needs to stand
  * out.
  */
-function Money({ value }: { value: string | null }) {
-  const negative = value !== null && Number(value) < 0;
+function Money({ value }: { value: number | null }) {
+  const negative = value !== null && value < 0;
   return (
     <span className={negative ? "text-destructive" : undefined}>
       {formatMoney(value)}

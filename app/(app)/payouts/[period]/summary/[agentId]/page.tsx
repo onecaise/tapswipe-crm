@@ -146,11 +146,7 @@ async function Summary({
                   {formatMoney(row.residual_income)}
                 </td>
                 <td className="py-1.5 text-right tabular-nums">
-                  {formatPct(
-                    row.rep_split_pct === null
-                      ? null
-                      : Number(row.rep_split_pct),
-                  )}
+                  {formatPct(row.rep_split_pct)}
                 </td>
                 <td className="py-1.5 text-right font-medium tabular-nums">
                   {formatMoney(row.rep_payout)}

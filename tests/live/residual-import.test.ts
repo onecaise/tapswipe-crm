@@ -605,6 +605,59 @@ describe("a rep sees only their own committed rows", () => {
   });
 });
 
+describe("PostgREST's wire types for the ledger", () => {
+  // The assertion that would have prevented a real crash, and the reason it lives
+  // in the live suite rather than the hermetic one: only a running PostgREST can
+  // say what it puts on the wire.
+  //
+  // lib/payouts.ts once declared these columns as `string | null`, on the stated
+  // belief that PostgREST sends `numeric` as a quoted string to preserve exactness.
+  // It does not. PayoutFigureCell then seeded a string-typed useState with a number
+  // and threw `text.trim is not a function` when rendering a period. Nothing caught
+  // it because the pages cast query results with `as PayoutRow[]`, and an assertion
+  // is not a check.
+  //
+  // So: pin the wire format itself. If PostgREST ever changes this, or if someone
+  // "corrects" the types back, this fails and names the reason.
+  it("sends numeric as a JSON number, not a string", async () => {
+    const { data, error } = await adminClient()
+      .from("rep_payout_rows")
+      .select("volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout")
+      .not("residual_income", "is", null)
+      .limit(1);
+
+    expect(error).toBeNull();
+    expect(data ?? [], "seed a committed row with figures first").not.toHaveLength(0);
+
+    const row = (data ?? [])[0] as Record<string, unknown>;
+    for (const column of [
+      "volume",
+      "average_ticket",
+      "total_cost",
+      "residual_income",
+      "rep_split_pct",
+      "rep_payout",
+    ]) {
+      expect(
+        typeof row[column],
+        `${column} must arrive as a number — lib/payouts.ts types it that way`,
+      ).toBe("number");
+    }
+  });
+
+  it("sends date and text columns as strings", async () => {
+    // The other half, so the rule is "numeric is a number", not "everything is".
+    const { data } = await adminClient()
+      .from("rep_payout_rows")
+      .select("period, mid")
+      .limit(1);
+
+    const row = (data ?? [])[0] as Record<string, unknown>;
+    expect(typeof row.period).toBe("string");
+    expect(typeof row.mid).toBe("string");
+  });
+});
+
 describe("the export is scoped by RLS and re-importable", () => {
   it("gives a rep only their own rows, and an admin everyone's", async () => {
     // The reason this function is not admin-gated: it reads through the caller's own
