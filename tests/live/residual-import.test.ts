@@ -32,6 +32,7 @@ import {
 const FUNCTIONS = [
   "residual-import-file-url",
   "parse-residual-import",
+  "export-residuals",
 ] as const;
 
 const PERIOD = "2026-07-01";
@@ -138,8 +139,44 @@ afterAll(async () => {
   await teardownFixtures();
 });
 
+/** Downloads the export as raw bytes, so a test can read the workbook back. */
+async function exportWorkbook(
+  token: string,
+  body: Record<string, unknown> = {},
+): Promise<{ status: number; rows: unknown[][] }> {
+  const { apiUrl, anonKey } = await import("./helpers/stack").then((m) =>
+    m.getStackConfig(),
+  );
+  const response = await fetch(`${apiUrl}/functions/v1/export-residuals`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      apikey: anonKey,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (response.status !== 200) return { status: response.status, rows: [] };
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const book = XLSX.read(bytes, { type: "array", cellDates: true });
+  const sheet = book.Sheets[book.SheetNames[0]];
+  return {
+    status: response.status,
+    rows: XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      raw: true,
+      defval: null,
+    }) as unknown[][],
+  };
+}
+
 describe("every residual function rejects a caller who is not an active admin", () => {
   for (const name of FUNCTIONS) {
+    // export-residuals is deliberately NOT admin-only: RLS scopes the file, so a
+    // rep exporting gets their own rows. Its own describe block below covers that.
+    if (name === "export-residuals") continue;
     const body =
       name === "residual-import-file-url"
         ? { file_name: "should-not-exist.xlsx" }
@@ -565,5 +602,127 @@ describe("a rep sees only their own committed rows", () => {
 
     expect(batches ?? []).toEqual([]);
     expect(staging ?? []).toEqual([]);
+  });
+});
+
+describe("the export is scoped by RLS and re-importable", () => {
+  it("gives a rep only their own rows, and an admin everyone's", async () => {
+    // The reason this function is not admin-gated: it reads through the caller's own
+    // client, so the file *is* the caller's scope. Reaching for supabaseAdmin
+    // anywhere in it — even to join agent names — would silently turn a rep's export
+    // into the whole company's, which is exactly the disclosure shape search_crm is
+    // security invoker to avoid.
+    const asAdmin = await exportWorkbook(fixtures.tokens.admin, {
+      period: PERIOD,
+    });
+    expect(asAdmin.status).toBe(200);
+
+    const asOwner = await exportWorkbook(fixtures.tokens.owner, {
+      period: PERIOD,
+    });
+    expect(asOwner.status).toBe(200);
+
+    const mids = (rows: unknown[][]) => rows.slice(1).map((r) => String(r[3]));
+    expect(mids(asOwner.rows).length).toBeGreaterThan(0);
+    expect(mids(asAdmin.rows).length).toBeGreaterThan(
+      mids(asOwner.rows).length,
+    );
+    // Nothing of the intruder's reached the owner's file.
+    expect(mids(asOwner.rows)).not.toContain("LIVE-MID-SCOPE-B");
+    expect(mids(asAdmin.rows)).toContain("LIVE-MID-SCOPE-B");
+  });
+
+  it("refuses a deactivated caller", async () => {
+    const response = await exportWorkbook(fixtures.tokens.deactivated);
+    expect(response.status).toBe(403);
+  });
+
+  it("carries the nine importable headers, plus two the parser ignores", async () => {
+    const { rows } = await exportWorkbook(fixtures.tokens.admin, {
+      period: PERIOD,
+    });
+
+    expect(rows[0]).toEqual([
+      "Period",
+      "Agent #",
+      "Agent",
+      "MID",
+      "Merchant name",
+      "Volume",
+      "Average ticket",
+      "Total cost",
+      "Residual income",
+      "Rep split",
+      "Rep payout",
+    ]);
+  });
+
+  it("has NO total row, because a total row would break the round trip", async () => {
+    // A total has no MID, so re-importing this file would block that row with
+    // missing_mid and refuse the whole batch — breaking the one thing the export
+    // exists for. The pages show the totals instead.
+    const { rows } = await exportWorkbook(fixtures.tokens.admin, {
+      period: PERIOD,
+    });
+
+    for (const row of rows.slice(1)) {
+      expect(
+        String(row[3] ?? "").trim(),
+        `every data row must carry a MID, got ${JSON.stringify(row)}`,
+      ).not.toBe("");
+    }
+  });
+
+  it("round-trips: export, fill the figures, re-import, and they land", async () => {
+    // The bulk-entry path end to end, and the assertion that ties this feature
+    // together. If the export's headers ever stop matching what the parser reads,
+    // this is what fails.
+    const asAdmin = userClient(fixtures.tokens.admin);
+
+    const { batchId } = await importFile([
+      HEADER,
+      ["Jul-26", OWNER_NUMBER, "LIVE-MID-ROUNDTRIP", "Round Trip Co", 3000, 30, 75],
+    ]);
+    expect(
+      (await asAdmin.rpc("commit_residual_import", { batch_id_input: batchId }))
+        .error,
+    ).toBeNull();
+
+    // Export it, and confirm the two money columns come out blank rather than zero —
+    // a zero would be a figure nobody entered.
+    const exported = await exportWorkbook(fixtures.tokens.admin, {
+      period: PERIOD,
+    });
+    const line = exported.rows
+      .slice(1)
+      .find((row) => String(row[3]) === "LIVE-MID-ROUNDTRIP");
+    expect(line, "the committed row should be in the export").toBeDefined();
+    expect(line?.[8]).toBeNull();
+    expect(line?.[9]).toBeNull();
+
+    // Fill them in, as an admin would in Excel, and feed the same shape back.
+    const filled = exported.rows.map((row, index) =>
+      index === 0 || String(row[3]) !== "LIVE-MID-ROUNDTRIP"
+        ? row
+        : [...row.slice(0, 8), 120.5, 45, row[10]],
+    );
+
+    const back = await importFile(filled as unknown[][], "round-trip.xlsx");
+    expect(back.parse.status, back.parse.raw).toBe(200);
+    expect(back.parse.body).toMatchObject({ blocked_count: 0 });
+
+    expect(
+      (
+        await asAdmin.rpc("commit_residual_import", {
+          batch_id_input: back.batchId,
+        })
+      ).error,
+    ).toBeNull();
+
+    const row = await ledgerFor("LIVE-MID-ROUNDTRIP");
+    expect(row?.residual_income).toBe(120.5);
+    expect(row?.rep_split_pct).toBe(45);
+    // Recomputed by the database from the two figures the spreadsheet supplied.
+    expect(row?.rep_payout).toBe(54.23);
   });
 });

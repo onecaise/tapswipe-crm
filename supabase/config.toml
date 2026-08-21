@@ -523,3 +523,12 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/parse-residual-import/deno.json"
 entrypoint = "./functions/parse-residual-import/index.ts"
+
+# Exports rep_payout_rows as a re-importable XLSX. NOT admin-only, deliberately:
+# every row is read through the caller-scoped client, so RLS scopes the export and
+# a rep gets their own rows. Same reasoning as search_crm being security invoker.
+[functions.export-residuals]
+enabled = true
+verify_jwt = false
+import_map = "./functions/export-residuals/deno.json"
+entrypoint = "./functions/export-residuals/index.ts"

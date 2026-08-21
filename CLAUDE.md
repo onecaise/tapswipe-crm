@@ -11,9 +11,9 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Built:** every CRM route lives under the `app/(app)/` route group so it renders inside the shell — `app/(app)/{dashboard,merchants,leads,ghost-sheets,pre-apps,support-tickets,documents,notes,tasks,payouts,admin/users}`. Route groups don't affect URLs, so the paths are still `/dashboard`, `/merchants/7` and so on. Data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,annotations-data,documents,payouts,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks are **written** through panels (`components/{notes,tasks}-panel.tsx`) on the four owner records; `/notes` and `/tasks` are the cross-record view of the same rows, and are read-only (notes) or read plus the complete toggle (tasks). Creation stays on the record, because `owner_id` has no FK and the panels take the pair from a parent row already loaded under RLS.
 - **Not built yet:** My Submissions.
 - **Still [starter-kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase) template, not product code:** `README.md`, `app/page.tsx`, `app/protected/*`, `components/tutorial/*`, and `components/{hero,deploy-button,next-logo,supabase-logo,env-var-warning}.tsx`.
-- **Edge Functions:** all nine are implemented — `create-upload-url`, `create-download-url`, `submit-pre-app-secrets`, `read-pre-app-secrets`, `create-user`, `deactivate-user`, `admin-reset-password`, `residual-import-file-url`, `parse-residual-import` (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env,admin-users,residuals,residual-imports}.ts`).
+- **Edge Functions:** all ten are implemented — `create-upload-url`, `create-download-url`, `submit-pre-app-secrets`, `read-pre-app-secrets`, `create-user`, `deactivate-user`, `admin-reset-password`, `residual-import-file-url`, `parse-residual-import`, `export-residuals` (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env,admin-users,residuals,residual-imports}.ts`).
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Twenty-one migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Twenty-four migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi`.
 
@@ -139,7 +139,7 @@ Two consequences worth knowing before you write a test or a fixture. **Service-r
 
 ### Edge Functions
 
-Nine functions, all registered in `supabase/config.toml` (a function not listed there won't deploy or serve):
+Ten functions, all registered in `supabase/config.toml` (a function not listed there won't deploy or serve):
 
 | Function | Purpose |
 | --- | --- |
@@ -148,10 +148,11 @@ Nine functions, all registered in `supabase/config.toml` (a function not listed 
 | `create-upload-url`, `create-download-url` | mint short-lived signed URLs for the private `documents` Storage bucket after checking `documents.agent_id` or `is_admin()` |
 | `residual-import-file-url` | admin-only; two modes — creates a `rep_payout_batches` row and signs an upload into `residual-imports`, or signs a download of a batch's stored file |
 | `parse-residual-import` | admin-only; reads a batch's XLSX with SheetJS and stages its rows. **Idempotent** — it clears the batch's staging rows first, which is what makes "resolve an agent number, then read again" one code path rather than two |
+| `export-residuals` | **not admin-only, deliberately.** Reads every row through the *caller-scoped* client, so RLS is the whole authorization story and a rep's export is their own book. Reaching for `supabaseAdmin` anywhere in it — even to join agent names — would silently turn that into the company's, which is the disclosure shape `search_crm` is `security invoker` to avoid. Paginates with `.range()`, because PostgREST's `max_rows` would otherwise export a silent prefix |
 
-**All nine are `verify_jwt = false` in `config.toml`** — verified, every one of the nine `[functions.*]` blocks sets it. The platform therefore performs **no** auth check before your handler runs, so **each function is responsible for authenticating the caller itself**. `functions deploy` carries this setting up with the code, so it holds in production too.
+**All ten are `verify_jwt = false` in `config.toml`** — verified, every one of the ten `[functions.*]` blocks sets it. The platform therefore performs **no** auth check before your handler runs, so **each function is responsible for authenticating the caller itself**. `functions deploy` carries this setting up with the code, so it holds in production too.
 
-The two implemented functions show the required shape, and the order matters:
+Every one of them follows the same shape, and the order matters:
 
 1. `withSupabase({ auth: "user" }, ...)` rejects a missing or invalid JWT before the handler body (this is what returns the `401`).
 2. `callerIsActive(ctx.supabase)` — an `is_active_agent()` RPC through the **caller-scoped** client. A valid JWT does not mean the account is still enabled; a deactivated agent's token keeps working until it expires. Called via `ctx.supabaseAdmin` this would always be false, because a service-role connection has no `auth.uid()`.

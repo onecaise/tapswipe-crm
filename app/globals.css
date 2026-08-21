@@ -120,3 +120,55 @@
     @apply bg-background text-foreground;
   }
 }
+
+/*
+ * Print rules, for the payout summary at
+ * /payouts/[period]/summary/[agentId] — the one page in this app meant to
+ * leave the screen.
+ *
+ * Global rather than page-local because the two things that have to go are
+ * the sidebar and the app chrome, and neither is rendered by that page: they
+ * come from the (app) route-group layout, which a `print:hidden` utility on
+ * the page cannot reach. Everything inside the document itself is handled by
+ * `print:` utilities where it is written, so this block stays small.
+ *
+ * Deliberately not a colour override. The design system's tokens are what the
+ * statement should print in, and forcing black text here would make the
+ * printed figures disagree with the screen an admin just checked them on.
+ */
+@media print {
+  /* The shell: sidebar, header, and any control marked print:hidden. */
+  aside,
+  header,
+  nav {
+    display: none !important;
+  }
+
+  /* The (app) layout constrains and pads the content area for a screen. On
+     paper that leaves a wide margin inside the printer's own margin. */
+  main {
+    display: block !important;
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Cards read as boxes-within-a-box once the page is the only thing on the
+     sheet. The summary page already flattens its own article; this catches the
+     shell wrappers around it. */
+  body {
+    background: #fff;
+  }
+
+  /* A merchant line split across a page break is unreadable on a statement
+     someone is reconciling against a processor's report. */
+  tr,
+  thead,
+  tfoot {
+    break-inside: avoid;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+}

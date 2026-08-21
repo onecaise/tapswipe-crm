@@ -8,6 +8,7 @@ import { formatMoney, formatPeriod, periodParam } from "@/lib/format";
 import { summarizeByPeriod, type PayoutRow } from "@/lib/payouts";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
+import { PayoutExportButton } from "@/components/payout-export-button";
 import { StatCard } from "@/components/stat-card";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -144,17 +145,23 @@ async function PayoutPeriods() {
   );
 }
 
-async function ImportAction() {
+async function HeaderActions() {
   const profile = await requireUser();
-  if (profile.role !== "admin") return null;
 
   return (
-    <Button asChild size="sm">
-      <Link href="/payouts/import">
-        <UploadIcon size={16} />
-        Import residuals
-      </Link>
-    </Button>
+    <div className="flex items-start gap-2">
+      {/* Every period the caller can see, in one file. Scoped by RLS, so this is
+          the whole company for an admin and their own book for a rep. */}
+      <PayoutExportButton label="Export all" />
+      {profile.role === "admin" && (
+        <Button asChild size="sm">
+          <Link href="/payouts/import">
+            <UploadIcon size={16} />
+            Import residuals
+          </Link>
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -168,7 +175,7 @@ export default function PayoutsPage() {
           // Its own Suspense boundary because it reads the session too, and
           // cacheComponents: true means a dynamic read cannot sit outside one.
           <Suspense fallback={null}>
-            <ImportAction />
+            <HeaderActions />
           </Suspense>
         }
       />

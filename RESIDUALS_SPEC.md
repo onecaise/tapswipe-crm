@@ -1,7 +1,27 @@
 # Rep Payouts / Residuals — Specification
 
-Status: **not built.** Nothing in §5–§9 exists yet. Every decision in §3 was settled by
-interview on 2026-08-17 and is recorded here as a decision, not a suggestion.
+Status: **built, as of 2026-08-21.** All six commits in §11 have landed. Every decision in §3
+was settled by interview on 2026-08-17 and is recorded here as a decision, not a suggestion.
+
+Three places where what shipped deviates from what is written below, each deliberate and each
+documented at the point it applies:
+
+1. **Committing is a `security definer` RPC, not an eighth Edge Function** (§7.3). supabase-js
+   has no client-side transaction, so the function version had a real window where a period
+   was half-imported. It also sidesteps PostgREST's row cap, gets a fail-closed audit row for
+   free, and keeps `auth.uid()` so history rows name the committing admin.
+2. **The export has no total row** (§7.4). A total has no MID, so re-importing the file this
+   feature produces would block that row and refuse the batch — which contradicted decision
+   12, the round trip that is the whole point of the export.
+3. **`rep_payout_batches` and `rep_payout_import_rows` are granted fewer verbs than §5.2
+   first said** — select+update and select-only respectively, because nothing client-side
+   writes them. A grant no policy backs fails the quiet way.
+
+One thing verified beyond what §12 asked for, and one thing still unverified. The migrations
+were applied to real Postgres 17 (not only PGlite) and the generated column, partial unique
+index and grant surface were read back from the catalog there. Nobody has signed into the
+app and looked at the pages: they are covered by `build`, the test suites and a direct
+function probe, not by eye.
 
 Scope: importing a processor's period residual spreadsheet, holding it as a per-merchant
 ledger, letting an admin fill in the two figures the processor does not supply, and getting
@@ -478,17 +498,37 @@ write, which nothing currently performs.
 ### 7.4 `export-residuals` — any active caller
 
 `{ period?, agent_id? }` → reads `rep_payout_rows` **through `ctx.supabase`** (decision 24),
-builds the nine-column workbook plus a derived `Rep payout` column and a total row, returns
+builds the workbook, returns
 `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` bytes with a
 `Content-Disposition` filename.
+
+**No total row — corrected 2026-08-17, and this was a real conflict in this spec.** §7.4
+originally said "plus a derived `Rep payout` column and a total row". A total row is
+incompatible with decision 12: it has no MID, so re-importing the file the feature produces
+would block that row with `missing_mid` and refuse the whole batch. The round trip is the
+point of this export, so the total goes. The page already shows the totals; a spreadsheet
+that will not re-import is worse than one without a footer.
+
+Columns: the nine canonical headers (which is what makes it re-importable), plus **`Agent`**
+(the rep's name) and **`Rep payout`** (derived). Those two extras are safe precisely because
+`mapHeaders` ignores headers it does not recognise, and `Rep payout` is generated so there is
+nothing to write it back to. `Agent` does not collide with `Agent #`: the normaliser reduces
+those to `agent` and `agent#`.
+
+**Paginated with `.range()`.** PostgREST caps a response at `[api] max_rows` (1000 here), so
+a single select would silently export a prefix. That is the same hazard that made committing
+an RPC (§7.3) rather than a function; here the read genuinely has to go through PostgREST,
+because RLS scoping *is* the authorization, so it pages instead.
 
 RLS is the whole authorization story: an admin gets everything in scope, a rep gets their own
 rows, a deactivated caller gets nothing (and is rejected earlier by `callerIsActive`). No
 role branch in the function, for the same reason `search_crm` is `security invoker` — an
 export is exactly the shape of thing that becomes a disclosure bug.
 
-Note the asymmetry: the export's `Rep payout` column is written, but on re-import it is
-ignored. It is derived (decision 13) and there is nothing to write it to.
+Note the asymmetry: the export's `Rep payout` and `Agent` columns are written, but on
+re-import both are ignored. `Rep payout` is derived (decision 13) so there is nothing to
+write it to, and the rep is identified by `Agent #`, not by a display name that two people
+could share.
 
 ### 7.5 `create-user` — one field added
 
@@ -682,6 +722,7 @@ code becomes English.
 | `tests/unit/residuals-parse.test.ts` | vitest | Every accepted Period form → the right first-of-month, including the Excel serial and the two-digit year; rejected forms (`"Q3 2026"`, a bare month) → `unparseable_period`. Number coercion: separators, `$`, `%`, parens-negative, empty vs `-` → **null, not zero**. Header matching case/whitespace-insensitively; a missing required header fails the parse. Blocker precedence in the §6 order. |
 | `tests/unit/payouts.test.ts` | vitest | `parsePeriodParam` rejects untrusted input; `payoutTotals` over a mixed set including nulls and negatives; `formatMoney` (including negative and null) and `formatPeriod` — the latter with a **December** case, which is the one that catches the `new Date` mistake §8.7 warns about. |
 | `tests/live/manage-users.test.ts` | HTTP | Extended for `create-user`'s new field: an account created with an `agent_number` lands with it on `profiles`; a duplicate number returns **409 before the `auth.users` row is created**, so no orphan and no rollback path; blank and whitespace store null rather than `''`; over 32 characters is a 400. Nothing in the repo type-checks `supabase/functions` (tsconfig excludes it, eslint ignores it), so this file is the only automated check on that handler. |
+| `tests/live/residual-import.test.ts` (export half) | HTTP | `export-residuals` scoped by RLS — a rep's file contains their rows and not the other agent's, an admin's contains both; a deactivated caller gets 403. The header row is exactly the eleven columns, in order. **Every data row carries a MID**, which is how the "no total row" rule is pinned. And the round trip: commit a row, export it, assert the two money columns come out **blank rather than zero**, fill them in, re-import the same shape, and assert they land with `rep_payout` recomputed by the database. |
 | `tests/live/residual-import.test.ts` | HTTP | `warmFunctions` first. The whole cycle against the running stack: mint upload URL → upload a fixture XLSX → parse → assert blockers → resolve an agent number → re-parse → commit → assert `rep_payout_rows`. Then: commit refused with a blocker outstanding; commit refused twice (already `committed`); merge preserves hand-entered figures on a re-upload of a fresh-format file and **writes** them on a round-trip file; a rep and a deactivated admin are both rejected by every admin-only function; `export-residuals` returns only the caller's rows as an admin vs as a rep; a batch id that is not the caller's returns **404, not 403**. Cleans its `audit_log` **and `rep_payout_row_history`** rows before deleting its users. |
 | `tests/auth/require-admin.test.ts` | vitest | Extended for the two admin-only routes, matching the existing shape. |
 

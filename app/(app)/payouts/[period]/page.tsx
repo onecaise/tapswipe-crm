@@ -11,6 +11,7 @@ import {
   formatPct,
   formatPeriod,
   formatText,
+  periodParam,
 } from "@/lib/format";
 import {
   PAYOUT_ROW_COLUMNS,
@@ -21,6 +22,7 @@ import {
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { PayoutBulkSplit } from "@/components/payout-bulk-split";
+import { PayoutExportButton } from "@/components/payout-export-button";
 import { PayoutFigureCell } from "@/components/payout-figure-cell";
 import { PayoutPeriodDelete } from "@/components/payout-period-delete";
 import { StatCard } from "@/components/stat-card";
@@ -139,13 +141,19 @@ async function PeriodLedger({
         title={formatPeriod(period)}
         subtitle="Residual income per merchant, grouped by rep."
         action={
-          isAdmin ? (
-            <PayoutPeriodDelete
-              period={period}
-              rowCount={overall.rows}
-              filledCount={overall.rows - overall.unfilled}
-            />
-          ) : undefined
+          <div className="flex items-start gap-2">
+            {/* Not admin-only: the export is scoped by RLS, so a rep exporting
+                gets their own rows. And it is the bulk-entry path for an admin —
+                export, fill the two columns in Excel, upload it again. */}
+            <PayoutExportButton period={period} label="Export XLSX" />
+            {isAdmin && (
+              <PayoutPeriodDelete
+                period={period}
+                rowCount={overall.rows}
+                filledCount={overall.rows - overall.unfilled}
+              />
+            )}
+          </div>
         }
       />
 
@@ -183,6 +191,13 @@ async function PeriodLedger({
                   {totals.unfilled > 0 && (
                     <> · {totals.unfilled} awaiting figures</>
                   )}
+                  {" · "}
+                  <Link
+                    href={`/payouts/${periodParam(period)}/summary/${group.agentId}`}
+                    className="underline underline-offset-4"
+                  >
+                    Payout summary
+                  </Link>
                 </p>
                 {/* The common case in one action: a rep's split is usually the
                     same percentage on every merchant, and typing it forty times
