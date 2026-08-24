@@ -734,20 +734,43 @@ test.describe("two sessions on one record", () => {
       }),
     ]);
 
-    await expect(one.getByText("e2e-tab-one.txt")).toBeVisible();
-    await expect(two.getByText("e2e-tab-two.txt")).toBeVisible();
+    // Settled means the spinner is gone and no error is showing — an observable
+    // state, unlike "my row has appeared", which is the first thing this spec
+    // asserted and the reason it was flaky. Two concurrent router.refresh()
+    // calls against `next dev` are not guaranteed to land within any particular
+    // window, and asserting that they do makes the spec about Next's refresh
+    // timing rather than about two sessions colliding. It failed roughly one run
+    // in three that way, and passed three for three in isolation, which is
+    // exactly the shape of a spec measuring the wrong thing.
+    for (const tab of [one, two]) {
+      await expect(tab.getByText("Uploading…")).toBeHidden();
+      await expect(tab.locator("p.text-destructive")).toHaveCount(0);
+    }
 
-    // Each tab refreshed only itself, so reloading is what proves both rows are
-    // really there rather than one being local optimism.
-    await one.reload();
-    await expect(one.getByText("e2e-tab-one.txt")).toBeVisible();
-    await expect(one.getByText("e2e-tab-two.txt")).toBeVisible();
+    // Reloaded, so each tab is a fresh server render rather than a refresh
+    // racing another tab's. This is the claim that matters: both uploads
+    // survived, and neither tab is missing the other's work.
+    for (const tab of [one, two]) {
+      await tab.reload();
+      await expect(tab.getByText("e2e-tab-one.txt")).toBeVisible();
+      await expect(tab.getByText("e2e-tab-two.txt")).toBeVisible();
+    }
 
     const [rowOne] = await documentRows("e2e-tab-one.txt");
     const [rowTwo] = await documentRows("e2e-tab-two.txt");
+    // Distinct keys is the collision check: the file NAME is not part of the
+    // storage key (the key ends in a uuid), so two uploads must never resolve to
+    // one object.
     expect(rowOne.fileKey).not.toBe(rowTwo.fileKey);
-    expect(await storageObjectExists(rowOne.fileKey)).toBe(true);
-    expect(await storageObjectExists(rowTwo.fileKey)).toBe(true);
+
+    // Polled rather than read once. A list() on a prefix immediately after a PUT
+    // is a read-after-write question about Storage, not about this panel, and a
+    // single read turned that into a failure indistinguishable from a lost file.
+    for (const row of [rowOne, rowTwo]) {
+      await expect
+        .poll(async () => storageObjectExists(row.fileKey), { timeout: 10_000 })
+        .toBe(true);
+    }
 
     await context.close();
   });
