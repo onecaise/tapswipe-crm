@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/client";
+import { invokeEdgeFunction } from "@/lib/edge-functions";
 
 /**
  * Client-side plumbing for the three admin Edge Functions.
@@ -25,36 +26,24 @@ export type ResetPassword = {
 };
 
 /**
- * Invokes an Edge Function and returns the server's own error message.
+ * Invokes one of the admin Edge Functions and returns the server's own error
+ * message.
  *
- * supabase-js reports any non-2xx as a FunctionsHttpError whose `.message` is a
- * generic "Edge Function returned a non-2xx status code" — the actual reason sits
- * unread in the response body. Without this unwrapping, "A user with that email
- * already exists" reaches the admin as that generic string, which is the
- * difference between a fixable message and a mysterious one.
+ * The unwrapping this used to do inline now lives in lib/edge-functions.ts. It
+ * moved because the document panel needed exactly the same thing and shipped
+ * without it — reporting "Edge Function returned a non-2xx status code" for a
+ * deactivated account, a record that wasn't the caller's, and a real fault
+ * alike. Kept as a named wrapper so the admin screens still read as calling one
+ * thing.
  */
 export async function callAdminFunction<T>(
   name: string,
   body: Record<string, unknown>,
 ): Promise<{ data: T | null; error: string | null }> {
-  const supabase = createClient();
-  const { data, error } = await supabase.functions.invoke(name, { body });
-
-  if (!error) {
-    return { data: data as T, error: null };
-  }
-
-  const response = (error as { context?: Response }).context;
-  if (response && typeof response.json === "function") {
-    try {
-      const payload = (await response.json()) as { error?: unknown };
-      if (payload?.error) {
-        return { data: null, error: String(payload.error) };
-      }
-    } catch {
-      // Body wasn't JSON (a 500 page, say) — fall back to the generic message.
-    }
-  }
-
-  return { data: null, error: error.message };
+  return invokeEdgeFunction<T>(
+    createClient(),
+    name,
+    body,
+    "Edge Function returned a non-2xx status code",
+  );
 }

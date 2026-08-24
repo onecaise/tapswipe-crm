@@ -4,6 +4,7 @@ import { useState } from "react";
 import { DownloadIcon } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import { edgeFunctionErrorMessage } from "@/lib/edge-functions";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -48,19 +49,13 @@ export function PayoutExportButton({
     );
 
     if (callError || !(data instanceof Blob)) {
-      // The function's own message sits in the response body on a non-2xx, exactly
-      // as callAdminFunction documents, so it is worth unwrapping here too.
-      const response = (callError as { context?: Response } | null)?.context;
-      let message = callError?.message ?? "Could not build the export.";
-      if (response && typeof response.json === "function") {
-        try {
-          const payload = (await response.json()) as { error?: unknown };
-          if (payload?.error) message = String(payload.error);
-        } catch {
-          // Not JSON — keep the generic message.
-        }
-      }
-      setError(message);
+      // The function's own message sits in the response body on a non-2xx, so it
+      // is unwrapped rather than shown as the generic invoke() message. Not
+      // invokeEdgeFunction() here: this response is a Blob, not JSON, and that
+      // helper's null-data guard would be reading the wrong shape.
+      setError(
+        await edgeFunctionErrorMessage(callError, "Could not build the export."),
+      );
       setBusy(false);
       return;
     }
