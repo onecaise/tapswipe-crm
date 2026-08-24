@@ -11,6 +11,7 @@ import {
   supportTicketStatusIntent,
 } from "@/lib/support-tickets";
 import { formatDate, formatText } from "@/lib/format";
+import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { loadTicketReplies } from "@/lib/support-ticket-replies";
 // Still no notes or tasks panel here: the check constraint on notes.owner_type /
 // tasks.owner_type allows only lead | pre_app | merchant | ghost_sheet, so a
@@ -21,6 +22,7 @@ import { loadTicketReplies } from "@/lib/support-ticket-replies";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { StatusBadge } from "@/components/status-badge";
+import { DocumentsPanel } from "@/components/documents-panel";
 import { LoadingState } from "@/components/loading-state";
 import { SupportTicketClose } from "@/components/support-ticket-close";
 import { TicketRepliesPanel } from "@/components/ticket-replies-panel";
@@ -94,6 +96,18 @@ async function TicketDetail({ params }: { params: Promise<{ id: string }> }) {
   // ownership check of its own — and the 404 above already ran if the ticket
   // isn't the caller's.
   const { replies, error: repliesError } = await loadTicketReplies(ticket.id);
+
+  // Tier 1 read, scoped by the documents select policy. owner_type is a literal,
+  // never from the URL: owner_id has no foreign key, and ids collide across types
+  // — ticket 7 and merchant 7 both exist — so dropping it would mix one record's
+  // attachments into another's page with nothing to object.
+  const { data: docs } = await supabase
+    .from("documents")
+    .select(DOCUMENT_LIST_COLUMNS)
+    .eq("owner_type", "support_ticket")
+    .eq("owner_id", ticket.id)
+    .order("uploaded_at", { ascending: false });
+  const documents = (docs ?? []) as DocumentRow[];
 
   return (
     <>
@@ -187,6 +201,21 @@ async function TicketDetail({ params }: { params: Promise<{ id: string }> }) {
           Could not load replies: {repliesError}
         </p>
       )}
+
+      {/* `support_ticket` has been one of the four values in documents.owner_type
+          since the initial schema, and both signed-URL functions have always
+          accepted it — there was simply no way to reach it from the app, so the
+          one owner type where a photo of a broken terminal or a screenshot of an
+          error is the *whole* point of the ticket had nowhere to put one.
+          Unlike the notes and tasks panels this page deliberately omits, an
+          admin's upload here is visible to the rep: create-upload-url files the
+          object and the row under the PARENT record's agent, not the uploader,
+          so it lands in the rep's own book rather than being invisible to them. */}
+      <DocumentsPanel
+        ownerType="support_ticket"
+        ownerId={ticket.id}
+        documents={documents}
+      />
     </>
   );
 }

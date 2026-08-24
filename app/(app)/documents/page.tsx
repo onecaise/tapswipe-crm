@@ -76,7 +76,8 @@ async function DocumentCenter() {
               colSpan={isAdmin ? 6 : 5}
               className="text-muted-foreground"
             >
-              No documents yet. Upload one from a merchant or lead.
+              No documents yet. Upload one from a merchant, lead, pre-app or
+              support ticket.
             </TableCell>
           </TableRow>
         ) : (
@@ -96,8 +97,10 @@ async function DocumentCenter() {
                       {OWNER_TYPE_LABELS[doc.owner_type]} #{doc.owner_id}
                     </Link>
                   ) : (
-                    // pre_apps and support_tickets have no pages yet, so the
-                    // reference is shown without a link rather than a dead one.
+                    // Unreachable while all four owner types have a detail page,
+                    // and kept for the next one that lands in the check
+                    // constraint before its page exists: an unlinked reference
+                    // beats a dead link. ownerHref is where that decision lives.
                     <span className="text-muted-foreground">
                       {OWNER_TYPE_LABELS[doc.owner_type]} #{doc.owner_id}
                     </span>
