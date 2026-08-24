@@ -506,6 +506,16 @@ entrypoint = "./functions/create-download-url/index.ts"
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/create-download-url/*.html" ]
 
+# Removes a document: the metadata row AND the object behind it. Needed as a
+# function because the bucket is private with no storage policies, so nothing the
+# browser holds can delete an object — the plain PostgREST delete it replaces
+# left the file in the bucket forever.
+[functions.delete-document]
+enabled = true
+verify_jwt = false
+import_map = "./functions/delete-document/deno.json"
+entrypoint = "./functions/delete-document/index.ts"
+
 # Signs uploads into, and downloads out of, the `residual-imports` bucket.
 # Admin-only. verify_jwt = false like every other function here, so it
 # authenticates the caller itself.
