@@ -15,6 +15,7 @@ import { withSupabase } from "@supabase/server";
 import {
   STORAGE_BUCKET,
   callerIsActive,
+  fileKeyMatchesOwner,
   isPositiveInt,
   json,
 } from "../_shared/documents.ts";
@@ -57,12 +58,37 @@ export default {
     // whole authorization decision on hand-written code here.
     const { data: document, error } = await ctx.supabase
       .from("documents")
-      .select("file_key, file_name")
+      .select("file_key, file_name, agent_id, owner_type, owner_id")
       .eq("id", documentId)
       .maybeSingle();
 
     if (error || !document) {
       // Not found and not yours, indistinguishable.
+      return json({ error: "Document not found" }, 404);
+    }
+
+    // RLS proved the caller may see this ROW. It says nothing about whether the
+    // row's file_key is really that row's object — the client inserts the
+    // metadata, so file_key is client-supplied and the insert policy only ever
+    // looked at agent_id. Without this, inserting a row with your own agent_id
+    // and another agent's file_key made this function sign their object for you
+    // with the service role. Measured against the running stack; see
+    // documents_file_key_matches_owner.
+    //
+    // Same 404 as "not yours", for the same reason: a distinct status here would
+    // tell a caller their forgery was recognised, and there is no legitimate
+    // request this branch can refuse.
+    if (
+      !fileKeyMatchesOwner(
+        document.file_key,
+        document.agent_id,
+        document.owner_type,
+        document.owner_id,
+      )
+    ) {
+      console.error(
+        `[create-download-url] file_key does not match its row: document ${documentId}`,
+      );
       return json({ error: "Document not found" }, 404);
     }
 

@@ -290,7 +290,11 @@ describe("all eight insert-testable tables are covered", () => {
     },
     {
       table: "documents",
-      insert: `insert into documents (agent_id, owner_type, owner_id, doc_type, file_key) values ('${AGENT_ID}', 'lead', 1, 'T Doc', 'k/t-doc')`,
+      // The file_key has to be the real {agent}/{type}/{id}/{uuid} shape:
+      // documents_file_key_matches_owner rejects anything else, and the agent
+      // segment is the ROW's agent even though the ADMIN is inserting — which is
+      // exactly what makes this a cross-agent write.
+      insert: `insert into documents (agent_id, owner_type, owner_id, doc_type, file_key) values ('${AGENT_ID}', 'lead', 1, 'T Doc', '${AGENT_ID}/lead/1/88888888-aaaa-4aaa-8aaa-aaaaaaaaaaaa')`,
     },
   ];
 
@@ -519,13 +523,14 @@ describe("documents — the eighth table, and the delete that nothing logged", (
     await asUser(db, ADMIN_ID);
     await db.exec(`
       insert into documents (agent_id, owner_type, owner_id, doc_type, file_key)
-      values ('${AGENT_ID}', 'merchant', 1, 'Bank letter', 'k/admin-made');
+      values ('${AGENT_ID}', 'merchant', 1, 'Bank letter',
+        '${AGENT_ID}/merchant/1/99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
     `);
 
     await asPlatform(db);
     const [created] = await rows<{ id: number }>(
       db,
-      `select id from documents where file_key = 'k/admin-made'`,
+      `select id from documents where file_key like '%99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa'`,
     );
     const id = created.id;
 

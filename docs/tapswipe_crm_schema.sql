@@ -957,6 +957,62 @@ create table documents (
   uploaded_at timestamptz default now()
 );
 
+-- file_key must be the storage key for THIS row's agent/owner/owner_id, not an
+-- arbitrary string. The row is written by the browser (create-upload-url signs,
+-- the client inserts), so without this every one of those four columns is
+-- attacker-controlled, and only agent_id is checked -- by the insert policy,
+-- against auth.uid().
+--
+-- That gap was a live cross-agent read, demonstrated against the running stack
+-- before this constraint existed. Agent B inserts a documents row with
+-- agent_id = B (so RLS is satisfied) and file_key = an object belonging to
+-- agent A. create-download-url then resolves the row through B's own client,
+-- sees a row B is entitled to, and signs the key it finds on it with the
+-- service role. B downloads A's file. Nothing in the policies objects, because
+-- the policies only ever look at agent_id -- the leak is that file_key was
+-- never tied to it.
+--
+-- The same forgery on owner_id planted a row on another rep's merchant, where an
+-- admin reading that merchant's page would see it as that rep's document. One
+-- constraint closes both, because the key encodes all three.
+--
+-- starts_with() rather than LIKE: no pattern metacharacters to get wrong, and
+-- owner_type contains an underscore ('pre_app', 'support_ticket'), which LIKE
+-- would treat as a wildcard. It is immutable, so it is legal in a CHECK.
+--
+-- The two split_part() conjuncts make it a whole-key check rather than a prefix
+-- one. Without them '<agent>/merchant/7/' passes (a directory, which signs a URL
+-- that can never resolve) and so does '<agent>/merchant/7/a/b' (a nested key
+-- create-upload-url would never mint). Neither crosses a trust boundary, so
+-- they are here for the cheaper reason: fileKeyMatchesOwner() in
+-- supabase/functions/_shared/documents.ts enforces the same rule in front of
+-- Storage, and two layers that agree exactly are worth more than two that agree
+-- approximately. split_part returns '' for a field that isn't there, which is
+-- what makes "no fifth segment" expressible. The uuid itself is only required to
+-- be non-empty -- it is random, and there is nothing to compare it to.
+--
+-- NOT VALID on purpose, and as a separate ALTER because CREATE TABLE has no
+-- NOT VALID. Rows predating this were written by hand-rolled fixtures and dev
+-- seeds with keys like 'k/3', and a validating constraint would make
+-- `supabase db push` fail against whichever environment still has one.
+-- documents has no UPDATE policy and no UPDATE grant, so a row can never be
+-- edited into violating it -- which means NOT VALID still covers everything the
+-- app is able to create.
+--
+-- Belt and braces: create-download-url re-derives the expected prefix and
+-- refuses to sign a row that does not match, so a legacy row exempted here is
+-- still not a usable read primitive.
+alter table documents
+  add constraint documents_file_key_matches_owner
+  check (
+    starts_with(
+      file_key,
+      agent_id::text || '/' || owner_type || '/' || owner_id::text || '/'
+    )
+    and split_part(file_key, '/', 4) <> ''
+    and split_part(file_key, '/', 5) = ''
+  ) not valid;
+
 alter table documents enable row level security;
 
 create policy "select own or admin" on documents
@@ -3435,6 +3491,22 @@ $$;
 -- Neither bucket is in any migration, so a freshly started local stack has
 -- neither and every signing call 404s until they exist.
 -- tests/live/helpers/stack.ts creates both as part of provisioning.
+--
+-- SET A PER-BUCKET file_size_limit ON BOTH. This is not optional and it is
+-- not what config.toml's `[storage] file_size_limit` does. Measured on the
+-- local stack with that set to "50MiB": a 120 MiB PUT through
+-- uploadToSignedUrl was accepted, and so was a 120 MiB service-role
+-- upload. Both buckets came back from listBuckets() with
+-- file_size_limit = null, which is what was actually in force -- no
+-- ceiling at all, at any layer, so one rep with a video file could fill
+-- the project's storage quota. `documents` is provisioned at
+-- MAX_DOCUMENT_BYTES (lib/documents.ts, 50 MiB) by
+-- tests/live/helpers/stack.ts, e2e/fixtures/seed.ts and
+-- seed-dev-local.mjs; the hosted buckets need the same set from the
+-- dashboard, or via storage.updateBucket, because no migration can carry
+-- it. lib/documents.ts also refuses an over-size file client-side, which
+-- is what produces a readable message instead of a 413 from Storage --
+-- but a client-side check is a courtesy, not the boundary.
 -- =====================================================================
 
 -- =====================================================================
