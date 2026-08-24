@@ -26,7 +26,23 @@ const eslintConfig = [
   // costs no coverage.
   //
   // .next is generated build output — flat config doesn't ignore it by default.
-  { ignores: ["supabase/**", ".next/**", "next-env.d.ts"] },
+  //
+  // playwright-report/ and test-results/ are the same trap as supabase/.temp/,
+  // and it has already sprung once: the HTML reporter only unpacks its bundled
+  // trace-viewer assets when a run has something to show, so `npm run lint` was
+  // clean until an e2e test failed and then reported 3027 errors in
+  // playwright-report/trace/assets/*.js. Lint that passes or fails according to
+  // whether the last test run was green is worse than no lint. Both are
+  // gitignored, so nothing here is repo code.
+  {
+    ignores: [
+      "supabase/**",
+      ".next/**",
+      "next-env.d.ts",
+      "playwright-report/**",
+      "test-results/**",
+    ],
+  },
   ...compat.extends("next/core-web-vitals", "next/typescript"),
 ];
 

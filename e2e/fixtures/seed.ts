@@ -85,8 +85,41 @@ export function publicStackConfig(): { apiUrl: string; publishableKey: string } 
   return { apiUrl, publishableKey: match[1] };
 }
 
+/**
+ * The four owner types documents can hang off, mirroring the check constraint
+ * on documents.owner_type and DOCUMENT_OWNER_TYPES in lib/documents.ts.
+ */
+export const DOC_OWNER_TYPES = [
+  "merchant",
+  "lead",
+  "pre_app",
+  "support_ticket",
+] as const;
+
+export type DocOwnerType = (typeof DOC_OWNER_TYPES)[number];
+
+/** Where each owner type's detail page lives, for a spec to navigate to. */
+export const DOC_OWNER_PATHS: Record<DocOwnerType, string> = {
+  merchant: "/merchants",
+  lead: "/leads",
+  pre_app: "/pre-apps",
+  support_ticket: "/support-tickets",
+};
+
+/**
+ * One record of every document-owning type, per persona.
+ *
+ * Every persona gets a full set rather than only the ones a spec happens to
+ * need, because half the document matrix is "the same page, as somebody else":
+ * an agent must be refused another agent's record and an admin must reach it,
+ * and both need the *other* persona's record to exist.
+ */
+export type DocOwnerIds = Record<DocOwnerType, number>;
+
 export type SeedResult = {
   ids: Record<PersonaKey, string>;
+  /** persona -> owner type -> record id, for the document specs. */
+  docOwners: Record<PersonaKey, DocOwnerIds>;
   apiUrl: string;
 };
 
@@ -318,7 +351,215 @@ export async function seedE2E(): Promise<SeedResult> {
   const { error } = await db.from("rep_payout_rows").insert(rows);
   if (error) throw new Error(`ledger seed: ${error.message}`);
 
-  return { ids, apiUrl };
+  const docOwners = {
+    admin: await ensureDocOwners(db, "admin", ids.admin),
+    agent: await ensureDocOwners(db, "agent", ids.agent),
+    agent2: await ensureDocOwners(db, "agent2", ids.agent2),
+  } satisfies Record<PersonaKey, DocOwnerIds>;
+
+  await ensureDocumentsBucket(db);
+
+  return { ids, docOwners, apiUrl };
+}
+
+/**
+ * The private `documents` bucket, with the size ceiling the app promises.
+ *
+ * The bucket is created out-of-band in production — it is in no migration — so a
+ * freshly reset local stack has none and every signing call 404s. The size limit
+ * is re-asserted on every run rather than only at creation, because a bucket
+ * created before the limit existed keeps accepting unbounded uploads and nothing
+ * says so: config.toml's `[storage] file_size_limit` is NOT what constrains a
+ * signed upload (measured — a 120 MiB PUT was accepted with it set to 50MiB).
+ * The per-bucket limit is.
+ */
+async function ensureDocumentsBucket(db: SupabaseClient): Promise<void> {
+  const { error: createError } = await db.storage.createBucket("documents", {
+    public: false,
+    fileSizeLimit: MAX_DOCUMENT_BYTES,
+  });
+  if (createError && !/exists/i.test(createError.message)) {
+    throw new Error(`documents bucket: ${createError.message}`);
+  }
+  const { error: updateError } = await db.storage.updateBucket("documents", {
+    public: false,
+    fileSizeLimit: MAX_DOCUMENT_BYTES,
+  });
+  if (updateError) {
+    throw new Error(`documents bucket limit: ${updateError.message}`);
+  }
+}
+
+/**
+ * The upload ceiling, duplicated from lib/documents.ts.
+ *
+ * Imported rather than redeclared would be better, but this module is loaded by
+ * Playwright's config-time transpile and the `@/` alias is not wired up there.
+ * The two are pinned together by e2e/documents-edge-cases.spec.ts, which asserts
+ * the client refuses at exactly this boundary.
+ */
+const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
+
+/**
+ * One merchant, lead, pre-app and support ticket per persona.
+ *
+ * Looked up by a per-persona marker before being created, so a second run reuses
+ * them: these records accumulate notes, tasks and documents, and re-creating them
+ * each run would leave a growing pile of orphans behind (documents.owner_id has
+ * no foreign key, so nothing cleans up after a deleted owner).
+ */
+async function ensureDocOwners(
+  db: SupabaseClient,
+  persona: PersonaKey,
+  agentId: string,
+): Promise<DocOwnerIds> {
+  const marker = `E2E-DOC-${persona}`;
+
+  const find = async (
+    table: string,
+    column: string,
+  ): Promise<number | null> => {
+    const { data } = await db
+      .from(table)
+      .select("id")
+      .eq("agent_id", agentId)
+      .eq(column, marker)
+      .maybeSingle();
+    return (data?.id as number | undefined) ?? null;
+  };
+
+  const create = async (
+    table: string,
+    row: Record<string, unknown>,
+  ): Promise<number> => {
+    const { data, error } = await db
+      .from(table)
+      .insert({ agent_id: agentId, ...row })
+      .select("id")
+      .single();
+    if (error || !data) {
+      throw new Error(`${table} for ${persona}: ${error?.message ?? "no row"}`);
+    }
+    return data.id as number;
+  };
+
+  const merchant =
+    (await find("merchants", "mid")) ??
+    (await create("merchants", {
+      mid: marker,
+      dba: `E2E Docs ${persona}`,
+      legal_business_name: `E2E Docs ${persona} LLC`,
+      status: "active",
+      processor: "TSYS",
+    }));
+
+  const lead =
+    (await find("leads", "dba")) ??
+    (await create("leads", {
+      dba: marker,
+      merchant_legal_name: `E2E Docs Lead ${persona} LLC`,
+      status: "open",
+    }));
+
+  const preApp =
+    (await find("pre_apps", "dba_name")) ??
+    (await create("pre_apps", {
+      dba_name: marker,
+      legal_business_name: `E2E Docs Pre-App ${persona} LLC`,
+      status: "draft",
+    }));
+
+  const ticket =
+    (await find("support_tickets", "subject")) ??
+    (await create("support_tickets", {
+      subject: marker,
+      message: `Document panel fixture for ${persona}.`,
+      status: "open",
+      priority: "medium",
+    }));
+
+  return {
+    merchant,
+    lead,
+    pre_app: preApp,
+    support_ticket: ticket,
+  };
+}
+
+/**
+ * The metadata rows behind a file name, newest first.
+ *
+ * Paired with storageObjectExists(), this is what distinguishes a real delete
+ * from a metadata-only one — a spec cannot see Storage itself, because the bucket
+ * is private and the browser only ever holds a signed URL. Both run on the Node
+ * side with the service role, deliberately not exposed to the page, for the same
+ * reason publicStackConfig withholds that key.
+ *
+ * Capture the file_key BEFORE the action under test: once the row is gone there
+ * is nothing left to look the object up by.
+ */
+export async function documentRows(
+  fileName: string,
+): Promise<{ id: number; fileKey: string }[]> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const { data } = await db
+    .from("documents")
+    .select("id, file_key")
+    .eq("file_name", fileName)
+    .order("id", { ascending: false });
+
+  return (data ?? []).map((r) => ({
+    id: r.id as number,
+    fileKey: r.file_key as string,
+  }));
+}
+
+/** Whether a specific storage key is still in the bucket. */
+export async function storageObjectExists(fileKey: string): Promise<boolean> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const parts = fileKey.split("/");
+  const name = parts.pop() as string;
+  const { data: listed } = await db.storage
+    .from("documents")
+    .list(parts.join("/"), { limit: 1000 });
+  return (listed ?? []).some((o) => o.name === name);
+}
+
+/**
+ * Removes every documents row (and its object) a spec created, by file name.
+ *
+ * Specs upload real files, so without this each run leaves more rows on the
+ * fixture records and the "no documents attached yet" empty state becomes
+ * unreachable for whichever spec asserts on it.
+ */
+export async function clearDocuments(fileNames: string[]): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const { data: rows } = await db
+    .from("documents")
+    .select("id, file_key")
+    .in("file_name", fileNames);
+  if (!rows || rows.length === 0) return;
+
+  const keys = rows.map((r) => r.file_key as string);
+  if (keys.length > 0) await db.storage.from("documents").remove(keys);
+  await db
+    .from("documents")
+    .delete()
+    .in(
+      "id",
+      rows.map((r) => r.id as number),
+    );
 }
 
 /**

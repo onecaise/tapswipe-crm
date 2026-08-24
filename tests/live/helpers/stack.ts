@@ -197,11 +197,33 @@ export const PERSONA_EMAILS = Object.fromEntries(
   PERSONAS.map((persona) => [persona.key, persona.email]),
 ) as Record<PersonaKey, string>;
 
+/**
+ * The four values documents.owner_type allows, and the table each one's
+ * agent_id comes from.
+ *
+ * Mirrors OWNER_TABLES in supabase/functions/_shared/documents.ts. Every one of
+ * them is provisioned per persona, because "works for merchants" was true of the
+ * document panel for months while three of the four were untested — and one of
+ * them (support_ticket) had no UI at all.
+ */
+export const OWNER_TABLES = {
+  merchant: "merchants",
+  lead: "leads",
+  pre_app: "pre_apps",
+  support_ticket: "support_tickets",
+} as const;
+
+export type OwnerType = keyof typeof OWNER_TABLES;
+
+export const OWNER_TYPES = Object.keys(OWNER_TABLES) as OwnerType[];
+
 export type Fixtures = {
   userIds: Record<PersonaKey, string>;
   tokens: Record<PersonaKey, string>;
   /** merchants.id owned by each persona. */
   merchantIds: Record<PersonaKey, number>;
+  /** One record of every document-owning type, per persona. */
+  ownerIds: Record<PersonaKey, Record<OwnerType, number>>;
   /** documents.id owned by each persona, each with real bytes in Storage. */
   documentIds: Record<PersonaKey, number>;
   /** The bytes behind the owner's document, for a round-trip comparison. */
@@ -212,6 +234,16 @@ export type Fixtures = {
 
 export const MISSING_ID = 987654;
 export const BUCKET = "documents";
+
+/**
+ * The per-bucket upload ceiling, mirroring MAX_DOCUMENT_BYTES in lib/documents.ts.
+ *
+ * Redeclared rather than imported because this suite runs against the stack and
+ * not the app, and pulling an app module in for one number would make the fixture
+ * helper depend on the `@/` alias. tests/live/document-urls.test.ts asserts the
+ * server actually refuses at this boundary, which is what keeps the two honest.
+ */
+export const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
 
 /**
  * The second private bucket, holding uploaded residual reports.
@@ -256,18 +288,34 @@ export async function provisionFixtures(): Promise<Fixtures> {
 
   // Both buckets are created out-of-band in production (neither is in any
   // migration), so they have to be created here too or every signing call 404s.
+  //
+  // fileSizeLimit is applied on every run, not only at creation: a bucket that
+  // predates the limit keeps accepting unbounded uploads and nothing says so.
+  // It is also the ONLY thing that limits an upload — config.toml's
+  // `[storage] file_size_limit` does not apply to a signed PUT (measured: 120 MiB
+  // accepted with it set to 50MiB), and both buckets came back from listBuckets()
+  // with file_size_limit = null.
   for (const bucket of [BUCKET, RESIDUAL_BUCKET]) {
     const { error: bucketError } = await admin.storage.createBucket(bucket, {
       public: false,
+      fileSizeLimit: MAX_DOCUMENT_BYTES,
     });
     if (bucketError && !/exists/i.test(bucketError.message)) {
       throw new Error(`Could not create bucket ${bucket}: ${bucketError.message}`);
+    }
+    const { error: limitError } = await admin.storage.updateBucket(bucket, {
+      public: false,
+      fileSizeLimit: MAX_DOCUMENT_BYTES,
+    });
+    if (limitError) {
+      throw new Error(`Could not limit bucket ${bucket}: ${limitError.message}`);
     }
   }
 
   const userIds = {} as Record<PersonaKey, string>;
   const tokens = {} as Record<PersonaKey, string>;
   const merchantIds = {} as Record<PersonaKey, number>;
+  const ownerIds = {} as Record<PersonaKey, Record<OwnerType, number>>;
   const documentIds = {} as Record<PersonaKey, string | number>;
   const ownerDocumentBody = "live round-trip payload";
 
@@ -320,6 +368,64 @@ export async function provisionFixtures(): Promise<Fixtures> {
       );
     }
     merchantIds[persona.key] = merchant.id;
+
+    // The other three document-owning types. Each function resolves the parent
+    // record's agent_id through a per-owner_type table lookup, so "an agent
+    // cannot upload against a record that isn't theirs" is four separate code
+    // paths through OWNER_TABLES, not one — and only the merchant one was ever
+    // exercised.
+    const { data: lead, error: leadError } = await admin
+      .from("leads")
+      .insert({
+        agent_id: created.user.id,
+        dba: `Live ${persona.key} Lead`,
+        merchant_legal_name: `Live ${persona.fullName} Lead LLC`,
+        status: "open",
+      })
+      .select("id")
+      .single();
+    if (leadError || !lead) {
+      throw new Error(`Could not insert lead for ${persona.email}: ${leadError?.message}`);
+    }
+
+    const { data: preApp, error: preAppError } = await admin
+      .from("pre_apps")
+      .insert({
+        agent_id: created.user.id,
+        dba_name: `Live ${persona.key} Pre-App`,
+        legal_business_name: `Live ${persona.fullName} Pre-App LLC`,
+        status: "draft",
+      })
+      .select("id")
+      .single();
+    if (preAppError || !preApp) {
+      throw new Error(
+        `Could not insert pre-app for ${persona.email}: ${preAppError?.message}`,
+      );
+    }
+
+    const { data: ticket, error: ticketError } = await admin
+      .from("support_tickets")
+      .insert({
+        agent_id: created.user.id,
+        subject: `Live ${persona.key} Ticket`,
+        message: "Document fixture.",
+        status: "open",
+      })
+      .select("id")
+      .single();
+    if (ticketError || !ticket) {
+      throw new Error(
+        `Could not insert ticket for ${persona.email}: ${ticketError?.message}`,
+      );
+    }
+
+    ownerIds[persona.key] = {
+      merchant: merchant.id,
+      lead: lead.id,
+      pre_app: preApp.id,
+      support_ticket: ticket.id,
+    };
 
     // A real object in Storage, because createSignedUrl fails on a key that
     // isn't there — a download test against a dangling file_key would report
@@ -379,6 +485,7 @@ export async function provisionFixtures(): Promise<Fixtures> {
     userIds,
     tokens,
     merchantIds,
+    ownerIds,
     documentIds: documentIds as Record<PersonaKey, number>,
     ownerDocumentBody,
     missingId: MISSING_ID,
@@ -453,42 +560,76 @@ export async function teardownFixtures(): Promise<void> {
   );
 
   for (const user of stale) {
-    const { data: objects } = await admin.storage
-      .from(BUCKET)
-      .list(`${user.id}/merchant`, { limit: 1000 });
-    // list() is one level deep, so walk merchant/<id>/ to reach the files.
-    for (const dir of objects ?? []) {
-      const { data: files } = await admin.storage
+    // All four owner types, not just merchant. The key is
+    // {agent_id}/{owner_type}/{owner_id}/{uuid}, so anything filed against a
+    // lead, pre-app or ticket used to survive teardown — invisible, since the
+    // bucket is private, and cumulative across runs.
+    for (const ownerType of OWNER_TYPES) {
+      const { data: objects } = await admin.storage
         .from(BUCKET)
-        .list(`${user.id}/merchant/${dir.name}`, { limit: 1000 });
-      const paths = (files ?? []).map(
-        (f) => `${user.id}/merchant/${dir.name}/${f.name}`,
-      );
-      if (paths.length > 0) await admin.storage.from(BUCKET).remove(paths);
+        .list(`${user.id}/${ownerType}`, { limit: 1000 });
+      // list() is one level deep, so walk {owner_type}/<id>/ to reach the files.
+      for (const dir of objects ?? []) {
+        const { data: files } = await admin.storage
+          .from(BUCKET)
+          .list(`${user.id}/${ownerType}/${dir.name}`, { limit: 1000 });
+        const paths = (files ?? []).map(
+          (f) => `${user.id}/${ownerType}/${dir.name}/${f.name}`,
+        );
+        if (paths.length > 0) await admin.storage.from(BUCKET).remove(paths);
+      }
     }
 
     // Collected before the delete, because the delete is what makes them
-    // unfindable — and the cross-agent audit trigger keys its rows on the
-    // merchant id, not the agent.
-    const { data: merchants } = await admin
-      .from("merchants")
-      .select("id")
-      .eq("agent_id", user.id);
-    const merchantIds = (merchants ?? []).map((m) => String(m.id));
+    // unfindable — and the cross-agent audit trigger keys its rows on the owner
+    // record's id, not the agent.
+    //
+    // All four document-owning tables, in FK order: pre_apps.lead_id references
+    // leads (`on delete set null`, so it does not block, but the pre-app has to
+    // be reachable) and support_tickets.merchant_id references merchants, so
+    // tickets and pre-apps go before the records they point at.
+    const ownerRowIds = new Map<string, string[]>();
+    for (const table of [
+      "support_tickets",
+      "pre_apps",
+      "merchants",
+      "leads",
+    ] as const) {
+      const { data: found } = await admin
+        .from(table)
+        .select("id")
+        .eq("agent_id", user.id);
+      ownerRowIds.set(table, (found ?? []).map((row) => String(row.id)));
+    }
 
     await admin.from("documents").delete().eq("agent_id", user.id);
-    await admin.from("merchants").delete().eq("agent_id", user.id);
-
-    // The delete above fires log_cross_agent_change() — a service-role
-    // connection has no auth.uid(), so it counts as cross-agent and each removed
-    // merchant leaves a cross_agent_delete row behind. Cleared here, after the
-    // delete rather than before, or the rows this generates would outlive it.
-    if (merchantIds.length > 0) {
-      await admin
-        .from("audit_log")
+    for (const table of ownerRowIds.keys()) {
+      const { error: ownerDeleteError } = await admin
+        .from(table)
         .delete()
-        .eq("table_name", "merchants")
-        .in("row_id", merchantIds);
+        .eq("agent_id", user.id);
+      // Checked for the same reason deleteUser's error is: a silent FK failure
+      // here leaves the record behind, deleteUser then fails on the profiles
+      // reference, and the persona survives into the next run.
+      if (ownerDeleteError) {
+        throw new Error(
+          `Could not delete ${table} for ${user.email}: ${ownerDeleteError.message}`,
+        );
+      }
+    }
+
+    // The deletes above fire log_cross_agent_change() — a service-role
+    // connection has no auth.uid(), so every removed row counts as cross-agent
+    // and leaves a cross_agent_delete behind. Cleared here, after the delete
+    // rather than before, or the rows this generates would outlive it.
+    for (const [table, ids] of ownerRowIds) {
+      if (ids.length > 0) {
+        await admin
+          .from("audit_log")
+          .delete()
+          .eq("table_name", table)
+          .in("row_id", ids);
+      }
     }
 
     // Before deleteUser, not after, and not optional: audit_log.actor_id
