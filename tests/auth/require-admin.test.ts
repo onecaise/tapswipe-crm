@@ -92,23 +92,43 @@ beforeEach(() => {
 });
 
 describe("getCurrentProfile", () => {
-  it("returns null when there is no session", async () => {
-    expect(await getCurrentProfile()).toBeNull();
+  it("reports anonymous when there is no session", async () => {
+    expect(await getCurrentProfile()).toEqual({ status: "anonymous" });
   });
 
-  it("returns null for a signed-in user with no profile row", async () => {
+  it("reports missing for a signed-in user with no profile row", async () => {
     claimsSub = AGENT.id;
     profileRow = null;
 
     // The ghost-user state: an auth.users row with no profiles row.
-    expect(await getCurrentProfile()).toBeNull();
+    expect(await getCurrentProfile()).toEqual({ status: "missing" });
+  });
+
+  it("reports unavailable — not missing — when the query itself fails", async () => {
+    claimsSub = AGENT.id;
+    profileRow = null;
+    profileError = {
+      message: "column profiles.last_viewed_notifications_at does not exist",
+    };
+
+    // The exact shape of the 2026-09-02 outage: the row existed, the select
+    // named a column the deployed schema had not been migrated to, and the old
+    // code reported it as an absent profile. `missing` here would be a lie,
+    // and it is a lie that sends whoever is debugging to the wrong database.
+    expect(await getCurrentProfile()).toEqual({
+      status: "unavailable",
+      message: "column profiles.last_viewed_notifications_at does not exist",
+    });
   });
 
   it("returns the profile for a signed-in user", async () => {
     claimsSub = AGENT.id;
     profileRow = AGENT;
 
-    expect(await getCurrentProfile()).toEqual(AGENT);
+    expect(await getCurrentProfile()).toEqual({
+      status: "ok",
+      profile: AGENT,
+    });
   });
 });
 
@@ -124,6 +144,19 @@ describe("requireUser", () => {
     // Sending them to /auth/login would loop: they're already authenticated, so
     // logging in again succeeds and lands them right back here.
     await expectRedirect(requireUser, "/auth/error?error=no-profile");
+  });
+
+  it("routes an unreadable profile somewhere else entirely", async () => {
+    claimsSub = AGENT.id;
+    profileRow = null;
+    profileError = { message: "column profiles.nope does not exist" };
+
+    // The distinction this whole pair exists for. Both users are signed in and
+    // neither gets a profile back, but only one of them actually lacks a row —
+    // and only one of them is fixed by an admin creating an account. Sending
+    // both to no-profile is what made the 2026-09-02 outage read as an
+    // account-provisioning problem for as long as it did.
+    await expectRedirect(requireUser, "/auth/error?error=profile-unavailable");
   });
 
   it("redirects a deactivated user to the error page", async () => {

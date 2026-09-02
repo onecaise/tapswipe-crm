@@ -36,8 +36,47 @@ export type Profile = {
 };
 
 /**
- * The caller's own profile row, or null if they aren't signed in or have no
- * profile row at all.
+ * The columns getCurrentProfile() reads, as one exported string.
+ *
+ * Exported so tests/deployed/schema-drift.test.ts can probe the *real* query
+ * against each deployed project rather than a copy of it that would quietly
+ * fall out of step. That test exists because this select is what broke
+ * production on 2026-09-02: it named last_viewed_notifications_at while the
+ * deployed schema had not been migrated to have it, and every signed-in user
+ * was turned away. Any column added here is automatically covered from then on.
+ */
+export const PROFILE_SELECT =
+  "id, full_name, role, is_active, must_change_password, last_viewed_notifications_at, created_at";
+/**
+ * Why this returns a tagged result rather than `Profile | null`.
+ *
+ * It used to return null for three different things: no session, no profiles
+ * row, and "the query failed". requireUser() mapped the last two onto the same
+ * /auth/error?error=no-profile, and on 2026-09-02 that cost a production
+ * outage — a migration adding profiles.last_viewed_notifications_at had not
+ * been pushed, so the select 400'd with `column ... does not exist`, and every
+ * signed-in user was told they had no profile while their row sat right there.
+ * The error page named the one cause that was not the problem.
+ *
+ * A failed read is not evidence that a row is absent, so it no longer claims to
+ * be. Each state below is a different thing to go and fix.
+ */
+export type ProfileLookup =
+  /** Signed in, profile row read. */
+  | { status: "ok"; profile: Profile }
+  /** No usable session. */
+  | { status: "anonymous" }
+  /** Authenticated, but genuinely no profiles row — the ghost-user state. */
+  | { status: "missing" }
+  /**
+   * The lookup itself failed. The row may well exist and be perfectly fine;
+   * what is broken is our ability to read it. Carries the message, because the
+   * cause is usually in it verbatim.
+   */
+  | { status: "unavailable"; message: string };
+
+/**
+ * The caller's own profile row, as one of the four states above.
  *
  * This is a Tier 1 read: the own-row branch of the `profiles` select policy
  * (`id = auth.uid()`) makes it work for agents and admins alike, so no service
@@ -45,7 +84,7 @@ export type Profile = {
  * `is_active` — which is what lets `requireUser()` below tell a deactivated
  * user why they're being turned away instead of showing them an empty app.
  */
-export async function getCurrentProfile(): Promise<Profile | null> {
+export async function getCurrentProfile(): Promise<ProfileLookup> {
   const supabase = await createClient();
 
   const { data: claimsData, error: claimsError } =
@@ -53,37 +92,54 @@ export async function getCurrentProfile(): Promise<Profile | null> {
   const userId = claimsData?.claims?.sub;
 
   if (claimsError || !userId) {
-    return null;
+    return { status: "anonymous" };
   }
 
   const { data, error } = await supabase
     .from("profiles")
-    .select(
-      "id, full_name, role, is_active, must_change_password, last_viewed_notifications_at, created_at",
-    )
+    .select(PROFILE_SELECT)
     .eq("id", userId)
     .maybeSingle();
 
-  if (error || !data) {
-    // An auth.users row with no matching profiles row is the "ghost user"
-    // state §8 of the master plan warns about. Return null rather than
-    // throwing; callers decide how to handle it.
-    return null;
+  // Checked before the row, and kept separate from it. A 400 here means the
+  // query is wrong for this database — most often a column this build selects
+  // that the deployed schema has not been migrated to yet — and reporting that
+  // as an absent profile sends whoever is debugging it to auth.users, which is
+  // the one place the answer is not.
+  if (error) {
+    return { status: "unavailable", message: error.message };
   }
 
-  return data as Profile;
+  if (!data) {
+    // An auth.users row with no matching profiles row is the "ghost user"
+    // state §8 of the master plan warns about. Callers decide how to handle it;
+    // nothing here throws.
+    return { status: "missing" };
+  }
+
+  return { status: "ok", profile: data as Profile };
 }
 
 /**
  * Signed-in, non-deactivated users only. Returns their profile.
  *
- * Three distinct failure cases, deliberately routed differently:
+ * Four distinct failure cases, deliberately routed differently:
  *   - not signed in            -> /auth/login
- *   - signed in, no profile    -> /auth/error (redirecting to login would
- *                                 loop: they'd log in fine and bounce back)
- *   - signed in, deactivated   -> /auth/error, because RLS now returns zero
- *                                 rows for them and an unexplained empty app
- *                                 is a worse answer than being told why
+ *   - signed in, no profile    -> /auth/error?error=no-profile (redirecting to
+ *                                 login would loop: they'd log in fine and
+ *                                 bounce right back here)
+ *   - profile unreadable       -> /auth/error?error=profile-unavailable, which
+ *                                 is NOT the same answer as having no profile.
+ *                                 See ProfileLookup above for what conflating
+ *                                 the two cost.
+ *   - signed in, deactivated   -> /auth/error?error=account-deactivated,
+ *                                 because RLS now returns zero rows for them
+ *                                 and an unexplained empty app is a worse
+ *                                 answer than being told why
+ *
+ * The session check is getCurrentProfile's, not a second one here: it already
+ * calls getClaims() and applies the identical test, so doing it again first
+ * only meant every page load paid for two.
  *
  * Wrapped in React's cache() so the (app) route-group layout and the page it
  * wraps share one lookup. Both need the profile — the layout for the sidebar's
@@ -93,24 +149,31 @@ export async function getCurrentProfile(): Promise<Profile | null> {
  * another's render.
  */
 export const requireUser = cache(async function requireUser(): Promise<Profile> {
-  const supabase = await createClient();
-  const { data: claimsData } = await supabase.auth.getClaims();
+  const lookup = await getCurrentProfile();
 
-  if (!claimsData?.claims?.sub) {
+  if (lookup.status === "anonymous") {
     redirect("/auth/login");
   }
 
-  const profile = await getCurrentProfile();
-
-  if (!profile) {
+  if (lookup.status === "missing") {
     redirect("/auth/error?error=no-profile");
   }
 
-  if (!profile.is_active) {
+  if (lookup.status === "unavailable") {
+    // The message is deliberately not put in the URL: it is a database error
+    // string on a page shown to whoever just failed to get in. It goes to the
+    // server log, where the person who needs it is actually looking.
+    console.error(
+      `[requireUser] profile lookup failed, not an absent profile: ${lookup.message}`,
+    );
+    redirect("/auth/error?error=profile-unavailable");
+  }
+
+  if (!lookup.profile.is_active) {
     redirect("/auth/error?error=account-deactivated");
   }
 
-  return profile;
+  return lookup.profile;
 });
 
 /**
