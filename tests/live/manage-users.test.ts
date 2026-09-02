@@ -313,6 +313,113 @@ describe("create-user", () => {
     expect(await countUsers()).toBe(1);
   });
 
+  it("resumes a half-created account instead of refusing the address", async () => {
+    // The orphan this simulates is what a create-user call leaves behind when
+    // the process dies between createUser and the profiles insert — a timeout,
+    // a recycled isolate, a redeploy mid-request. The rollback in the function
+    // cannot fire for that, because there is no longer anything running to fire
+    // it, so the leftover is built here directly: an auth.users row with the
+    // right address and deliberately no profiles row.
+    const orphanEmail = "live-orphaned-rep@tapswipe.test";
+    const admin = adminClient();
+
+    const { data: orphan, error: orphanError } =
+      await admin.auth.admin.createUser({
+        email: orphanEmail,
+        password: PASSWORD,
+        email_confirm: true,
+      });
+    expect(orphanError, "could not stage the orphan").toBe(null);
+
+    const orphanId = String(orphan!.user!.id);
+    createdUserIds.push(orphanId);
+
+    // The precondition, asserted rather than assumed: staging an orphan that
+    // already had a profile would make the resume below pass for the wrong
+    // reason.
+    const { data: before } = await admin
+      .from("profiles")
+      .select("id")
+      .eq("id", orphanId)
+      .maybeSingle();
+    expect(before, "the staged orphan must have no profile").toBe(null);
+
+    const response = await invoke(
+      "create-user",
+      { full_name: "Live Orphaned Rep", email: orphanEmail, role: "agent" },
+      fixtures.tokens.admin,
+    );
+
+    // 201, not 409. A 409 here is the bug: the address is taken by a row that
+    // is not a usable account, and answering "already exists" leaves a login
+    // that reaches /auth/error?error=no-profile with no way back — profiles has
+    // no insert policy, so nothing in the app can repair it.
+    expect(response.status, response.raw).toBe(201);
+    expect(response.body.resumedOrphanedAuthUser).toBe(true);
+
+    // Adopted, not replaced. A second auth.users row for the same person would
+    // be its own problem: the access model depends on agent_id naming one human.
+    expect(response.body.user_id).toBe(orphanId);
+
+    const { data: profile } = await admin
+      .from("profiles")
+      .select("full_name, role, is_active, must_change_password, email")
+      .eq("id", orphanId)
+      .single();
+
+    expect(profile).toMatchObject({
+      full_name: "Live Orphaned Rep",
+      role: "agent",
+      is_active: true,
+      must_change_password: true,
+      email: orphanEmail,
+    });
+
+    // The returned password has to be live, and the point of resetting it is
+    // that the interrupted attempt's password was generated in a process that
+    // died before returning it — so nobody has ever seen it, and reusing it
+    // would make the response a lie.
+    const temporaryPassword = String(response.body.temporary_password);
+    const signIn = await anonClient().auth.signInWithPassword({
+      email: orphanEmail,
+      password: temporaryPassword,
+    });
+    expect(signIn.error, "the returned password should sign in").toBe(null);
+
+    // And the password the orphan was staged with is gone, which is what makes
+    // "shown once" true for the resumed account too.
+    const stale = await anonClient().auth.signInWithPassword({
+      email: orphanEmail,
+      password: PASSWORD,
+    });
+    expect(stale.error, "the pre-resume password should no longer work").not.toBe(
+      null,
+    );
+
+    // A distinct verb, so the log shows that an account was finished rather
+    // than made — every occurrence of this is a create that failed half-way.
+    const { data: audit } = await admin
+      .from("audit_log")
+      .select("action")
+      .eq("row_id", orphanId);
+    expect(audit).toEqual([{ action: "resume_create_user" }]);
+  });
+
+  it("still refuses an address whose account is complete", async () => {
+    // The other half of the pair, and the one the resume path must not swallow.
+    // `email` was created complete by the first test in this block, so this has
+    // to stay a 409 — otherwise "resume" would reset a working rep's password
+    // for any admin who retyped an address that already belonged to someone.
+    const response = await invoke(
+      "create-user",
+      { full_name: "Not A Resume", email, role: "agent" },
+      fixtures.tokens.admin,
+    );
+
+    expect(response.status, response.raw).toBe(409);
+    expect(String(response.body.error)).toMatch(/already exists/i);
+  });
+
   it("validates the body before touching anything", async () => {
     for (const body of [
       { full_name: "", email: "a@b.co", role: "agent" },

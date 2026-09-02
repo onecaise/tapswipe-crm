@@ -126,6 +126,21 @@ export function NewUserForm() {
           </p>
         </div>
 
+        {created.resumedOrphanedAuthUser && (
+          <Callout tone="warning">
+            <p className="font-medium">
+              This finished an account that was left half-created
+            </p>
+            <p className="mt-1">
+              A sign-in already existed for {created.email} with no profile
+              attached, so an earlier attempt to create it must have been cut
+              short. It has been completed rather than refused, and the password
+              above is a new one — any password issued by that earlier attempt
+              no longer works.
+            </p>
+          </Callout>
+        )}
+
         {created.auditWriteFailed && (
           <Callout tone="warning">
             The account was created, but the audit log entry could not be

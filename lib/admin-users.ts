@@ -15,6 +15,13 @@ export type CreatedUser = {
   email: string;
   /** Shown once. Never persisted, here or anywhere. */
   temporary_password: string;
+  /**
+   * Set when create-user finished an account an earlier attempt left half-built
+   * — an auth.users row with no profiles row — instead of refusing the address
+   * as taken. The account is complete either way; this is why an address the
+   * admin may have just been told already existed went through.
+   */
+  resumedOrphanedAuthUser?: boolean;
   auditWriteFailed?: boolean;
 };
 

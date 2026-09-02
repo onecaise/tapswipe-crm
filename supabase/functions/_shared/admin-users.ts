@@ -204,3 +204,85 @@ export async function writeAudit(
   });
   return error ?? null;
 }
+
+/**
+ * The minimum surface of the service-role client's Auth admin API needed to
+ * look a user up by address. Structural, for the same reason as the types above.
+ */
+type AuthAdminClient = {
+  auth: {
+    admin: {
+      listUsers: (params: { page: number; perPage: number }) => PromiseLike<{
+        data: { users?: { id: string; email?: string | null }[] } | null;
+        error: unknown;
+      }>;
+    };
+  };
+};
+
+export type AuthUser = { id: string; email?: string | null };
+
+/**
+ * Three outcomes, kept distinct on purpose: found, definitively absent, and
+ * "the lookup itself failed". Collapsing the last two would make a transient
+ * Auth error look like proof that no such account exists, which is the one
+ * conclusion a caller must not draw from a failed read.
+ */
+export type AuthUserLookup =
+  | { ok: true; user: AuthUser | null }
+  | { ok: false; error: string };
+
+const USER_PAGE_SIZE = 200;
+
+/**
+ * Bounded so a lookup can never become an unbounded scan on a project that grew
+ * past what anyone expected. 50 x 200 is 10,000 accounts — orders of magnitude
+ * past this CRM's ceiling, and if it is ever exceeded the answer is a "not
+ * found" that the caller reports rather than a function that hangs.
+ */
+const USER_MAX_PAGES = 50;
+
+/**
+ * Finds the auth.users row for an address.
+ *
+ * GoTrue's admin API has no get-by-email, so this pages listUsers and matches
+ * locally. Addresses are compared lower-cased because callers normalise before
+ * writing but GoTrue is the authority on what it actually stored.
+ *
+ * Only for use where profiles cannot answer the question. profiles carries a
+ * denormalised `email` copy and is the cheaper read — but the case this exists
+ * for is precisely an auth.users row with no profiles row, which that copy
+ * cannot see by definition.
+ */
+export async function findAuthUserByEmail(
+  supabaseAdmin: AuthAdminClient,
+  email: string,
+): Promise<AuthUserLookup> {
+  const wanted = email.trim().toLowerCase();
+
+  for (let page = 1; page <= USER_MAX_PAGES; page++) {
+    const { data, error } = await supabaseAdmin.auth.admin.listUsers({
+      page,
+      perPage: USER_PAGE_SIZE,
+    });
+
+    if (error) {
+      const message =
+        typeof error === "object" && error !== null && "message" in error
+          ? String((error as { message: unknown }).message)
+          : "unknown error";
+      return { ok: false, error: message };
+    }
+
+    const users = data?.users ?? [];
+    const match = users.find(
+      (user) => (user.email ?? "").trim().toLowerCase() === wanted,
+    );
+    if (match) return { ok: true, user: match };
+
+    // A short page is the last page.
+    if (users.length < USER_PAGE_SIZE) return { ok: true, user: null };
+  }
+
+  return { ok: true, user: null };
+}
