@@ -114,17 +114,104 @@ function pathFor(
 const panel = (page: Page) => page.getByRole("heading", { name: "Documents" });
 
 /**
- * Picks a file and waits for the upload to settle.
+ * Waits until React has attached its listeners to the file input.
  *
- * Waits on the LIST rather than on the "Uploading…" text: the whole point of
- * driving this in a browser is the state after three network round trips, and
- * "Uploading…" can come and go between two polls.
+ * `page.goto()` resolves on `load`, which is BEFORE hydration. Until React
+ * attaches, the input is a plain DOM node: `setInputFiles` still dispatches
+ * `change` — unconditionally, as this file notes elsewhere — and that event
+ * lands on nothing. React 19 replays discrete pre-hydration events once it
+ * attaches, which is why picking too early usually works anyway; "usually" is
+ * the problem. When the replay is dropped, `upload()` never runs, and the
+ * symptom is total silence: no "Uploading…", no error, no request, no row.
+ *
+ * Measured rather than guessed. In the two-tabs test below the second tab was
+ * unhydrated at pick time on 12 runs out of 12, and the upload vanished on 2 of
+ * them; gating on this made it 12 out of 12 clean. See the note on that test.
+ *
+ * The probe reads React's internal props off the element, because that is the
+ * fact we actually need and nothing in this app's markup changes at hydration.
+ * It is tied to React's private naming, so if a future major renames those keys
+ * this throws a named error on timeout rather than quietly returning — a loud
+ * failure here is recoverable, a silent one puts the flake straight back.
  */
+async function waitForHydration(page: Page): Promise<void> {
+  const attached = async () =>
+    page.evaluate(() => {
+      const el = document.querySelector("input[type=file]");
+      return el
+        ? Object.keys(el).some((key) => key.startsWith("__react"))
+        : false;
+    });
+
+  const deadline = Date.now() + 15_000;
+  while (!(await attached())) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        "The file input never hydrated within 15s. If React renamed its " +
+          "internal props (__reactFiber$/__reactProps$), this probe needs " +
+          "updating — see waitForHydration in this file.",
+      );
+    }
+    await page.waitForTimeout(25);
+  }
+}
+
+/**
+ * Reloads, once the upload's own `router.refresh()` has stopped navigating.
+ *
+ * A plain `reload()` after an upload races that refresh. When Next is already
+ * navigating — including its own "Failed to fetch RSC payload, falling back to
+ * browser navigation", which two concurrent refreshes on one record provoke —
+ * our reload is superseded and Playwright reports
+ * `net::ERR_ABORTED; maybe frame was detached?`. Measured: 1 run in 12, with
+ * BOTH documents present on the page, so the data was never the problem.
+ *
+ * Waiting for the network to quieten first removes the overlap; the retry is
+ * the backstop, and it is not papering over anything. ERR_ABORTED means
+ * precisely "a different navigation won", which is a fact about Next's router
+ * rather than about two sessions colliding — the distinction this whole spec
+ * exists to keep straight.
+ */
+async function freshRender(page: Page): Promise<void> {
+  await page.waitForLoadState("networkidle").catch(() => {});
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await page.reload();
+      return;
+    } catch (error) {
+      if (!String(error).includes("ERR_ABORTED")) throw error;
+      await page.waitForTimeout(250);
+    }
+  }
+  // Out of retries: let this one throw, so a genuine navigation fault is not
+  // swallowed by the loop above.
+  await page.reload();
+}
+
+/**
+ * Picks a file, once the panel can actually respond to the pick.
+ *
+ * Every pick in this file goes through here rather than calling setInputFiles
+ * directly, so the gate cannot be forgotten at a new call site. Almost all of
+ * them are the first interaction after a goto, which is exactly the shape that
+ * was losing uploads. It returns immediately on an already-hydrated page, so it
+ * costs nothing on the common path.
+ */
+async function pickFile(
+  page: Page,
+  files: Parameters<ReturnType<Page["getByLabel"]>["setInputFiles"]>[0],
+): Promise<void> {
+  await waitForHydration(page);
+  await page.getByLabel("File").setInputFiles(files);
+}
+
+/** Picks a file described by name and body, the common case. */
 async function uploadFile(
   page: Page,
   file: { name: string; body: string; mimeType?: string },
 ): Promise<void> {
-  await page.getByLabel("File").setInputFiles({
+  await pickFile(page, {
     name: file.name,
     mimeType: file.mimeType ?? "text/plain",
     buffer: Buffer.from(file.body),
@@ -235,7 +322,7 @@ test.describe("client-side refusals happen before any upload", () => {
       }
     });
 
-    await page.getByLabel("File").setInputFiles({
+    await pickFile(page, {
       name: "empty.txt",
       mimeType: "text/plain",
       buffer: Buffer.from([]),
@@ -261,7 +348,7 @@ test.describe("client-side refusals happen before any upload", () => {
     // From a path on disk, not an inline buffer — Playwright refuses a buffer
     // over 50 MB, which is (awkwardly) just under the boundary this test is
     // about.
-    await page.getByLabel("File").setInputFiles(oversizeFile());
+    await pickFile(page, oversizeFile());
 
     // The numbers matter more than the wording: "too big" leaves the rep
     // guessing whether 40 MB would work.
@@ -293,7 +380,7 @@ test.describe("client-side refusals happen before any upload", () => {
       buffer: Buffer.from("second time lucky"),
     };
 
-    await page.getByLabel("File").setInputFiles(file);
+    await pickFile(page, file);
     // The function's own message, which is the other half of this fix.
     await expect(page.getByText("Storage is having a moment")).toBeVisible();
 
@@ -312,7 +399,7 @@ test.describe("client-side refusals happen before any upload", () => {
     // and asserting on it alone would be a spec that proves nothing.
     await expect(page.getByLabel("File")).toHaveValue("");
 
-    await page.getByLabel("File").setInputFiles(file);
+    await pickFile(page, file);
     await expect(page.getByText("e2e-retry.txt")).toBeVisible();
     // And cleared again on the way out of a success.
     await expect(page.getByLabel("File")).toHaveValue("");
@@ -356,7 +443,7 @@ test.describe("failure states leave nothing behind", () => {
       await route.continue();
     });
 
-    await page.getByLabel("File").setInputFiles({
+    await pickFile(page, {
       name: "e2e-orphan.txt",
       mimeType: "text/plain",
       buffer: Buffer.from("bytes with no row"),
@@ -398,7 +485,7 @@ test.describe("failure states leave nothing behind", () => {
       }),
     );
 
-    await page.getByLabel("File").setInputFiles({
+    await pickFile(page, {
       name: "e2e-signfail.txt",
       mimeType: "text/plain",
       buffer: Buffer.from("x"),
@@ -466,7 +553,7 @@ test.describe("a drop mid-upload", () => {
       route.abort("connectionreset"),
     );
 
-    await page.getByLabel("File").setInputFiles({
+    await pickFile(page, {
       name: "e2e-dropped.txt",
       mimeType: "text/plain",
       buffer: Buffer.from("never arrives"),
@@ -521,7 +608,7 @@ test.describe("who sees the panel", () => {
     await page.goto(pathFor("support_ticket", owners.agent));
     await expect(panel(page)).toBeVisible();
 
-    await page.getByLabel("File").setInputFiles({
+    await pickFile(page, {
       name: "e2e-admin-upload.txt",
       mimeType: "text/plain",
       buffer: Buffer.from("uploaded by an admin"),
@@ -660,7 +747,7 @@ test.describe("forging the call the UI would not make", () => {
     });
     const otherPage = await otherContext.newPage();
     await otherPage.goto(pathFor("merchant", owners.agent2));
-    await otherPage.getByLabel("File").setInputFiles({
+    await pickFile(otherPage, {
       name: "e2e-other-rep.txt",
       mimeType: "text/plain",
       buffer: Buffer.from("belongs to agent two"),
@@ -716,6 +803,23 @@ test.describe("two sessions on one record", () => {
     await one.goto(path);
     await two.goto(path);
 
+    // Both tabs, before either pick. This is what made the test flaky, and the
+    // asymmetry is worth seeing: `one` hydrates during `two`'s navigation, while
+    // `two` is driven the instant its own goto resolves — and goto resolves on
+    // `load`, which is before hydration. Probing it directly, `two` was
+    // unhydrated at pick time on 12 runs out of 12, and its upload silently
+    // never happened on 2 of them: React usually replays a pre-hydration change
+    // event, but not always, and when it does not there is no spinner, no error
+    // and no request to find. With this gate, 12 runs out of 12 are clean.
+    //
+    // Note what the old version was really asserting. It waited for "Uploading…"
+    // to be hidden, which an event that never fired satisfies immediately, then
+    // reloaded — so the test claimed to be about two sessions colliding while
+    // actually measuring React's pre-hydration event replay.
+    for (const tab of [one, two]) {
+      await waitForHydration(tab);
+    }
+
     // Started together on purpose. Each upload gets its own signed key with a
     // fresh uuid, so nothing should collide — but the failure mode is silent
     // (one object overwriting the other, two rows resolving to the same bytes),
@@ -734,14 +838,18 @@ test.describe("two sessions on one record", () => {
       }),
     ]);
 
-    // Settled means the spinner is gone and no error is showing — an observable
-    // state, unlike "my row has appeared", which is the first thing this spec
-    // asserted and the reason it was flaky. Two concurrent router.refresh()
-    // calls against `next dev` are not guaranteed to land within any particular
-    // window, and asserting that they do makes the spec about Next's refresh
-    // timing rather than about two sessions colliding. It failed roughly one run
-    // in three that way, and passed three for three in isolation, which is
-    // exactly the shape of a spec measuring the wrong thing.
+    // Settled means the spinner is gone and no error is showing. Still better
+    // than "my row has appeared", which is what this spec asserted first: two
+    // concurrent router.refresh() calls against `next dev` are not guaranteed to
+    // land in any particular window, so asserting that they do made the spec
+    // about Next's refresh timing rather than about two sessions colliding.
+    //
+    // But this wait is NOT what fixed the flakiness, and it used to say it was.
+    // It cannot be: `toBeHidden()` is satisfied by an element that was never
+    // rendered, so an upload that never started passes it instantly. The spec
+    // kept failing about one run in three after this change, and the actual
+    // cause was the unhydrated pick now gated above. Kept because it is a
+    // genuine post-condition, but it is a check, not the guard.
     for (const tab of [one, two]) {
       await expect(tab.getByText("Uploading…")).toBeHidden();
       await expect(tab.locator("p.text-destructive")).toHaveCount(0);
@@ -751,7 +859,7 @@ test.describe("two sessions on one record", () => {
     // racing another tab's. This is the claim that matters: both uploads
     // survived, and neither tab is missing the other's work.
     for (const tab of [one, two]) {
-      await tab.reload();
+      await freshRender(tab);
       await expect(tab.getByText("e2e-tab-one.txt")).toBeVisible();
       await expect(tab.getByText("e2e-tab-two.txt")).toBeVisible();
     }
@@ -785,7 +893,7 @@ test.describe("two sessions on one record", () => {
     // and not the first.
     for (const n of [1, 2, 3]) {
       await expect(page.getByLabel("File")).toBeEnabled();
-      await page.getByLabel("File").setInputFiles({
+      await pickFile(page, {
         name: `e2e-rapid-${n}.txt`,
         mimeType: "text/plain",
         buffer: Buffer.from(`rapid ${n}`),
