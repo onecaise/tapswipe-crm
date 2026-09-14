@@ -3,7 +3,7 @@ import path from "node:path";
 import { defineConfig } from "vitest/config";
 
 /**
- * Compliance checks against the deployed project named in .env.local.
+ * Compliance checks against every deployed project named in .env.deployed.local.
  *
  * A third config rather than a flag on the other two, because the target is
  * different in kind: `npm test` asserts what the migrations do (hermetic,

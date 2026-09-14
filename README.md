@@ -1,109 +1,184 @@
-<a href="https://demo-nextjs-with-supabase.vercel.app/">
-  <img alt="Next.js and Supabase Starter Kit - the fastest way to build apps with Next.js and Supabase" src="https://demo-nextjs-with-supabase.vercel.app/opengraph-image.png">
-  <h1 align="center">Next.js and Supabase Starter Kit</h1>
-</a>
+# Tapswipe CRM
 
-<p align="center">
- The fastest way to build apps with Next.js and Supabase
-</p>
+Tapswipe's internal CRM for merchant services. Dashboard, Merchants, Pre-Apps, Leads,
+Ghost Sheets, Support Tickets, Document Center, Notes, Tasks, Rep Payouts and admin
+user management.
 
-<p align="center">
-  <a href="#features"><strong>Features</strong></a> ·
-  <a href="#demo"><strong>Demo</strong></a> ·
-  <a href="#deploy-to-vercel"><strong>Deploy to Vercel</strong></a> ·
-  <a href="#clone-and-run-locally"><strong>Clone and run locally</strong></a> ·
-  <a href="#feedback-and-issues"><strong>Feedback and issues</strong></a>
-  <a href="#more-supabase-examples"><strong>More Examples</strong></a>
-</p>
-<br/>
+Private and internal. There is no public sign-up and there never will be — accounts are
+created by an admin through the `create-user` Edge Function, because an `auth.users` row
+with no matching `profiles` row can log in, see nothing, and cannot heal itself.
 
-## Features
+Next.js 16 (App Router, React 19) · Supabase (Postgres + Auth + Storage + Deno Edge
+Functions) · Tailwind 3 + shadcn/ui · TypeScript strict.
 
-- Works across the entire [Next.js](https://nextjs.org) stack
-  - App Router
-  - Pages Router
-  - Proxy
-  - Client
-  - Server
-  - It just works!
-- supabase-ssr. A package to configure Supabase Auth to use cookies
-- Password-based authentication block installed via the [Supabase UI Library](https://supabase.com/ui/docs/nextjs/password-based-auth)
-- Styling with [Tailwind CSS](https://tailwindcss.com)
-- Components with [shadcn/ui](https://ui.shadcn.com/)
-- Optional deployment with [Supabase Vercel Integration and Vercel deploy](#deploy-your-own)
-  - Environment variables automatically assigned to Vercel project
+---
 
-## Demo
+## Getting started
 
-You can view a fully working demo at [demo-nextjs-with-supabase.vercel.app](https://demo-nextjs-with-supabase.vercel.app/).
+You need Docker (for the local Supabase stack) and Node ≥ 20.9.
 
-## Deploy to Vercel
+```bash
+npm install
+npx supabase start                 # Postgres :54322, API :54321, Studio :54323, mail :54324
+npx supabase db reset              # build the schema from supabase/migrations/
+npm run seed:local                 # create the two local dev accounts
+npm run dev                        # http://localhost:3000
+```
 
-Vercel deployment will guide you through creating a Supabase account and project.
+`npm run dev` needs `.env.development.local`, which is gitignored. Create it from what
+the stack reports:
 
-After installation of the Supabase integration, all relevant environment variables will be assigned to the project so the deployment is fully functioning.
+```bash
+npx supabase status -o env         # take API_URL and PUBLISHABLE_KEY
+```
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fvercel%2Fnext.js%2Ftree%2Fcanary%2Fexamples%2Fwith-supabase&project-name=nextjs-with-supabase&repository-name=nextjs-with-supabase&demo-title=nextjs-with-supabase&demo-description=This+starter+configures+Supabase+Auth+to+use+cookies%2C+making+the+user%27s+session+available+throughout+the+entire+Next.js+app+-+Client+Components%2C+Server+Components%2C+Route+Handlers%2C+Server+Actions+and+Middleware.&demo-url=https%3A%2F%2Fdemo-nextjs-with-supabase.vercel.app%2F&external-id=https%3A%2F%2Fgithub.com%2Fvercel%2Fnext.js%2Ftree%2Fcanary%2Fexamples%2Fwith-supabase&demo-image=https%3A%2F%2Fdemo-nextjs-with-supabase.vercel.app%2Fopengraph-image.png)
+```env
+NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=<PUBLISHABLE_KEY from the line above>
+```
 
-The above will also clone the Starter kit to your GitHub, you can clone that locally and develop locally.
+Then sign in as either account `npm run seed:local` made:
 
-If you wish to just develop locally and not deploy to Vercel, [follow the steps below](#clone-and-run-locally).
+| Email | Password | Role |
+| --- | --- | --- |
+| `admin@tapswipe.test` | `local-dev-admin-123` | admin |
+| `agent@tapswipe.test` | `local-dev-agent-123` | agent |
 
-## Clone and run locally
+Local only, and they do not survive `npx supabase db reset` — it drops `auth.users` with
+everything else, so re-run `npm run seed:local` after every reset.
 
-1. You'll first need a Supabase project which can be made [via the Supabase dashboard](https://database.new)
+### Two things that are not obvious
 
-2. Create a Next.js app using the Supabase Starter template npx command
+**The Storage buckets are not in any migration, and `db reset` destroys them.** `documents`
+and `residual-imports` are created out-of-band, so a freshly started stack has neither —
+and, measured rather than assumed, `npx supabase db reset` drops both as well. That is the
+one to watch: you reset to test a migration, and document upload and download start 404ing
+for a reason nothing in the UI or the logs connects to what you just did.
 
-   ```bash
-   npx create-next-app --example with-supabase with-supabase-app
-   ```
+`npm run seed:local` does **not** create them. **`npm run test:live` is the only command
+that restores both** — the e2e fixtures provision `documents` alone, so a run of
+`npm run test:e2e` leaves residual imports still broken. Otherwise create them in Studio as
+**private**, with a 50 MiB file size limit (`MAX_DOCUMENT_BYTES` in `lib/documents.ts`).
+The per-bucket limit is the real ceiling: `[storage] file_size_limit` in `config.toml` does
+not constrain a signed upload, which was also measured rather than assumed.
 
-   ```bash
-   yarn create next-app --example with-supabase with-supabase-app
-   ```
+**Anything that needs an Edge Function needs them served.** Document upload/download,
+pre-app secrets, user management and residual imports all go through
+`supabase/functions/`. `npx supabase start` brings up an edge runtime, but it can and does
+die; when document features fail with nothing in the UI to explain it, that is the first
+thing to check.
 
-   ```bash
-   pnpm create next-app --example with-supabase with-supabase-app
-   ```
+```bash
+npx supabase functions serve --env-file ./supabase/functions/.env
+```
 
-3. Use `cd` to change into the app's directory
+---
 
-   ```bash
-   cd with-supabase-app
-   ```
+## Environment files
 
-4. Rename `.env.example` to `.env.local` and update the following:
+There are three, all gitignored, and the split is deliberate. `.env.example` documents it
+in full — the short version:
 
-  ```env
-  NEXT_PUBLIC_SUPABASE_URL=[INSERT SUPABASE PROJECT URL]
-  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=[INSERT SUPABASE PROJECT API PUBLISHABLE OR ANON KEY]
-  ```
-  > [!NOTE]
-  > This example uses `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, which refers to Supabase's new **publishable** key format.
-  > Both legacy **anon** keys and new **publishable** keys can be used with this variable name during the transition period. Supabase's dashboard may show `NEXT_PUBLIC_SUPABASE_ANON_KEY`; its value can be used in this example.
-  > See the [full announcement](https://github.com/orgs/supabase/discussions/29260) for more information.
+| File | Holds | Used by |
+| --- | --- | --- |
+| `.env.development.local` | the **local stack** | `npm run dev` |
+| `.env.local` | the **hosted** project | `next build`, production |
+| `.env.deployed.local` | every deployed project to check | `npm run test:deployed` |
 
-  Both `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` can be found in [your Supabase project's API settings](https://supabase.com/dashboard/project/_?showConnect=true)
+Next resolves `.env.development.local` ahead of `.env.local`, so dev talks to the local
+stack with no flag to remember. That ordering is load-bearing: with only `.env.local`
+present, `npm run dev` once pointed the whole app at the hosted project, and the symptom
+was not an error but an admin-only column appearing for a rep and a list reading "no
+pre-apps yet" because the row was in the other database. `lib/env-guard.ts` now throws at
+dev-server boot if the URL is not local. Set `ALLOW_REMOTE_SUPABASE_IN_DEV=1` to do it on
+purpose.
 
-5. You can now run the Next.js local development server:
+The publishable/anon key is the only key this app should ever hold. The service-role key
+belongs in Edge Function secrets, and nowhere else.
 
-   ```bash
-   npm run dev
-   ```
+---
 
-   The starter kit should now be running on [localhost:3000](http://localhost:3000/).
+## Acting on a hosted project
 
-6. This template comes with the default shadcn/ui style initialized. If you instead want other ui.shadcn styles, delete `components.json` and [re-install shadcn/ui](https://ui.shadcn.com/docs/installation/next)
+There are two hosted projects — `tapswipe-crm-dev` and `tapswipe-crm-prod` — and **both are
+real**. Prod is fully deployed and carries live data; it is not a spare.
 
-> Check out [the docs for Local Development](https://supabase.com/docs/guides/getting-started/local-development) to also run Supabase locally.
+The Supabase CLI is linked to exactly one of them at a time, and a README cannot tell you
+which. Use the wrapped scripts, which read `supabase/.temp/linked-project.json` and report
+what the CLI will *actually* do:
 
-## Feedback and issues
+```bash
+npm run guard:linked      # print the linked project; exit 1 if prod, missing or unrecognised
+npm run db:push           # guard, then supabase db push
+npm run db:dump           # guard, then db dump --linked
+npm run migration:list    # guard, then migration list --linked
+npm run functions:deploy  # guard, then functions deploy
 
-Please file feedback and issues over on the [Supabase GitHub org](https://github.com/supabase/supabase/issues/new/choose).
+ALLOW_PROD_SUPABASE=1 npm run db:push    # act on prod on purpose
+```
 
-## More Supabase examples
+Raw `npx supabase …` bypasses the guard entirely. Prefer the scripts, and pin
+`--project-ref` when you mean prod — that is the only form nobody else's relink can
+invalidate.
 
-- [Next.js Subscription Payments Starter](https://github.com/vercel/nextjs-subscription-payments)
-- [Cookie-based Auth and the Next.js 13 App Router (free course)](https://youtube.com/playlist?list=PL5S4mPUpp4OtMhpnp93EFSo42iQ40XjbF)
-- [Supabase Auth and the Next.js App Router](https://github.com/supabase/supabase/tree/master/examples/auth/nextjs)
+**Never run `npx supabase config push`.** It has no `--dry-run`, and `config.toml` holds
+local-dev auth values; pushing it would set the production Site URL to `localhost`, replace
+the redirect allow-list, clamp auth emails to 2/hour project-wide, and turn off email
+confirmations. `config.toml` governs the local stack only.
+
+---
+
+## Tests
+
+Four suites, four different targets. Each is green while the next one's class of bug is
+sitting in the repo, which is why there are four and not one.
+
+```bash
+npm test               # the migrations themselves — PGlite, in-process, no Docker
+npm run test:live      # the local stack over real HTTP — needs `supabase start` + `functions serve`
+npm run test:deployed  # read-only compliance checks against the deployed projects — needs network
+npm run test:e2e       # the rendered app in a real browser — needs Docker + Chromium
+npm run test:e2e:ui    # the same, in Playwright's inspect UI
+```
+
+Run `npm test` for any schema change, `npm run test:live` for anything crossing
+PostgREST/GoTrue/Storage or an Edge Function, and `npm run test:e2e` only for things a
+person could **only** find by looking — layout, paint, client state across a refresh, file
+inputs. A browser copy of an RLS assertion is just a slower, flakier duplicate.
+
+A red `npm run test:deployed` means a deployed project drifted, not that code broke.
+
+```bash
+npm run build          # next build (also type-checks)
+npm run lint           # eslint .
+npx tsc --noEmit       # type-check only
+```
+
+---
+
+## Documentation
+
+This README gets you running. Everything else lives in four documents, and they are worth
+reading before changing anything structural:
+
+| Document | What it is |
+| --- | --- |
+| **`CLAUDE.md`** | How the codebase actually works, and why. The access-control model, the three tiers of data access, what each Edge Function is responsible for, and a long list of decisions that look arbitrary until you know what went wrong. Start here. |
+| **`docs/tapswipe_crm_schema.sql`** | **The authoritative spec** for the data model and access rules — not the migrations. Change the doc first, then make `supabase/migrations/` match it. |
+| `docs/tapswipe_crm_master_plan.md` | The narrative plan around the schema: scope, architecture, security, cost, build order. |
+| `SPEC.md`, `RESIDUALS_SPEC.md` | Design records for the pre-app submission flow and rep payouts. Both shipped; where they disagree with the code, the code is the fact. |
+
+One rule runs through all of it: **`role = 'admin'` sees every row; an active
+`role = 'agent'` sees only rows where `agent_id = auth.uid()`.** It is enforced by RLS
+policies in the database rather than by checks in the app, so a new table needs an
+`agent_id`, RLS enabled, the four policies, **and** explicit grants — the last one is
+independent of the others, and a table with perfect policies and no grant answers every
+request with `permission denied`.
+
+## Not built yet
+
+My Submissions.
+
+`README.md` was the last of the [Next.js + Supabase starter kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase)
+still in the repo. The rest of the scaffold — the marketing page at `/`, the `/protected`
+route, the tutorial components — was deleted on 14 September 2026.
