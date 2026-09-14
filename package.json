@@ -10,6 +10,8 @@
     "test:live": "vitest run --config vitest.live.config.mts",
     "test:deployed": "vitest run --config vitest.deployed.config.mts",
     "seed:local": "node scripts/seed-local-users.mjs",
+    "seed:dev": "node seed-dev-local.mjs",
+    "seed:dev:payouts": "node seed-dev-payouts.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "guard:linked": "node scripts/check-linked-project.mjs",

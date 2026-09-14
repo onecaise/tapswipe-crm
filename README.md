@@ -55,16 +55,18 @@ pre-apps, tickets, notes, tasks, and a payouts period with a review batch left b
 way a real one would be:
 
 ```bash
-node seed-dev-local.mjs      # accounts + demo records + both Storage buckets
-node seed-dev-payouts.mjs    # agent numbers, a committed period, one blocked import batch
+npm run seed:dev            # accounts + demo records + both Storage buckets
+npm run seed:dev:payouts    # agent numbers, a committed period, one blocked import batch
 ```
 
-`seed-dev-payouts.mjs` needs `seed-dev-local.mjs` to have run, and needs Edge Functions
-served — it uploads and parses a real XLSX rather than faking the staging rows.
+`seed:dev:payouts` needs `seed:dev` to have run, and needs Edge Functions served — it
+uploads and parses a real XLSX rather than faking the staging rows. They are two scripts
+rather than one for that reason: the first has no such prerequisite and should not fail
+because of the second's.
 
 **The two paths collide, and the collision is the thing to know.** Both claim
 `admin@tapswipe.test` and `agent@tapswipe.test`, both delete-then-recreate, and the
-passwords differ — `seed-dev-local.mjs` sets **`TapswipeDev123!`** for both accounts.
+passwords differ — `npm run seed:dev` sets **`TapswipeDev123!`** for both accounts.
 Whichever you ran last owns the login. Pick one per session rather than alternating.
 
 ### Two things that are not obvious
