@@ -11,7 +11,12 @@
     "test:deployed": "vitest run --config vitest.deployed.config.mts",
     "seed:local": "node scripts/seed-local-users.mjs",
     "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "guard:linked": "node scripts/check-linked-project.mjs",
+    "db:push": "npm run guard:linked && npx supabase db push",
+    "db:dump": "npm run guard:linked && npx supabase db dump --linked",
+    "migration:list": "npm run guard:linked && npx supabase migration list --linked",
+    "functions:deploy": "npm run guard:linked && npx supabase functions deploy"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.7.1",

@@ -15,7 +15,22 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 
 **`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Twenty-five migrations exist; `20260804201300_initial_schema.sql` is the first.
 
-Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi` — and note **which** project that is: `tapswipe-crm-dev`. There is a second, **unlinked** project `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`). So `supabase db push`, `functions deploy` and `npm run test:deployed` all target **dev**, not production; reaching prod would need an explicit relink. Wording below that says "production" of the linked project means "the hosted project" and is loose — dev is what those commands hit. Dev is also frequently `INACTIVE` (paused), in which case `migration list` fails with a connection timeout and `functions deploy` bundles fine but then 404s with `Cannot retrieve service for project … status 'INACTIVE'`; restoring it is a dashboard action, with no CLI equivalent under `supabase projects`.
+Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi` — and note **which** project that is: `tapswipe-crm-dev`. The second project `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) is **not linked, but it is deployed and real**: as of 4 Sep 2026 all 28 migrations are applied there, all eleven functions are deployed, `PRE_APP_SECRETS_KEY` is set, and both private buckets exist. Treat it as live production, not as a spare project.
+
+So `supabase db push`, `functions deploy` and `migration list --linked` target **dev**; `npm run test:deployed` reads `.env.local`, which also holds **dev**. Reaching prod needs an explicit relink — or better, an explicit `--project-ref zuvsdkjnfstrjahstsmg`, which is how the 4 Sep function deploys were done and is the only form that cannot be invalidated by someone else's relink. Wording below that says "production" of the linked project means "the hosted project" and is loose — **dev is what those commands hit, and that looseness is exactly what went wrong once.**
+
+**This claim drifted once, silently, and the guard exists because of it.** On 2 Sep 2026 12:15 EDT the CLI was manually relinked to **prod**, and this file went on asserting dev was linked for seven days. Two read-only commands (`migration list --linked`, `npm run test:deployed`) ran under that false belief before anyone noticed — no writes, no data touched, and the 4 Sep prod deployment that followed was deliberate and taken from a full `db dump` backup first. That was luck rather than design: nothing in the repo compared the documented link against the actual one. Now something does — `scripts/check-linked-project.mjs` prints the linked project and **fails closed** when it is prod, missing, or an unrecognised ref. Use the wrapped scripts for anything acting on the linked project:
+
+```bash
+npm run guard:linked      # print the linked project; exit 1 if prod or unrecognised
+npm run db:push           # guard, then supabase db push
+npm run db:dump           # guard, then db dump --linked
+npm run migration:list    # guard, then migration list --linked
+npm run functions:deploy  # guard, then functions deploy
+ALLOW_PROD_SUPABASE=1 npm run db:push   # act on prod on purpose
+```
+
+The guard reads `supabase/.temp/linked-project.json`, so it reports what the CLI will *actually* do rather than what any doc claims. Raw `npx supabase …` still bypasses it — prefer the npm scripts, and pin `--project-ref` when you mean prod. Dev is also frequently `INACTIVE` (paused), in which case `migration list` fails with a connection timeout and `functions deploy` bundles fine but then 404s with `Cannot retrieve service for project … status 'INACTIVE'`; restoring it is a dashboard action, with no CLI equivalent under `supabase projects`.
 
 ## Commands
 
