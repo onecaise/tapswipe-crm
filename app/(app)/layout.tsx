@@ -9,8 +9,9 @@ import { requireUser } from "@/lib/auth";
 /**
  * The shell every CRM route renders inside.
  *
- * A route group rather than the root layout, because `/`, `/auth/*` and the
- * starter's `/protected` must not get the chrome. Route groups don't affect
+ * A route group rather than the root layout, because `/` and `/auth/*` must not
+ * get the chrome — `/` renders nothing at all and redirects, and the auth pages
+ * are for people who have no sidebar to show yet. Route groups don't affect
  * URLs, so the paths under here are unchanged.
  *
  * The Suspense boundaries cacheComponents requires live inside AppSidebar,
