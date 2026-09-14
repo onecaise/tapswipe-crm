@@ -45,7 +45,27 @@ Then sign in as either account `npm run seed:local` made:
 | `agent@tapswipe.test` | `local-dev-agent-123` | agent |
 
 Local only, and they do not survive `npx supabase db reset` — it drops `auth.users` with
-everything else, so re-run `npm run seed:local` after every reset.
+everything else, so re-seed after every reset.
+
+### Two accounts, or a populated app
+
+`npm run seed:local` gives you the two accounts and nothing else, which is what you want
+while writing migrations. For pages with something actually on them — merchants, leads,
+pre-apps, tickets, notes, tasks, and a payouts period with a review batch left blocked the
+way a real one would be:
+
+```bash
+node seed-dev-local.mjs      # accounts + demo records + both Storage buckets
+node seed-dev-payouts.mjs    # agent numbers, a committed period, one blocked import batch
+```
+
+`seed-dev-payouts.mjs` needs `seed-dev-local.mjs` to have run, and needs Edge Functions
+served — it uploads and parses a real XLSX rather than faking the staging rows.
+
+**The two paths collide, and the collision is the thing to know.** Both claim
+`admin@tapswipe.test` and `agent@tapswipe.test`, both delete-then-recreate, and the
+passwords differ — `seed-dev-local.mjs` sets **`TapswipeDev123!`** for both accounts.
+Whichever you ran last owns the login. Pick one per session rather than alternating.
 
 ### Two things that are not obvious
 

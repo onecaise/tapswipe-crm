@@ -65,12 +65,65 @@ const anon = createClient(url, publishableKey, {
 // profile row, say) resolves itself instead of persisting as a puzzle.
 const { data: existing } = await admin.auth.admin.listUsers();
 const wanted = new Set(ACCOUNTS.map((account) => account.email));
+/**
+ * Every column that references profiles(id), in an order that satisfies the
+ * FKs between the tables themselves — replies before tickets, history before
+ * rows, rows before batches, children before leads.
+ *
+ * ALL SEVENTEEN of them are `ON DELETE NO ACTION`, so any single leftover row
+ * blocks the delete. This list used to be two entries (audit_log, pre_apps),
+ * which was fine only because nothing else had been seeded yet. Once
+ * seed-dev-payouts.mjs had run, the rep owned rep_payout_rows, the delete below
+ * failed on the FK, the user survived, and createUser then reported
+ * `email_exists` (422) — an error naming the one thing that was not the
+ * problem. That is the trap CLAUDE.md records a teardown walking into once
+ * already, and a partial list is how you walk into it again.
+ *
+ * Regenerate after adding any table with an agent_id:
+ *
+ *   select c.conrelid::regclass, a.attname
+ *   from pg_constraint c
+ *   join unnest(c.conkey) with ordinality k(attnum, ord) on true
+ *   join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum
+ *   where c.contype = 'f' and c.confrelid = 'public.profiles'::regclass;
+ */
+const PROFILE_REFERENCES = [
+  ["rep_payout_row_history", "agent_id"],
+  ["rep_payout_row_history", "changed_by"],
+  ["rep_payout_rows", "agent_id"],
+  ["rep_payout_import_rows", "agent_id"],
+  ["rep_payout_batches", "imported_by"],
+  ["support_ticket_replies", "author_id"],
+  ["support_tickets", "agent_id"],
+  ["documents", "agent_id"],
+  ["notes", "agent_id"],
+  ["tasks", "agent_id"],
+  ["bug_reports", "agent_id"],
+  ["bug_reports", "resolved_by"],
+  ["ghost_sheets", "agent_id"],
+  ["pre_apps", "agent_id"],
+  ["merchants", "agent_id"],
+  ["leads", "agent_id"],
+  ["audit_log", "actor_id"],
+];
+
 for (const user of existing.users.filter((user) => wanted.has(user.email))) {
-  // audit_log.actor_id references profiles(id) with no ON DELETE, and profiles
-  // cascades from auth.users — so an audit row blocks the delete.
-  await admin.from("audit_log").delete().eq("actor_id", user.id);
-  await admin.from("pre_apps").delete().eq("agent_id", user.id);
-  await admin.auth.admin.deleteUser(user.id);
+  for (const [table, column] of PROFILE_REFERENCES) {
+    await admin.from(table).delete().eq(column, user.id);
+  }
+
+  // Checked, rather than fired and forgotten. An unchecked delete that fails is
+  // exactly how the above presented as a puzzle instead of as a foreign key.
+  const { error: deleteError } = await admin.auth.admin.deleteUser(user.id);
+  if (deleteError) {
+    throw new Error(
+      `Could not delete the existing ${user.email}: ` +
+        `${deleteError.message || JSON.stringify(deleteError)}\n` +
+        `Something still references this profile — most likely a new table ` +
+        `with an agent_id that is missing from PROFILE_REFERENCES above. ` +
+        `Re-run the query in that comment to find it.`,
+    );
+  }
 }
 
 const results = [];
