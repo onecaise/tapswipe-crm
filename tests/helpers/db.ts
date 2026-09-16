@@ -277,11 +277,38 @@ export async function seed(db: TestDb): Promise<void> {
     -- column added by a later migration (split_agent_pct, decline_reason)
     -- breaks those suites with an error that looks nothing like their subject.
     -- Tests that care about the split set it themselves.
+    --
+    -- The transition flag is what lets the 'submitted' row exist at all:
+    -- pre_apps_guard_transitions is BEFORE INSERT OR UPDATE as of
+    -- 20260916104500, so every pre-app is born a draft and the four RPCs are
+    -- the only route to any other status — including for the table owner this
+    -- runs as. Setting the flag is the escape hatch that migration documents,
+    -- and it is the fixture's to use because seeding a submitted pre-app the
+    -- honest way would mean an SSN ciphertext per owner and an RPC call as a
+    -- specific user, which is a whole Edge Function away from a PGlite helper.
+    --
+    -- Set and cleared around this one statement rather than left on for the
+    -- block, mirroring the RPCs. The third argument, is_local, is true, which
+    -- scopes it to the implicit transaction this multi-statement exec runs in,
+    -- so even the explicit reset below is belt-and-braces: a throw mid-block
+    -- cannot leave the guard disarmed for whatever runs next.
+    --
+    -- (No backticks in this comment on purpose. It lives inside a JS template
+    -- literal, so a backtick here ends the string and the parse error lands
+    -- nowhere near the cause -- the same trap as a literal backslash-x escape,
+    -- which the note at the top of this file covers.)
+    --
+    -- A migration prefix that predates the trigger still works — set_config is
+    -- core Postgres and a GUC nobody reads is inert.
+    select set_config('tapswipe.pre_app_transition', 'on', true);
+
     insert into pre_apps (agent_id, status, dba_name, legal_business_name)
     values
       ('${AGENT_ID}',       'draft',     'Agent Draft App',     'Agent Draft App LLC'),
       ('${AGENT_ID}',       'submitted', 'Agent Submitted App', 'Agent Submitted App LLC'),
       ('${OTHER_AGENT_ID}', 'draft',     'Other Draft App',     'Other Draft App LLC');
+
+    select set_config('tapswipe.pre_app_transition', '', true);
 
     -- Owners on the agent's draft: one controlling (51%) and one minority, so
     -- the "at least one owner at 51%+" submit rule has both a passing and a

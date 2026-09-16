@@ -2239,7 +2239,7 @@ create trigger support_ticket_replies_audit_cross_agent
   for each row execute function log_cross_agent_reply();
 
 -- =====================================================================
--- PRE-APP STATUS GUARD.
+-- PRE-APP STATUS GUARD — fires on INSERT and on UPDATE, and needs both.
 --
 -- Why this exists: the pre_apps update policy is
 -- `(agent_id = auth.uid() and is_active_agent()) or is_admin()` and says
@@ -2250,6 +2250,29 @@ create trigger support_ticket_replies_audit_cross_agent
 -- submitting but before approval, which approve_pre_app then copies into
 -- merchants. RLS cannot express "status unchanged": a `with check`
 -- expression sees only NEW, never OLD. A row trigger can.
+--
+-- The INSERT half was added second, and the gap it closes is worth recording
+-- because the paragraph above described it exactly one verb over and nobody
+-- noticed. While this trigger was BEFORE UPDATE only, `status` was unwritable
+-- after the fact but perfectly writable on the way in: the insert policy reads
+-- agent_id and nothing else, the CHECK admits all four statuses as legal
+-- INITIAL values, and the grant is table-level with no column list. So any
+-- active rep could POST /rest/v1/pre_apps with status = 'approved' and land in
+-- a terminal state directly -- no is_admin() check, no merchants row, and no
+-- audit trail either, because pre_apps_audit_cross_agent logs only when the
+-- actor differs from the row's agent_id and on your own insert it does not.
+--
+-- status = 'submitted' was the worse one. It puts a fabricated row in the
+-- admin's queue looking submitted while skipping every completeness rule in
+-- submit_pre_app() -- owners, the 51% control person, an SSN per owner --
+-- and approve_pre_app() re-checks only `status = 'submitted'`, so an admin
+-- approving in good faith would build a real merchant, carrying the rep's own
+-- split_agent_pct, from an application with no owner and no banking details.
+--
+-- Hence: a pre-app is born a draft, for everyone, and the four RPCs stay the
+-- only route to any other status. date_submitted is pinned on INSERT for the
+-- same reason it is pinned on UPDATE -- it is submit_pre_app()'s to set, and a
+-- fabricated submission date is a fabricated receipt.
 --
 -- How the trigger tells an RPC's own write from a client's: a session-local
 -- flag, NOT the caller's role. `security definer` changes current_user, not
@@ -2270,11 +2293,19 @@ create trigger support_ticket_replies_audit_cross_agent
 -- NOTE FOR EDGE FUNCTION AUTHORS: this fires for the table OWNER too, so a
 -- service-role connection is not exempt — and because such a connection has
 -- no auth.uid(), is_admin() is false there as well. Privileged server code
--- therefore cannot UPDATE pre_apps.status, or touch a non-draft pre-app at
--- all; it has to call these RPCs. That is intended: it keeps the audit_log
--- write and the merchant creation on the only path that exists. If some
--- future function genuinely needs to bypass it, set the transition flag
--- around its own write rather than weakening the trigger.
+-- therefore cannot INSERT a non-draft pre-app, cannot UPDATE pre_apps.status,
+-- and cannot touch a non-draft pre-app at all; it has to call these RPCs.
+-- That is intended: it keeps the audit_log write and the merchant creation on
+-- the only path that exists. If some future function genuinely needs to bypass
+-- it, set the transition flag around its own write rather than weakening the
+-- trigger.
+--
+-- Test fixtures are the standing example of a legitimate bypass, and they are
+-- the reason the flag is checked before the INSERT branch and not only before
+-- the UPDATE one: tests/helpers/db.ts seeds a submitted pre-app, and the two
+-- column-constraint tests in tests/rls/pre-apps.test.ts have to reach NOT NULL
+-- and the CHECK rather than being intercepted here. All three set the flag
+-- around their own insert. A client cannot -- see the note in the body.
 -- =====================================================================
 create or replace function pre_apps_guard_transitions()
 returns trigger
@@ -2289,6 +2320,28 @@ begin
   -- client-controlled headers. A client cannot set this one -- set_config
   -- lives in pg_catalog, so it is not reachable as /rpc/set_config either.
   if coalesce(current_setting('tapswipe.pre_app_transition', true), '') = 'on' then
+    return new;
+  end if;
+
+  -- INSERT has no OLD, so this branch has to return before the comparisons
+  -- below rather than falling through them -- `new.status is distinct from
+  -- old.status` against a NULL OLD record would raise, and on a BEFORE INSERT
+  -- trigger that is a confusing way to be right by accident.
+  --
+  -- `is distinct from` rather than `<>` because a BEFORE trigger runs ahead of
+  -- the column constraints: an explicit `status = null` arrives here still
+  -- null, before NOT NULL has had a chance to reject it.
+  if tg_op = 'INSERT' then
+    if new.status is distinct from 'draft' then
+      raise exception
+        'a pre-app is created as a draft; status moves only through submit_pre_app(), approve_pre_app(), decline_pre_app() or reopen_pre_app()'
+        using errcode = 'PT409';
+    end if;
+
+    if new.date_submitted is not null then
+      raise exception 'date_submitted is set by submit_pre_app()' using errcode = 'PT409';
+    end if;
+
     return new;
   end if;
 
@@ -2313,8 +2366,12 @@ begin
 end;
 $$;
 
+-- One trigger for both verbs rather than two: the function already branches on
+-- tg_op, and a second trigger name would let someone drop half the guard while
+-- the other half went on looking like full coverage -- which is the shape of
+-- the bug this closes.
 create trigger pre_apps_guard_transitions
-  before update on pre_apps
+  before insert or update on pre_apps
   for each row execute function pre_apps_guard_transitions();
 
 -- =====================================================================

@@ -13,7 +13,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Still [starter-kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase) template, not product code:** `README.md`, and that is now the whole list. The scaffold's UI was deleted on 14 Sep 2026 — `app/protected/*`, `components/tutorial/*`, `components/{hero,deploy-button,next-logo,supabase-logo,env-var-warning,auth-button,theme-switcher}.tsx`, the `hasEnvVars` export, and the two `app/{opengraph,twitter}-image.png` banners that served a "Next.js Starter Kit" social preview from an internal tool. `app/page.tsx` is product code now: it renders nothing and redirects (see below). Don't reintroduce a greyed-out template page for the same reason `lib/nav.ts` shouldn't carry a permanently-disabled row.
 - **Edge Functions:** all eleven are implemented — `create-upload-url`, `create-download-url`, `delete-document`, `submit-pre-app-secrets`, `read-pre-app-secrets`, `create-user`, `deactivate-user`, `admin-reset-password`, `residual-import-file-url`, `parse-residual-import`, `export-residuals` (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env,admin-users,residuals,residual-imports}.ts`).
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Twenty-five migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Twenty-nine migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi` — and note **which** project that is: `tapswipe-crm-dev`. The second project `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) is **not linked, but it is deployed and real**: as of 4 Sep 2026 all 28 migrations are applied there, all eleven functions are deployed, `PRE_APP_SECRETS_KEY` is set, and both private buckets exist. Treat it as live production, not as a spare project.
 
@@ -40,7 +40,7 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (795 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (805 tests)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (142 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
 npm run test:e2e       # Playwright, real browser against the app on the local stack (70 tests)

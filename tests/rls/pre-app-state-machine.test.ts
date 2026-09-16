@@ -91,6 +91,211 @@ afterAll(async () => {
   await db?.close();
 });
 
+describe("the guard trigger refuses a non-draft INSERT", () => {
+  /**
+   * The verb the guard did not cover until 20260916104500.
+   *
+   * Every case here asserts the INSERT branch's own wording ("created as a
+   * draft") rather than the shared "only through submit_pre_app()" tail, so a
+   * regression that re-points the trigger at UPDATE alone fails these instead
+   * of passing on the other branch's message.
+   *
+   * Each also re-counts pre_apps afterwards. A BEFORE trigger that returned
+   * NULL instead of raising would silently skip the row and satisfy a
+   * rejects-only assertion while leaving no trace of why.
+   */
+
+  async function preAppCount(): Promise<number> {
+    await asPlatform(db);
+    const r = await rows<CountRow>(
+      db,
+      `select count(*)::int as n from pre_apps`,
+    );
+    return r[0].n;
+  }
+
+  it("refuses an agent INSERTing a pre-app already approved", async () => {
+    // The finding this closes: a terminal status reached with no is_admin()
+    // check, no merchants row, and no audit row — the cross-agent audit
+    // trigger logs only when the actor differs from the row's agent_id, and
+    // on your own insert it does not.
+    const before = await preAppCount();
+    await asUser(db, AGENT_ID);
+
+    await expect(
+      db.exec(
+        `insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+         values ('${AGENT_ID}', 'approved', 'Forged Approved', 'Forged Approved LLC')`,
+      ),
+    ).rejects.toThrow(/created as a draft/i);
+
+    expect(await preAppCount()).toBe(before);
+  });
+
+  it("refuses an agent INSERTing a pre-app already submitted", async () => {
+    // The worse half: 'submitted' is the status approve_pre_app accepts, and
+    // it re-checks only that. A fabricated row here would skip every
+    // completeness rule in submit_pre_app and still be approvable into a real
+    // merchant carrying the rep's own split.
+    const before = await preAppCount();
+    await asUser(db, AGENT_ID);
+
+    await expect(
+      db.exec(
+        `insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+         values ('${AGENT_ID}', 'submitted', 'Forged Submitted', 'Forged Submitted LLC')`,
+      ),
+    ).rejects.toThrow(/created as a draft/i);
+
+    expect(await preAppCount()).toBe(before);
+  });
+
+  it("refuses an agent INSERTing a pre-app already declined", async () => {
+    const before = await preAppCount();
+    await asUser(db, AGENT_ID);
+
+    await expect(
+      db.exec(
+        `insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+         values ('${AGENT_ID}', 'declined', 'Forged Declined', 'Forged Declined LLC')`,
+      ),
+    ).rejects.toThrow(/created as a draft/i);
+
+    expect(await preAppCount()).toBe(before);
+  });
+
+  it("refuses an ADMIN the same insert, on a rep's behalf", async () => {
+    // Same reasoning as the UPDATE branch's deliberate lack of an is_admin()
+    // early return: an admin reaching 'approved' this way still produces no
+    // merchant and no audit row, which is a data-integrity hole and not only
+    // an authorization one.
+    const before = await preAppCount();
+    await asUser(db, ADMIN_ID);
+
+    await expect(
+      db.exec(
+        `insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+         values ('${AGENT_ID}', 'approved', 'Admin Forged', 'Admin Forged LLC')`,
+      ),
+    ).rejects.toThrow(/created as a draft/i);
+
+    expect(await preAppCount()).toBe(before);
+  });
+
+  it("applies to the table owner as well, not just client roles", async () => {
+    // The twin of the existing owner-level assertion on approve_pre_app. A
+    // service-role Edge Function connection has no auth.uid(), so a role-based
+    // guard would wave it straight through; this one is not role-based.
+    const before = await preAppCount();
+    await asPlatform(db);
+
+    await expect(
+      db.exec(
+        `insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+         values ('${AGENT_ID}', 'approved', 'Owner Forged', 'Owner Forged LLC')`,
+      ),
+    ).rejects.toThrow(/created as a draft/i);
+
+    expect(await preAppCount()).toBe(before);
+  });
+
+  it("refuses a fabricated date_submitted on insert", async () => {
+    // date_submitted is submit_pre_app's to set. Pinned on the way in for the
+    // same reason it is pinned on update: a submission date nobody submitted
+    // is a receipt for an event that did not happen.
+    const before = await preAppCount();
+    await asUser(db, AGENT_ID);
+
+    await expect(
+      db.exec(
+        `insert into pre_apps (agent_id, status, date_submitted, dba_name, legal_business_name)
+         values ('${AGENT_ID}', 'draft', '2026-01-01', 'Forged Date', 'Forged Date LLC')`,
+      ),
+    ).rejects.toThrow(/date_submitted is set by submit_pre_app/i);
+
+    expect(await preAppCount()).toBe(before);
+  });
+
+  it("still lets an agent create an ordinary draft", async () => {
+    // Non-vacuity: without this the whole describe would pass just as well
+    // against a trigger that refused every insert outright.
+    await asUser(db, AGENT_ID);
+
+    await db.exec(
+      `insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+       values ('${AGENT_ID}', 'draft', 'Honest Draft', 'Honest Draft LLC')`,
+    );
+
+    await asPlatform(db);
+    const r = await rows<{ status: string }>(
+      db,
+      `select status from pre_apps where dba_name = 'Honest Draft'`,
+    );
+    expect(r[0].status).toBe("draft");
+  });
+
+  it("lets the column default stand when status is omitted", async () => {
+    // The default is applied while the tuple is built, which is before a
+    // BEFORE trigger sees it — so NEW.status is already 'draft' here and the
+    // ordinary create path in components/pre-app-create-form.tsx, which never
+    // names the column, is unaffected.
+    await asUser(db, AGENT_ID);
+
+    await db.exec(
+      `insert into pre_apps (agent_id, dba_name, legal_business_name)
+       values ('${AGENT_ID}', 'Defaulted Draft', 'Defaulted Draft LLC')`,
+    );
+
+    await asPlatform(db);
+    const r = await rows<{ status: string }>(
+      db,
+      `select status from pre_apps where dba_name = 'Defaulted Draft'`,
+    );
+    expect(r[0].status).toBe("draft");
+  });
+
+  it("honours the transition flag, which is what the fixture relies on", async () => {
+    // tests/helpers/db.ts seeds a submitted pre-app through this hatch, so it
+    // is load-bearing for most of this file: if it stopped working, dozens of
+    // suites would fail somewhere far from the cause. A client cannot set it —
+    // set_config lives in pg_catalog and is not exposed as /rpc/set_config,
+    // and the name is under `tapswipe.` rather than the header-populated
+    // `request.` namespace.
+    await asPlatform(db);
+
+    await db.exec(
+      `select set_config('tapswipe.pre_app_transition', 'on', true);
+       insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+       values ('${AGENT_ID}', 'submitted', 'Flagged Submitted', 'Flagged Submitted LLC')`,
+    );
+
+    const r = await rows<{ status: string }>(
+      db,
+      `select status from pre_apps where dba_name = 'Flagged Submitted'`,
+    );
+    expect(r[0].status).toBe("submitted");
+  });
+
+  it("does not leave the transition flag set behind it", async () => {
+    // The twin of the same assertion on submit_pre_app. `is_local => true`
+    // scopes the flag to its transaction, so the guard must be armed again by
+    // the time the next statement runs.
+    await asPlatform(db);
+    await db.exec(
+      `select set_config('tapswipe.pre_app_transition', 'on', true);
+       insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+       values ('${AGENT_ID}', 'submitted', 'Flag Scope', 'Flag Scope LLC')`,
+    );
+
+    await expect(
+      db.exec(
+        `insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+         values ('${AGENT_ID}', 'approved', 'After Flag', 'After Flag LLC')`,
+      ),
+    ).rejects.toThrow(/created as a draft/i);
+  });
+});
+
 describe("the guard trigger refuses direct status writes", () => {
   it("refuses an agent PATCHing status on their own draft", async () => {
     await asUser(db, AGENT_ID);

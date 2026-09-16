@@ -172,11 +172,27 @@ describe("pre_apps row scoping", () => {
 });
 
 describe("pre_apps status is a real column constraint", () => {
-  // Asserted on INSERT rather than UPDATE. The status guard trigger added with
-  // the state machine is BEFORE UPDATE, so it now intercepts a direct
-  // `update ... set status = ...` before the column constraints are ever
-  // evaluated — a test written that way would pass on the trigger's message
-  // and prove nothing about NOT NULL or the CHECK. INSERT reaches them.
+  // These two assert the COLUMN constraints — NOT NULL and the CHECK — and
+  // have to get past the guard trigger to reach them, which is why each one
+  // sets the transition flag in the same exec as its insert.
+  //
+  // The history is worth keeping, because the workaround has now inverted.
+  // These were written on INSERT precisely because the guard was BEFORE UPDATE
+  // only: an `update ... set status = ...` was intercepted by the trigger and
+  // would have passed on the trigger's message while proving nothing about the
+  // constraints. As of 20260916104500 the guard is BEFORE INSERT OR UPDATE, so
+  // INSERT is intercepted too and there is no unguarded verb left. Hence the
+  // flag: it disarms the trigger for one statement so the constraint underneath
+  // is what answers.
+  //
+  // `is_local => true` keeps that scoped to the implicit transaction the exec
+  // runs in, which the failing statement then rolls back anyway — the guard
+  // cannot stay disarmed past the assertion.
+  //
+  // What these no longer prove is that a bad status is *unreachable*; that is
+  // now the trigger's job and is asserted in pre-app-state-machine.test.ts.
+  // These prove the constraints are still there behind it, so removing the
+  // trigger later would not silently leave the column unvalidated.
 
   it("rejects a null status", async () => {
     // A CHECK passes when it evaluates to NULL, so before `not null` was added
@@ -186,7 +202,8 @@ describe("pre_apps status is a real column constraint", () => {
 
     await expect(
       db.exec(
-        `insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+        `select set_config('tapswipe.pre_app_transition', 'on', true);
+         insert into pre_apps (agent_id, status, dba_name, legal_business_name)
          values ('${AGENT_ID}', null, 'Null Status', 'Null Status LLC')`,
       ),
     ).rejects.toThrow(/not-null|null value/i);
@@ -197,7 +214,8 @@ describe("pre_apps status is a real column constraint", () => {
 
     await expect(
       db.exec(
-        `insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+        `select set_config('tapswipe.pre_app_transition', 'on', true);
+         insert into pre_apps (agent_id, status, dba_name, legal_business_name)
          values ('${AGENT_ID}', 'pending', 'Bad Status', 'Bad Status LLC')`,
       ),
     ).rejects.toThrow(/check constraint/i);

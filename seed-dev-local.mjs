@@ -295,8 +295,19 @@ const preApps = await insert("pre_apps", [
   },
   {
     agent_id: agent,
-    status: "submitted",
-    date_submitted: "2026-08-10",
+    // Was 'submitted' with a date_submitted of 2026-08-10, and could not stay
+    // that way: pre_apps_guard_transitions became BEFORE INSERT OR UPDATE in
+    // 20260916104500, so a pre-app is born a draft for everyone — the
+    // service-role key this script holds is not an exemption, and the escape
+    // hatch is a session GUC that PostgREST gives no way to set.
+    //
+    // Seeding a genuinely submitted pre-app now means driving submit_pre_app()
+    // as a signed-in user, which wants an SSN ciphertext per owner, and this
+    // script deliberately seeds no owner secrets (see the note further down).
+    // So the demo data is drafts only, and the admin approval queue starts
+    // empty. If that queue is what you came to look at, submit this one from
+    // the wizard at /pre-apps — which is the flow it was skipping anyway.
+    status: "draft",
     dba_name: "Lumen Wellness",
     legal_business_name: "Lumen Wellness Studio LLC",
     contact_name: "Priya Raman",
@@ -319,9 +330,14 @@ const preApps = await insert("pre_apps", [
   },
 ]);
 
-// Owners, so the submitted pre-app's detail page is not an empty section. The
-// SSN lives in pre_app_owner_secrets and is deliberately NOT seeded here: it is
-// reachable only through submit-pre-app-secrets, which encrypts it.
+// Owners, so each pre-app's detail page is not an empty section. The SSN lives
+// in pre_app_owner_secrets and is deliberately NOT seeded here: it is reachable
+// only through submit-pre-app-secrets, which encrypts it.
+//
+// Priya holds 100%, so the Lumen Wellness draft already satisfies
+// submit_pre_app's "one owner at 51%+" rule — supply the SSN in the wizard and
+// it submits. That is the only route to a submitted pre-app in dev now; see the
+// note on its status above.
 await insert("pre_app_owners", [
   {
     pre_app_id: preApps[1],
