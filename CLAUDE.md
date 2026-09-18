@@ -212,6 +212,8 @@ Three consequences worth knowing before changing any of it:
 
 **Deactivation is two layers and neither is optional.** `profiles.is_active = false` is what RLS reads; `banned_until` on `auth.users` (via `auth.admin.updateUserById(id, { ban_duration })`) is what GoTrue reads. Without the ban a "deactivated" rep still signs in successfully and lands on an app that is empty by design, which reads as a bug. `deactivate-user` writes the auth layer **first**, so a partial failure leaves the account locked-but-shown-active (visible, safe) rather than shown-inactive-but-usable (invisible, not). Neither layer revokes an access token already issued — that stays valid up to an hour, and RLS is what makes the window harmless. `admin.signOut()` is not the fix: it takes the target's own JWT, which an admin does not have.
 
+**A rep's own logout is a different thing again, and it is `scope: "global"`.** `components/logout-button.tsx` in the topbar calls `supabase.auth.signOut()` with supabase-js's default scope, so signing out at a desk revokes that user's refresh tokens on **every** device rather than ending just that browser's session — kept deliberately, but written down because nothing announces it: already-issued access tokens stay valid either way (JWTs are not checked against a revocation list), so the only thing that ever notices is something forcing a refresh, which is how it first surfaced — as `e2e/root-redirect.spec.ts`'s rotated-cookie test going red two files after the logout spec, pointing at the proxy rather than at the cause.
+
 ### Edge Functions
 
 Eleven functions, all registered in `supabase/config.toml` (a function not listed there won't deploy or serve):
