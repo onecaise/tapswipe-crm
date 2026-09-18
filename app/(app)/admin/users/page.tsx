@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Suspense } from "react";
-import { ArrowLeftIcon, UserPlusIcon } from "lucide-react";
+import { ArrowLeftIcon, UploadIcon, UserPlusIcon } from "lucide-react";
 
 import { requireAdmin, type Role } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
@@ -172,12 +172,23 @@ export default function ManageUsersPage() {
         title="Manage Users"
         subtitle="Accounts are created here, never by self-service sign-up. Deactivate rather than delete — a rep who leaves still owns historical deals and residuals."
         action={
-          <Button asChild size="sm">
-            <Link href="/admin/users/new">
-              <UserPlusIcon size={16} />
-              New user
-            </Link>
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* Secondary to "New user": one rep at a time is the ordinary case,
+                and a bulk import is the thing you reach for when onboarding a
+                book of them. */}
+            <Button asChild variant="outline" size="sm">
+              <Link href="/admin/users/import">
+                <UploadIcon size={16} />
+                Import reps
+              </Link>
+            </Button>
+            <Button asChild size="sm">
+              <Link href="/admin/users/new">
+                <UserPlusIcon size={16} />
+                New user
+              </Link>
+            </Button>
+          </div>
         }
       />
 

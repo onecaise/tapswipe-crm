@@ -653,3 +653,71 @@ export async function commitEvidence(batchId: number): Promise<{
     stagingLeft: staging.count ?? 0,
   };
 }
+
+/**
+ * Removes the accounts and batches a bulk-import spec created.
+ *
+ * Accounts go first and audit_log goes before them: audit_log.actor_id and
+ * .row_id reference profiles with no ON DELETE, and provisionUser writes a
+ * create_user row for every account it makes, so an unchecked delete would fail
+ * on the FK and leave the persona behind — after which the next run's import
+ * would report "already has an account" for a row the spec expects to be new.
+ *
+ * user_import_batches.imported_by is the eighteenth NO ACTION reference to
+ * profiles, so the batches have to go too. Their rows follow by cascade.
+ */
+export async function clearImportedUsers(
+  emails: string[],
+  fileNames: string[],
+): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const { data: batches } = await db
+    .from("user_import_batches")
+    .select("id")
+    .in("file_name", fileNames);
+
+  const { data: list } = await db.auth.admin.listUsers({ perPage: 1000 });
+  const wanted = new Set(emails.map((email) => email.toLowerCase()));
+
+  for (const user of list?.users ?? []) {
+    if (!user.email || !wanted.has(user.email.toLowerCase())) continue;
+    await db.from("audit_log").delete().eq("actor_id", user.id);
+    await db.from("audit_log").delete().eq("row_id", user.id);
+    await db.auth.admin.deleteUser(user.id);
+  }
+
+  const batchIds = (batches ?? []).map((batch) => batch.id as number);
+  if (batchIds.length > 0) {
+    await db
+      .from("audit_log")
+      .delete()
+      .eq("action", "commit_user_import")
+      .in("row_id", batchIds.map(String));
+    await db.from("user_import_batches").delete().in("id", batchIds);
+  }
+}
+
+/** The profiles a bulk-import spec created, for asserting what really landed. */
+export async function importedProfiles(
+  emails: string[],
+): Promise<{ email: string; role: string; must_change_password: boolean }[]> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const { data } = await db
+    .from("profiles")
+    .select("email, role, must_change_password")
+    .in("email", emails);
+
+  return (data ?? []) as {
+    email: string;
+    role: string;
+    must_change_password: boolean;
+  }[];
+}
