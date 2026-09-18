@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
-import { ArrowLeftIcon, PencilIcon } from "lucide-react";
+import { ArrowLeftIcon, PencilIcon, PrinterIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
@@ -91,12 +91,21 @@ async function MerchantDetail({
       <PageHeader
         title={merchant.dba}
         action={
-          <Button asChild size="sm">
-            <Link href={`/merchants/${merchant.id}/edit`}>
-              <PencilIcon size={16} />
-              Edit
-            </Link>
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* Secondary: printing a record is occasional, editing it is not. */}
+            <Button asChild size="sm" variant="outline">
+              <Link href={`/merchants/${merchant.id}/print`}>
+                <PrinterIcon size={16} />
+                Print
+              </Link>
+            </Button>
+            <Button asChild size="sm">
+              <Link href={`/merchants/${merchant.id}/edit`}>
+                <PencilIcon size={16} />
+                Edit
+              </Link>
+            </Button>
+          </div>
         }
       >
         <div className="mt-1 flex items-center gap-2">
