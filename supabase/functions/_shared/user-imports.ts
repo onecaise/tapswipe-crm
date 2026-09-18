@@ -84,6 +84,19 @@ export const REQUIRED_COLUMNS: UserImportColumn[] = USER_IMPORT_COLUMNS.filter(
  */
 export const MAX_IMPORT_ROWS = 200;
 
+/**
+ * A positive integer, for a batch id arriving as JSON.
+ *
+ * Three lines duplicated from _shared/residual-imports.ts and
+ * _shared/documents.ts rather than imported, for the reason both of those
+ * record: a type guard is not worth making this module depend on a residuals-
+ * or documents-named one. The duplication is self-evident and the rule cannot
+ * drift meaningfully.
+ */
+export function isPositiveInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
 /** Blocker codes, in the order user_import_rows.blocker allows. */
 export type UserImportBlocker =
   | "missing_name"

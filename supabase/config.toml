@@ -542,3 +542,9 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/export-residuals/deno.json"
 entrypoint = "./functions/export-residuals/index.ts"
+
+[functions.stage-user-import]
+enabled = true
+verify_jwt = false
+import_map = "./functions/stage-user-import/deno.json"
+entrypoint = "./functions/stage-user-import/index.ts"
