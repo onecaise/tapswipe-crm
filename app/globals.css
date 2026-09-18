@@ -122,28 +122,32 @@
 }
 
 /*
- * Print rules, for the payout summary at
- * /payouts/[period]/summary/[agentId] — the one page in this app meant to
- * leave the screen.
+ * Print rules, for the three pages in this app meant to leave the screen: the
+ * payout summary at /payouts/[period]/summary/[agentId], the blank application
+ * at /pre-apps/blank-form, and a merchant's record at /merchants/[id]/print.
  *
- * Global rather than page-local because the two things that have to go are
- * the sidebar and the app chrome, and neither is rendered by that page: they
- * come from the (app) route-group layout, which a `print:hidden` utility on
- * the page cannot reach. Everything inside the document itself is handled by
- * `print:` utilities where it is written, so this block stays small.
+ * This block deliberately no longer hides the app chrome by element name. It
+ * used to say `aside, header, nav { display: none }`, and that was wrong in a
+ * way nothing caught for weeks: the selector matched the topbar, but it also
+ * matched the <header> INSIDE each printable document. The payout summary's
+ * header carries the title, the rep's name, their agent number, the period and
+ * the "this summary is incomplete" warning — so every statement ever printed
+ * came out as an unlabelled table of money, with the warning that exists
+ * precisely to stop an in-progress period looking final silently removed.
+ * Measured 2026-09-18: on screen the document begins "Payout summary / E2E
+ * Agent / Agent # 9002 / April 2027"; under print media it began "MID".
+ *
+ * So the chrome now hides itself — `print:hidden` on the <aside> in
+ * app-sidebar.tsx, the <header> in app-topbar.tsx, the wizard's <nav>, and the
+ * fixed bug-report bubble. A component styling itself is reachable in a way the
+ * old comment here claimed it was not: what a *page* cannot reach is the
+ * layout, but the layout's own components have no such problem.
  *
  * Deliberately not a colour override. The design system's tokens are what the
  * statement should print in, and forcing black text here would make the
  * printed figures disagree with the screen an admin just checked them on.
  */
 @media print {
-  /* The shell: sidebar, header, and any control marked print:hidden. */
-  aside,
-  header,
-  nav {
-    display: none !important;
-  }
-
   /* The (app) layout constrains and pads the content area for a screen. On
      paper that leaves a wide margin inside the printer's own margin. */
   main {

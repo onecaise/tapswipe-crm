@@ -27,7 +27,10 @@ export function AppSidebar() {
     // sticky + h-screen rather than `position: fixed`: it pins the same way
     // while staying in the flex row, so the main column needs no matching
     // left offset to stay in sync with it.
-    <aside className="sticky top-0 flex h-screen w-[248px] shrink-0 flex-col bg-sidebar">
+    // print:hidden here rather than an `aside` selector in globals.css: the
+    // chrome hides itself, so a document's own semantic elements are not
+    // collateral. See the print block in app/globals.css.
+    <aside className="sticky top-0 flex h-screen w-[248px] shrink-0 flex-col bg-sidebar print:hidden">
       <div className="flex items-center gap-2.5 border-b border-sidebar-border px-4 py-3.5">
         {/* The mark has black linework in it, so it needs a light plate to sit
             on — straight onto #0E0E10 half the logo would vanish. */}

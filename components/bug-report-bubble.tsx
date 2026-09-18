@@ -123,7 +123,11 @@ export function BugReportBubble({
   return (
     <div
       ref={rootRef}
-      className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3"
+      // print:hidden because this is a fixed-position overlay on every page in
+      // the shell, and it is not an aside/header/nav, so the global print block
+      // in globals.css does not reach it. Without this it prints on top of the
+      // payout summary and both print views.
+      className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3 print:hidden"
     >
       {open && (
         <div

@@ -31,7 +31,10 @@ import { createClient } from "@/lib/supabase/server";
  */
 export function AppTopbar() {
   return (
-    <header className="sticky top-0 z-10 flex h-[60px] shrink-0 items-center justify-between gap-4 border-b bg-card px-7">
+    // print:hidden here rather than a bare `header` selector in globals.css,
+    // which also matched every printable document's own <header>. See the note
+    // in the print block there.
+    <header className="sticky top-0 z-10 flex h-[60px] shrink-0 items-center justify-between gap-4 border-b bg-card px-7 print:hidden">
       <GlobalSearch />
 
       {/* Grouped so justify-between pushes the pair right as one unit. */}

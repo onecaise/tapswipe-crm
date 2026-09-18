@@ -191,7 +191,10 @@ export function PreAppWizardShell({
           </Callout>
         )}
 
-        <nav className="flex flex-wrap gap-2">
+        {/* Not a page anyone prints, but it was covered by the old global
+            `nav` print rule and there is no reason to start printing a step
+            switcher now that the rule is gone. */}
+        <nav className="flex flex-wrap gap-2 print:hidden">
           {PRE_APP_STEPS.map((candidate) => {
             const href = stepHref(preAppId, candidate);
             const isCurrent = candidate === step;
