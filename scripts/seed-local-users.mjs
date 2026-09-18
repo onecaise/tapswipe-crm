@@ -70,7 +70,7 @@ const wanted = new Set(ACCOUNTS.map((account) => account.email));
  * FKs between the tables themselves — replies before tickets, history before
  * rows, rows before batches, children before leads.
  *
- * ALL SEVENTEEN of them are `ON DELETE NO ACTION`, so any single leftover row
+ * ALL EIGHTEEN of them are `ON DELETE NO ACTION`, so any single leftover row
  * blocks the delete. This list used to be two entries (audit_log, pre_apps),
  * which was fine only because nothing else had been seeded yet. Once
  * seed-dev-payouts.mjs had run, the rep owned rep_payout_rows, the delete below
@@ -88,6 +88,9 @@ const wanted = new Set(ACCOUNTS.map((account) => account.email));
  *   where c.contype = 'f' and c.confrelid = 'public.profiles'::regclass;
  */
 const PROFILE_REFERENCES = [
+  // user_import_rows is deliberately absent: its user_id carries no FK, and its
+  // rows go with the batch by cascade. Only the batch references profiles.
+  ["user_import_batches", "imported_by"],
   ["rep_payout_row_history", "agent_id"],
   ["rep_payout_row_history", "changed_by"],
   ["rep_payout_rows", "agent_id"],
