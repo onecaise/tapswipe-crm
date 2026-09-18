@@ -338,6 +338,14 @@ export async function provisionFixtures(): Promise<Fixtures> {
     const { error: profileError } = await admin.from("profiles").insert({
       id: created.user.id,
       full_name: persona.fullName,
+      // The denormalised copy of auth.users.email, which create-user also
+      // writes. It was missing here, and that made these personas
+      // unrepresentative of any real account: stage-user-import detects an
+      // address that already exists by reading profiles.email, so a persona
+      // with a null copy looked like a brand-new person to the importer. Any
+      // feature that resolves a profile BY EMAIL is invisible to a fixture that
+      // does not set one.
+      email: persona.email,
       role: persona.role,
       is_active: persona.isActive,
       // Only the two active agents get one, so an import file can name them and
@@ -543,12 +551,33 @@ async function clearPayoutRows(
 }
 
 /**
+ * Clears every user-import batch imported by `userId`.
+ *
+ * user_import_batches.imported_by is the EIGHTEENTH reference to profiles, and
+ * like the other seventeen it is NO ACTION — so a batch left behind makes
+ * deleteUser fail on the FK, the persona survives teardown, and the next run
+ * dies on "user already registered". Exactly the trap clearPayoutRows documents,
+ * with one more door.
+ *
+ * Only the batch needs deleting: user_import_rows.batch_id is `on delete
+ * cascade`, and its user_id carries no FK at all (deliberately — an import row
+ * is provenance and must outlive the account it names).
+ */
+async function clearUserImports(
+  admin: SupabaseClient,
+  userId: string,
+): Promise<void> {
+  await admin.from("user_import_batches").delete().eq("imported_by", userId);
+}
+
+/**
  * Removes everything provisionFixtures created, in FK order.
  *
  * merchants.agent_id and documents.agent_id reference profiles with no ON
  * DELETE clause, so deleting the auth user first would fail on the profiles
  * cascade. The five rep_payout references are the same trap with five doors —
- * see clearPayoutRows. Storage objects are removed by prefix, keyed on the user id.
+ * see clearPayoutRows, and clearUserImports for the eighteenth. Storage objects
+ * are removed by prefix, keyed on the user id.
  */
 export async function teardownFixtures(): Promise<void> {
   const admin = adminClient();
@@ -644,6 +673,7 @@ export async function teardownFixtures(): Promise<void> {
     await admin.from("audit_log").delete().eq("row_id", user.id);
 
     await clearPayoutRows(admin, user.id);
+    await clearUserImports(admin, user.id);
 
     // Residual import files, removed by the {batch_id}/ prefix. Listed rather
     // than guessed at, because the filename is whatever was uploaded.
@@ -686,6 +716,7 @@ export async function deleteUserCompletely(userId: string): Promise<void> {
   await admin.from("audit_log").delete().eq("actor_id", userId);
   await admin.from("audit_log").delete().eq("row_id", userId);
   await clearPayoutRows(admin, userId);
+  await clearUserImports(admin, userId);
 
   const { error } = await admin.auth.admin.deleteUser(userId);
   if (error) {
