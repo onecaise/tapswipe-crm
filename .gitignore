@@ -58,3 +58,13 @@ supabase/.branches/
 /test-results/
 /blob-report/
 /playwright/.cache/
+
+# prod script output
+#
+# diag-prod-trigger.ps1 and push-prod-migration.ps1 tee their output here, so a
+# later session reads an artifact instead of asking someone to relay scrollback.
+# Not committed: the output names a project ref and a live server IP, and a
+# transcript of a production operation is not repo content. The scripts redact
+# the password out of everything they write, but the right default for a file
+# recording a prod action is still "stays local".
+/scripts/logs/
