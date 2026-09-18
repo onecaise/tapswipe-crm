@@ -28,6 +28,22 @@ export const PERSONAS = {
   admin: { email: "e2e-admin@tapswipe.test", fullName: "E2E Admin", role: "admin", agentNumber: "9001" },
   agent: { email: "e2e-agent@tapswipe.test", fullName: "E2E Agent", role: "agent", agentNumber: "9002" },
   agent2: { email: "e2e-agent2@tapswipe.test", fullName: "E2E Agent Two", role: "agent", agentNumber: "9003" },
+  /**
+   * Exists to be signed out, and is shared with nothing.
+   *
+   * `supabase.auth.signOut()` defaults to `scope: "global"`, which revokes the
+   * user's refresh tokens on the server for every device at once. The stored
+   * access token in e2e/.auth/*.json stays cryptographically valid — JWTs are
+   * not checked against a revocation list — so most specs never notice. The one
+   * that does is root-redirect.spec.ts's rotated-cookie test, which deliberately
+   * backdates `expires_at` to force a refresh, and that refresh is exactly what
+   * a global sign-out kills.
+   *
+   * So logging out as `agent` in one spec reds an unrelated spec two files
+   * later, with a failure that points at the proxy rather than at the cause.
+   * Hence a persona whose session nothing else depends on. Do not reuse it.
+   */
+  logout: { email: "e2e-logout@tapswipe.test", fullName: "E2E Logout", role: "agent", agentNumber: "9004" },
 } as const;
 
 export type PersonaKey = keyof typeof PERSONAS;
@@ -119,7 +135,8 @@ export type DocOwnerIds = Record<DocOwnerType, number>;
 export type SeedResult = {
   ids: Record<PersonaKey, string>;
   /** persona -> owner type -> record id, for the document specs. */
-  docOwners: Record<PersonaKey, DocOwnerIds>;
+  /** Every persona but `logout`, which owns no records — see PERSONAS. */
+  docOwners: Record<Exclude<PersonaKey, "logout">, DocOwnerIds>;
   apiUrl: string;
 };
 
@@ -330,6 +347,7 @@ export async function seedE2E(): Promise<SeedResult> {
     admin: await ensurePersona(db, "admin"),
     agent: await ensurePersona(db, "agent"),
     agent2: await ensurePersona(db, "agent2"),
+    logout: await ensurePersona(db, "logout"),
   } satisfies Record<PersonaKey, string>;
 
   const ownedPeriods = Object.values(PERIODS).map(firstOfMonth);
@@ -355,7 +373,11 @@ export async function seedE2E(): Promise<SeedResult> {
     admin: await ensureDocOwners(db, "admin", ids.admin),
     agent: await ensureDocOwners(db, "agent", ids.agent),
     agent2: await ensureDocOwners(db, "agent2", ids.agent2),
-  } satisfies Record<PersonaKey, DocOwnerIds>;
+    // No entry for `logout`, and the Exclude says so out loud rather than
+    // leaving a reader to wonder whether it was forgotten. That persona exists
+    // to be signed out; it opens no records, so seeding it a merchant, a lead,
+    // a pre-app and a ticket on every run would be four rows nothing reads.
+  } satisfies Record<Exclude<PersonaKey, "logout">, DocOwnerIds>;
 
   await ensureDocumentsBucket(db);
 

@@ -2,6 +2,7 @@ import { BellIcon } from "lucide-react";
 import { Suspense } from "react";
 
 import { GlobalSearch } from "@/components/global-search";
+import { LogoutButton } from "@/components/logout-button";
 import { NotificationsBell } from "@/components/notifications-bell";
 import { requireUser } from "@/lib/auth";
 import { countNotifications, notificationsFloor } from "@/lib/notifications";
@@ -21,15 +22,32 @@ import { createClient } from "@/lib/supabase/server";
  * the header. A count that briefly reads zero is the right failure — it
  * understates, and understating is what the real value does the rest of the time
  * anyway.
+ *
+ * It also carries the app's only sign-out control. In here rather than on each
+ * page so it is present everywhere inside the shell by construction — and, for
+ * the same reason, absent from /auth/* and /, which are outside this route
+ * group and have no topbar at all. That is a structural guarantee rather than a
+ * check someone has to remember: there is nothing conditional to get wrong.
  */
 export function AppTopbar() {
   return (
     <header className="sticky top-0 z-10 flex h-[60px] shrink-0 items-center justify-between gap-4 border-b bg-card px-7">
       <GlobalSearch />
 
-      <Suspense fallback={<BellFallback />}>
-        <BellWithCount />
-      </Suspense>
+      {/* Grouped so justify-between pushes the pair right as one unit. */}
+      <div className="flex shrink-0 items-center gap-1">
+        <Suspense fallback={<BellFallback />}>
+          <BellWithCount />
+        </Suspense>
+
+        {/* Not suspended, and that asymmetry is deliberate rather than an
+            oversight: unlike the bell, the sidebar nav and BugReportLauncher,
+            this reads no profile and takes no props, so there is nothing
+            dynamic for cacheComponents to object to. It therefore paints with
+            the bar instead of streaming in — which is the right behaviour for
+            the control someone reaches for when they want out. */}
+        <LogoutButton />
+      </div>
     </header>
   );
 }

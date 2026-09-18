@@ -5,7 +5,6 @@ import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { StatCard } from "@/components/stat-card";
-import { LogoutButton } from "@/components/logout-button";
 import { Badge } from "@/components/ui/badge";
 
 /**
@@ -67,10 +66,7 @@ async function DashboardHeader() {
   const profile = await requireUser();
 
   return (
-    <PageHeader
-      title={`Welcome back, ${profile.full_name}`}
-      action={<LogoutButton />}
-    >
+    <PageHeader title={`Welcome back, ${profile.full_name}`}>
       <div className="mt-1">
         <Badge variant="secondary">{profile.role}</Badge>
       </div>
