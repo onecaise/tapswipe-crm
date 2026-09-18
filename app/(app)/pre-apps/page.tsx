@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Suspense } from "react";
-import { PlusIcon } from "lucide-react";
+import { PlusIcon, PrinterIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
@@ -168,12 +168,23 @@ export default function PreAppsPage({
         title="Pre-Apps"
         subtitle="Merchant applications. Agents see their own; admins see the whole company and land on what needs review."
         action={
-          <Button asChild size="sm">
-            <Link href="/pre-apps/new">
-              <PlusIcon size={16} />
-              New pre-app
-            </Link>
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* Secondary, because starting one in the app is the common case
+                and printing a blank is the exception — a merchant with no
+                computer to fill it in on. */}
+            <Button asChild size="sm" variant="outline">
+              <Link href="/pre-apps/blank-form">
+                <PrinterIcon size={16} />
+                Blank form
+              </Link>
+            </Button>
+            <Button asChild size="sm">
+              <Link href="/pre-apps/new">
+                <PlusIcon size={16} />
+                New pre-app
+              </Link>
+            </Button>
+          </div>
         }
       />
 
