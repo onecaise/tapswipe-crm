@@ -144,6 +144,18 @@ for (const account of ACCOUNTS) {
   const { error: profileError } = await admin.from("profiles").insert({
     id: created.user.id,
     full_name: account.full_name,
+    // Mirrors create-user, which copies it from the created auth user. Taken
+    // from `created.user` rather than `account` so it matches what GoTrue
+    // actually stored, normalisation included.
+    //
+    // Omitting it made these accounts unrepresentative of any real one, and not
+    // only cosmetically: anything that resolves a profile BY EMAIL cannot see a
+    // row whose copy is null. stage-user-import detects an address that already
+    // has an account exactly that way, so locally-seeded users looked like
+    // brand-new people to a bulk import. The identical omission in
+    // tests/live/helpers/stack.ts failed two tests before it was found; this
+    // one had nothing asserting against it at all.
+    email: created.user.email,
     role: account.role,
     is_active: true,
   });
