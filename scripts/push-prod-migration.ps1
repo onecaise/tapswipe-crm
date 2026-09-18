@@ -3,7 +3,35 @@
 #
 # Run from the SAME terminal where SUPABASE_DB_PASSWORD is set:
 #
-#   powershell -File scripts\push-prod-migration.ps1
+#   powershell -File scripts\push-prod-migration.ps1 -DryRun    # connect, list, change nothing
+#   powershell -File scripts\push-prod-migration.ps1            # for real
+#
+# DO THE DRY RUN FIRST. It proves the credential, the pooler host, the target and
+# the migration list against the real server without writing anything, which is
+# most of what can go wrong.
+#
+# WHY --yes, AND WHY THE OUTPUT STREAMS.
+#
+# The first attempt at this hung for over thirty minutes with the CLI at
+# near-zero CPU, and had to be killed. `supabase db push` asks "Do you want to
+# push these migrations to the remote database?" -- the string is in the binary --
+# and the script was capturing its output with `| Out-String`, which holds
+# everything until the process exits. So the prompt never reached the terminal,
+# nobody could answer it, and the CLI sat waiting on stdin forever. The read-only
+# diagnostic confirmed afterwards that nothing had been applied.
+#
+# Two fixes, and both are needed. `--yes` (a global flag: "Answer yes to all
+# prompts") means the question is answered without a human. Streaming the output
+# line by line instead of buffering it means anything the CLI says -- a prompt, a
+# progress line, an error -- is visible WHILE it happens rather than after. A
+# command that can block on input must never have its output swallowed.
+#
+# Auto-confirming is safe here specifically because this script has already
+# proved what it is talking to: it refuses to continue unless the server reports
+# a real remote address, and it verifies the result against the catalog
+# afterwards rather than trusting the CLI's exit code. The prompt was the CLI
+# asking "are you sure you mean the remote database" -- a question this script
+# answers more rigorously than a human at a keyboard could.
 #
 # WHY THIS EXISTS RATHER THAN A PASTED COMMAND:
 # a pasted `db push --db-url $dbUrl` reported "Applying migration ... exit code
@@ -44,6 +72,13 @@
 #
 # READ-ONLY UNTIL THE PUSH STEP, and it aborts before that step if the pre-flight
 # cannot prove it is talking to a remote server.
+
+param(
+  # Connects to prod, lists what would be applied, and changes nothing. The CLI
+  # does the listing itself, so this also proves the credential and the pooler
+  # host before a real run touches anything.
+  [switch]$DryRun
+)
 
 $PROJECT_REF = 'zuvsdkjnfstrjahstsmg'            # tapwipe-crm-prod
 
@@ -196,15 +231,43 @@ if ($missingBefore.Count -eq 0) {
 
 # ---------- PUSH ----------
 Say '--- push ---'
-Say ('Applying ' + $missingBefore.Count + ' migration(s). db push applies everything pending and has no')
+Say ('Pending: ' + $missingBefore.Count + ' migration(s). db push applies everything pending and has no')
 Say ('target-version flag, so all of them go in this one command: ' + ($missingBefore -join ', '))
-Say 'Output is captured, so nothing appears until it finishes.'
 
-$pushOut  = (& $CLI db push --db-url $url 2>&1 | Out-String).TrimEnd()
+if ($DryRun) {
+  Say 'DRY RUN: --dry-run is set, so the CLI will list and change nothing.'
+}
+
+# Streamed, not captured. Buffering with Out-String is what made the first
+# attempt hang for thirty minutes: the CLI's confirmation prompt never reached
+# the terminal. Each line is redacted and logged as it arrives, so a prompt or a
+# stall is visible immediately.
+#
+# 2>&1 sends the CLI's stderr down the same pipeline, but PowerShell 5.1 wraps
+# each of those lines in an ErrorRecord -- which renders with "At line:N char:M"
+# noise and a stack trace around what is really just a status message. Flattened
+# with ToString() so the log reads like the terminal does.
+$pushArgs = @('db', 'push', '--db-url', $url, '--yes')
+if ($DryRun) { $pushArgs += '--dry-run' }
+
+& $CLI @pushArgs 2>&1 | ForEach-Object {
+  if ($_ -is [System.Management.Automation.ErrorRecord]) {
+    Say $_.ToString()
+  } else {
+    Say ([string]$_)
+  }
+}
 $pushExit = $LASTEXITCODE
 
-Say $pushOut
 Say ('cli exit code: ' + $pushExit)
+
+if ($DryRun) {
+  Say '--- end of dry run ---'
+  Say 'Nothing was applied. Re-run without -DryRun to apply, and the result will be'
+  Say 'verified against the server catalog rather than against the exit code above.'
+  Say ('--- end --- log written to ' + $LOG)
+  exit 0
+}
 
 # ---------- VERIFY (read-only, same process, same connection shape) ----------
 Say '--- after ---'
