@@ -1,5 +1,5 @@
 # Apply pending migrations to tapwipe-crm-prod, proving the target BEFORE the
-# push and verifying the result AFTER it, in this same process.
+# push and verifying EVERY pending migration after it, in this same process.
 #
 # Run from the SAME terminal where SUPABASE_DB_PASSWORD is set:
 #
@@ -19,40 +19,47 @@
 # So this script never trusts the exit message. It asks the server directly,
 # before and after, and calls the push a failure unless prod's catalog changed.
 #
-# EVERY LINE IS ALSO WRITTEN TO scripts\logs\, including the CLI's own output
-# and the computed PASS/FAIL. A prod migration that leaves no artifact is a prod
-# migration nobody can audit later -- and the companion diagnostic already
-# proved that point the hard way, having been run three times in one session
-# with its answer surviving only in a terminal that was then closed. The log
-# directory is gitignored.
+# WHY THE VERIFICATION IS NO LONGER PINNED TO ONE MIGRATION. This script was
+# written when exactly one was pending, and hardcoded its version. `db push`
+# applies EVERYTHING pending and has no target-version flag, so the moment a
+# second migration was waiting the script would have pushed both while checking
+# only the first -- and its pre-flight would have exited 0 with "nothing to push"
+# as soon as the first was recorded, leaving the second silently missing. A
+# verification narrower than the action it verifies is worse than none, because
+# it reports PASS.
+#
+# The migration check now reads supabase/migrations/ and asserts that every
+# version on disk has a row on the server, so adding a migration cannot leave it
+# behind again. The per-feature structural checks live in scripts/prod-state.ps1
+# and catch the other failure: a recorded version row with only some of its DDL.
+#
+# EVERY LINE IS ALSO WRITTEN TO scripts\logs\, including the CLI's own output and
+# the computed PASS/FAIL. A prod migration that leaves no artifact is one nobody
+# can audit later.
 #
 # Captured output is REDACTED before it is written or printed -- anything
-# matching the password, encoded or raw, becomes ***. The Supabase CLI echoes
-# the connection string in several of its error messages, so a log that records
-# a failed push is exactly where a credential would otherwise end up.
+# matching the password, encoded or raw, becomes ***. The Supabase CLI echoes the
+# connection string in several of its error messages, so a log that records a
+# failed push is exactly where a credential would otherwise end up.
 #
-# The password is never printed -- only its character count, so an empty or
-# mangled variable is visible without disclosing the value. No credential is
-# stored in this file.
-#
-# READ-ONLY UNTIL THE PUSH STEP, and it aborts before that step if the
-# pre-flight cannot prove it is talking to a remote server.
+# READ-ONLY UNTIL THE PUSH STEP, and it aborts before that step if the pre-flight
+# cannot prove it is talking to a remote server.
 
 $PROJECT_REF = 'zuvsdkjnfstrjahstsmg'            # tapwipe-crm-prod
 
 # NOTE: CLAUDE.md documents aws-1-us-west-2 for this project; this script has
-# always used aws-0, and the two have never been reconciled against a successful
-# connection. Both resolve to real, distinct Supabase pooler IPs, so DNS will not
-# disambiguate them -- the wrong one fails as "Tenant or user not found", which
-# reads like a bad password. The pre-flight below aborts before the push either
-# way, so a wrong host here costs a confusing message and nothing else.
+# always used aws-0. Both resolve to real, distinct Supabase pooler IPs, so DNS
+# will not disambiguate them -- the wrong one fails as "Tenant or user not
+# found", which reads like a bad password. The pre-flight aborts before the push
+# either way, so a wrong host here costs a confusing message and nothing else.
 $POOLER_HOST = 'aws-0-us-west-2.pooler.supabase.com'
 $POOLER_ALT  = 'aws-1-us-west-2.pooler.supabase.com'
 $POOLER_PORT = '5432'                            # session mode; 6543 breaks migrations partway
 $CONTAINER   = 'supabase_db_tapswipe-crm'        # borrowed as a psql client only
-$MIGRATION   = '20260916104500'
 $REPO        = Split-Path $PSScriptRoot -Parent
 $CLI         = Join-Path $REPO 'node_modules\.bin\supabase.cmd'
+
+. (Join-Path $PSScriptRoot 'prod-state.ps1')
 
 # ---------- logging ----------
 $LOG_DIR = Join-Path $PSScriptRoot 'logs'
@@ -61,9 +68,6 @@ if (-not (Test-Path $LOG_DIR)) {
 }
 $LOG = Join-Path $LOG_DIR ('push-prod-migration_' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
 
-# Strips the credential out of anything captured from a child process, in both
-# the percent-encoded form that goes into the URL and the raw form. Runs before
-# the text reaches the console OR the log.
 function Redact {
   param([string]$Text)
   if ([string]::IsNullOrEmpty($Text)) { return $Text }
@@ -83,16 +87,32 @@ function Say {
   Add-Content -Path $LOG -Value $clean -Encoding utf8
 }
 
-$STATE_SQL = "select 'server=' || coalesce(host(inet_server_addr()),'SOCKET-LOCAL') || ' | port=' || coalesce(inet_server_port()::text,'na') || ' | migration_row=' || (select count(*)::text from supabase_migrations.schema_migrations where version = '$MIGRATION') || ' | latest=' || coalesce((select max(version) from supabase_migrations.schema_migrations),'none') || ' | fn_has_insert_branch=' || coalesce((select case when prosrc like '%tg_op%' then 'yes' else 'no' end from pg_proc where proname = 'pre_apps_guard_transitions' limit 1),'no-function') || ' | trigger=' || coalesce((select pg_get_triggerdef(oid) from pg_trigger where tgname='pre_apps_guard_transitions'),'NONE')"
-
 function Get-ProdState {
   param([string]$Url)
-  return (docker exec $CONTAINER psql -w -d "$Url" -tA -c $STATE_SQL 2>&1 | Out-String).Trim()
+  return (docker exec $CONTAINER psql -w -d "$Url" -tA -c $PROD_STATE_SQL 2>&1 | Out-String).Trim()
+}
+
+function Get-AppliedVersions {
+  param([string]$Url)
+  $raw = (docker exec $CONTAINER psql -w -d "$Url" -tA -c $PROD_VERSIONS_SQL 2>&1 | Out-String)
+  return @($raw -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d{14}$' })
+}
+
+function Report-State {
+  param([string]$State, [string[]]$Missing)
+  Say $State
+  if ($Missing.Count -gt 0) {
+    Say ("pending on this server: " + ($Missing -join ', '))
+  } else {
+    Say 'pending on this server: none'
+  }
 }
 
 Say ('--- push-prod-migration --- ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 Say ('log: ' + $LOG)
-Say ('migration: ' + $MIGRATION)
+
+$localVersions = Get-LocalMigrationVersions -RepoRoot $REPO
+Say ('migrations in the repo: ' + $localVersions.Count + ' (newest ' + $localVersions[-1] + ')')
 
 if ([string]::IsNullOrEmpty($env:SUPABASE_DB_PASSWORD)) {
   Say 'ABORT: $env:SUPABASE_DB_PASSWORD is empty in this process.'
@@ -106,8 +126,6 @@ if ($null -eq (Get-Command docker -ErrorAction SilentlyContinue)) {
   exit 1
 }
 
-# Checked explicitly: `docker exec` against a stopped container fails with a
-# message about the container, which reads like a problem with prod.
 $containerUp = docker ps --format '{{.Names}}' | Select-String -SimpleMatch $CONTAINER
 if ($null -eq $containerUp) {
   Say ('ABORT: container ' + $CONTAINER + ' is not running. Start the local stack (npx supabase start).')
@@ -133,8 +151,11 @@ if ($url.Length -ne $expected) {
 
 # ---------- PRE-FLIGHT (read-only) ----------
 Say '--- before ---'
-$before = Get-ProdState -Url $url
-Say $before
+$before        = Get-ProdState -Url $url
+$appliedBefore = Get-AppliedVersions -Url $url
+$missingBefore = Get-MissingMigrations -Local $localVersions -Applied $appliedBefore
+
+Report-State -State $before -Missing $missingBefore
 
 if ($before -notmatch 'server=') {
   Say 'ABORT: could not read server state. Nothing was pushed.'
@@ -147,17 +168,37 @@ if ($before -match 'SOCKET-LOCAL') {
   Say 'ABORT: this connection reached a local unix socket, not prod. Nothing was pushed.'
   exit 1
 }
-if ($before -match 'migration_row=1') {
-  Say ('NOTE: ' + $MIGRATION + ' is already recorded on this server. Nothing to push.')
-  Say 'RESULT: PASS -- already applied.'
+
+# "Nothing to push" is now decided by the FULL check, not by one version row.
+# The old script exited 0 here the moment its one hardcoded migration was
+# recorded -- which, with a second one pending, would have been a PASS over an
+# unapplied migration.
+$problemsBefore = Get-ProdStateFailures -State $before -Missing $missingBefore
+
+if ($missingBefore.Count -eq 0) {
+  if ($problemsBefore.Count -eq 0) {
+    Say 'NOTE: every migration in the repo is already recorded here, and the structure checks pass.'
+    Say 'RESULT: PASS -- nothing to push.'
+    Say ('--- end --- log written to ' + $LOG)
+    Remove-Variable enc, url -ErrorAction SilentlyContinue
+    exit 0
+  }
+
+  # Every version row present but the structure wrong: a half-applied migration.
+  # Pushing again would not fix it -- db push skips versions already recorded.
+  Say 'RESULT: FAIL -- every migration is recorded, but the schema does not match:'
+  foreach ($problem in $problemsBefore) { Say ("  - " + $problem) }
+  Say 'Nothing was pushed. db push skips recorded versions, so this needs a look rather than a re-run.'
   Say ('--- end --- log written to ' + $LOG)
   Remove-Variable enc, url -ErrorAction SilentlyContinue
-  exit 0
+  exit 1
 }
 
 # ---------- PUSH ----------
 Say '--- push ---'
-Say 'Running supabase db push (output is captured, so nothing appears until it finishes).'
+Say ('Applying ' + $missingBefore.Count + ' migration(s). db push applies everything pending and has no')
+Say ('target-version flag, so all of them go in this one command: ' + ($missingBefore -join ', '))
+Say 'Output is captured, so nothing appears until it finishes.'
 
 $pushOut  = (& $CLI db push --db-url $url 2>&1 | Out-String).TrimEnd()
 $pushExit = $LASTEXITCODE
@@ -167,28 +208,37 @@ Say ('cli exit code: ' + $pushExit)
 
 # ---------- VERIFY (read-only, same process, same connection shape) ----------
 Say '--- after ---'
-$after = Get-ProdState -Url $url
-Say $after
+$after        = Get-ProdState -Url $url
+$appliedAfter = Get-AppliedVersions -Url $url
+$missingAfter = Get-MissingMigrations -Local $localVersions -Applied $appliedAfter
+
+Report-State -State $after -Missing $missingAfter
 
 Remove-Variable enc, url -ErrorAction SilentlyContinue
 
-$ok = ($after -match "migration_row=1") -and
-      ($after -match 'fn_has_insert_branch=yes') -and
-      ($after -match 'BEFORE INSERT OR UPDATE')
+$problems = Get-ProdStateFailures -State $after -Missing $missingAfter
 
-if ($ok) {
-  Say 'RESULT: PASS -- prod now has the migration row, the tg_op branch, and a BEFORE INSERT OR UPDATE trigger.'
+if ($problems.Count -eq 0) {
+  Say ('RESULT: PASS -- all ' + $localVersions.Count + ' migrations are recorded, and every structure check passes:')
+  Say '  - pre_apps_guard_transitions carries the tg_op branch, behind a BEFORE INSERT OR UPDATE trigger'
+  Say '  - both user_import tables exist with RLS on, 3 policies, the profiles FK, 3 grants to authenticated,'
+  Say '    no grant to anon, and the partial index'
   Say ('--- end --- log written to ' + $LOG)
   exit 0
 }
 
-# Deliberately distinguishes the two failure shapes, because they need
-# different responses: nothing happened, versus the function was replaced
-# without the trigger.
-if ($after -match 'fn_has_insert_branch=yes') {
-  Say 'RESULT: FAIL -- HALF APPLIED. The function carries the tg_op branch but the trigger is not BEFORE INSERT OR UPDATE. Do not re-run; report this output.'
+# Named individually, because the responses differ: nothing applied at all is a
+# re-run, a half-applied migration is not.
+Say 'RESULT: FAIL -- prod does not match what was pushed:'
+foreach ($problem in $problems) { Say ("  - " + $problem) }
+
+if ($missingAfter.Count -eq $missingBefore.Count) {
+  Say 'Nothing landed at all. Report this output.'
+} elseif ($missingAfter.Count -gt 0) {
+  Say 'SOME migrations landed and some did not. Do not re-run blindly; report this output.'
 } else {
-  Say 'RESULT: FAIL -- prod is unchanged. Nothing was applied. Report this output.'
+  Say 'Every version row is present but the schema does not match -- a HALF-APPLIED migration.'
+  Say 'Do not re-run: db push skips recorded versions. Report this output.'
 }
 
 Say ('--- end --- log written to ' + $LOG)
