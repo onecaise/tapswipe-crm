@@ -143,13 +143,19 @@
  * old comment here claimed it was not: what a *page* cannot reach is the
  * layout, but the layout's own components have no such problem.
  *
- * The one thing on these pages that must SURVIVE print media is the letterhead
- * mark in components/print-letterhead.tsx, which sits inside each document's
- * own <header> on all three. It carries no `print:` utility and needs none,
- * because nothing here hides by element name any more — reintroduce a broad
- * selector and the logo goes the way the titles did. e2e/print.spec.ts asserts
- * it is visible under print media AND that the image actually decoded, which a
- * `display: none` and a never-loaded lazy image would fail differently.
+ * The one thing on these pages that must SURVIVE print media is the Tapswipe
+ * letterhead, and it lives in components/print-document.tsx rather than here
+ * — it repeats on every SHEET, which is a structural problem no stylesheet
+ * solves: Chrome repeats a header only for real <thead> markup, so that file
+ * wraps each document in a real table. Measured against paginated PDFs; the
+ * three mechanisms tried are written up there.
+ *
+ * Nothing in this block hides it, and nothing needs to show it. It carries no
+ * `print:` utility at all, because nothing here hides by element name any more
+ * — reintroduce a broad selector and the logo goes the way the titles did.
+ * e2e/print.spec.ts asserts it against a real paginated PDF, because
+ * emulateMedia cannot see a page break: a mark that prints only on sheet 1
+ * looks identical to a correct one in every screen-based assertion.
  *
  * Deliberately not a colour override. The design system's tokens are what the
  * statement should print in, and forcing black text here would make the
@@ -182,5 +188,24 @@
 
   thead {
     display: table-header-group;
+  }
+
+  /*
+   * The scaffold's own two rows are exempt from the break-inside rule above.
+   *
+   * components/print-document.tsx wraps each printable document in a real
+   * <table> so its <thead> repeats the letterhead on every sheet. That puts
+   * the ENTIRE document inside one <tr> — and `break-inside: avoid` on it
+   * would be an instruction to keep a six-sheet application on one sheet.
+   * Chrome breaks it anyway, because avoid is a hint rather than a rule, but
+   * it obeys as far as it can first, which is how you get a nearly empty first
+   * sheet. Exempted by attribute, so the rule above still covers every real
+   * table row on the page — including the payout ledger's, which is the one it
+   * was written for, and including the ledger's when it is nested inside this
+   * scaffold.
+   */
+  [data-print-document] > thead > tr,
+  [data-print-document] > tbody > tr {
+    break-inside: auto;
   }
 }

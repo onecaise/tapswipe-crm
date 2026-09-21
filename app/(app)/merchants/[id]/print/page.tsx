@@ -4,7 +4,7 @@ import { Suspense } from "react";
 
 import { PageShell } from "@/components/page-shell";
 import { PrintButton } from "@/components/print-button";
-import { PrintLetterhead } from "@/components/print-letterhead";
+import { PrintDocument } from "@/components/print-document";
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { taskIsOverdue } from "@/lib/annotations";
@@ -124,86 +124,87 @@ async function MerchantPrint({
         </div>
       </div>
 
-      <article className="flex flex-col gap-6 rounded-xl border bg-card p-6 print:rounded-none print:border-0 print:p-0">
-        <header className="border-b pb-4">
-          <PrintLetterhead />
-          <h2 className="text-xl font-bold tracking-tight">{merchant.dba}</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Merchant record
-            {merchant.mid !== null && merchant.mid !== ""
-              ? ` · MID ${merchant.mid}`
-              : ""}
-          </p>
-        </header>
+      <article className="rounded-xl border bg-card p-6 print:rounded-none print:border-0 print:p-0">
+        <PrintDocument bodyClassName="flex flex-col gap-6">
+          <header className="border-b pb-4">
+            <h2 className="text-xl font-bold tracking-tight">{merchant.dba}</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Merchant record
+              {merchant.mid !== null && merchant.mid !== ""
+                ? ` · MID ${merchant.mid}`
+                : ""}
+            </p>
+          </header>
 
-        {/* The same nine fields the detail page shows, through the same
-            formatters, so a printed value never disagrees with the screen. */}
-        <dl className="grid grid-cols-2 gap-x-8 gap-y-3">
-          <Row label="Legal business name">
-            {formatText(merchant.legal_business_name)}
-          </Row>
-          <Row label="MID">{formatText(merchant.mid)}</Row>
-          <Row label="Status">{formatText(merchant.status)}</Row>
-          <Row label="Processor">{formatText(merchant.processor)}</Row>
-          <Row label="Agent split">{formatPct(merchant.split_agent_pct)}</Row>
-          <Row label="Company split">
-            {formatPct(merchant.split_company_pct)}
-          </Row>
-          <Row label="Date added">{formatDate(merchant.date_added)}</Row>
-          {agentName !== null && <Row label="Agent">{agentName}</Row>}
-          <Row label="Last updated">{formatDate(merchant.updated_at)}</Row>
-          {merchant.pre_app_id !== null && (
-            <Row label="Approved from">Pre-app #{merchant.pre_app_id}</Row>
-          )}
-        </dl>
+          {/* The same nine fields the detail page shows, through the same
+              formatters, so a printed value never disagrees with the screen. */}
+          <dl className="grid grid-cols-2 gap-x-8 gap-y-3">
+            <Row label="Legal business name">
+              {formatText(merchant.legal_business_name)}
+            </Row>
+            <Row label="MID">{formatText(merchant.mid)}</Row>
+            <Row label="Status">{formatText(merchant.status)}</Row>
+            <Row label="Processor">{formatText(merchant.processor)}</Row>
+            <Row label="Agent split">{formatPct(merchant.split_agent_pct)}</Row>
+            <Row label="Company split">
+              {formatPct(merchant.split_company_pct)}
+            </Row>
+            <Row label="Date added">{formatDate(merchant.date_added)}</Row>
+            {agentName !== null && <Row label="Agent">{agentName}</Row>}
+            <Row label="Last updated">{formatDate(merchant.updated_at)}</Row>
+            {merchant.pre_app_id !== null && (
+              <Row label="Approved from">Pre-app #{merchant.pre_app_id}</Row>
+            )}
+          </dl>
 
-        <Block title="Tasks" count={tasks.length}>
-          {tasks.map((task) => (
-            <li key={task.id} className="break-inside-avoid py-1.5 text-sm">
-              <span className="font-medium">{task.title}</span>
-              <span className="text-muted-foreground">
-                {" — "}
-                {task.completed
-                  ? "completed"
-                  : taskIsOverdue(task)
-                    ? `due ${formatDate(task.due_date)}, overdue`
-                    : task.due_date !== null
-                      ? `due ${formatDate(task.due_date)}`
-                      : "open"}
-                {task.author_name !== null ? ` · ${task.author_name}` : ""}
-              </span>
-            </li>
-          ))}
-        </Block>
+          <Block title="Tasks" count={tasks.length}>
+            {tasks.map((task) => (
+              <li key={task.id} className="break-inside-avoid py-1.5 text-sm">
+                <span className="font-medium">{task.title}</span>
+                <span className="text-muted-foreground">
+                  {" — "}
+                  {task.completed
+                    ? "completed"
+                    : taskIsOverdue(task)
+                      ? `due ${formatDate(task.due_date)}, overdue`
+                      : task.due_date !== null
+                        ? `due ${formatDate(task.due_date)}`
+                        : "open"}
+                  {task.author_name !== null ? ` · ${task.author_name}` : ""}
+                </span>
+              </li>
+            ))}
+          </Block>
 
-        <Block title="Notes" count={notes.length}>
-          {notes.map((note) => (
-            <li key={note.id} className="break-inside-avoid py-1.5 text-sm">
-              <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                {formatDate(note.created_at)}
-                {note.author_name !== null ? ` · ${note.author_name}` : ""}
-              </span>
-              {/* whitespace-pre-wrap: a note is typed prose and its line breaks
-                  are part of what someone wrote. */}
-              <span className="block whitespace-pre-wrap">{note.body}</span>
-            </li>
-          ))}
-        </Block>
+          <Block title="Notes" count={notes.length}>
+            {notes.map((note) => (
+              <li key={note.id} className="break-inside-avoid py-1.5 text-sm">
+                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                  {formatDate(note.created_at)}
+                  {note.author_name !== null ? ` · ${note.author_name}` : ""}
+                </span>
+                {/* whitespace-pre-wrap: a note is typed prose and its line breaks
+                    are part of what someone wrote. */}
+                <span className="block whitespace-pre-wrap">{note.body}</span>
+              </li>
+            ))}
+          </Block>
 
-        <Block title="Documents" count={documents.length}>
-          {documents.map((doc) => (
-            <li key={doc.id} className="break-inside-avoid py-1.5 text-sm">
-              <span className="font-medium">
-                {formatText(doc.file_name)}
-              </span>
-              <span className="text-muted-foreground">
-                {" — "}
-                {formatText(doc.doc_type)} · uploaded{" "}
-                {formatDate(doc.uploaded_at)}
-              </span>
-            </li>
-          ))}
-        </Block>
+          <Block title="Documents" count={documents.length}>
+            {documents.map((doc) => (
+              <li key={doc.id} className="break-inside-avoid py-1.5 text-sm">
+                <span className="font-medium">
+                  {formatText(doc.file_name)}
+                </span>
+                <span className="text-muted-foreground">
+                  {" — "}
+                  {formatText(doc.doc_type)} · uploaded{" "}
+                  {formatDate(doc.uploaded_at)}
+                </span>
+              </li>
+            ))}
+          </Block>
+        </PrintDocument>
       </article>
     </>
   );

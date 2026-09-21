@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { PERIODS, seedE2E, storageStateFor } from "./fixtures/seed";
+import { imagesPerPage, sheetMap } from "./helpers/pdf";
 
 /**
  * The printable pages: a blank application, one merchant's record, and — for
@@ -178,10 +179,10 @@ test.describe("another agent's merchant", () => {
 /**
  * The Tapswipe mark at the head of all three printed documents.
  *
- * Its own describe rather than an extra assertion inside the three tests
- * above, so a failure here means one thing: the letterhead. The tests above
- * are about the chrome coming off, and a spec that can fail for two reasons is
- * worse than two that each fail for one.
+ * Its own describe rather than an extra assertion inside the tests above, so a
+ * failure here means one thing: the letterhead. The tests above are about the
+ * chrome coming off, and a spec that can fail for two reasons is worse than
+ * two that each fail for one.
  *
  * Three assertions, each pinning something different — and the third is here
  * because the second turned out not to pin what it was first written to pin:
@@ -249,15 +250,64 @@ test.describe("the printed letterhead", () => {
   test("heads a payout summary", async ({ page }) => {
     await seedE2E();
     // Reached through the rep's own link rather than a hand-built URL, which
-    // would need their uuid — and the link is what an admin or rep actually
-    // clicks.
+    // would need their uuid — and the link is what an admin or rep clicks.
     await page.goto(`/payouts/${PERIODS.many}`);
-    await page.getByRole("link", { name: "Payout summary" }).first().click();
+    const href = await page
+      .getByRole("link", { name: "Payout summary" })
+      .first()
+      .getAttribute("href");
+    await page.goto(href as string);
     await expect(
       page.getByRole("heading", { name: "Payout summary" }),
     ).toBeVisible();
 
     await page.emulateMedia({ media: "print" });
     await expectLetterheadPrinted(page);
+  });
+
+  /**
+   * And on EVERY sheet, not just the first.
+   *
+   * The only assertion in this repo that reads a real paginated PDF, because
+   * it is the only claim that has sheets in it. Everything above runs under
+   * emulateMedia, which applies the print stylesheet without ever paginating,
+   * so all three of those specs pass just as happily on a mark that appears
+   * once and never again.
+   *
+   * The blank application is the subject because it is the only document here
+   * that reliably runs to several sheets — six, on the fields the wizard
+   * currently has. The other two are a sheet each, and a one-sheet document
+   * cannot tell a running head from a static one.
+   *
+   * This is what pins the mechanism rather than the mark. Measured against
+   * this document, `display: table-header-group` on a div repeats on no sheet
+   * but the first, in every arrangement tried, and `position: fixed` drops off
+   * the last — so the real <table> in components/print-document.tsx is load
+   * bearing, and swapping it for either of the obvious simplifications reds
+   * this and nothing else.
+   */
+  test("repeats on every sheet, not just the first", async ({ page }, info) => {
+    // page.pdf() is headless-Chromium only. Skipped rather than failed when
+    // someone runs the suite headed to watch it.
+    test.skip(
+      info.project.use.headless === false,
+      "page.pdf() needs headless Chromium",
+    );
+
+    await page.goto("/pre-apps/blank-form");
+    await expect(
+      page.getByRole("heading", { name: "Merchant application" }),
+    ).toBeVisible();
+    await page.emulateMedia({ media: "print" });
+    await expectLetterheadPrinted(page);
+
+    const sheets = imagesPerPage(await page.pdf({ format: "Letter" }));
+
+    expect(sheets.length, "the blank form stopped being a multi-sheet document")
+      .toBeGreaterThan(1);
+    expect(
+      sheetMap(sheets),
+      `the mark is missing from some sheets (O = has it): ${sheetMap(sheets)}`,
+    ).toBe("O".repeat(sheets.length));
   });
 });

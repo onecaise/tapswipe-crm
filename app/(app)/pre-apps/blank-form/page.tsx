@@ -2,7 +2,7 @@ import Link from "next/link";
 
 import { PageShell } from "@/components/page-shell";
 import { PrintButton } from "@/components/print-button";
-import { PrintLetterhead } from "@/components/print-letterhead";
+import { PrintDocument } from "@/components/print-document";
 import {
   BUSINESS_SECTION,
   OWNER_SECTION,
@@ -62,56 +62,57 @@ export default function BlankFormPage() {
         </div>
       </div>
 
-      <article className="flex flex-col gap-6 rounded-xl border bg-card p-6 print:rounded-none print:border-0 print:p-0">
-        <header className="border-b pb-4">
-          <PrintLetterhead />
-          <h2 className="text-xl font-bold tracking-tight">
-            Merchant application
-          </h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Please complete in ink. Leave blank anything that does not apply —
-            the checklist on the last page shows what has to be filled in before
-            the application can be submitted.
+      <article className="rounded-xl border bg-card p-6 print:rounded-none print:border-0 print:p-0">
+        <PrintDocument bodyClassName="flex flex-col gap-6">
+          <header className="border-b pb-4">
+            <h2 className="text-xl font-bold tracking-tight">
+              Merchant application
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Please complete in ink. Leave blank anything that does not apply —
+              the checklist on the last page shows what has to be filled in before
+              the application can be submitted.
+            </p>
+            <div className="mt-4 grid grid-cols-2 gap-4">
+              <RuledBox label="Representative" />
+              <RuledBox label="Date" hint="MM/DD/YYYY" />
+            </div>
+          </header>
+
+          <Section section={BUSINESS_SECTION} />
+
+          {/* Owners are unbounded in the schema; paper commits to a number. */}
+          {Array.from({ length: PAPER_OWNER_BLOCKS }, (_, index) => (
+            <OwnerBlock key={index} ordinal={index + 1} />
+          ))}
+
+          <p className="text-xs text-muted-foreground">
+            Attach a further sheet for any additional owners. At least one owner
+            must hold 51% or more.
           </p>
-          <div className="mt-4 grid grid-cols-2 gap-4">
-            <RuledBox label="Representative" />
-            <RuledBox label="Date" hint="MM/DD/YYYY" />
-          </div>
-        </header>
 
-        <Section section={BUSINESS_SECTION} />
+          <Section section={TERMINAL_SECTION} />
+          <Section section={PROFILE_SECTION} />
 
-        {/* Owners are unbounded in the schema; paper commits to a number. */}
-        {Array.from({ length: PAPER_OWNER_BLOCKS }, (_, index) => (
-          <OwnerBlock key={index} ordinal={index + 1} />
-        ))}
+          <SensitiveSection />
 
-        <p className="text-xs text-muted-foreground">
-          Attach a further sheet for any additional owners. At least one owner
-          must hold 51% or more.
-        </p>
-
-        <Section section={TERMINAL_SECTION} />
-        <Section section={PROFILE_SECTION} />
-
-        <SensitiveSection />
-
-        <section className="break-inside-avoid border-t pt-4">
-          <h3 className="text-base font-bold tracking-tight">
-            Before this can be submitted
-          </h3>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Everything below is checked again when the application is entered.
-          </p>
-          <ul className="mt-3 flex flex-col gap-1.5">
-            {PAPER_COMPLETENESS_CHECKLIST.map((item) => (
-              <li key={item} className="flex items-start gap-2 text-sm">
-                <Tick />
-                <span>{item}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
+          <section className="break-inside-avoid border-t pt-4">
+            <h3 className="text-base font-bold tracking-tight">
+              Before this can be submitted
+            </h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Everything below is checked again when the application is entered.
+            </p>
+            <ul className="mt-3 flex flex-col gap-1.5">
+              {PAPER_COMPLETENESS_CHECKLIST.map((item) => (
+                <li key={item} className="flex items-start gap-2 text-sm">
+                  <Tick />
+                  <span>{item}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        </PrintDocument>
       </article>
     </PageShell>
   );
