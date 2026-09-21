@@ -1,9 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { seedE2E, storageStateFor } from "./fixtures/seed";
+import { PERIODS, seedE2E, storageStateFor } from "./fixtures/seed";
 
 /**
- * The two printable pages: a blank application, and one merchant's record.
+ * The printable pages: a blank application, one merchant's record, and — for
+ * the letterhead only — a payout summary. The summary's own content is covered
+ * by the payouts specs; it is here because the mark is shared by all three.
  *
  * Only browser-only claims are here. Whether the field inventory covers every
  * column is settled by `satisfies` at compile time, and whether the labels match
@@ -170,5 +172,92 @@ test.describe("another agent's merchant", () => {
     // And none of the record leaked past the guard.
     await expect(page.getByRole("heading", { name: "Tasks" })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "Documents" })).toHaveCount(0);
+  });
+});
+
+/**
+ * The Tapswipe mark at the head of all three printed documents.
+ *
+ * Its own describe rather than an extra assertion inside the three tests
+ * above, so a failure here means one thing: the letterhead. The tests above
+ * are about the chrome coming off, and a spec that can fail for two reasons is
+ * worse than two that each fail for one.
+ *
+ * Three assertions, each pinning something different — and the third is here
+ * because the second turned out not to pin what it was first written to pin:
+ *
+ *   - **toBeVisible** catches the class of bug this whole suite exists for — a
+ *     broad print selector sweeping up something that belongs on the page, the
+ *     way `header { display: none }` once took every document's own title.
+ *     Measured: adding `print:hidden` to the component reds all three of these
+ *     and nothing else.
+ *   - **naturalWidth** separates a painted mark from an empty box. next/image
+ *     lays out at its full size before it has any bytes, so toBeVisible passes
+ *     on an image that would print as nothing.
+ *   - **not lazy** is what actually pins `priority`. Deleting `priority` and
+ *     re-running left the first two green: expect.poll simply waits out the
+ *     fetch a top-of-page image issues anyway, and the race `priority` exists
+ *     to prevent — print fired before the bytes land — is not one Playwright
+ *     can stage. So the deferral is asserted directly instead.
+ *
+ *     Asserted as NOT "lazy" rather than as "eager", which is measured rather
+ *     than assumed: Next 16 OMITS the attribute on a priority image (the
+ *     rendered tag is `alt decoding="async" src srcset` and nothing else) and
+ *     writes `loading="lazy"` only when it is absent. toHaveAttribute
+ *     "eager" therefore reds on the correct markup — it did, once, here.
+ */
+async function expectLetterheadPrinted(page: Page) {
+  // Scoped to the document: the sidebar renders the same file, with an empty
+  // alt, and it is hidden on paper.
+  const mark = page.locator("article img[alt='Tapswipe']");
+
+  await expect(mark, "the letterhead did not print").toBeVisible();
+  await expect
+    .poll(
+      () => mark.evaluate((img) => (img as HTMLImageElement).naturalWidth),
+      { message: "the logo laid out but never loaded — it would print blank" },
+    )
+    .toBeGreaterThan(0);
+  await expect(
+    mark,
+    "the logo is lazy again — it can lose a race with the print dialog",
+  ).not.toHaveAttribute("loading", "lazy");
+}
+
+test.describe("the printed letterhead", () => {
+  test.use({ storageState: storageStateFor("agent") });
+
+  test("heads the blank application", async ({ page }) => {
+    await page.goto("/pre-apps/blank-form");
+    await expect(
+      page.getByRole("heading", { name: "Merchant application" }),
+    ).toBeVisible();
+
+    await page.emulateMedia({ media: "print" });
+    await expectLetterheadPrinted(page);
+  });
+
+  test("heads a merchant's record", async ({ page }) => {
+    const { docOwners } = await seedE2E();
+    await page.goto(`/merchants/${docOwners.agent.merchant}/print`);
+    await expect(page.getByRole("heading", { name: "Tasks" })).toBeVisible();
+
+    await page.emulateMedia({ media: "print" });
+    await expectLetterheadPrinted(page);
+  });
+
+  test("heads a payout summary", async ({ page }) => {
+    await seedE2E();
+    // Reached through the rep's own link rather than a hand-built URL, which
+    // would need their uuid — and the link is what an admin or rep actually
+    // clicks.
+    await page.goto(`/payouts/${PERIODS.many}`);
+    await page.getByRole("link", { name: "Payout summary" }).first().click();
+    await expect(
+      page.getByRole("heading", { name: "Payout summary" }),
+    ).toBeVisible();
+
+    await page.emulateMedia({ media: "print" });
+    await expectLetterheadPrinted(page);
   });
 });

@@ -20,6 +20,7 @@ import {
 } from "@/lib/payouts";
 import { PageShell } from "@/components/page-shell";
 import { PrintButton } from "@/components/print-button";
+import { PrintLetterhead } from "@/components/print-letterhead";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -101,6 +102,7 @@ async function Summary({
           print stylesheet to keep in step with the app's look. */}
       <article className="flex flex-col gap-5 rounded-xl border bg-card p-6 print:rounded-none print:border-0 print:p-0">
         <header className="flex flex-col gap-1 border-b pb-4">
+          <PrintLetterhead />
           <h1 className="text-xl font-bold tracking-tight">Payout summary</h1>
           <p className="text-sm">
             <span className="font-medium">

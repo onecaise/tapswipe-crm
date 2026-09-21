@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { PageShell } from "@/components/page-shell";
 import { PrintButton } from "@/components/print-button";
+import { PrintLetterhead } from "@/components/print-letterhead";
 import {
   BUSINESS_SECTION,
   OWNER_SECTION,
@@ -63,6 +64,7 @@ export default function BlankFormPage() {
 
       <article className="flex flex-col gap-6 rounded-xl border bg-card p-6 print:rounded-none print:border-0 print:p-0">
         <header className="border-b pb-4">
+          <PrintLetterhead />
           <h2 className="text-xl font-bold tracking-tight">
             Merchant application
           </h2>

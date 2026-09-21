@@ -4,6 +4,7 @@ import { Suspense } from "react";
 
 import { PageShell } from "@/components/page-shell";
 import { PrintButton } from "@/components/print-button";
+import { PrintLetterhead } from "@/components/print-letterhead";
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { taskIsOverdue } from "@/lib/annotations";
@@ -125,6 +126,7 @@ async function MerchantPrint({
 
       <article className="flex flex-col gap-6 rounded-xl border bg-card p-6 print:rounded-none print:border-0 print:p-0">
         <header className="border-b pb-4">
+          <PrintLetterhead />
           <h2 className="text-xl font-bold tracking-tight">{merchant.dba}</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             Merchant record

@@ -143,6 +143,14 @@
  * old comment here claimed it was not: what a *page* cannot reach is the
  * layout, but the layout's own components have no such problem.
  *
+ * The one thing on these pages that must SURVIVE print media is the letterhead
+ * mark in components/print-letterhead.tsx, which sits inside each document's
+ * own <header> on all three. It carries no `print:` utility and needs none,
+ * because nothing here hides by element name any more — reintroduce a broad
+ * selector and the logo goes the way the titles did. e2e/print.spec.ts asserts
+ * it is visible under print media AND that the image actually decoded, which a
+ * `display: none` and a never-loaded lazy image would fail differently.
+ *
  * Deliberately not a colour override. The design system's tokens are what the
  * statement should print in, and forcing black text here would make the
  * printed figures disagree with the screen an admin just checked them on.
