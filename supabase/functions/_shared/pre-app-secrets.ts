@@ -46,20 +46,16 @@ export const isRpPassword = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= 128;
 
 /**
- * ABA routing number: nine digits AND the 3-7-1 weighted mod-10 check digit.
+ * ABA routing number: nine digits, and nothing more.
  *
- * `3(d1+d4+d7) + 7(d2+d5+d8) + (d3+d6+d9) ≡ 0 (mod 10)`. This is NOT Luhn —
- * 011401533 (KeyBank) is ABA-valid and Luhn-invalid, so reaching for Luhn here
- * would reject real routing numbers. Checking at all matters because once the
- * value is encrypted nobody can eyeball it again.
+ * The 3-7-1 weighted mod-10 check digit was enforced here until 25 Sep 2026 and
+ * was removed deliberately — see the matching note in lib/masks.ts for why, and
+ * for the algorithm to restore if that decision is ever reversed. Restore it in
+ * both files or neither: this one returns the 400, and lib/masks.ts is what
+ * decides whether the form lets the rep get that far.
  */
-export function isRoutingNumber(value: unknown): value is string {
-  if (typeof value !== "string" || !/^\d{9}$/.test(value)) return false;
-  const n = [...value].map(Number);
-  const sum =
-    3 * (n[0] + n[3] + n[6]) + 7 * (n[1] + n[4] + n[7]) + (n[2] + n[5] + n[8]);
-  return sum % 10 === 0;
-}
+export const isRoutingNumber = (value: unknown): value is string =>
+  typeof value === "string" && /^\d{9}$/.test(value);
 
 export type ParseResult =
   | { ok: true; entries: SecretEntry[] }
@@ -120,7 +116,7 @@ export function parseSecretsBody(body: unknown): ParseResult {
         if (!isRoutingNumber(entry.aba_routing)) {
           return {
             ok: false,
-            error: "aba_routing must be nine digits and pass its checksum",
+            error: "aba_routing must be nine digits",
           };
         }
         if (!isAccountNumber(entry.account_number)) {

@@ -109,47 +109,31 @@ describe("EIN, SSN and ZIP masks", () => {
   });
 });
 
-describe("ABA routing checksum", () => {
+describe("ABA routing number", () => {
   it("accepts real routing numbers", () => {
-    // 3-7-1 weighted mod 10. These are genuine published ABA numbers.
+    // Genuine published ABA numbers.
     expect(isRouting("021000021")).toBe(true); // Chase
     expect(isRouting("011401533")).toBe(true); // KeyBank
     expect(isRouting("121000248")).toBe(true); // Wells Fargo
   });
 
-  it("rejects a single-digit typo", () => {
-    expect(isRouting("021000022")).toBe(false);
+  /**
+   * The checksum was removed on 25 Sep 2026, and this is the test that says so
+   * out loud rather than leaving its absence to be inferred from missing
+   * coverage. Both values are nine digits that FAIL the 3-7-1 weighted mod-10
+   * check — 021000022 is a single-digit typo of Chase and 021000012 is a
+   * transposition of it. Under the old rule each was rejected at the keystroke.
+   *
+   * So this is also the regression test for restoring it by halves: putting the
+   * checksum back in lib/masks.ts without supabase/functions/_shared/
+   * pre-app-secrets.ts (or the reverse) reds this and nothing else.
+   */
+  it("accepts nine digits that fail the old 3-7-1 checksum", () => {
+    expect(isRouting("021000022")).toBe(true); // single-digit typo
+    expect(isRouting("021000012")).toBe(true); // transposed pair
   });
 
-  it("rejects a transposition, which is the typo it exists to catch", () => {
-    expect(isRouting("021000012")).toBe(false);
-  });
-
-  it("is the 3-7-1 weighted checksum, not Luhn", () => {
-    // The distinguishing fixture matters. 021000021 (Chase) satisfies BOTH
-    // algorithms, so testing with it proves nothing about which one is in use.
-    // 011401533 (KeyBank) is ABA-valid and Luhn-invalid, so it separates them.
-    const luhn = (v: string) => {
-      let sum = 0;
-      let double = false;
-      for (let i = v.length - 1; i >= 0; i--) {
-        let d = Number(v[i]);
-        if (double) {
-          d *= 2;
-          if (d > 9) d -= 9;
-        }
-        sum += d;
-        double = !double;
-      }
-      return sum % 10 === 0;
-    };
-
-    expect(luhn("021000021")).toBe(true); // useless as a discriminator
-    expect(isRouting("011401533")).toBe(true);
-    expect(luhn("011401533")).toBe(false); // this is the one that matters
-  });
-
-  it("rejects anything that is not nine digits", () => {
+  it("still rejects anything that is not nine digits", () => {
     expect(isRouting("02100002")).toBe(false);
     expect(isRouting("0210000211")).toBe(false);
     expect(maskRouting("0210-0002-1")).toBe("021000021");

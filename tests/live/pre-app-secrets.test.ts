@@ -227,8 +227,8 @@ describe("submit-pre-app-secrets access control", () => {
 
 describe("submit-pre-app-secrets validation mirrors lib/masks.ts", () => {
   const cases: [string, unknown, RegExp][] = [
-    ["an 8-digit routing number", { aba_routing: "02100002", account_number: PLAINTEXT.account }, /checksum|nine digits/i],
-    ["a checksum-failing 9-digit routing number", { aba_routing: "021000022", account_number: PLAINTEXT.account }, /checksum/i],
+    ["an 8-digit routing number", { aba_routing: "02100002", account_number: PLAINTEXT.account }, /nine digits/i],
+    ["a 10-digit routing number", { aba_routing: "0210000211", account_number: PLAINTEXT.account }, /nine digits/i],
     ["a 3-digit account number", { aba_routing: PLAINTEXT.routing, account_number: "123" }, /4 to 17/i],
     ["an 18-digit account number", { aba_routing: PLAINTEXT.routing, account_number: "123456789012345678" }, /4 to 17/i],
   ];
@@ -264,7 +264,7 @@ describe("submit-pre-app-secrets validation mirrors lib/masks.ts", () => {
     expect(raw).not.toContain("123456789");
   });
 
-  it("accepts a checksum-valid routing number", async () => {
+  it("accepts a nine-digit routing number", async () => {
     const { status, raw } = await invoke(
       "submit-pre-app-secrets",
       {
@@ -273,6 +273,35 @@ describe("submit-pre-app-secrets validation mirrors lib/masks.ts", () => {
             kind: "banking",
             pre_app_id: preAppId,
             aba_routing: PLAINTEXT.routing,
+            account_number: PLAINTEXT.account,
+          },
+        ],
+      },
+      owner.token,
+    );
+    expect(status, raw).toBe(200);
+  });
+
+  /**
+   * The checksum was removed on 25 Sep 2026. 021000022 is a single-digit typo
+   * of Chase's 021000021 and fails the old 3-7-1 weighted mod-10 check, so this
+   * exact body returned a 400 before that change.
+   *
+   * It is asserted HERE rather than only in the unit suite because the two
+   * validators are duplicated across a boundary TypeScript cannot see, and this
+   * is the side that issues the 400. Restoring the checksum in lib/masks.ts
+   * alone would leave this green while the form silently refuses what the
+   * function accepts; restoring it here alone reds this immediately.
+   */
+  it("accepts a nine-digit routing number that fails the old checksum", async () => {
+    const { status, raw } = await invoke(
+      "submit-pre-app-secrets",
+      {
+        secrets: [
+          {
+            kind: "banking",
+            pre_app_id: preAppId,
+            aba_routing: "021000022",
             account_number: PLAINTEXT.account,
           },
         ],

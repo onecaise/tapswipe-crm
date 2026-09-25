@@ -87,24 +87,24 @@ export function maskRouting(value: string): string {
 }
 
 /**
- * The ABA check digit: `3(d1+d4+d7) + 7(d2+d5+d8) + (d3+d6+d9) ≡ 0 (mod 10)`.
+ * Nine digits, and nothing more.
  *
- * This is the 3-7-1 weighted checksum, **not** Luhn. Reaching for Luhn is the
- * easy mistake here and it rejects real routing numbers — 011401533 (KeyBank)
- * is ABA-valid and fails Luhn. (021000021, Chase, happens to satisfy both, so
- * it is useless as a test of which algorithm is in use.) The point of checking
- * at all is that it catches most single-digit and transposition typos at the
- * keystroke, before the value is encrypted and becomes something nobody can
- * eyeball again.
+ * The 3-7-1 weighted mod-10 check digit was enforced here until 25 Sep 2026 and
+ * was removed deliberately. It refused numbers reps knew were right, and a
+ * routing number the processor accepts but this form rejects costs more than
+ * the typo it catches. The price is real and worth stating plainly: a
+ * transposed pair now reaches the database, gets encrypted, and becomes
+ * something nobody can eyeball again.
+ *
+ * If a checksum is ever restored, it is the 3-7-1 weighted sum
+ * `3(d1+d4+d7) + 7(d2+d5+d8) + (d3+d6+d9) ≡ 0 (mod 10)` and **not** Luhn —
+ * 011401533 (KeyBank) is ABA-valid and Luhn-invalid, so reaching for Luhn
+ * rejects real numbers. And it would have to go back into
+ * `supabase/functions/_shared/pre-app-secrets.ts` in the same commit, or the
+ * form accepts what the function returns a 400 for.
  */
-export function isRouting(value: string): boolean {
-  if (value === "") return true;
-  if (!/^\d{9}$/.test(value)) return false;
-  const n = [...value].map(Number);
-  const sum =
-    3 * (n[0] + n[3] + n[6]) + 7 * (n[1] + n[4] + n[7]) + (n[2] + n[5] + n[8]);
-  return sum % 10 === 0;
-}
+export const isRouting = (value: string): boolean =>
+  value === "" || /^\d{9}$/.test(value);
 
 // ---------------------------------------------------------------------------
 // Bank account number — 4 to 17 digits

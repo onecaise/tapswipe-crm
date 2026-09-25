@@ -198,10 +198,7 @@ export function SecretsStep({
               onChange={setRouting}
             />
             {routing !== "" && !isRouting(routing) && (
-              <p className="text-xs text-destructive">
-                Nine digits, and the checksum has to match — check for a
-                transposed pair.
-              </p>
+              <p className="text-xs text-destructive">Nine digits.</p>
             )}
             <OnFile
               label="Routing"
