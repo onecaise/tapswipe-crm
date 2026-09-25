@@ -13,7 +13,15 @@ import { invokeEdgeFunction } from "@/lib/edge-functions";
 export type CreatedUser = {
   user_id: string;
   email: string;
-  /** Shown once. Never persisted, here or anywhere. */
+  /**
+   * The password the account signs in with — the one the admin typed, echoed
+   * back so the success screen shows what was actually set rather than what the
+   * form thinks it sent. Never persisted, here or anywhere, so Reset password on
+   * the users list is the only way to issue another.
+   *
+   * Still named `temporary_password` because that is what it is: the profiles
+   * row lands with must_change_password = true, so it survives one sign-in.
+   */
   temporary_password: string;
   /**
    * Set when create-user finished an account an earlier attempt left half-built

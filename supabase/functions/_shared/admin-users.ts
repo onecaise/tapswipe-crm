@@ -127,6 +127,37 @@ export function isRole(value: unknown): value is Role {
 }
 
 /**
+ * GoTrue's floor, and the rule create-user applies to an admin-chosen password.
+ *
+ * DUPLICATED from lib/passwords.ts on purpose — a Deno function cannot import
+ * from lib/, because no import-map specifier reaches above supabase/functions/.
+ * Same arrangement as lib/user-imports.ts against _shared/user-imports.ts, and
+ * pinned the same way: tests/unit/password-rules.test.ts imports both copies and
+ * asserts they agree, so they cannot drift into the state where the form accepts
+ * a password the function then refuses with a 400 the admin cannot explain.
+ *
+ * Six is what supabase/config.toml's [auth].minimum_password_length sets for the
+ * local stack; the hosted projects carry it on their own Auth surface. Enforcing
+ * it here rather than leaning on GoTrue's own refusal is what keeps the failure a
+ * plain 400 from this function instead of a half-run provision: the password is
+ * only rejected once auth.admin.createUser is already being called.
+ */
+export const MIN_PASSWORD_LENGTH = 6;
+
+/**
+ * Whether an admin-supplied password is one this function will set.
+ *
+ * No trimming — a leading or trailing space is a real character, and trimming
+ * here would set the account's password to something other than what the admin
+ * typed and is about to hand over. Only length is checked: composition rules are
+ * GoTrue's to have (password_requirements is "" on both projects), and inventing
+ * stricter ones here would refuse passwords the Auth server accepts.
+ */
+export function isAcceptablePassword(value: unknown): value is string {
+  return typeof value === "string" && value.length >= MIN_PASSWORD_LENGTH;
+}
+
+/**
  * Deliberately permissive: one @, no spaces, a dot in the domain.
  *
  * The authority on whether an address is usable is GoTrue, which rejects what it

@@ -3,10 +3,17 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
-import { CheckIcon, CopyIcon, UserPlusIcon } from "lucide-react";
+import {
+  CheckIcon,
+  CopyIcon,
+  EyeIcon,
+  EyeOffIcon,
+  UserPlusIcon,
+} from "lucide-react";
 
 import { callAdminFunction, type CreatedUser } from "@/lib/admin-users";
 import type { Role } from "@/lib/auth";
+import { MIN_PASSWORD_LENGTH, isAcceptablePassword } from "@/lib/passwords";
 import { Callout } from "@/components/callout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,11 +22,21 @@ import { Label } from "@/components/ui/label";
 /**
  * Creates an account via the create-user Edge Function.
  *
- * The temporary password comes back in the response and is shown once. It is
- * never written to the database, so there is no second chance to read it — hence
- * the success state replaces the form rather than closing over it, and says so.
- * (This is also why this is a page rather than a dialog: a dialog that can be
- * dismissed is the wrong container for a secret with no second viewing.)
+ * THE ADMIN CHOOSES THE PASSWORD HERE. It is typed into the form, sent to the
+ * function, and set as the account's first password; nothing is generated. The
+ * rep still has to replace it — must_change_password is set server-side and the
+ * (app) layout diverts them to /auth/update-password until they do — so what the
+ * admin sets buys exactly one sign-in.
+ *
+ * That means this screen is allowed to show a password, which the bulk import
+ * deliberately never does. The difference is who knows it: there, forty
+ * generated credentials would be surfaced to someone who never chose any of
+ * them; here the admin typed it and is about to read it down a phone. Do not
+ * "harmonise" the two — e2e/user-import.spec.ts asserts the no-credential rule
+ * for that page only, and it should stay that way.
+ *
+ * The password is still never written to the database, so the recovery path when
+ * it is lost is Reset password on the users list, not a second viewing.
  *
  * Two search params, both sent by the residuals import review screen when an
  * unrecognised Agent # turns out to belong to nobody yet: `agent_number`
@@ -56,10 +73,16 @@ export function NewUserForm() {
     () => searchParams.get("agent_number")?.trim() ?? "",
   );
   const [role, setRole] = useState<Role>("agent");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreatedUser | null>(null);
   const [copied, setCopied] = useState(false);
+
+  // Only once they have started typing, so the rule is not shouted at someone
+  // mid-keystroke. The same shape update-password-form.tsx uses.
+  const tooShort = password !== "" && !isAcceptablePassword(password);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -68,7 +91,16 @@ export function NewUserForm() {
 
     const { data, error: callError } = await callAdminFunction<CreatedUser>(
       "create-user",
-      { full_name: fullName, email, role, agent_number: agentNumber },
+      {
+        full_name: fullName,
+        email,
+        role,
+        // Sent verbatim — no trim. A space at either end is a real character of
+        // the password the admin is about to hand over, and quietly dropping it
+        // would set the account to something other than what is on screen.
+        password,
+        agent_number: agentNumber,
+      },
     );
 
     if (callError || !data) {
@@ -96,15 +128,21 @@ export function NewUserForm() {
         <Callout tone="success">
           <p className="font-medium">Account created for {created.email}</p>
           <p className="mt-1 text-muted-foreground">
-            Give this password to them directly — a call or a message, not email
-            if you can avoid it. They will be required to choose their own the
-            first time they sign in.
+            They sign in with the password you set. Give it to them directly — a
+            call or a message, not email if you can avoid it. They will be
+            required to choose their own the first time they sign in.
           </p>
         </Callout>
 
         <div className="flex flex-col gap-2 rounded-xl border bg-card p-4">
+          {/* Echoed back from the function rather than from the form's own
+              state, so this shows what was actually set on the account. It is
+              not a reveal — the admin typed it a moment ago — it is here to be
+              copied into whatever message hands it over, and to be the one
+              place that is still right if the resume path reset an adopted
+              account to it. */}
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Temporary password — shown once
+            The password you set
           </p>
           <div className="flex items-center gap-2">
             <code className="flex-1 truncate rounded-lg bg-muted px-3 py-2 font-mono text-sm">
@@ -121,7 +159,8 @@ export function NewUserForm() {
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            It is not stored anywhere. If you lose it, use Reset password on the
+            It is not stored anywhere, so this screen is the last place it
+            appears. If it is lost before they sign in, use Reset password on the
             users list to issue a new one.
           </p>
         </div>
@@ -134,9 +173,9 @@ export function NewUserForm() {
             <p className="mt-1">
               A sign-in already existed for {created.email} with no profile
               attached, so an earlier attempt to create it must have been cut
-              short. It has been completed rather than refused, and the password
-              above is a new one — any password issued by that earlier attempt
-              no longer works.
+              short. It has been completed rather than refused, and the account
+              now takes the password you just set — anything that earlier attempt
+              issued no longer works.
             </p>
           </Callout>
         )}
@@ -170,6 +209,10 @@ export function NewUserForm() {
               setEmail("");
               setAgentNumber("");
               setRole("agent");
+              // Cleared with the rest: carrying one person's password over into
+              // the next person's form is how two reps end up sharing one.
+              setPassword("");
+              setShowPassword(false);
             }}
           >
             Create another
@@ -209,6 +252,47 @@ export function NewUserForm() {
       </div>
 
       <div className="grid gap-2">
+        <Label htmlFor="password">One-time password</Label>
+        <div className="flex items-center gap-2">
+          <Input
+            id="password"
+            // Masked by default — an admin creating an account is often doing it
+            // with someone at their shoulder — but revealable, because they have
+            // to read it out and a typo they cannot see is the whole risk here.
+            type={showPassword ? "text" : "password"}
+            required
+            minLength={MIN_PASSWORD_LENGTH}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            // Nothing should offer to fill or save this: it is not the admin's
+            // own credential, it belongs to the person being onboarded.
+            autoComplete="off"
+            aria-describedby="password-hint"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setShowPassword((shown) => !shown)}
+            aria-pressed={showPassword}
+          >
+            {showPassword ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
+            {showPassword ? "Hide" : "Show"}
+          </Button>
+        </div>
+        <p
+          id="password-hint"
+          className={
+            tooShort ? "text-xs text-destructive" : "text-xs text-muted-foreground"
+          }
+        >
+          At least {MIN_PASSWORD_LENGTH} characters. You hand this over yourself
+          — there is no email invite — and they must choose their own the first
+          time they sign in.
+        </p>
+      </div>
+
+      <div className="grid gap-2">
         <Label htmlFor="agent_number">Agent # (optional)</Label>
         <Input
           id="agent_number"
@@ -243,7 +327,7 @@ export function NewUserForm() {
       {error && <p className="text-sm text-destructive">{error}</p>}
 
       <div className="flex gap-2">
-        <Button type="submit" size="sm" disabled={isSaving}>
+        <Button type="submit" size="sm" disabled={isSaving || tooShort}>
           <UserPlusIcon size={16} />
           {isSaving ? "Creating…" : "Create user"}
         </Button>

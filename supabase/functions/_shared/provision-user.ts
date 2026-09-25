@@ -90,6 +90,21 @@ export type ProvisionInput = {
   email: string;
   role: Role;
   agentNumber: string | null;
+  /**
+   * The account's first password, when the caller has one to set.
+   *
+   * Present for create-user, where an admin types it and will hand it over
+   * themselves — see that function for why this flow is allowed to know a
+   * credential. ABSENT for provision-user-batch, which has no admin standing
+   * over each of forty rows and takes the generated password below precisely so
+   * it can discard it unread. Omitting it is therefore the safe default and the
+   * reason this is optional rather than required.
+   *
+   * Callers validate it before calling — MIN_PASSWORD_LENGTH in admin-users.ts.
+   * Nothing is trimmed or normalised here: whatever arrives is what GoTrue is
+   * given, because it is what the admin is about to read out.
+   */
+  password?: string;
 };
 
 /**
@@ -170,7 +185,10 @@ export async function provisionUser(
   const { fullName, role } = input;
   const email = normalizeEmail(input.email);
   const agentNumber = input.agentNumber;
-  const temporaryPassword = generateTempPassword();
+  // The caller's password if it set one, otherwise a generated one. The variable
+  // keeps its name because "temporary" is still true of both: must_change_password
+  // is set below either way, so neither survives the rep's first sign-in.
+  const temporaryPassword = input.password ?? generateTempPassword();
 
   // Checked BEFORE createUser, deliberately.
   //
@@ -408,10 +426,12 @@ export async function provisionUser(
     outcome: resumed ? "resumed" : "created",
     userId: newUserId,
     email,
-    // Returned exactly once and stored nowhere. The single-row caller shows it
-    // to the admin; the batch caller discards it unread, because a batch that
-    // hands out forty secrets at once is a worse problem than a batch whose
-    // accounts need a password issued per rep at onboarding time.
+    // Stored nowhere. The single-row caller shows it to the admin — who typed
+    // it in that flow, so showing it back reveals nothing they do not already
+    // know; the batch caller discards it unread, because there it IS a secret
+    // nobody has seen, and a batch that hands out forty of those at once is a
+    // worse problem than a batch whose accounts need a password issued per rep
+    // at onboarding time.
     temporaryPassword,
     // Non-fatal: the account exists either way, and reporting failure for an
     // action that succeeded would be the worse lie. Surfaced so it is not silent.

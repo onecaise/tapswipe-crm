@@ -1,5 +1,18 @@
 // Creates a rep or admin account: the auth.users row, the matching profiles
-// row, and a temporary password returned to the calling admin once.
+// row, and the one-time password the calling admin chose for it.
+//
+// THE ADMIN SUPPLIES THAT PASSWORD, and this function does not generate one.
+// That is the opposite arrangement to provision-user-batch, on purpose and not
+// by oversight: there, forty accounts are created with nobody standing over each
+// row, so the generated password is discarded unread and no credential surfaces
+// anywhere. Here one admin is typing one password for one person they are about
+// to ring up, so the password is theirs to know — it arrives in the request body
+// and is echoed back in the response. must_change_password is still set, so it
+// buys exactly one sign-in either way.
+//
+// It is validated here as well as in the form, because the form is not a
+// boundary — anyone with an admin session can POST to this URL. MIN_PASSWORD_LENGTH
+// in _shared/admin-users.ts is the rule, mirrored from lib/passwords.ts.
 //
 // verify_jwt = false in config.toml, so this function authenticates the caller
 // itself — withSupabase({ auth: "user" }) rejects a missing or invalid JWT
@@ -21,8 +34,10 @@ import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
 
 import {
+  MIN_PASSWORD_LENGTH,
   callerIsActive,
   callerIsAdmin,
+  isAcceptablePassword,
   isAgentNumber,
   isEmail,
   isFullName,
@@ -66,6 +81,7 @@ export default {
       full_name: fullName,
       email,
       role,
+      password,
       agent_number: agentNumber,
     } = body;
 
@@ -77,6 +93,19 @@ export default {
     }
     if (!isRole(role)) {
       return json({ error: "role must be 'agent' or 'admin'" }, 400);
+    }
+    // Required, and checked before anything is created. The form enforces the
+    // same rule, which is a courtesy rather than the boundary — this is the
+    // check that cannot be skipped by posting to the URL directly.
+    if (!isAcceptablePassword(password)) {
+      return json(
+        {
+          error:
+            `password is required and must be at least ${MIN_PASSWORD_LENGTH} ` +
+            `characters`,
+        },
+        400,
+      );
     }
 
     // Optional, and absent is the norm. normalizeAgentNumber is shared with the
@@ -98,6 +127,10 @@ export default {
       email,
       role,
       agentNumber: normalisedAgentNumber,
+      // Passed through exactly as typed. provisionUser falls back to a generated
+      // password when this is absent, which is the batch caller's path and not
+      // one this function ever takes.
+      password,
     });
 
     if (result.outcome === "conflict") {
@@ -118,8 +151,12 @@ export default {
       {
         user_id: result.userId,
         email: result.email,
-        // Returned exactly once and stored nowhere. The admin passes it to the
-        // rep out-of-band; first login forces a replacement.
+        // The password the account can actually sign in with — the one the admin
+        // just typed, on both the created and the resumed path (the resume resets
+        // the adopted row to it). Echoed back rather than dropped so the success
+        // screen can state what was set without the form having to hold it, and
+        // so "this finished a half-created account" comes with the password that
+        // is now live on it. Stored nowhere; first login forces a replacement.
         temporary_password: result.temporaryPassword,
         // Set when this call adopted a leftover auth.users row rather than
         // creating one. The account is complete and the password above is live
@@ -145,11 +182,13 @@ export default {
   curl -i --location --request POST 'http://127.0.0.1:54321/functions/v1/create-user' \
     --header 'Authorization: Bearer <ADMIN_ACCESS_TOKEN>' \
     --header 'Content-Type: application/json' \
-    --data '{"full_name":"New Rep","email":"rep@tapswipe.test","role":"agent","agent_number":"4471"}'
+    --data '{"full_name":"New Rep","email":"rep@tapswipe.test","role":"agent","password":"hand-this-over","agent_number":"4471"}'
 
   agent_number is optional; omit it, or send "" / null, for a rep with none.
+  password is REQUIRED, and is the account's first password.
 
   Expected: 201 with { user_id, email, temporary_password }
+            400 if password is missing or shorter than MIN_PASSWORD_LENGTH
             201 with resumedOrphanedAuthUser: true if that email had an
                 auth.users row but no profiles row — an interrupted earlier
                 attempt, finished rather than refused, with a fresh password
@@ -158,3 +197,4 @@ export default {
             403 if the caller is not an active admin
             401 if there is no valid JWT
 */
+

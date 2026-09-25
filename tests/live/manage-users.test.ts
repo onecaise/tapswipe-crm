@@ -38,6 +38,18 @@ const FUNCTIONS = [
   "admin-reset-password",
 ] as const;
 
+/**
+ * The password these tests set on the accounts they create.
+ *
+ * create-user takes the admin's chosen password now rather than generating one,
+ * so every body below has to carry one — and a body missing it is a 400, which
+ * is exactly the "403 is really a 400 in disguise" failure VALID_BODY exists to
+ * rule out. Deliberately not the fixtures' PASSWORD: these are different
+ * accounts, and reusing it would let a sign-in assertion pass against the wrong
+ * one.
+ */
+const CHOSEN_PASSWORD = "live-chosen-password-456";
+
 /** A syntactically valid body per function, so a 403 is never a 400 in disguise. */
 const VALID_BODY: Record<(typeof FUNCTIONS)[number], Record<string, unknown>> =
   {
@@ -45,6 +57,7 @@ const VALID_BODY: Record<(typeof FUNCTIONS)[number], Record<string, unknown>> =
       full_name: "Should Not Exist",
       email: "live-should-not-exist@tapswipe.test",
       role: "agent",
+      password: CHOSEN_PASSWORD,
     },
     "deactivate-user": {
       user_id: "00000000-0000-4000-8000-000000000000",
@@ -238,10 +251,15 @@ describe("a deactivated user cannot log in, even with the right password", () =>
 describe("create-user", () => {
   const email = "live-created-rep@tapswipe.test";
 
-  it("creates an account whose temporary password actually works", async () => {
+  it("creates an account whose password is the one the admin chose", async () => {
     const response = await invoke(
       "create-user",
-      { full_name: "Live Created Rep", email, role: "agent" },
+      {
+        full_name: "Live Created Rep",
+        email,
+        role: "agent",
+        password: CHOSEN_PASSWORD,
+      },
       fixtures.tokens.admin,
     );
 
@@ -251,7 +269,12 @@ describe("create-user", () => {
     const temporaryPassword = String(response.body.temporary_password);
     createdUserIds.push(userId);
 
-    expect(temporaryPassword.length).toBeGreaterThanOrEqual(16);
+    // Echoed back unchanged. The response used to carry a generated password,
+    // and asserting only its length would not notice the function quietly
+    // ignoring the chosen one and setting something else — which is precisely
+    // the failure that would leave an admin reading out a password that does
+    // not work.
+    expect(temporaryPassword).toBe(CHOSEN_PASSWORD);
 
     // The profile row is what makes the account usable at all — an auth user
     // without one lands on /auth/error?error=no-profile forever.
@@ -270,14 +293,16 @@ describe("create-user", () => {
       must_change_password: true,
     });
 
-    // The end-to-end point of the whole function: the generated credential
-    // signs in. Asserting only the 201 would not catch a password that was
-    // returned but never actually set on the account.
+    // The end-to-end point of the whole function: the credential signs in.
+    // Asserting only the 201 would not catch a password that was returned but
+    // never actually set on the account. Sent as the literal the admin typed
+    // rather than as the echoed value, so a function that echoed the body back
+    // while setting something else cannot pass this pair.
     const signIn = await anonClient().auth.signInWithPassword({
       email,
-      password: temporaryPassword,
+      password: CHOSEN_PASSWORD,
     });
-    expect(signIn.error, "the temporary password should sign in").toBe(null);
+    expect(signIn.error, "the chosen password should sign in").toBe(null);
 
     const { data: audit } = await admin
       .from("audit_log")
@@ -304,7 +329,12 @@ describe("create-user", () => {
 
     const response = await invoke(
       "create-user",
-      { full_name: "Duplicate Rep", email, role: "agent" },
+      {
+        full_name: "Duplicate Rep",
+        email,
+        role: "agent",
+        password: CHOSEN_PASSWORD,
+      },
       fixtures.tokens.admin,
     );
 
@@ -346,7 +376,12 @@ describe("create-user", () => {
 
     const response = await invoke(
       "create-user",
-      { full_name: "Live Orphaned Rep", email: orphanEmail, role: "agent" },
+      {
+        full_name: "Live Orphaned Rep",
+        email: orphanEmail,
+        role: "agent",
+        password: CHOSEN_PASSWORD,
+      },
       fixtures.tokens.admin,
     );
 
@@ -412,7 +447,12 @@ describe("create-user", () => {
     // for any admin who retyped an address that already belonged to someone.
     const response = await invoke(
       "create-user",
-      { full_name: "Not A Resume", email, role: "agent" },
+      {
+        full_name: "Not A Resume",
+        email,
+        role: "agent",
+        password: CHOSEN_PASSWORD,
+      },
       fixtures.tokens.admin,
     );
 
@@ -421,20 +461,57 @@ describe("create-user", () => {
   });
 
   it("validates the body before touching anything", async () => {
+    const p = CHOSEN_PASSWORD;
     for (const body of [
-      { full_name: "", email: "a@b.co", role: "agent" },
-      { full_name: "No Email", email: "not-an-email", role: "agent" },
-      { full_name: "Bad Role", email: "live-bad-role@tapswipe.test", role: "superuser" },
+      { full_name: "", email: "a@b.co", role: "agent", password: p },
+      { full_name: "No Email", email: "not-an-email", role: "agent", password: p },
+      {
+        full_name: "Bad Role",
+        email: "live-bad-role@tapswipe.test",
+        role: "superuser",
+        password: p,
+      },
       {
         full_name: "Long Number",
         email: "live-long-number@tapswipe.test",
         role: "agent",
+        password: p,
         agent_number: "x".repeat(33),
+      },
+      // The password the admin chooses is validated here as well as in the
+      // form, because the form is not a boundary — these two bodies are what an
+      // admin session POSTing straight at the URL can send. Five characters is
+      // one short of MIN_PASSWORD_LENGTH; omitted entirely is the other half,
+      // and the one that would otherwise fall through to a generated password
+      // nobody asked for.
+      {
+        full_name: "Short Password",
+        email: "live-short-password@tapswipe.test",
+        role: "agent",
+        password: "12345",
+      },
+      {
+        full_name: "No Password",
+        email: "live-no-password@tapswipe.test",
+        role: "agent",
       },
     ]) {
       const response = await invoke("create-user", body, fixtures.tokens.admin);
       expect(response.status, response.raw).toBe(400);
     }
+
+    // And nothing was created for either password case. A 400 that still left an
+    // account behind would be the failure worth catching: the refusal has to
+    // land before auth.admin.createUser, not after it.
+    const { data: users } = await adminClient().auth.admin.listUsers({
+      perPage: 1000,
+    });
+    const leftBehind = (users?.users ?? []).filter(
+      (user) =>
+        user.email === "live-short-password@tapswipe.test" ||
+        user.email === "live-no-password@tapswipe.test",
+    );
+    expect(leftBehind).toEqual([]);
   });
 
   it("records an agent number, and refuses one already taken", async () => {
@@ -447,6 +524,7 @@ describe("create-user", () => {
         full_name: "Live Numbered Rep",
         email: numbered,
         role: "agent",
+        password: CHOSEN_PASSWORD,
         // Deliberately not one of PERSONA_AGENT_NUMBERS. The personas now hold
         // LIVE-4471 and LIVE-9902 so the residual suite can name them in an import
         // file, and reusing one here made this test collide with the fixture — the
@@ -478,6 +556,7 @@ describe("create-user", () => {
         full_name: "Live Clashing Rep",
         email: clashing,
         role: "agent",
+        password: CHOSEN_PASSWORD,
         // Deliberately not one of PERSONA_AGENT_NUMBERS. The personas now hold
         // LIVE-4471 and LIVE-9902 so the residual suite can name them in an import
         // file, and reusing one here made this test collide with the fixture — the
@@ -510,7 +589,13 @@ describe("create-user", () => {
     ]) {
       const response = await invoke(
         "create-user",
-        { full_name: "Live Blank Number", email, role: "agent", agent_number: "   " },
+        {
+          full_name: "Live Blank Number",
+          email,
+          role: "agent",
+          password: CHOSEN_PASSWORD,
+          agent_number: "   ",
+        },
         fixtures.tokens.admin,
       );
       expect(response.status, response.raw).toBe(201);
@@ -539,7 +624,12 @@ describe("admin-reset-password", () => {
 
     const created = await invoke(
       "create-user",
-      { full_name: "Live Reset Rep", email, role: "agent" },
+      {
+        full_name: "Live Reset Rep",
+        email,
+        role: "agent",
+        password: CHOSEN_PASSWORD,
+      },
       fixtures.tokens.admin,
     );
     expect(created.status, created.raw).toBe(201);

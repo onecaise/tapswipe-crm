@@ -12,14 +12,13 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { MIN_PASSWORD_LENGTH } from "@/lib/passwords";
 import { useState } from "react";
 
-/**
- * GoTrue's floor. Mirrored here only to say so before the request rather than
- * after — the server is still the authority and its message is shown verbatim
- * if it disagrees.
- */
-const MIN_PASSWORD_LENGTH = 6;
+// MIN_PASSWORD_LENGTH used to be declared here. It moved to lib/passwords.ts
+// when the new-user form began setting an account's first password and needed
+// the same rule — two forms inventing the same number separately is how one of
+// them ends up a character out from what the Auth server will accept.
 
 export function UpdatePasswordForm({
   className,

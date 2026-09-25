@@ -30,7 +30,7 @@ export default function NewUserPage() {
 
       <PageHeader
         title="New user"
-        subtitle="Creates the account and a one-time temporary password. There is no email invite — you hand the password over yourself."
+        subtitle="Creates the account with a one-time password you choose. There is no email invite — you hand the password over yourself, and they replace it the first time they sign in."
       />
 
       {/* cacheComponents: true means the requireAdmin() read needs a Suspense
