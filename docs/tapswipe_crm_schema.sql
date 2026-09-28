@@ -649,6 +649,35 @@ create table pre_apps (
   billing_type text check (billing_type in ('gross', 'net')),
   bank_name text,
 
+  -- Sales volume, as estimated by the merchant at application time.
+  --
+  -- All seven are optional and all are independent. No cross-field rule is
+  -- enforced: not high >= average, not the four brand figures summing to the
+  -- monthly total, not the monthly figures summing to the annual one. These are
+  -- rough numbers a merchant gives in conversation, and a form that rejected an
+  -- inconsistent set would refuse honestly-filled applications. Underwriting
+  -- reconciles them; this table records what was said. Same stance as the
+  -- moto_pct / internet_pct pair on pre_app_business_profile, which is captured
+  -- and deliberately never summed against anything.
+  --
+  -- `est_` prefixed because rep_payout_rows.average_ticket already exists and
+  -- means something different: the ACTUAL figure for a merchant in a period,
+  -- read off the processor's monthly residual report. An estimate given at
+  -- application time and a measurement taken afterwards must not read alike,
+  -- and `average_ticket` on its own does not say which it is.
+  --
+  -- numeric(14,2) matches those columns, so an estimate and an actual can be
+  -- compared without a cast. Non-negative because a negative here is a typo and
+  -- nothing else -- unlike total_cost and residual_income over there, which are
+  -- deliberately signed because clawbacks make a negative month real.
+  est_annual_volume      numeric(14,2) check (est_annual_volume      >= 0),
+  est_monthly_visa       numeric(14,2) check (est_monthly_visa       >= 0),
+  est_monthly_mastercard numeric(14,2) check (est_monthly_mastercard >= 0),
+  est_monthly_discover   numeric(14,2) check (est_monthly_discover   >= 0),
+  est_monthly_amex       numeric(14,2) check (est_monthly_amex       >= 0),
+  est_average_ticket     numeric(14,2) check (est_average_ticket     >= 0),
+  est_high_ticket        numeric(14,2) check (est_high_ticket        >= 0),
+
   -- Commission split between the rep and Tapswipe, recorded by the rep who
   -- knows the deal terms and copied into merchants by approve_pre_app(). The
   -- standard deal is 50/50; it is 100/0 when the CEO is the one on the sale.

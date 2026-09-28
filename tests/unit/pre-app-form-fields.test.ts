@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   BILLING_TYPE_OPTIONS,
   LEGAL_ENTITY_TYPES,
+  SALES_VOLUME_FIELDS,
   TERMINAL_BOOLEANS,
   UNSET,
 } from "@/lib/pre-app-validation";
@@ -13,6 +14,7 @@ import {
   PAPER_COMPLETENESS_CHECKLIST,
   PAPER_OWNER_BLOCKS,
   PROFILE_SECTION,
+  SALES_VOLUME_GROUP,
   SECRET_FIELDS,
   TERMINAL_SECTION,
   type PaperFieldEntry,
@@ -88,7 +90,7 @@ describe("the paper form asks what the wizard asks", () => {
    * printed layout, rather than drifting.
    */
   it("carries the same number of fields per step", () => {
-    expect(fieldsOf(BUSINESS_SECTION)).toHaveLength(24);
+    expect(fieldsOf(BUSINESS_SECTION)).toHaveLength(31);
     expect(fieldsOf(OWNER_SECTION)).toHaveLength(16);
     expect(fieldsOf(TERMINAL_SECTION)).toHaveLength(24);
     expect(fieldsOf(PROFILE_SECTION)).toHaveLength(8);
@@ -114,6 +116,33 @@ describe("the paper form asks what the wizard asks", () => {
       .map((field) => [field.key, field.label]);
 
     expect(ticks).toEqual(TERMINAL_BOOLEANS.map(([key, label]) => [key, label]));
+  });
+
+  it("prints every sales-volume field the wizard offers, with its own label", () => {
+    // Same argument as the terminal ticks above: SALES_VOLUME_FIELDS is what
+    // business-step.tsx maps over, so comparing against it pins all seven
+    // labels to their real source. The paper form has to spell the keys out
+    // literally — `satisfies Record<PaperBusinessKey, PaperField>` needs literal
+    // keys — and this is what stops that copy drifting from the screen.
+    const money = fieldsOf(BUSINESS_SECTION)
+      .filter((field) => field.kind === "money")
+      .map((field) => [field.key, field.label]);
+
+    expect(money).toEqual(SALES_VOLUME_FIELDS.map(([key, label]) => [key, label]));
+  });
+
+  it("gives every sales-volume field the same group and a unit hint", () => {
+    // The unit is genuinely ambiguous on paper: a mask stops "250k" being typed
+    // into the wizard and nothing stops it being written in a box.
+    const money = fieldsOf(BUSINESS_SECTION).filter(
+      (field) => field.kind === "money",
+    );
+
+    expect(money).toHaveLength(SALES_VOLUME_FIELDS.length);
+    for (const field of money) {
+      expect(field.group, field.key).toBe(SALES_VOLUME_GROUP);
+      expect(field.hint, field.key).toBe("dollars");
+    }
   });
 
   it("offers the real billing types and entity types", () => {

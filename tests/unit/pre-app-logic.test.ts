@@ -5,6 +5,7 @@ import {
   countSignificant,
   isAccount,
   isEin,
+  isMoney,
   isPercent,
   isPhone,
   isRouting,
@@ -13,6 +14,7 @@ import {
   isZip,
   maskAccount,
   maskEin,
+  maskMoney,
   maskPercent,
   maskPhone,
   maskRouting,
@@ -162,6 +164,51 @@ describe("account number and percentage", () => {
     expect(isPercent("100")).toBe(true);
     expect(isPercent("100.01")).toBe(false);
     expect(isPercent("0")).toBe(true);
+  });
+});
+
+describe("money mask", () => {
+  it("keeps digits and at most two decimals", () => {
+    expect(maskMoney("250000")).toBe("250000");
+    expect(maskMoney("1234.5")).toBe("1234.5");
+    expect(maskMoney("1234.567")).toBe("1234.56");
+    expect(maskMoney("1234.5.7")).toBe("1234.57");
+    expect(maskMoney("$1,234.50")).toBe("1234.50");
+  });
+
+  it("strips a leading minus, so a negative cannot be typed", () => {
+    // Convenience only. The pre_apps_est_*_non_negative CHECKs are the real
+    // boundary, because autosave writes without consulting the validator.
+    expect(maskMoney("-50")).toBe("50");
+    expect(maskMoney("-0.01")).toBe("0.01");
+  });
+
+  it("caps the whole part at twelve digits, which is numeric(14,2)", () => {
+    expect(maskMoney("1234567890123")).toBe("123456789012");
+    expect(maskMoney("1234567890123.456")).toBe("123456789012.45");
+  });
+
+  it("is idempotent, so it is safe on every keystroke and on a loaded value", () => {
+    for (const value of ["", "250000", "1234.567", "-50", "$1,234.50", "."]) {
+      expect(maskMoney(maskMoney(value)), value).toBe(maskMoney(value));
+    }
+  });
+
+  it("accepts an empty value, so a half-typed figure still autosaves", () => {
+    expect(isMoney("")).toBe(true);
+    expect(isMoney("0")).toBe(true);
+    expect(isMoney("250000")).toBe(true);
+    expect(isMoney("1234.5")).toBe(true);
+    expect(isMoney("1234.56")).toBe(true);
+  });
+
+  it("rejects what the column would reject", () => {
+    expect(isMoney("1234.567")).toBe(false);
+    expect(isMoney("-50")).toBe(false);
+    expect(isMoney("1234567890123")).toBe(false);
+    expect(isMoney("1e5")).toBe(false);
+    expect(isMoney("abc")).toBe(false);
+    expect(isMoney(".")).toBe(false);
   });
 });
 

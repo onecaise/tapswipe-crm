@@ -262,6 +262,122 @@ describe("pre_apps commission split", () => {
   });
 });
 
+/**
+ * The sales-volume estimates.
+ *
+ * These CHECKs are the only thing standing between a negative and the column.
+ * The zod rule in lib/pre-app-validation.ts decides whether a rep may leave the
+ * step, and hooks/use-autosave.ts is deliberately validity-blind — it PATCHes
+ * whatever is in the field regardless — so a figure that fails the client
+ * validator still reaches Postgres. Plain pre-app columns pass through no Edge
+ * Function at all, which makes this the last layer rather than a second one.
+ */
+describe("pre_apps sales volume", () => {
+  const MONEY_COLUMNS = [
+    "est_annual_volume",
+    "est_monthly_visa",
+    "est_monthly_mastercard",
+    "est_monthly_discover",
+    "est_monthly_amex",
+    "est_average_ticket",
+    "est_high_ticket",
+  ] as const;
+
+  for (const column of MONEY_COLUMNS) {
+    it(`${column}: rejects a negative`, async () => {
+      await asUser(db, AGENT_ID);
+
+      await expect(
+        db.exec(
+          `update pre_apps set ${column} = -0.01 where id = ${agentDraftId}`,
+        ),
+      ).rejects.toThrow(new RegExp(`pre_apps_${column}_non_negative`));
+    });
+  }
+
+  it("accepts zero, and accepts NULL", async () => {
+    // The load-bearing permissive case. A merchant who genuinely expects no
+    // Amex volume writes 0, and every pre-app that predates these columns holds
+    // NULL — "not asked" is a real answer, distinct from zero. A future tidy-up
+    // that made these NOT NULL or `> 0` would break both, and this is what says
+    // so.
+    await asUser(db, AGENT_ID);
+
+    await db.exec(
+      `update pre_apps set ${MONEY_COLUMNS.map((c) => `${c} = 0`).join(", ")}
+       where id = ${agentDraftId}`,
+    );
+
+    await db.exec(
+      `update pre_apps set ${MONEY_COLUMNS.map((c) => `${c} = null`).join(", ")}
+       where id = ${agentDraftId}`,
+    );
+
+    const result = await rows<{ n: string }>(
+      db,
+      `select count(*)::text as n from pre_apps
+        where id = ${agentDraftId} and est_annual_volume is null`,
+    );
+    expect(result[0].n).toBe("1");
+  });
+
+  it("stores a large figure at two decimal places", async () => {
+    // numeric(14,2): twelve digits and two decimals, which is what maskMoney
+    // caps the input at. If these two ever disagree the rep gets a 22003 two
+    // seconds after typing, from a field nothing names.
+    await asUser(db, AGENT_ID);
+
+    await db.exec(
+      `update pre_apps set est_annual_volume = 999999999999.99
+       where id = ${agentDraftId}`,
+    );
+
+    const result = await rows<{ v: string }>(
+      db,
+      `select est_annual_volume::text as v from pre_apps where id = ${agentDraftId}`,
+    );
+    expect(result[0].v).toBe("999999999999.99");
+  });
+
+  it("rounds a third decimal rather than refusing it", async () => {
+    // Worth pinning because it is the one case the mask cannot reach: the UI
+    // caps at two decimals, but an API caller can send three, and numeric(14,2)
+    // rounds silently rather than raising. Not a bug — but if it ever became an
+    // error, a direct PATCH would start failing and nothing else would notice.
+    await asUser(db, AGENT_ID);
+
+    await db.exec(
+      `update pre_apps set est_average_ticket = 41.555 where id = ${agentDraftId}`,
+    );
+
+    const result = await rows<{ v: string }>(
+      db,
+      `select est_average_ticket::text as v from pre_apps where id = ${agentDraftId}`,
+    );
+    expect(result[0].v).toBe("41.56");
+  });
+
+  it("does not enforce any relationship between the figures", async () => {
+    // Deliberate: these are estimates given in conversation. A high ticket
+    // below the average ticket, and brand figures that do not sum to the annual
+    // total, are both allowed. A constraint here would block honestly-filled
+    // applications, and this test is what stops one being added by tidiness.
+    await asUser(db, AGENT_ID);
+
+    await db.exec(
+      `update pre_apps set est_average_ticket = 500, est_high_ticket = 10,
+                           est_annual_volume = 1, est_monthly_visa = 99999
+       where id = ${agentDraftId}`,
+    );
+
+    const result = await rows<{ v: string }>(
+      db,
+      `select est_high_ticket::text as v from pre_apps where id = ${agentDraftId}`,
+    );
+    expect(result[0].v).toBe("10.00");
+  });
+});
+
 describe("pre-app child tables reach their check through the parent", () => {
   for (const table of CHILD_TABLES) {
     it(`${table}: the owning agent sees their own rows`, async () => {

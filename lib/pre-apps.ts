@@ -64,6 +64,20 @@ export type PreApp = {
   billing_type: "gross" | "net" | null;
   bank_name: string | null;
 
+  /**
+   * Sales volume, as estimated at application time. All optional, all
+   * independent — see docs/tapswipe_crm_schema.sql for why no cross-field rule
+   * is enforced. `est_` prefixed to keep them distinct from
+   * rep_payout_rows.average_ticket, which is a measured actual, not an estimate.
+   */
+  est_annual_volume: number | null;
+  est_monthly_visa: number | null;
+  est_monthly_mastercard: number | null;
+  est_monthly_discover: number | null;
+  est_monthly_amex: number | null;
+  est_average_ticket: number | null;
+  est_high_ticket: number | null;
+
   split_agent_pct: number;
   split_company_pct: number;
 

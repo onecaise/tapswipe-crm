@@ -8,12 +8,15 @@ import {
   BILLING_TYPE_OPTIONS,
   type BusinessStepValues,
   LEGAL_ENTITY_TYPES,
+  SALES_VOLUME_FIELDS,
   UNSET,
   businessStepSchema,
 } from "@/lib/pre-app-validation";
 import type { PreApp } from "@/lib/pre-apps";
+import { SALES_VOLUME_GROUP } from "@/lib/pre-app-form-fields";
 import {
   maskEin,
+  maskMoney,
   maskPercent,
   maskPhone,
   maskZip,
@@ -290,6 +293,22 @@ export function BusinessStep({
           </span>
         </div>
       </Section>
+
+      {/* Estimates, and treated as such: nothing here is required and no two
+          of these figures are checked against each other. See the note in
+          businessStepSchema for why that is deliberate. */}
+      <Section title={SALES_VOLUME_GROUP}>
+        {SALES_VOLUME_FIELDS.map(([name, label]) => (
+          <MoneyField
+            key={name}
+            label={label}
+            form={form}
+            name={name}
+            error={errors[name]?.message}
+            disabled={!canEdit}
+          />
+        ))}
+      </Section>
     </form>
   );
 }
@@ -327,6 +346,41 @@ function Field({
   );
 }
 
+/**
+ * A dollar amount, masked as it is typed.
+ *
+ * Same shape as PercentField in profile-step.tsx, and module-level for the same
+ * reason: a component defined inside the step would be a new type on every
+ * render, remounting the input and throwing away the caret mid-figure.
+ */
+function MoneyField({
+  label,
+  form,
+  name,
+  error,
+  disabled,
+}: {
+  label: string;
+  form: ReturnType<typeof useForm<BusinessStepValues>>;
+  name: keyof BusinessStepValues;
+  error?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <Field label={label} error={error}>
+      <MaskedInput
+        mask={maskMoney}
+        value={form.watch(name) as string}
+        disabled={disabled}
+        aria-invalid={Boolean(error)}
+        onChange={(v) =>
+          form.setValue(name, v, { shouldDirty: true, shouldValidate: true })
+        }
+      />
+    </Field>
+  );
+}
+
 function MaskedField({
   label,
   mask,
@@ -361,6 +415,9 @@ function MaskedField({
 /** DB row -> form state. Everything becomes a string; null becomes "". */
 function toFormValues(preApp: PreApp): BusinessStepValues {
   const s = (value: string | null) => value ?? "";
+  // A numeric column arrives as a number (or null) and has to reach the form as
+  // a string, the same way profile-step.tsx loads the card-mix percentages.
+  const n = (value: number | null) => (value == null ? "" : String(value));
   return {
     dba_name: preApp.dba_name,
     legal_business_name: preApp.legal_business_name,
@@ -386,8 +443,22 @@ function toFormValues(preApp: PreApp): BusinessStepValues {
     billing_type: preApp.billing_type ?? UNSET,
     bank_name: s(preApp.bank_name),
     split_agent_pct: String(preApp.split_agent_pct),
+    est_annual_volume: n(preApp.est_annual_volume),
+    est_monthly_visa: n(preApp.est_monthly_visa),
+    est_monthly_mastercard: n(preApp.est_monthly_mastercard),
+    est_monthly_discover: n(preApp.est_monthly_discover),
+    est_monthly_amex: n(preApp.est_monthly_amex),
+    est_average_ticket: n(preApp.est_average_ticket),
+    est_high_ticket: n(preApp.est_high_ticket),
   };
 }
+
+/**
+ * The columns toPayload must coerce to numbers, derived from the one list
+ * rather than retyped — a key missing from a hand-written copy here would fall
+ * through to the string branch and be the exact bug the branch exists to stop.
+ */
+const MONEY_KEYS = new Set<string>(SALES_VOLUME_FIELDS.map(([name]) => name));
 
 /**
  * Form state -> a PATCH body, for the dirty fields only.
@@ -420,6 +491,24 @@ function toPayload(
       }
       payload.split_agent_pct = agent;
       payload.split_company_pct = Number((100 - agent).toFixed(2));
+      continue;
+    }
+
+    if (MONEY_KEYS.has(key)) {
+      // These are numeric columns, so the fallthrough below would PATCH a raw
+      // string — and a transient "1e" would reach PostgREST as a 22P02 that
+      // sticks the indicator on "Save failed" with nothing naming the field.
+      //
+      // Blank clears the column, which is legal here: unlike the split, these
+      // are nullable and "not known" is a real answer. Anything unparseable is
+      // omitted entirely, preserving the last good figure rather than wiping it
+      // mid-keystroke. SPEC.md §6.1.
+      if (value === "") {
+        payload[key] = null;
+      } else {
+        const amount = Number(value);
+        if (!Number.isNaN(amount)) payload[key] = amount;
+      }
       continue;
     }
 

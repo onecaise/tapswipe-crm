@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import {
   isEin,
+  isMoney,
   isPercent,
   isPhone,
   isState,
@@ -33,6 +34,9 @@ import {
 /** A masked text field: valid when empty or fully formed. */
 const masked = (predicate: (value: string) => boolean, message: string) =>
   z.string().refine(predicate, { message });
+
+/** One message for all seven money fields, so they cannot drift apart. */
+const MONEY_MESSAGE = "A dollar amount, 0 or more";
 
 /** Free text, trimmed on the way out, with a sane ceiling. */
 const text = z.string().trim().max(500, "Too long");
@@ -114,6 +118,29 @@ export const businessStepSchema = z.object({
    * merely unlikely.
    */
   split_agent_pct: masked(isPercent, "0 to 100"),
+
+  /**
+   * Sales volume — seven optional dollar amounts.
+   *
+   * Format only, and nothing else. There is deliberately no rule tying these to
+   * one another: not high >= average, not the four brand figures summing to
+   * anything. They are estimates given in conversation, and enforcing an
+   * arithmetic relationship between them would block honestly-filled forms —
+   * the same reasoning that leaves moto_pct and internet_pct unconstrained in
+   * profileStepSchema below.
+   *
+   * `isMoney` accepts "", so clearing a figure is legal and a half-typed one
+   * still autosaves. The non-negative guarantee is the CHECK constraint's, not
+   * this schema's: autosave is validity-blind and writes regardless of what
+   * these refinements say.
+   */
+  est_annual_volume: masked(isMoney, MONEY_MESSAGE),
+  est_monthly_visa: masked(isMoney, MONEY_MESSAGE),
+  est_monthly_mastercard: masked(isMoney, MONEY_MESSAGE),
+  est_monthly_discover: masked(isMoney, MONEY_MESSAGE),
+  est_monthly_amex: masked(isMoney, MONEY_MESSAGE),
+  est_average_ticket: masked(isMoney, MONEY_MESSAGE),
+  est_high_ticket: masked(isMoney, MONEY_MESSAGE),
 });
 
 export type BusinessStepValues = z.infer<typeof businessStepSchema>;
@@ -121,6 +148,27 @@ export type BusinessStepValues = z.infer<typeof businessStepSchema>;
 export const BUSINESS_STEP_FIELDS = Object.keys(
   businessStepSchema.shape,
 ) as (keyof BusinessStepValues)[];
+
+/**
+ * The seven sales-volume fields, as `[column, label]` pairs.
+ *
+ * The wizard renders its fieldset by mapping this, so the labels have exactly
+ * one source — the same arrangement as TERMINAL_BOOLEANS below.
+ *
+ * lib/pre-app-form-fields.ts cannot map it: that file's
+ * `satisfies Record<PaperBusinessKey, PaperField>` needs literal keys to do its
+ * job, so it spells the seven out and the two are pinned against each other by
+ * a test instead, exactly as the eleven terminal ticks are.
+ */
+export const SALES_VOLUME_FIELDS = [
+  ["est_annual_volume", "Estimated annual volume"],
+  ["est_monthly_visa", "Estimated monthly — Visa"],
+  ["est_monthly_mastercard", "Estimated monthly — Mastercard"],
+  ["est_monthly_discover", "Estimated monthly — Discover"],
+  ["est_monthly_amex", "Estimated monthly — Amex"],
+  ["est_average_ticket", "Average ticket"],
+  ["est_high_ticket", "High ticket"],
+] as const satisfies readonly (readonly [keyof BusinessStepValues, string])[];
 
 /** Options for the billing_type select, including the absent case. */
 export const BILLING_TYPE_OPTIONS = [

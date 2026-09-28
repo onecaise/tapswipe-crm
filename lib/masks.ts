@@ -135,6 +135,41 @@ export const isPercent = (value: string): boolean =>
   (/^\d{1,3}(\.\d{1,2})?$/.test(value) && Number(value) <= 100);
 
 // ---------------------------------------------------------------------------
+// Money — a dollar amount, at most two decimal places
+// ---------------------------------------------------------------------------
+
+/**
+ * Twelve digits and two decimals, which is exactly `numeric(14,2)`.
+ *
+ * Capped there rather than at some round number so the mask cannot produce a
+ * value the column refuses on precision — a rep who holds a key down gets a
+ * figure that stops growing, not a save that fails with 22003 two seconds later.
+ *
+ * Note what is NOT here: no thousands separators, and no currency symbol. Both
+ * would have to be stripped again in `toPayload` before `Number()` saw them, and
+ * a separator moves as digits are typed, which is precisely the case
+ * `applyMask`'s caret arithmetic has to work around. The figure is displayed
+ * with `formatMoney()` once it is read back out; the input stays plain.
+ *
+ * The leading `-` is stripped along with every other non-digit, so a negative is
+ * unreachable through the UI. That is a convenience rather than the boundary —
+ * the `pre_apps_est_*_non_negative` CHECKs are what actually hold, because
+ * autosave writes whatever is typed without consulting the validator.
+ */
+export function maskMoney(value: string): string {
+  // Keep one decimal point at most, and only digits around it — same shape as
+  // maskPercent, with a wider whole part and no upper bound on the value.
+  const cleaned = value.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1");
+  const [whole, fraction] = cleaned.split(".");
+  return fraction === undefined
+    ? whole.slice(0, 12)
+    : `${whole.slice(0, 12)}.${fraction.slice(0, 2)}`;
+}
+
+export const isMoney = (value: string): boolean =>
+  value === "" || /^\d{1,12}(\.\d{1,2})?$/.test(value);
+
+// ---------------------------------------------------------------------------
 // US states — a fixed list, so the value is a code and not free text
 // ---------------------------------------------------------------------------
 

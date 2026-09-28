@@ -4,10 +4,15 @@ import {
   type PreAppOwner,
   type PreAppTerminal,
 } from "@/lib/pre-apps";
-import { TERMINAL_BOOLEANS } from "@/lib/pre-app-validation";
+import {
+  SALES_VOLUME_FIELDS,
+  TERMINAL_BOOLEANS,
+} from "@/lib/pre-app-validation";
+import { SALES_VOLUME_GROUP } from "@/lib/pre-app-form-fields";
 import {
   formatClockTime,
   formatDate,
+  formatMoney,
   formatPct,
   formatText,
 } from "@/lib/format";
@@ -70,6 +75,17 @@ export function PreAppSummary({
           {formatPct(preApp.split_company_pct)}
         </Field>
         {agentName && <Field label="Agent">{formatText(agentName)}</Field>}
+      </Section>
+
+      {/* Rendered from the same list the wizard maps, so a field added there
+          appears here without a second edit. Every figure is optional, and
+          formatMoney prints an em dash for the ones left blank. */}
+      <Section title={SALES_VOLUME_GROUP}>
+        {SALES_VOLUME_FIELDS.map(([name, label]) => (
+          <Field key={name} label={label}>
+            {formatMoney(preApp[name])}
+          </Field>
+        ))}
       </Section>
 
       <div className="flex flex-col gap-4">

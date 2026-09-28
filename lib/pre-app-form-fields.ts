@@ -42,6 +42,8 @@ export type PaperFieldKind =
   | "date"
   | "time"
   | "percent"
+  /** A dollar amount. Prints as an ordinary ruled box; the unit is in the hint. */
+  | "money"
   /** A tick box rather than a writing space. */
   | "checkbox"
   /** Two-letter state code; the form prints a hint rather than 51 options. */
@@ -87,6 +89,16 @@ type PaperBusinessKey = Exclude<
   | "updated_at"
   | "split_company_pct"
 >;
+
+/**
+ * The legend the wizard's sales-volume fieldset prints, exported so
+ * business-step.tsx renders from this string rather than a second copy of it.
+ *
+ * The rest of this file deliberately copies the wizard's labels (see the header
+ * note), but a group heading is one string used in exactly two places, and
+ * sharing it costs nothing.
+ */
+export const SALES_VOLUME_GROUP = "Sales volume";
 
 const BUSINESS_FIELDS = {
   dba_name: { label: "DBA name", kind: "text", group: "Business", required: true },
@@ -185,6 +197,53 @@ const BUSINESS_FIELDS = {
     kind: "percent",
     group: "Banking and split",
     hint: "the company split is 100 minus this",
+  },
+
+  /**
+   * Sales volume. The hint carries the unit on every one of them: on screen a
+   * mask makes "250k" impossible to type, and on paper nothing stops it.
+   */
+  est_annual_volume: {
+    label: "Estimated annual volume",
+    kind: "money",
+    group: SALES_VOLUME_GROUP,
+    hint: "dollars",
+  },
+  est_monthly_visa: {
+    label: "Estimated monthly — Visa",
+    kind: "money",
+    group: SALES_VOLUME_GROUP,
+    hint: "dollars",
+  },
+  est_monthly_mastercard: {
+    label: "Estimated monthly — Mastercard",
+    kind: "money",
+    group: SALES_VOLUME_GROUP,
+    hint: "dollars",
+  },
+  est_monthly_discover: {
+    label: "Estimated monthly — Discover",
+    kind: "money",
+    group: SALES_VOLUME_GROUP,
+    hint: "dollars",
+  },
+  est_monthly_amex: {
+    label: "Estimated monthly — Amex",
+    kind: "money",
+    group: SALES_VOLUME_GROUP,
+    hint: "dollars",
+  },
+  est_average_ticket: {
+    label: "Average ticket",
+    kind: "money",
+    group: SALES_VOLUME_GROUP,
+    hint: "dollars",
+  },
+  est_high_ticket: {
+    label: "High ticket",
+    kind: "money",
+    group: SALES_VOLUME_GROUP,
+    hint: "dollars",
   },
 } satisfies Record<PaperBusinessKey, PaperField>;
 
