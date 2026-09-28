@@ -209,26 +209,8 @@ const BUSINESS_FIELDS = {
     group: SALES_VOLUME_GROUP,
     hint: "dollars",
   },
-  est_monthly_visa: {
-    label: "Estimated monthly — Visa",
-    kind: "money",
-    group: SALES_VOLUME_GROUP,
-    hint: "dollars",
-  },
-  est_monthly_mastercard: {
-    label: "Estimated monthly — Mastercard",
-    kind: "money",
-    group: SALES_VOLUME_GROUP,
-    hint: "dollars",
-  },
-  est_monthly_discover: {
-    label: "Estimated monthly — Discover",
-    kind: "money",
-    group: SALES_VOLUME_GROUP,
-    hint: "dollars",
-  },
-  est_monthly_amex: {
-    label: "Estimated monthly — Amex",
+  est_monthly_volume: {
+    label: "Estimated monthly volume",
     kind: "money",
     group: SALES_VOLUME_GROUP,
     hint: "dollars",

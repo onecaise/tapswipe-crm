@@ -71,10 +71,7 @@ export type PreApp = {
    * rep_payout_rows.average_ticket, which is a measured actual, not an estimate.
    */
   est_annual_volume: number | null;
-  est_monthly_visa: number | null;
-  est_monthly_mastercard: number | null;
-  est_monthly_discover: number | null;
-  est_monthly_amex: number | null;
+  est_monthly_volume: number | null;
   est_average_ticket: number | null;
   est_high_ticket: number | null;
 

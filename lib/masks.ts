@@ -22,8 +22,24 @@
 
 const digits = (value: string): string => value.replace(/\D/g, "");
 
-/** Characters a caret can meaningfully sit after; separators are not. */
-const isSignificant = (char: string): boolean => /[0-9A-Za-z]/.test(char);
+/**
+ * Characters a caret can meaningfully sit after; mask-inserted separators are
+ * not.
+ *
+ * The decimal point counts, and that is not an obvious call. Every other
+ * separator here — the dashes in a phone, EIN, SSN or ZIP — is *inserted by the
+ * mask* at a fixed offset, so the caret should skip it. A decimal point is
+ * *typed by the rep* and its position is the meaning of the number.
+ *
+ * Excluding it put the caret before the dot the moment one was typed, so every
+ * following digit landed to the left of it: "1234.567" became "1234567." and
+ * "60.5" became "605.". Harmless-looking on a percentage, where whole numbers
+ * are the norm, and quite wrong on money, where cents are routine.
+ *
+ * Safe for the other masks because a "." cannot survive any of them — they keep
+ * digits only (phone, EIN, SSN, ZIP, routing, account) or letters (state).
+ */
+const isSignificant = (char: string): boolean => /[0-9A-Za-z.]/.test(char);
 
 // ---------------------------------------------------------------------------
 // Phones — xxx-xxx-xxxx

@@ -275,10 +275,7 @@ describe("pre_apps commission split", () => {
 describe("pre_apps sales volume", () => {
   const MONEY_COLUMNS = [
     "est_annual_volume",
-    "est_monthly_visa",
-    "est_monthly_mastercard",
-    "est_monthly_discover",
-    "est_monthly_amex",
+    "est_monthly_volume",
     "est_average_ticket",
     "est_high_ticket",
   ] as const;
@@ -296,8 +293,8 @@ describe("pre_apps sales volume", () => {
   }
 
   it("accepts zero, and accepts NULL", async () => {
-    // The load-bearing permissive case. A merchant who genuinely expects no
-    // Amex volume writes 0, and every pre-app that predates these columns holds
+    // The load-bearing permissive case. A brand-new business with no trading
+    // history writes 0, and every pre-app that predates these columns holds
     // NULL — "not asked" is a real answer, distinct from zero. A future tidy-up
     // that made these NOT NULL or `> 0` would break both, and this is what says
     // so.
@@ -359,14 +356,14 @@ describe("pre_apps sales volume", () => {
 
   it("does not enforce any relationship between the figures", async () => {
     // Deliberate: these are estimates given in conversation. A high ticket
-    // below the average ticket, and brand figures that do not sum to the annual
-    // total, are both allowed. A constraint here would block honestly-filled
+    // below the average ticket, and a monthly figure wildly out of step with the
+    // annual one, are both allowed. A constraint here would block honestly-filled
     // applications, and this test is what stops one being added by tidiness.
     await asUser(db, AGENT_ID);
 
     await db.exec(
       `update pre_apps set est_average_ticket = 500, est_high_ticket = 10,
-                           est_annual_volume = 1, est_monthly_visa = 99999
+                           est_annual_volume = 1, est_monthly_volume = 99999
        where id = ${agentDraftId}`,
     );
 

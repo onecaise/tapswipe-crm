@@ -251,6 +251,56 @@ describe("state list and typeahead", () => {
   });
 });
 
+describe("typing a decimal point", () => {
+  /**
+   * Types `text` one character at a time, exactly as MaskedInput does: each
+   * keystroke goes through applyMask and the caret it returns decides where the
+   * next character lands.
+   *
+   * Typing the whole string in one go would not catch this class of bug at all
+   * — the masks are idempotent, so mask("1234.567") has always been right. It
+   * is only the caret carried BETWEEN keystrokes that was wrong.
+   */
+  function typeInto(mask: (value: string) => string, text: string): string {
+    let value = "";
+    let caret = 0;
+    for (const char of text) {
+      const raw = value.slice(0, caret) + char + value.slice(caret);
+      const next = applyMask(mask, value, raw, caret + 1);
+      value = next.value;
+      caret = next.caret;
+    }
+    return value;
+  }
+
+  it("keeps the point where it was typed, for money", () => {
+    // Regression: the decimal point was not counted as significant, so the
+    // caret landed BEFORE it and every later digit went to its left —
+    // "1234.567" arrived as "1234567.", a thousandfold error that still passes
+    // isMoney and saves without complaint.
+    expect(typeInto(maskMoney, "1234.567")).toBe("1234.56");
+    expect(typeInto(maskMoney, "0.99")).toBe("0.99");
+    expect(typeInto(maskMoney, "1250000.50")).toBe("1250000.50");
+  });
+
+  it("keeps the point where it was typed, for percentages", () => {
+    // The same bug, and it predates the money mask: every percent field in the
+    // wizard had it. Less visible only because a percentage is usually whole.
+    expect(typeInto(maskPercent, "60.5")).toBe("60.5");
+    expect(typeInto(maskPercent, "12.75")).toBe("12.75");
+  });
+
+  it("still skips the separators a mask inserts itself", () => {
+    // The other half of the fix: a dash is placed by the mask at a fixed
+    // offset, so the caret must continue to step over it. If `isSignificant`
+    // were widened to everything, these would start mis-placing digits.
+    expect(typeInto(maskPhone, "6155551234")).toBe("615-555-1234");
+    expect(typeInto(maskEin, "123456789")).toBe("12-3456789");
+    expect(typeInto(maskSsn, "123456789")).toBe("123-45-6789");
+    expect(typeInto(maskZip, "123456789")).toBe("12345-6789");
+  });
+});
+
 describe("caret preservation", () => {
   it("counts only significant characters", () => {
     expect(countSignificant("615-555-1234")).toBe(10);

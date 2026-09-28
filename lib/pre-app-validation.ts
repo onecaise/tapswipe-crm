@@ -120,14 +120,13 @@ export const businessStepSchema = z.object({
   split_agent_pct: masked(isPercent, "0 to 100"),
 
   /**
-   * Sales volume — seven optional dollar amounts.
+   * Sales volume — four optional dollar amounts.
    *
    * Format only, and nothing else. There is deliberately no rule tying these to
-   * one another: not high >= average, not the four brand figures summing to
-   * anything. They are estimates given in conversation, and enforcing an
-   * arithmetic relationship between them would block honestly-filled forms —
-   * the same reasoning that leaves moto_pct and internet_pct unconstrained in
-   * profileStepSchema below.
+   * one another: not high >= average, not monthly * 12 = annual. They are
+   * estimates given in conversation, and enforcing an arithmetic relationship
+   * between them would block honestly-filled forms — the same reasoning that
+   * leaves moto_pct and internet_pct unconstrained in profileStepSchema below.
    *
    * `isMoney` accepts "", so clearing a figure is legal and a half-typed one
    * still autosaves. The non-negative guarantee is the CHECK constraint's, not
@@ -135,10 +134,7 @@ export const businessStepSchema = z.object({
    * these refinements say.
    */
   est_annual_volume: masked(isMoney, MONEY_MESSAGE),
-  est_monthly_visa: masked(isMoney, MONEY_MESSAGE),
-  est_monthly_mastercard: masked(isMoney, MONEY_MESSAGE),
-  est_monthly_discover: masked(isMoney, MONEY_MESSAGE),
-  est_monthly_amex: masked(isMoney, MONEY_MESSAGE),
+  est_monthly_volume: masked(isMoney, MONEY_MESSAGE),
   est_average_ticket: masked(isMoney, MONEY_MESSAGE),
   est_high_ticket: masked(isMoney, MONEY_MESSAGE),
 });
@@ -162,10 +158,7 @@ export const BUSINESS_STEP_FIELDS = Object.keys(
  */
 export const SALES_VOLUME_FIELDS = [
   ["est_annual_volume", "Estimated annual volume"],
-  ["est_monthly_visa", "Estimated monthly — Visa"],
-  ["est_monthly_mastercard", "Estimated monthly — Mastercard"],
-  ["est_monthly_discover", "Estimated monthly — Discover"],
-  ["est_monthly_amex", "Estimated monthly — Amex"],
+  ["est_monthly_volume", "Estimated monthly volume"],
   ["est_average_ticket", "Average ticket"],
   ["est_high_ticket", "High ticket"],
 ] as const satisfies readonly (readonly [keyof BusinessStepValues, string])[];

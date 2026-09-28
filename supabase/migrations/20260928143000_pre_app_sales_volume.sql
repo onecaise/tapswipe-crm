@@ -5,14 +5,19 @@
 -- not-present -- on pre_app_business_profile, and never once asked for an
 -- amount. A repo-wide grep for est_annual_volume / monthly volume / annual
 -- volume / high ticket / sales volume before this migration returned nothing
--- at all, and neither did visa / mastercard / amex. Underwriting and pricing
--- both need these figures, so reps have been collecting them out-of-band and
--- the application has been silent about them.
+-- at all. Underwriting and pricing both need these figures, so reps have been
+-- collecting them out-of-band and the application has been silent about them.
 --
--- Seven columns, all optional and all independent. No cross-field rule is
--- enforced -- not high >= average, not the four brand figures summing to
--- anything. They are estimates given in conversation, and a constraint that
--- rejected an inconsistent set would block honestly-filled applications.
+-- Four columns, all optional and all independent. No cross-field rule is
+-- enforced -- not high >= average, not monthly * 12 = annual. They are
+-- estimates given in conversation, and a constraint that rejected an
+-- inconsistent set would block honestly-filled applications.
+--
+-- One monthly figure rather than one per card brand. A merchant estimating at
+-- application time knows roughly what they turn over; asking them to break that
+-- across Visa, Mastercard, Discover and Amex collects four guesses where one
+-- was wanted, and the brand mix is the processor's to report afterwards --
+-- rep_payout_rows is where measured figures land.
 --
 -- `est_` prefixed on purpose. rep_payout_rows.average_ticket already exists
 -- and means the opposite kind of thing: an ACTUAL figure for one merchant in
@@ -32,13 +37,10 @@
 -- Matches docs/tapswipe_crm_schema.sql, updated first.
 
 alter table pre_apps
-  add column if not exists est_annual_volume      numeric(14,2),
-  add column if not exists est_monthly_visa       numeric(14,2),
-  add column if not exists est_monthly_mastercard numeric(14,2),
-  add column if not exists est_monthly_discover   numeric(14,2),
-  add column if not exists est_monthly_amex       numeric(14,2),
-  add column if not exists est_average_ticket     numeric(14,2),
-  add column if not exists est_high_ticket        numeric(14,2);
+  add column if not exists est_annual_volume  numeric(14,2),
+  add column if not exists est_monthly_volume numeric(14,2),
+  add column if not exists est_average_ticket numeric(14,2),
+  add column if not exists est_high_ticket    numeric(14,2);
 
 -- Added VALID rather than NOT VALID, which is the opposite of what
 -- merchants_split_totals_100 had to do. That one could not check existing rows
@@ -52,14 +54,8 @@ alter table pre_apps
 alter table pre_apps
   add constraint pre_apps_est_annual_volume_non_negative
     check (est_annual_volume >= 0),
-  add constraint pre_apps_est_monthly_visa_non_negative
-    check (est_monthly_visa >= 0),
-  add constraint pre_apps_est_monthly_mastercard_non_negative
-    check (est_monthly_mastercard >= 0),
-  add constraint pre_apps_est_monthly_discover_non_negative
-    check (est_monthly_discover >= 0),
-  add constraint pre_apps_est_monthly_amex_non_negative
-    check (est_monthly_amex >= 0),
+  add constraint pre_apps_est_monthly_volume_non_negative
+    check (est_monthly_volume >= 0),
   add constraint pre_apps_est_average_ticket_non_negative
     check (est_average_ticket >= 0),
   add constraint pre_apps_est_high_ticket_non_negative

@@ -444,10 +444,7 @@ function toFormValues(preApp: PreApp): BusinessStepValues {
     bank_name: s(preApp.bank_name),
     split_agent_pct: String(preApp.split_agent_pct),
     est_annual_volume: n(preApp.est_annual_volume),
-    est_monthly_visa: n(preApp.est_monthly_visa),
-    est_monthly_mastercard: n(preApp.est_monthly_mastercard),
-    est_monthly_discover: n(preApp.est_monthly_discover),
-    est_monthly_amex: n(preApp.est_monthly_amex),
+    est_monthly_volume: n(preApp.est_monthly_volume),
     est_average_ticket: n(preApp.est_average_ticket),
     est_high_ticket: n(preApp.est_high_ticket),
   };
