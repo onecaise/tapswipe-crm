@@ -7,14 +7,7 @@ import { ANNOTATION_INDEX_LIMIT } from "@/lib/annotations";
 import { formatDate, formatText } from "@/lib/format";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { ListTable, type ListColumn } from "@/components/list-table";
 
 /**
  * Every note the caller can see, across all four owner types.
@@ -42,65 +35,65 @@ async function NotesList() {
 
   const isAdmin = profile.role === "admin";
 
+  // The list's shape as data, so the table and the stacked-card view below lg
+  // cannot disagree about it. The admin-only Agent column is spliced in at its
+  // existing position — before Written, not appended. This also retires the
+  // hand-counted `colSpan={isAdmin ? 4 : 3}` the empty row used to carry.
+  const columns: ListColumn<(typeof rows)[number]>[] = [
+    {
+      header: "Note",
+      primary: true,
+      // max-w-md is a table-layout concern and stays on the <td>.
+      // whitespace-pre-line is NOT: it is what makes a note's line breaks
+      // survive, and ListTable deliberately does not put a primary column's
+      // className on the card heading — so it lives on the rendered node
+      // instead, where both layouts get it. React renders this as text, never
+      // as markup.
+      className: "max-w-md font-medium",
+      cell: (note) => (
+        <span className="whitespace-pre-line">{note.body}</span>
+      ),
+    },
+    {
+      header: "Attached to",
+      cell: (note) =>
+        note.owner_href ? (
+          <Link
+            href={note.owner_href}
+            className="underline underline-offset-4"
+          >
+            {note.owner_label}
+          </Link>
+        ) : (
+          // The owner was deleted, or is not this caller's to see. Shown
+          // without a link rather than as a dead one.
+          <span className="text-muted-foreground">{note.owner_label}</span>
+        ),
+    },
+    ...(isAdmin
+      ? [
+          {
+            header: "Agent",
+            className: "text-muted-foreground",
+            cell: (note: (typeof rows)[number]) => formatText(note.author_name),
+          },
+        ]
+      : []),
+    {
+      header: "Written",
+      className: "text-muted-foreground",
+      cell: (note) => formatDate(note.created_at),
+    },
+  ];
+
   return (
     <div className="flex flex-col gap-4">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Note</TableHead>
-            <TableHead>Attached to</TableHead>
-            {isAdmin && <TableHead>Agent</TableHead>}
-            <TableHead>Written</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.length === 0 ? (
-            <TableRow>
-              <TableCell
-                colSpan={isAdmin ? 4 : 3}
-                className="text-muted-foreground"
-              >
-                No notes yet. Add one from a lead, merchant, pre-app or ghost
-                sheet.
-              </TableCell>
-            </TableRow>
-          ) : (
-            rows.map((note) => (
-              <TableRow key={note.id}>
-                {/* whitespace-pre-line so line breaks survive. React renders
-                    this as text, never as markup. */}
-                <TableCell className="max-w-md whitespace-pre-line font-medium">
-                  {note.body}
-                </TableCell>
-                <TableCell>
-                  {note.owner_href ? (
-                    <Link
-                      href={note.owner_href}
-                      className="underline underline-offset-4"
-                    >
-                      {note.owner_label}
-                    </Link>
-                  ) : (
-                    // The owner was deleted, or is not this caller's to see.
-                    // Shown without a link rather than as a dead one.
-                    <span className="text-muted-foreground">
-                      {note.owner_label}
-                    </span>
-                  )}
-                </TableCell>
-                {isAdmin && (
-                  <TableCell className="text-muted-foreground">
-                    {formatText(note.author_name)}
-                  </TableCell>
-                )}
-                <TableCell className="text-muted-foreground">
-                  {formatDate(note.created_at)}
-                </TableCell>
-              </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
+      <ListTable
+        columns={columns}
+        rows={rows}
+        rowKey={(note) => note.id}
+        emptyMessage="No notes yet. Add one from a lead, merchant, pre-app or ghost sheet."
+      />
 
       {truncated && (
         <p className="text-sm text-muted-foreground">
