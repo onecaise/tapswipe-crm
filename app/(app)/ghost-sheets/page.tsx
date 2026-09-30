@@ -16,16 +16,9 @@ import { formatDate, formatText } from "@/lib/format";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { FilterTabs } from "@/components/filter-tabs";
+import { ListTable, type ListColumn } from "@/components/list-table";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 
 async function GhostSheetsList({
   searchParams,
@@ -78,6 +71,64 @@ async function GhostSheetsList({
     );
   }
 
+  const emptyMessage =
+    filter === "all" ? "No ghost sheets yet." : `No ${filter} ghost sheets.`;
+
+  // The list's shape as data, so the table and the stacked-card view below lg
+  // cannot disagree about it. The admin-only Agent column is spliced in at its
+  // existing position — before Created, not appended — so the column order is
+  // unchanged. This also retires the hand-counted `colSpan={isAdmin ? 6 : 5}`
+  // the empty row used to carry.
+  const columns: ListColumn<GhostSheetListRow>[] = [
+    {
+      header: "DBA",
+      primary: true,
+      className: "font-medium",
+      cell: (sheet) => (
+        <Link
+          href={`/ghost-sheets/${sheet.id}`}
+          className="underline underline-offset-4"
+        >
+          {formatText(sheet.dba)}
+        </Link>
+      ),
+    },
+    { header: "Contact", cell: (sheet) => formatText(sheet.contact_name) },
+    { header: "Phone", cell: (sheet) => formatText(sheet.contact_phone) },
+    {
+      header: "Converted",
+      // Keyed off lead_id via isConverted/conversionIntent, not off status —
+      // see lib/ghost-sheets.ts. A converted sheet's badge links to the lead it
+      // produced; an unconverted one is a bare badge.
+      cell: (sheet) =>
+        isConverted(sheet) ? (
+          <Link
+            href={`/leads/${sheet.lead_id}`}
+            className="underline underline-offset-4"
+          >
+            <StatusBadge intent={conversionIntent(sheet)}>converted</StatusBadge>
+          </Link>
+        ) : (
+          <StatusBadge intent={conversionIntent(sheet)}>open</StatusBadge>
+        ),
+    },
+    ...(isAdmin
+      ? [
+          {
+            header: "Agent",
+            className: "text-muted-foreground",
+            cell: (sheet: GhostSheetListRow) =>
+              formatText(agentNames.get(sheet.agent_id)),
+          },
+        ]
+      : []),
+    {
+      header: "Created",
+      className: "text-muted-foreground",
+      cell: (sheet) => formatDate(sheet.created_at),
+    },
+  ];
+
   return (
     <div className="flex flex-col gap-4">
       <FilterTabs
@@ -88,71 +139,12 @@ async function GhostSheetsList({
         }
       />
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>DBA</TableHead>
-            <TableHead>Contact</TableHead>
-            <TableHead>Phone</TableHead>
-            <TableHead>Converted</TableHead>
-            {isAdmin && <TableHead>Agent</TableHead>}
-            <TableHead>Created</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {sheets.length === 0 ? (
-            <TableRow>
-              <TableCell
-                colSpan={isAdmin ? 6 : 5}
-                className="text-muted-foreground"
-              >
-                {filter === "all"
-                  ? "No ghost sheets yet."
-                  : `No ${filter} ghost sheets.`}
-              </TableCell>
-            </TableRow>
-          ) : (
-            sheets.map((sheet) => (
-              <TableRow key={sheet.id}>
-                <TableCell className="font-medium">
-                  <Link
-                    href={`/ghost-sheets/${sheet.id}`}
-                    className="underline underline-offset-4"
-                  >
-                    {formatText(sheet.dba)}
-                  </Link>
-                </TableCell>
-                <TableCell>{formatText(sheet.contact_name)}</TableCell>
-                <TableCell>{formatText(sheet.contact_phone)}</TableCell>
-                <TableCell>
-                  {isConverted(sheet) ? (
-                    <Link
-                      href={`/leads/${sheet.lead_id}`}
-                      className="underline underline-offset-4"
-                    >
-                      <StatusBadge intent={conversionIntent(sheet)}>
-                        converted
-                      </StatusBadge>
-                    </Link>
-                  ) : (
-                    <StatusBadge intent={conversionIntent(sheet)}>
-                      open
-                    </StatusBadge>
-                  )}
-                </TableCell>
-                {isAdmin && (
-                  <TableCell className="text-muted-foreground">
-                    {formatText(agentNames.get(sheet.agent_id))}
-                  </TableCell>
-                )}
-                <TableCell className="text-muted-foreground">
-                  {formatDate(sheet.created_at)}
-                </TableCell>
-              </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
+      <ListTable
+        columns={columns}
+        rows={sheets}
+        rowKey={(sheet) => sheet.id}
+        emptyMessage={emptyMessage}
+      />
     </div>
   );
 }
