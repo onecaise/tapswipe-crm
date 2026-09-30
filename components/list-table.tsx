@@ -76,12 +76,34 @@ export type ListColumn<T> = {
    */
   primary?: boolean;
   /**
+   * Renders BESIDE the card's heading instead of in the field list — for a
+   * row-level control that belongs with the title rather than under it, like
+   * the checkbox on /tasks and the bug-report queue.
+   *
+   * An ordinary column in the table, in whatever position it is declared. This
+   * exists because such a control is usually a LEADING label-less column, and
+   * the label-less handling below would otherwise push it to the bottom of the
+   * card, far from the thing it acts on.
+   */
+  leading?: boolean;
+  /**
    * Extra classes for the value — applied to the <td> and to the card's <dd>,
    * because `text-muted-foreground` means "this reads as secondary" in either
    * layout. Not applied to the card heading: the primary column is the heading,
    * which owns its own type.
+   *
+   * Static, not a function of the row. A per-row rule (a completed task's
+   * strike-through, an overdue date in destructive red) belongs inside `cell`,
+   * on the node it describes — which is also the only way the card gets it,
+   * since a primary column's className never reaches the heading.
    */
   className?: string;
+  /**
+   * Extra classes for the <th>. Table-only, and almost always a width: the
+   * checkbox columns pin themselves narrow with `w-10` so the control does not
+   * sit in a column as wide as its neighbours.
+   */
+  headerClassName?: string;
 };
 
 export function ListTable<T>({
@@ -100,8 +122,10 @@ export function ListTable<T>({
   const rest = columns.filter((column) => column !== primary);
   // Split for the card layout only: the table renders every column the same
   // way, header or not.
-  const labelled = rest.filter((column) => column.header !== "");
-  const actions = rest.filter((column) => column.header === "");
+  const leading = rest.filter((column) => column.leading);
+  const body = rest.filter((column) => !column.leading);
+  const labelled = body.filter((column) => column.header !== "");
+  const actions = body.filter((column) => column.header === "");
   const isEmpty = rows.length === 0;
 
   return (
@@ -112,7 +136,9 @@ export function ListTable<T>({
           <TableHeader>
             <TableRow>
               {columns.map((column, index) => (
-                <TableHead key={index}>{column.header}</TableHead>
+                <TableHead key={index} className={column.headerClassName}>
+                  {column.header}
+                </TableHead>
               ))}
             </TableRow>
           </TableHeader>
@@ -164,8 +190,20 @@ export function ListTable<T>({
                 // as one component rather than two.
                 className="rounded-xl border bg-card p-4"
               >
-                <div className="text-[15px] font-semibold">
-                  {primary.cell(row)}
+                <div className="flex items-start gap-3">
+                  {leading.length > 0 && (
+                    // pt-0.5 nudges a checkbox onto the heading's first-line
+                    // baseline; without it the control floats above a title
+                    // that wraps.
+                    <div className="flex shrink-0 items-center gap-2 pt-0.5">
+                      {leading.map((column, index) => (
+                        <Fragment key={index}>{column.cell(row)}</Fragment>
+                      ))}
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1 text-[15px] font-semibold">
+                    {primary.cell(row)}
+                  </div>
                 </div>
 
                 {labelled.length > 0 && (
