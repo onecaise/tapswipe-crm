@@ -16,16 +16,9 @@ import { formatDate, formatText } from "@/lib/format";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { FilterTabs } from "@/components/filter-tabs";
+import { ListTable, type ListColumn } from "@/components/list-table";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 
 async function PreAppsList({
   searchParams,
@@ -87,6 +80,64 @@ async function PreAppsList({
     );
   }
 
+  const emptyMessage =
+    filter === "all" ? "No pre-apps yet." : `No ${filter} pre-apps.`;
+
+  // The list's shape as data, so the table and the stacked-card view below lg
+  // cannot disagree about it. The admin-only Agent column is spliced in at its
+  // existing position — before Submitted, not appended — so the column order is
+  // unchanged. This also retires the hand-counted `colSpan={isAdmin ? 6 : 5}`
+  // the empty row used to carry.
+  const columns: ListColumn<PreAppListRow>[] = [
+    {
+      header: "DBA",
+      primary: true,
+      className: "font-medium",
+      cell: (preApp) => (
+        <Link
+          href={`/pre-apps/${preApp.id}`}
+          className="underline underline-offset-4"
+        >
+          {preApp.dba_name}
+        </Link>
+      ),
+    },
+    {
+      header: "Legal name",
+      cell: (preApp) => formatText(preApp.legal_business_name),
+    },
+    {
+      header: "Status",
+      cell: (preApp) => (
+        <StatusBadge intent={statusIntent(preApp.status)}>
+          {preApp.status}
+        </StatusBadge>
+      ),
+    },
+    {
+      header: "Location",
+      // Kept verbatim, em dash and all: this is the one cell here that does not
+      // go through lib/format, because it joins two columns before falling back.
+      cell: (preApp) =>
+        [preApp.city, preApp.state].filter(Boolean).join(", ") || "—",
+    },
+    ...(isAdmin
+      ? [
+          {
+            header: "Agent",
+            className: "text-muted-foreground",
+            cell: (preApp: PreAppListRow) =>
+              formatText(agentNames.get(preApp.agent_id)),
+          },
+        ]
+      : []),
+    {
+      header: "Submitted",
+      className: "text-muted-foreground",
+      cell: (preApp) => formatDate(preApp.date_submitted),
+    },
+  ];
+
   return (
     <div className="flex flex-col gap-4">
       <FilterTabs
@@ -97,62 +148,12 @@ async function PreAppsList({
         }
       />
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>DBA</TableHead>
-            <TableHead>Legal name</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Location</TableHead>
-            {isAdmin && <TableHead>Agent</TableHead>}
-            <TableHead>Submitted</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {preApps.length === 0 ? (
-            <TableRow>
-              <TableCell
-                colSpan={isAdmin ? 6 : 5}
-                className="text-muted-foreground"
-              >
-                {filter === "all"
-                  ? "No pre-apps yet."
-                  : `No ${filter} pre-apps.`}
-              </TableCell>
-            </TableRow>
-          ) : (
-            preApps.map((preApp) => (
-              <TableRow key={preApp.id}>
-                <TableCell className="font-medium">
-                  <Link
-                    href={`/pre-apps/${preApp.id}`}
-                    className="underline underline-offset-4"
-                  >
-                    {preApp.dba_name}
-                  </Link>
-                </TableCell>
-                <TableCell>{formatText(preApp.legal_business_name)}</TableCell>
-                <TableCell>
-                  <StatusBadge intent={statusIntent(preApp.status)}>
-                    {preApp.status}
-                  </StatusBadge>
-                </TableCell>
-                <TableCell>
-                  {[preApp.city, preApp.state].filter(Boolean).join(", ") || "—"}
-                </TableCell>
-                {isAdmin && (
-                  <TableCell className="text-muted-foreground">
-                    {formatText(agentNames.get(preApp.agent_id))}
-                  </TableCell>
-                )}
-                <TableCell className="text-muted-foreground">
-                  {formatDate(preApp.date_submitted)}
-                </TableCell>
-              </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
+      <ListTable
+        columns={columns}
+        rows={preApps}
+        rowKey={(preApp) => preApp.id}
+        emptyMessage={emptyMessage}
+      />
     </div>
   );
 }
