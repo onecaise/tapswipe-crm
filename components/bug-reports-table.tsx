@@ -12,17 +12,10 @@ import {
   bugReportStatusIntent,
 } from "@/lib/bug-reports";
 import { formatDate, formatText } from "@/lib/format";
+import { ListTable, type ListColumn } from "@/components/list-table";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 
 export type BugReportRow = BugReport & { reporter_name: string | null };
 
@@ -106,6 +99,78 @@ export function BugReportsTable({
     router.refresh();
   };
 
+  // The list's shape as data, so the table and the stacked-card view below lg
+  // cannot disagree about it. Both conditional columns keep their existing
+  // positions: the select checkbox leads, the Status column trails and appears
+  // only on the read-only tabs.
+  //
+  // The checkbox is a LEADING column, so on a card it sits beside the report's
+  // first line rather than under its fields — a control that picks a row belongs
+  // next to the row, not below it.
+  //
+  // whitespace-pre-line moved OFF the column className and onto the rendered
+  // node. It is what makes a reporter's line breaks survive, and a primary
+  // column's className never reaches the card heading — so leaving it there
+  // would have kept line breaks in the table and silently collapsed them on a
+  // phone. max-w-md is a table-layout concern and stays on the column.
+  const columns: ListColumn<BugReportRow>[] = [
+    ...(selectable
+      ? [
+          {
+            header: "",
+            leading: true,
+            headerClassName: "w-10",
+            cell: (report: BugReportRow) => (
+              <Checkbox
+                checked={selected.has(report.id)}
+                disabled={busy}
+                aria-label={`Select report ${report.id}`}
+                onCheckedChange={() => toggle(report.id)}
+              />
+            ),
+          },
+        ]
+      : []),
+    {
+      header: "Report",
+      primary: true,
+      className: "max-w-md font-medium",
+      // React renders this as text, never as markup.
+      cell: (report) => (
+        <span className="whitespace-pre-line">{report.description}</span>
+      ),
+    },
+    {
+      header: "Page",
+      className: "text-muted-foreground",
+      cell: (report) => report.page,
+    },
+    {
+      header: "Reported by",
+      className: "text-muted-foreground",
+      cell: (report) => formatText(report.reporter_name),
+    },
+    {
+      header: "When",
+      className: "text-muted-foreground",
+      cell: (report) => formatDate(report.created_at),
+    },
+    // Only on the read-only tabs, where "All" mixes the three and the word is
+    // the only thing telling them apart.
+    ...(!selectable
+      ? [
+          {
+            header: "Status",
+            cell: (report: BugReportRow) => (
+              <StatusBadge intent={bugReportStatusIntent(report.status)}>
+                {report.status}
+              </StatusBadge>
+            ),
+          },
+        ]
+      : []),
+  ];
+
   return (
     <div className="flex flex-col gap-4">
       {selected.size > 0 && (
@@ -151,67 +216,16 @@ export function BugReportsTable({
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            {selectable && <TableHead className="w-10" />}
-            <TableHead>Report</TableHead>
-            <TableHead>Page</TableHead>
-            <TableHead>Reported by</TableHead>
-            <TableHead>When</TableHead>
-            {!selectable && <TableHead>Status</TableHead>}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {reports.length === 0 ? (
-            <TableRow>
-              <TableCell colSpan={5} className="text-muted-foreground">
-                {selectable
-                  ? "Nothing outstanding. Cleared reports stay on file — the Resolved and Dismissed tabs are where they go."
-                  : "Nothing here yet."}
-              </TableCell>
-            </TableRow>
-          ) : (
-            reports.map((report) => (
-              <TableRow key={report.id}>
-                {selectable && (
-                  <TableCell>
-                    <Checkbox
-                      checked={selected.has(report.id)}
-                      disabled={busy}
-                      aria-label={`Select report ${report.id}`}
-                      onCheckedChange={() => toggle(report.id)}
-                    />
-                  </TableCell>
-                )}
-                {/* whitespace-pre-line so line breaks survive. React renders
-                    this as text, never as markup. */}
-                <TableCell className="max-w-md whitespace-pre-line font-medium">
-                  {report.description}
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {report.page}
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {formatText(report.reporter_name)}
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {formatDate(report.created_at)}
-                </TableCell>
-                {/* Only on the read-only tabs, where "All" mixes the three and
-                    the word is the only thing telling them apart. */}
-                {!selectable && (
-                  <TableCell>
-                    <StatusBadge intent={bugReportStatusIntent(report.status)}>
-                      {report.status}
-                    </StatusBadge>
-                  </TableCell>
-                )}
-              </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
+      <ListTable
+        columns={columns}
+        rows={reports}
+        rowKey={(report) => report.id}
+        emptyMessage={
+          selectable
+            ? "Nothing outstanding. Cleared reports stay on file — the Resolved and Dismissed tabs are where they go."
+            : "Nothing here yet."
+        }
+      />
     </div>
   );
 }
