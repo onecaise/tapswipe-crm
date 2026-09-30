@@ -43,6 +43,29 @@ import {
  * returns every rep's rows and a rep's returns their own, so the grouping code is
  * the same and a rep simply gets one group.
  *
+ * DELIBERATELY NOT ON components/list-table.tsx, unlike every other list in the
+ * app. That component renders BOTH a table and a stacked-card view and hides one
+ * with display:none, which is fine for read-only text and wrong here. Measured,
+ * by converting it and then reverting:
+ *
+ *   * 9 payouts-editing specs went red on `getByLabel(...) resolved to 2
+ *     elements`. getByRole consults the accessibility tree and so ignores the
+ *     hidden copy; getByLabel does not, and every figure input existed twice.
+ *   * 2 payouts-rendering specs went red — the ones pinning the long-merchant-
+ *     name truncation that keeps the six money columns on screen.
+ *   * The two copies genuinely diverge mid-edit: typing 777.77 into the visible
+ *     cell left the hidden one showing the stored -820.40. They re-converge
+ *     after a save, because PayoutFigureCell re-syncs on a prop change — but the
+ *     window between typing and blurring is real, and crossing the breakpoint
+ *     inside it shows a stale figure on the one page where a wrong number is a
+ *     wrong commission payment.
+ *   * It doubles the stateful client components: 40 merchants is 80 editable
+ *     cells, not 160.
+ *
+ * If this page ever needs a narrow layout, the shape to reach for is a CSS-only
+ * one that restyles a SINGLE table — one DOM, so PayoutFigureCell mounts once —
+ * not a second rendered copy.
+ *
  * The `isAdmin` branches below are about affordances, NOT access: the update
  * policy on rep_payout_rows is admin-only, so a rep who reached an editable cell
  * would have their write filtered to zero rows — which is what the cell's

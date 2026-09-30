@@ -51,9 +51,21 @@ import { cn } from "@/lib/utils";
  * components: that would mean a client component, a hydration mismatch or a
  * flash of the wrong layout, and a list that cannot render until JS arrives.
  * `display:none` is also the version that is properly hidden — absent from the
- * accessibility tree AND from Playwright's role queries — so the duplicate rows
- * cannot make a `getByRole` ambiguous the way `visibility` or an offscreen
- * wrapper would.
+ * accessibility tree, and therefore from Playwright's `getByRole`, so the
+ * duplicate rows do not make a role query ambiguous the way `visibility` or an
+ * offscreen wrapper would.
+ *
+ * BUT NOT EVERY LOCATOR IS FILTERED THAT WAY, and this is the sharp edge. A
+ * locator that does not consult the accessibility tree — `getByLabel` is the one
+ * that bit — matches the hidden copy too, and strict mode then fails with
+ * "resolved to 2 elements". Measured: converting the payouts ledger red 9 editing
+ * specs outright, every one of them a getByLabel on a figure input.
+ *
+ * So the rule for a list with FORM CONTROLS in it is: assert with `getByRole`,
+ * and expect any existing `getByLabel` against it to need scoping. That is a
+ * real cost of rendering both layouts, and it is the reason the payouts ledger
+ * is deliberately NOT on this component — see the note at the end of
+ * app/(app)/payouts/[period]/page.tsx.
  */
 export type ListColumn<T> = {
   /**
