@@ -16,16 +16,9 @@ import { formatDate, formatText } from "@/lib/format";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { FilterTabs } from "@/components/filter-tabs";
+import { ListTable, type ListColumn } from "@/components/list-table";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 
 async function LeadsList({
   searchParams,
@@ -105,6 +98,48 @@ async function LeadsList({
         ? "Every lead has a follow-up date."
         : "No leads match that follow-up window.";
 
+  // The list's shape as data, so the table and the stacked-card view below lg
+  // cannot disagree about it. The admin-only Agent column is appended rather
+  // than guarded inline, which also retires the hand-counted
+  // `colSpan={isAdmin ? 8 : 7}` the empty row used to carry.
+  const columns: ListColumn<LeadListRow>[] = [
+    {
+      header: "DBA",
+      primary: true,
+      className: "font-medium",
+      cell: (lead) => (
+        <Link href={`/leads/${lead.id}`} className="underline underline-offset-4">
+          {formatText(lead.dba)}
+        </Link>
+      ),
+    },
+    { header: "Contact", cell: (lead) => formatText(lead.contact_name) },
+    { header: "Phone", cell: (lead) => formatText(lead.contact_phone) },
+    { header: "Source", cell: (lead) => formatText(lead.lead_source) },
+    { header: "Industry", cell: (lead) => formatText(lead.industry_vertical) },
+    {
+      header: "Follow-up",
+      className: "text-muted-foreground",
+      cell: (lead) => formatDate(lead.next_followup_date),
+    },
+    {
+      header: "Status",
+      cell: (lead) => (
+        <StatusBadge intent="neutral">{formatText(lead.status)}</StatusBadge>
+      ),
+    },
+    ...(isAdmin
+      ? [
+          {
+            header: "Agent",
+            className: "text-muted-foreground",
+            cell: (lead: LeadListRow) =>
+              formatText(agentNames.get(lead.agent_id)),
+          },
+        ]
+      : []),
+  ];
+
   return (
     <div className="flex flex-col gap-4">
       <FilterTabs
@@ -113,60 +148,12 @@ async function LeadsList({
         hrefFor={(value) => (value === "all" ? "/leads" : `/leads?status=${value}`)}
       />
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>DBA</TableHead>
-            <TableHead>Contact</TableHead>
-            <TableHead>Phone</TableHead>
-            <TableHead>Source</TableHead>
-            <TableHead>Industry</TableHead>
-            <TableHead>Follow-up</TableHead>
-            <TableHead>Status</TableHead>
-            {isAdmin && <TableHead>Agent</TableHead>}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {leads.length === 0 ? (
-            <TableRow>
-              <TableCell
-                colSpan={isAdmin ? 8 : 7}
-                className="text-muted-foreground"
-              >
-                {emptyMessage}
-              </TableCell>
-            </TableRow>
-          ) : (
-            leads.map((lead) => (
-              <TableRow key={lead.id}>
-                <TableCell className="font-medium">
-                  <Link
-                    href={`/leads/${lead.id}`}
-                    className="underline underline-offset-4"
-                  >
-                    {formatText(lead.dba)}
-                  </Link>
-                </TableCell>
-                <TableCell>{formatText(lead.contact_name)}</TableCell>
-                <TableCell>{formatText(lead.contact_phone)}</TableCell>
-                <TableCell>{formatText(lead.lead_source)}</TableCell>
-                <TableCell>{formatText(lead.industry_vertical)}</TableCell>
-                <TableCell className="text-muted-foreground">
-                  {formatDate(lead.next_followup_date)}
-                </TableCell>
-                <TableCell>
-                  <StatusBadge intent="neutral">{formatText(lead.status)}</StatusBadge>
-                </TableCell>
-                {isAdmin && (
-                  <TableCell className="text-muted-foreground">
-                    {formatText(agentNames.get(lead.agent_id))}
-                  </TableCell>
-                )}
-              </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
+      <ListTable
+        columns={columns}
+        rows={leads}
+        rowKey={(lead) => lead.id}
+        emptyMessage={emptyMessage}
+      />
     </div>
   );
 }
