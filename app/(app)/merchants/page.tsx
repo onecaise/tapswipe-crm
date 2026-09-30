@@ -15,16 +15,9 @@ import { formatDate, formatPct, formatText } from "@/lib/format";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { FilterTabs } from "@/components/filter-tabs";
+import { ListTable, type ListColumn } from "@/components/list-table";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 
 async function MerchantsList({
   searchParams,
@@ -79,6 +72,56 @@ async function MerchantsList({
     );
   }
 
+  const emptyMessage =
+    filter === "all" ? "No merchants yet." : `No ${filter} merchants.`;
+
+  // The list's shape as data, so the table and the stacked-card view below lg
+  // cannot disagree about it. The admin-only Agent column is spliced in at its
+  // existing position — before Added, not appended — so the column order is
+  // unchanged. This also retires the hand-counted `colSpan={isAdmin ? 7 : 6}`
+  // the empty row used to carry.
+  const columns: ListColumn<MerchantListRow>[] = [
+    {
+      header: "DBA",
+      primary: true,
+      className: "font-medium",
+      cell: (merchant) => (
+        <Link
+          href={`/merchants/${merchant.id}`}
+          className="underline underline-offset-4"
+        >
+          {merchant.dba}
+        </Link>
+      ),
+    },
+    { header: "MID", cell: (merchant) => formatText(merchant.mid) },
+    {
+      header: "Status",
+      cell: (merchant) => (
+        <StatusBadge intent={statusIntent(merchant.status)}>
+          {merchant.status}
+        </StatusBadge>
+      ),
+    },
+    { header: "Processor", cell: (merchant) => formatText(merchant.processor) },
+    { header: "Split", cell: (merchant) => formatPct(merchant.split_agent_pct) },
+    ...(isAdmin
+      ? [
+          {
+            header: "Agent",
+            className: "text-muted-foreground",
+            cell: (merchant: MerchantListRow) =>
+              formatText(agentNames.get(merchant.agent_id)),
+          },
+        ]
+      : []),
+    {
+      header: "Added",
+      className: "text-muted-foreground",
+      cell: (merchant) => formatDate(merchant.date_added),
+    },
+  ];
+
   return (
     <div className="flex flex-col gap-4">
       <FilterTabs
@@ -89,62 +132,12 @@ async function MerchantsList({
         }
       />
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>DBA</TableHead>
-            <TableHead>MID</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Processor</TableHead>
-            <TableHead>Split</TableHead>
-            {isAdmin && <TableHead>Agent</TableHead>}
-            <TableHead>Added</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {merchants.length === 0 ? (
-            <TableRow>
-              <TableCell
-                colSpan={isAdmin ? 7 : 6}
-                className="text-muted-foreground"
-              >
-                {filter === "all"
-                  ? "No merchants yet."
-                  : `No ${filter} merchants.`}
-              </TableCell>
-            </TableRow>
-          ) : (
-            merchants.map((merchant) => (
-              <TableRow key={merchant.id}>
-                <TableCell className="font-medium">
-                  <Link
-                    href={`/merchants/${merchant.id}`}
-                    className="underline underline-offset-4"
-                  >
-                    {merchant.dba}
-                  </Link>
-                </TableCell>
-                <TableCell>{formatText(merchant.mid)}</TableCell>
-                <TableCell>
-                  <StatusBadge intent={statusIntent(merchant.status)}>
-                    {merchant.status}
-                  </StatusBadge>
-                </TableCell>
-                <TableCell>{formatText(merchant.processor)}</TableCell>
-                <TableCell>{formatPct(merchant.split_agent_pct)}</TableCell>
-                {isAdmin && (
-                  <TableCell className="text-muted-foreground">
-                    {formatText(agentNames.get(merchant.agent_id))}
-                  </TableCell>
-                )}
-                <TableCell className="text-muted-foreground">
-                  {formatDate(merchant.date_added)}
-                </TableCell>
-              </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
+      <ListTable
+        columns={columns}
+        rows={merchants}
+        rowKey={(merchant) => merchant.id}
+        emptyMessage={emptyMessage}
+      />
     </div>
   );
 }
