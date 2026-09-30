@@ -18,16 +18,9 @@ import { formatDate, formatText } from "@/lib/format";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { FilterTabs } from "@/components/filter-tabs";
+import { ListTable, type ListColumn } from "@/components/list-table";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 
 async function TicketsList({
   searchParams,
@@ -113,6 +106,70 @@ async function TicketsList({
       ? "No support tickets yet."
       : `No ${filter} tickets.`;
 
+  // The list's shape as data, so the table and the stacked-card view below lg
+  // cannot disagree about it. The admin-only Agent column stays last, where it
+  // already was. This also retires the hand-counted `colSpan={isAdmin ? 7 : 6}`
+  // the empty row used to carry.
+  const columns: ListColumn<SupportTicketListRow>[] = [
+    {
+      header: "Subject",
+      primary: true,
+      className: "font-medium",
+      cell: (ticket) => (
+        <Link
+          href={`/support-tickets/${ticket.id}`}
+          className="underline underline-offset-4"
+        >
+          {ticket.subject}
+        </Link>
+      ),
+    },
+    {
+      header: "Merchant",
+      cell: (ticket) =>
+        ticket.merchant_id === null
+          ? formatText(null)
+          : formatText(merchantNames.get(ticket.merchant_id)),
+    },
+    { header: "Category", cell: (ticket) => formatText(ticket.category) },
+    {
+      header: "Priority",
+      // Blank priority stays an em dash rather than an empty badge: the column
+      // is free text, so "" and null are both ordinary.
+      cell: (ticket) =>
+        ticket.priority === null || ticket.priority.trim() === "" ? (
+          formatText(ticket.priority)
+        ) : (
+          <StatusBadge intent={supportTicketPriorityIntent(ticket.priority)}>
+            {ticket.priority}
+          </StatusBadge>
+        ),
+    },
+    {
+      header: "Opened",
+      className: "text-muted-foreground",
+      cell: (ticket) => formatDate(ticket.created_at),
+    },
+    {
+      header: "Status",
+      cell: (ticket) => (
+        <StatusBadge intent={supportTicketStatusIntent(ticket.status)}>
+          {ticket.status}
+        </StatusBadge>
+      ),
+    },
+    ...(isAdmin
+      ? [
+          {
+            header: "Agent",
+            className: "text-muted-foreground",
+            cell: (ticket: SupportTicketListRow) =>
+              formatText(agentNames.get(ticket.agent_id)),
+          },
+        ]
+      : []),
+  ];
+
   return (
     <div className="flex flex-col gap-4">
       <FilterTabs
@@ -121,74 +178,12 @@ async function TicketsList({
         hrefFor={(value) => `/support-tickets?status=${value}`}
       />
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Subject</TableHead>
-            <TableHead>Merchant</TableHead>
-            <TableHead>Category</TableHead>
-            <TableHead>Priority</TableHead>
-            <TableHead>Opened</TableHead>
-            <TableHead>Status</TableHead>
-            {isAdmin && <TableHead>Agent</TableHead>}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {tickets.length === 0 ? (
-            <TableRow>
-              <TableCell
-                colSpan={isAdmin ? 7 : 6}
-                className="text-muted-foreground"
-              >
-                {emptyMessage}
-              </TableCell>
-            </TableRow>
-          ) : (
-            tickets.map((ticket) => (
-              <TableRow key={ticket.id}>
-                <TableCell className="font-medium">
-                  <Link
-                    href={`/support-tickets/${ticket.id}`}
-                    className="underline underline-offset-4"
-                  >
-                    {ticket.subject}
-                  </Link>
-                </TableCell>
-                <TableCell>
-                  {ticket.merchant_id === null
-                    ? formatText(null)
-                    : formatText(merchantNames.get(ticket.merchant_id))}
-                </TableCell>
-                <TableCell>{formatText(ticket.category)}</TableCell>
-                <TableCell>
-                  {ticket.priority === null || ticket.priority.trim() === "" ? (
-                    formatText(ticket.priority)
-                  ) : (
-                    <StatusBadge
-                      intent={supportTicketPriorityIntent(ticket.priority)}
-                    >
-                      {ticket.priority}
-                    </StatusBadge>
-                  )}
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {formatDate(ticket.created_at)}
-                </TableCell>
-                <TableCell>
-                  <StatusBadge intent={supportTicketStatusIntent(ticket.status)}>
-                    {ticket.status}
-                  </StatusBadge>
-                </TableCell>
-                {isAdmin && (
-                  <TableCell className="text-muted-foreground">
-                    {formatText(agentNames.get(ticket.agent_id))}
-                  </TableCell>
-                )}
-              </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
+      <ListTable
+        columns={columns}
+        rows={tickets}
+        rowKey={(ticket) => ticket.id}
+        emptyMessage={emptyMessage}
+      />
     </div>
   );
 }
