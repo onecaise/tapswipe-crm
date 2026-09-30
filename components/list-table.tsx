@@ -56,7 +56,16 @@ import { cn } from "@/lib/utils";
  * wrapper would.
  */
 export type ListColumn<T> = {
-  /** Column header, and the field label on the stacked card. */
+  /**
+   * Column header, and the field label on the stacked card.
+   *
+   * An EMPTY string means the column has no label — an action column, like the
+   * Document Center's download button, which renders under a bare <TableHead />
+   * in the table. On the card such a column is NOT given an empty <dt> next to
+   * it; it drops out of the field list and renders under it, full width, where
+   * a button belongs. Several label-less columns are allowed and keep their
+   * order.
+   */
   header: string;
   /** The cell's contents. The same node serves both layouts. */
   cell: (row: T) => React.ReactNode;
@@ -89,6 +98,10 @@ export function ListTable<T>({
 }) {
   const primary = columns.find((column) => column.primary) ?? columns[0];
   const rest = columns.filter((column) => column !== primary);
+  // Split for the card layout only: the table renders every column the same
+  // way, header or not.
+  const labelled = rest.filter((column) => column.header !== "");
+  const actions = rest.filter((column) => column.header === "");
   const isEmpty = rows.length === 0;
 
   return (
@@ -98,8 +111,8 @@ export function ListTable<T>({
         <Table>
           <TableHeader>
             <TableRow>
-              {columns.map((column) => (
-                <TableHead key={column.header}>{column.header}</TableHead>
+              {columns.map((column, index) => (
+                <TableHead key={index}>{column.header}</TableHead>
               ))}
             </TableRow>
           </TableHeader>
@@ -123,8 +136,8 @@ export function ListTable<T>({
             ) : (
               rows.map((row) => (
                 <TableRow key={rowKey(row)}>
-                  {columns.map((column) => (
-                    <TableCell key={column.header} className={column.className}>
+                  {columns.map((column, index) => (
+                    <TableCell key={index} className={column.className}>
                       {column.cell(row)}
                     </TableCell>
                   ))}
@@ -155,21 +168,31 @@ export function ListTable<T>({
                   {primary.cell(row)}
                 </div>
 
-                <dl className="mt-3 grid grid-cols-[minmax(0,6.5rem)_minmax(0,1fr)] gap-x-3 gap-y-2">
-                  {rest.map((column) => (
-                    <Fragment key={column.header}>
-                      {/* Deliberately the same treatment as TableHead: a field
-                          label here and a column header there are the same
-                          thing wearing different layouts. */}
-                      <dt className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
-                        {column.header}
-                      </dt>
-                      <dd className={cn("min-w-0 text-sm", column.className)}>
-                        {column.cell(row)}
-                      </dd>
-                    </Fragment>
-                  ))}
-                </dl>
+                {labelled.length > 0 && (
+                  <dl className="mt-3 grid grid-cols-[minmax(0,6.5rem)_minmax(0,1fr)] gap-x-3 gap-y-2">
+                    {labelled.map((column, index) => (
+                      <Fragment key={index}>
+                        {/* Deliberately the same treatment as TableHead: a
+                            field label here and a column header there are the
+                            same thing wearing different layouts. */}
+                        <dt className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                          {column.header}
+                        </dt>
+                        <dd className={cn("min-w-0 text-sm", column.className)}>
+                          {column.cell(row)}
+                        </dd>
+                      </Fragment>
+                    ))}
+                  </dl>
+                )}
+
+                {actions.length > 0 && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    {actions.map((column, index) => (
+                      <Fragment key={index}>{column.cell(row)}</Fragment>
+                    ))}
+                  </div>
+                )}
               </li>
             ))}
           </ul>
