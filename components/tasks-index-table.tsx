@@ -14,16 +14,9 @@ import {
 } from "@/lib/annotations";
 import { formatDate, formatText } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { ListTable, type ListColumn } from "@/components/list-table";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 
 /**
  * The /tasks table: every task the caller can see, across all four owner types.
@@ -92,108 +85,121 @@ export function TasksIndexTable({
     router.refresh();
   };
 
-  // Checkbox column, then the admin-only delete column.
-  const columnCount = 4 + (isAdmin ? 2 : 0);
+  type Row = WithOwner<WithAuthor<Task>>;
+
+  // The list's shape as data, so the table and the stacked-card view below lg
+  // cannot disagree about it. Three things here worth knowing:
+  //
+  //   * The checkbox is a LEADING column: an ordinary first column in the
+  //     table, and beside the heading on a card, because a control that marks
+  //     a task done belongs next to the task rather than under its fields.
+  //   * The delete button is a LABEL-LESS column (header ""), so on a card it
+  //     renders full width under the fields rather than beside an empty label.
+  //   * The two per-row conditional styles — a completed task's strike-through
+  //     and an overdue date in destructive red — live INSIDE their cell
+  //     renderers rather than in className. className is static, and a primary
+  //     column's className never reaches the card heading anyway, so putting
+  //     the strike-through there would have kept it in the table and lost it
+  //     on a phone.
+  //
+  // This also retires `columnCount = 4 + (isAdmin ? 2 : 0)`.
+  const columns: ListColumn<Row>[] = [
+    {
+      header: "",
+      leading: true,
+      headerClassName: "w-10",
+      cell: (task) => (
+        <Checkbox
+          id={`task-${task.id}`}
+          checked={task.completed}
+          disabled={busy}
+          aria-label={`Mark "${task.title}" complete`}
+          onCheckedChange={(checked) =>
+            void setCompleted(task.id, checked === true)
+          }
+        />
+      ),
+    },
+    {
+      header: "Task",
+      primary: true,
+      className: "font-medium",
+      cell: (task) => (
+        <span
+          className={cn(
+            task.completed && "line-through text-muted-foreground",
+          )}
+        >
+          {task.title}
+        </span>
+      ),
+    },
+    {
+      header: "Attached to",
+      cell: (task) =>
+        task.owner_href ? (
+          <Link href={task.owner_href} className="underline underline-offset-4">
+            {task.owner_label}
+          </Link>
+        ) : (
+          // Owner deleted, or not this caller's to see. Shown without a link
+          // rather than as a dead one.
+          <span className="text-muted-foreground">{task.owner_label}</span>
+        ),
+    },
+    ...(isAdmin
+      ? [
+          {
+            header: "Agent",
+            className: "text-muted-foreground",
+            cell: (task: Row) => formatText(task.author_name),
+          },
+        ]
+      : []),
+    {
+      header: "Due",
+      className: "text-muted-foreground",
+      cell: (task) => {
+        const overdue = taskIsOverdue(task);
+        return (
+          <span className={cn(overdue && "text-destructive")}>
+            {task.due_date === null
+              ? "No due date"
+              : `${overdue ? "Overdue — " : ""}${formatDate(task.due_date)}`}
+          </span>
+        );
+      },
+    },
+    ...(isAdmin
+      ? [
+          {
+            header: "",
+            cell: (task: Row) => (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => void remove(task.id)}
+                aria-label="Remove task"
+              >
+                <Trash2Icon size={16} />
+              </Button>
+            ),
+          },
+        ]
+      : []),
+  ];
 
   return (
     <div className="flex flex-col gap-4">
       {error && <p className="text-sm text-destructive">{error}</p>}
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead className="w-10" />
-            <TableHead>Task</TableHead>
-            <TableHead>Attached to</TableHead>
-            {isAdmin && <TableHead>Agent</TableHead>}
-            <TableHead>Due</TableHead>
-            {isAdmin && <TableHead />}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {tasks.length === 0 ? (
-            <TableRow>
-              <TableCell
-                colSpan={columnCount}
-                className="text-muted-foreground"
-              >
-                {emptyMessage}
-              </TableCell>
-            </TableRow>
-          ) : (
-            tasks.map((task) => {
-              const overdue = taskIsOverdue(task);
-              return (
-                <TableRow key={task.id}>
-                  <TableCell>
-                    <Checkbox
-                      id={`task-${task.id}`}
-                      checked={task.completed}
-                      disabled={busy}
-                      aria-label={`Mark "${task.title}" complete`}
-                      onCheckedChange={(checked) =>
-                        void setCompleted(task.id, checked === true)
-                      }
-                    />
-                  </TableCell>
-                  <TableCell
-                    className={cn(
-                      "font-medium",
-                      task.completed && "line-through text-muted-foreground",
-                    )}
-                  >
-                    {task.title}
-                  </TableCell>
-                  <TableCell>
-                    {task.owner_href ? (
-                      <Link
-                        href={task.owner_href}
-                        className="underline underline-offset-4"
-                      >
-                        {task.owner_label}
-                      </Link>
-                    ) : (
-                      // Owner deleted, or not this caller's to see. Shown
-                      // without a link rather than as a dead one.
-                      <span className="text-muted-foreground">
-                        {task.owner_label}
-                      </span>
-                    )}
-                  </TableCell>
-                  {isAdmin && (
-                    <TableCell className="text-muted-foreground">
-                      {formatText(task.author_name)}
-                    </TableCell>
-                  )}
-                  <TableCell
-                    className={cn(
-                      "text-muted-foreground",
-                      overdue && "text-destructive",
-                    )}
-                  >
-                    {task.due_date === null
-                      ? "No due date"
-                      : `${overdue ? "Overdue — " : ""}${formatDate(task.due_date)}`}
-                  </TableCell>
-                  {isAdmin && (
-                    <TableCell>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busy}
-                        onClick={() => void remove(task.id)}
-                        aria-label="Remove task"
-                      >
-                        <Trash2Icon size={16} />
-                      </Button>
-                    </TableCell>
-                  )}
-                </TableRow>
-              );
-            })
-          )}
-        </TableBody>
-      </Table>
+      <ListTable
+        columns={columns}
+        rows={tasks}
+        rowKey={(task) => task.id}
+        emptyMessage={emptyMessage}
+      />
     </div>
   );
 }
