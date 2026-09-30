@@ -3,14 +3,16 @@ import { Suspense } from "react";
 
 import { NavGroups } from "@/components/sidebar-nav-list";
 import { SidebarNav } from "@/components/sidebar-nav";
+import { SidebarShell } from "@/components/sidebar-drawer";
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 
 /**
- * The fixed left navigation.
+ * The left navigation: a pinned 248px column from the `md` breakpoint up, and an
+ * off-canvas drawer behind a topbar hamburger below it.
  *
- * A server component, with two Suspense boundaries inside it rather than one
- * around the whole thing. That split is what lets the logo header — the only
+ * Still a server component, with two Suspense boundaries inside it rather than
+ * one around the whole thing. That split is what lets the logo header — the only
  * genuinely static part — prerender, while the two pieces that need the caller's
  * identity stream in:
  *
@@ -21,16 +23,16 @@ import { createClient } from "@/lib/supabase/server";
  *
  * Both read the profile through requireUser(), which is memoised per request, so
  * the two boundaries share one lookup rather than issuing two.
+ *
+ * SidebarShell is the client component holding the <aside> element and the
+ * drawer state; everything below is passed to it as children and so stays
+ * server-rendered. That ordering matters — putting the state at the top of this
+ * file instead would make the whole panel a client component and cost both
+ * boundaries above.
  */
 export function AppSidebar() {
   return (
-    // sticky + h-screen rather than `position: fixed`: it pins the same way
-    // while staying in the flex row, so the main column needs no matching
-    // left offset to stay in sync with it.
-    // print:hidden here rather than an `aside` selector in globals.css: the
-    // chrome hides itself, so a document's own semantic elements are not
-    // collateral. See the print block in app/globals.css.
-    <aside className="sticky top-0 flex h-screen w-[248px] shrink-0 flex-col bg-sidebar print:hidden">
+    <SidebarShell>
       <div className="flex items-center gap-2.5 border-b border-sidebar-border px-4 py-3.5">
         {/* The mark has black linework in it, so it needs a light plate to sit
             on — straight onto #0E0E10 half the logo would vanish. */}
@@ -63,7 +65,7 @@ export function AppSidebar() {
       <Suspense fallback={<SidebarUserSkeleton />}>
         <SidebarUser />
       </Suspense>
-    </aside>
+    </SidebarShell>
   );
 }
 

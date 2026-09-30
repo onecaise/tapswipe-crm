@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AppTopbar } from "@/components/app-topbar";
 import { BugReportLauncher } from "@/components/bug-report-launcher";
+import { SidebarProvider } from "@/components/sidebar-drawer";
 import { requireUser } from "@/lib/auth";
 
 /**
@@ -16,6 +17,11 @@ import { requireUser } from "@/lib/auth";
  *
  * The Suspense boundaries cacheComponents requires live inside AppSidebar,
  * around the two pieces that need the caller's identity — see the note there.
+ *
+ * SidebarProvider wraps the row because the hamburger (in AppTopbar) and the
+ * panel it opens (in AppSidebar) are siblings and share one piece of state. It
+ * is a client component taking server-rendered children, so nothing below it
+ * becomes a client component by being inside it.
  */
 export default function AppLayout({
   children,
@@ -23,32 +29,40 @@ export default function AppLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex min-h-screen">
-      {/* First in the tree so it starts resolving before anything else. */}
-      <Suspense fallback={null}>
-        <ForcePasswordChangeGate />
-      </Suspense>
+    <SidebarProvider>
+      <div className="flex min-h-screen">
+        {/* First in the tree so it starts resolving before anything else. */}
+        <Suspense fallback={null}>
+          <ForcePasswordChangeGate />
+        </Suspense>
 
-      <AppSidebar />
+        <AppSidebar />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <AppTopbar />
-        {/* The extra bottom padding keeps content clear of the bug-report
-            bubble, which is fixed bottom-right at z-50 and was measured sitting
-            on top of a document row's Remove button. Anything at the end of a
-            long page was in its way. */}
-        <main className="flex-1 p-7 pb-28 lg:p-8 lg:pb-28">{children}</main>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <AppTopbar />
+          {/* The extra bottom padding keeps content clear of the bug-report
+              bubble, which is fixed bottom-right at z-50 and was measured
+              sitting on top of a document row's Remove button. Anything at the
+              end of a long page was in its way.
+
+              16px of side padding on a phone rather than 28px: at 375px the old
+              value spent 15% of the viewport on margin, which is most of what
+              made a table unreadable there before it ever began scrolling. */}
+          <main className="flex-1 p-4 pb-28 sm:p-7 sm:pb-28 lg:p-8 lg:pb-28">
+            {children}
+          </main>
+        </div>
+
+        {/* Fixed-position, so it sits outside the flex row rather than in it.
+            In the layout rather than on each page so it is present everywhere
+            inside the shell — and absent from /auth/*, which is a different
+            route group. Suspended for the same reason the gate above is: it
+            reads the profile, and cacheComponents rejects that unsuspended. */}
+        <Suspense fallback={null}>
+          <BugReportLauncher />
+        </Suspense>
       </div>
-
-      {/* Fixed-position, so it sits outside the flex row rather than in it. In
-          the layout rather than on each page so it is present everywhere inside
-          the shell — and absent from /auth/*, which is a different route group.
-          Suspended for the same reason the gate above is: it reads the profile,
-          and cacheComponents rejects that unsuspended. */}
-      <Suspense fallback={null}>
-        <BugReportLauncher />
-      </Suspense>
-    </div>
+    </SidebarProvider>
   );
 }
 

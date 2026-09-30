@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { GlobalSearch } from "@/components/global-search";
 import { LogoutButton } from "@/components/logout-button";
 import { NotificationsBell } from "@/components/notifications-bell";
+import { SidebarTrigger } from "@/components/sidebar-drawer";
 import { requireUser } from "@/lib/auth";
 import { countNotifications, notificationsFloor } from "@/lib/notifications";
 import { createClient } from "@/lib/supabase/server";
@@ -23,6 +24,13 @@ import { createClient } from "@/lib/supabase/server";
  * understates, and understating is what the real value does the rest of the time
  * anyway.
  *
+ * It also carries the hamburger that opens the sidebar below the `md`
+ * breakpoint. That control belongs here rather than in the sidebar for the
+ * obvious reason — the panel it opens is off-screen — and it is why the bar's
+ * horizontal padding drops to 16px on a phone: at `px-7` the trigger, the search
+ * box, the bell and sign-out did not fit 375px without the search box being
+ * squeezed to nothing.
+ *
  * It also carries the app's only sign-out control. In here rather than on each
  * page so it is present everywhere inside the shell by construction — and, for
  * the same reason, absent from /auth/* and /, which are outside this route
@@ -34,7 +42,12 @@ export function AppTopbar() {
     // print:hidden here rather than a bare `header` selector in globals.css,
     // which also matched every printable document's own <header>. See the note
     // in the print block there.
-    <header className="sticky top-0 z-10 flex h-[60px] shrink-0 items-center justify-between gap-4 border-b bg-card px-7 print:hidden">
+    <header className="sticky top-0 z-10 flex h-[60px] shrink-0 items-center justify-between gap-2 border-b bg-card px-4 sm:gap-4 sm:px-7 print:hidden">
+      {/* Before the search box, so it is the first thing in the tab order and
+          the first thing a thumb reaches. Hidden from md up, where the sidebar
+          it opens is pinned anyway. */}
+      <SidebarTrigger />
+
       <GlobalSearch />
 
       {/* Grouped so justify-between pushes the pair right as one unit. */}
