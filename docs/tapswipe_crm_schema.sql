@@ -3117,7 +3117,7 @@ returns trigger
 language plpgsql
 security definer
 set search_path = public
-as $
+as $$
 declare
   group_agent_id uuid;
   max_version int;
@@ -3140,9 +3140,10 @@ begin
   NEW.version := coalesce(max_version, 0) + 1;
   return NEW;
 end;
-$;
+$$;
 
 revoke all on function enforce_quote_version() from public;
+revoke all on function enforce_quote_version() from anon, authenticated;
 -- Trigger function: revoked and deliberately NOT granted, like
 -- log_cross_agent_change() and set_updated_at(). A trigger fires whether
 -- or not the querying role holds EXECUTE.
@@ -3190,7 +3191,7 @@ create or replace function create_quote_version(
 returns int
 language plpgsql
 set search_path = public
-as $
+as $$
 declare
   new_quote_id int;
 begin
@@ -3293,7 +3294,7 @@ begin
 
   return new_quote_id;
 end;
-$;
+$$;
 
 revoke all on function create_quote_version(int, uuid, uuid, text, text, text, jsonb)
   from public;
