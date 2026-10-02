@@ -220,6 +220,16 @@ describe("grant surface after all migrations", () => {
       await tablePrivileges(db, "authenticated", "marketing_material_events"),
     ).toEqual(["INSERT", "SELECT"]);
 
+    // products: the same three verbs as marketing_materials, for the same
+    // reason -- a rep holds INSERT and UPDATE and no policy admits their
+    // write. No DELETE: a product is archived so the quote lines naming it
+    // stay whole.
+    expect(await tablePrivileges(db, "authenticated", "products")).toEqual([
+      "INSERT",
+      "SELECT",
+      "UPDATE",
+    ]);
+
     // Zero-policy RLS already denies these; the absent grant is the second
     // lock, so that a policy added by mistake still opens nothing.
     for (const secrets of [
@@ -264,6 +274,7 @@ describe("grant surface after all migrations", () => {
       "rep_payout_row_history",
       "marketing_materials",
       "marketing_material_events",
+      "products",
     ]) {
       expect(
         await nonDmlPrivileges(db, "authenticated", table),
@@ -296,6 +307,7 @@ describe("grant surface after all migrations", () => {
       // copy.
       "marketing_materials_id_seq",
       "marketing_material_events_id_seq",
+      "products_id_seq",
     ]) {
       expect(
         await sequencePrivileges(db, "authenticated", sequence),

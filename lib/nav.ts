@@ -1,5 +1,6 @@
 import {
   BanknoteIcon,
+  BoxesIcon,
   BugIcon,
   MegaphoneIcon,
   ClipboardListIcon,
@@ -96,6 +97,18 @@ export const NAV_GROUPS: readonly NavGroup[] = [
         label: "Bug Reports",
         href: "/admin/bug-reports",
         icon: BugIcon,
+        adminOnly: true,
+      },
+      // adminOnly, unlike Marketing — and the two tables are otherwise the
+      // same shape (company reference data, no agent_id, readable by every
+      // active rep). The difference is that there is no rep-facing PAGE here:
+      // a rep reads the catalog through the quote builder on a lead, not by
+      // browsing it. A nav row to a page that redirects them away is worse
+      // than no row.
+      {
+        label: "Products",
+        href: "/admin/products",
+        icon: BoxesIcon,
         adminOnly: true,
       },
     ],
