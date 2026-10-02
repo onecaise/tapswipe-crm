@@ -198,6 +198,28 @@ describe("grant surface after all migrations", () => {
       ).toEqual(["SELECT"]);
     }
 
+    // marketing_materials: SELECT, INSERT, UPDATE and no DELETE. The first
+    // three are held by every rep and usable only by an admin -- INSERT and
+    // UPDATE are backed by admin-only policies, which is the arrangement
+    // bug_reports already has, and the reason "a verb is granted only where a
+    // policy backs it" does not mean "only where every caller can use it".
+    // DELETE is absent from both layers on purpose: a material is archived,
+    // never removed, so the events that name it stay readable.
+    expect(
+      await tablePrivileges(db, "authenticated", "marketing_materials"),
+    ).toEqual(["INSERT", "SELECT", "UPDATE"]);
+
+    // marketing_material_events: append-only, and stricter than notes or
+    // support_ticket_replies -- those two allow a DELETE, this one does not.
+    // It is an engagement log read back in front of a merchant disputing what
+    // they were told, so there is no client path to edit or remove a row at
+    // all. Leaving the grants off is what makes that answer "permission
+    // denied" instead of a statement RLS filters to nothing while reporting a
+    // save that did not happen.
+    expect(
+      await tablePrivileges(db, "authenticated", "marketing_material_events"),
+    ).toEqual(["INSERT", "SELECT"]);
+
     // Zero-policy RLS already denies these; the absent grant is the second
     // lock, so that a policy added by mistake still opens nothing.
     for (const secrets of [
@@ -240,6 +262,8 @@ describe("grant surface after all migrations", () => {
       "rep_payout_import_rows",
       "rep_payout_rows",
       "rep_payout_row_history",
+      "marketing_materials",
+      "marketing_material_events",
     ]) {
       expect(
         await nonDmlPrivileges(db, "authenticated", table),
@@ -264,6 +288,14 @@ describe("grant surface after all migrations", () => {
       "merchants_id_seq",
       "leads_id_seq",
       "pre_apps_id_seq",
+      // Both marketing sequences ARE granted, unlike the four rep_payout ones
+      // below, and the contrast is the point: these two tables grant INSERT to
+      // authenticated (an admin creating a material, a rep logging an event),
+      // so nextval() is reached on the ordinary path. The rep_payout omission
+      // is a consequence of those tables having no INSERT grant, not a rule to
+      // copy.
+      "marketing_materials_id_seq",
+      "marketing_material_events_id_seq",
     ]) {
       expect(
         await sequencePrivileges(db, "authenticated", sequence),

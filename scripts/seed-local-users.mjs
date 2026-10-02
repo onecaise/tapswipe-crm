@@ -70,7 +70,7 @@ const wanted = new Set(ACCOUNTS.map((account) => account.email));
  * FKs between the tables themselves — replies before tickets, history before
  * rows, rows before batches, children before leads.
  *
- * ALL EIGHTEEN of them are `ON DELETE NO ACTION`, so any single leftover row
+ * ALL EIGHTEEN in this list are `ON DELETE NO ACTION`, so any single leftover row
  * blocks the delete. This list used to be two entries (audit_log, pre_apps),
  * which was fine only because nothing else had been seeded yet. Once
  * seed-dev-payouts.mjs had run, the rep owned rep_payout_rows, the delete below
@@ -111,7 +111,7 @@ const PROFILE_REFERENCES = [
 ];
 
 for (const user of existing.users.filter((user) => wanted.has(user.email))) {
-  // profiles.manager_id -- the NINETEENTH reference to profiles(id) and the one
+  // profiles.manager_id -- one of twenty-one references to profiles(id) and the one
   // that is NOT in PROFILE_REFERENCES above, deliberately. That list DELETES
   // rows, and the row carrying a manager_id is another rep's whole profile.
   //
@@ -125,6 +125,35 @@ for (const user of existing.users.filter((user) => wanted.has(user.email))) {
     .from("profiles")
     .update({ manager_id: null })
     .eq("manager_id", user.id);
+
+
+  // marketing_materials and marketing_material_events — the TWENTIETH and
+  // TWENTY-FIRST references to profiles(id), handled here rather than as two
+  // more entries in PROFILE_REFERENCES for the reason that list cannot express:
+  // a material this admin uploaded can carry events logged by a DIFFERENT rep,
+  // and marketing_material_events.material_id is NO ACTION. Deleting by
+  // uploaded_by alone fails on somebody else's row, naming marketing_materials
+  // while the row in the way belongs to a rep this teardown was never asked
+  // about. Events first, by material and then by actor; materials last.
+  const { data: ownMaterials } = await admin
+    .from("marketing_materials")
+    .select("id")
+    .eq("uploaded_by", user.id);
+  const materialIds = (ownMaterials ?? []).map((material) => material.id);
+  if (materialIds.length > 0) {
+    await admin
+      .from("marketing_material_events")
+      .delete()
+      .in("material_id", materialIds);
+  }
+  await admin
+    .from("marketing_material_events")
+    .delete()
+    .eq("agent_id", user.id);
+  await admin
+    .from("marketing_materials")
+    .delete()
+    .eq("uploaded_by", user.id);
 
   for (const [table, column] of PROFILE_REFERENCES) {
     await admin.from(table).delete().eq(column, user.id);

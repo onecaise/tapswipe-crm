@@ -123,6 +123,36 @@ for (const user of existing?.users ?? []) {
     .update({ manager_id: null })
     .eq("manager_id", user.id);
 
+
+  // marketing_materials and marketing_material_events — the TWENTIETH and
+  // TWENTY-FIRST references to profiles(id), and the reason they are handled
+  // here rather than as two more entries in the flat list above: a material
+  // this admin uploaded can carry events logged by a DIFFERENT rep, and
+  // marketing_material_events.material_id is NO ACTION. Deleting by
+  // uploaded_by alone therefore fails on somebody else's row, naming
+  // marketing_materials while the row in the way belongs to a rep this
+  // teardown was never asked about. Events first, by material and then by
+  // actor; materials last.
+  const { data: ownMaterials } = await db
+    .from("marketing_materials")
+    .select("id")
+    .eq("uploaded_by", user.id);
+  const materialIds = (ownMaterials ?? []).map((material) => material.id);
+  if (materialIds.length > 0) {
+    await db
+      .from("marketing_material_events")
+      .delete()
+      .in("material_id", materialIds);
+  }
+  await db
+    .from("marketing_material_events")
+    .delete()
+    .eq("agent_id", user.id);
+  await db
+    .from("marketing_materials")
+    .delete()
+    .eq("uploaded_by", user.id);
+
   for (const [table, column] of PROFILE_REFERENCES) {
     await db.from(table).delete().eq(column, user.id);
   }

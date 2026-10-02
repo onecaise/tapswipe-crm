@@ -571,9 +571,51 @@ async function clearUserImports(
 }
 
 /**
+ * Clears this user's marketing library rows — the TWENTIETH and TWENTY-FIRST
+ * references to profiles(id), both NO ACTION, both able to block deleteUser.
+ *
+ * Shaped like clearPayoutRows rather than like clearUserImports, and for the
+ * identical reason: a material this admin uploaded can carry events logged by a
+ * DIFFERENT rep, and marketing_material_events.material_id is NO ACTION. So
+ * deleting the materials by uploaded_by is not enough on its own — somebody
+ * else's events would block it, and the FK that failed would name
+ * marketing_materials while the row actually in the way belongs to a rep this
+ * teardown was never asked about.
+ *
+ * Events first, by material and then by actor; materials last. The two event
+ * deletes overlap (this user's events on their own material are caught twice)
+ * and that is fine — the alternative is one cleverer query that stops being
+ * obviously correct.
+ *
+ * Unlike documents, there is no storage object to tidy up here: the bucket
+ * holds company collateral, not per-user uploads, and a test that uploads one
+ * removes it itself.
+ */
+async function clearMarketingMaterials(
+  admin: SupabaseClient,
+  userId: string,
+): Promise<void> {
+  const { data: materials } = await admin
+    .from("marketing_materials")
+    .select("id")
+    .eq("uploaded_by", userId);
+  const materialIds = (materials ?? []).map((material) => material.id as number);
+
+  if (materialIds.length > 0) {
+    await admin
+      .from("marketing_material_events")
+      .delete()
+      .in("material_id", materialIds);
+  }
+
+  await admin.from("marketing_material_events").delete().eq("agent_id", userId);
+  await admin.from("marketing_materials").delete().eq("uploaded_by", userId);
+}
+
+/**
  * Clears any reporting line pointing at `userId`.
  *
- * profiles.manager_id is the NINETEENTH reference to profiles(id) and the only
+ * profiles.manager_id is one of twenty-one references to profiles(id) and the only
  * one that is not NO ACTION — `on delete set null`, because a manager leaving
  * should not block deleting their profile the way an unresolved payout row
  * correctly does. So unlike clearPayoutRows and clearUserImports, this one is
@@ -704,6 +746,7 @@ export async function teardownFixtures(): Promise<void> {
 
     await clearPayoutRows(admin, user.id);
     await clearUserImports(admin, user.id);
+    await clearMarketingMaterials(admin, user.id);
     await clearManagerReferences(admin, user.id);
 
     // Residual import files, removed by the {batch_id}/ prefix. Listed rather
@@ -748,6 +791,7 @@ export async function deleteUserCompletely(userId: string): Promise<void> {
   await admin.from("audit_log").delete().eq("row_id", userId);
   await clearPayoutRows(admin, userId);
   await clearUserImports(admin, userId);
+  await clearMarketingMaterials(admin, userId);
   await clearManagerReferences(admin, userId);
 
   const { error } = await admin.auth.admin.deleteUser(userId);

@@ -2434,6 +2434,255 @@ create index idx_user_import_rows_pending
 -- from provisionUser, plus one commit_user_import row per finished batch.
 
 -- =====================================================================
+-- MARKETING MATERIALS — the company's sell sheets, rate cards and
+-- one-pagers, plus a per-lead record of what a rep actually did with
+-- them.
+--
+-- WHY THIS IS NOT A NEW documents.owner_type. The same question
+-- residual-imports answered, and the same answer, for a different
+-- reason. `documents` is a table of REP-OWNED uploads: every row has an
+-- agent_id, every policy compares it to auth.uid(), and the storage key
+-- resolves a PARENT RECORD's owner (resolveParentAgentId). A marketing
+-- material has no owning rep and no parent record -- it is a company
+-- asset every rep reads and only an admin writes. Modelling it as a
+-- document would mean either an agent_id that lies about who it belongs
+-- to, or filing it under whichever admin uploaded it, which is a fact
+-- about who clicked rather than about the asset.
+--
+-- It also needs something `documents` has no column for and no reason to
+-- grow one: an engagement trail. "Which sell sheet did this rep send
+-- this lead, and when" is the question the feature exists to answer, and
+-- it is a different shape from "which files hang off this record".
+--
+-- So: two tables. One is reference data with no ownership at all; the
+-- other is an append-only log that carries the ownership.
+-- =====================================================================
+create table marketing_materials (
+  id serial primary key,
+  -- NO agent_id, deliberately, and this is the one client-readable table
+  -- in the schema where that is true. Every other table here is scoped by
+  -- `agent_id = auth.uid()`; this one is company reference data, so its
+  -- SELECT policy is "any active signed-in user" and there is nothing
+  -- per-rep to compare. Adding an agent_id later would not be a widening
+  -- of this table, it would be a different table.
+  --
+  -- The consequence to keep in mind: nothing about a material is private,
+  -- so nothing private may be uploaded as one. That is a documented
+  -- operating rule rather than something a policy can enforce, because
+  -- the whole point is that every rep can read it.
+
+  -- The "folder". Free text with no vocabulary, for the same reason
+  -- support_tickets.category and profiles.territory are: this is
+  -- reference data an admin extends when marketing produces a new kind of
+  -- collateral, and a CHECK would mean a migration every time. The browse
+  -- UI groups by whatever distinct values exist.
+  category text not null,
+  title text not null,
+
+  -- Nullable, and that is load-bearing rather than lax. The row is created
+  -- BEFORE the upload, because the storage key is {material_id}/{file_name}
+  -- and the id has to exist first -- the same sequencing rep_payout_batches
+  -- uses and for the same reason. A row with a null file_key is an upload
+  -- that was started and never finished; the admin list shows it as
+  -- incomplete rather than offering a download that would 404.
+  file_key text,
+  file_name text,
+  mime_type text,
+
+  -- The uploading admin. NOT called agent_id, exactly as
+  -- rep_payout_batches.imported_by and user_import_batches.imported_by are
+  -- not: naming it agent_id would make the standard own-or-admin policy
+  -- expression accidentally MEANINGFUL here and wrong, handing a rep write
+  -- access whenever an admin's uuid happened to match theirs.
+  --
+  -- NOTE: this is the TWENTIETH column in the schema referencing
+  -- profiles(id), and like nineteen of the twenty-one it is ON DELETE NO
+  -- ACTION. Any leftover row blocks deleting a user, so all four teardown
+  -- lists have to know about it.
+  uploaded_by uuid references profiles(id) not null,
+  uploaded_at timestamptz default now(),
+
+  -- Retirement is a timestamp, not a delete, and the reason is the events
+  -- table below. A material's whole purpose is to be referenced by an
+  -- engagement log; deleting one would either cascade that log away
+  -- (destroying the record the feature exists to keep) or be blocked by
+  -- the FK forever. Archiving drops it out of the rep-facing browse list
+  -- while every event that names it stays readable. Same argument
+  -- bug_reports makes for having no DELETE at all.
+  --
+  -- There is therefore NO delete path, in policy or in grant. If a file
+  -- ever genuinely must be destroyed -- a wrong upload, a legal demand --
+  -- that belongs in an Edge Function that removes the storage object too,
+  -- the way delete-document does, and it will have to decide what happens
+  -- to the events first. Leaving a client-side DELETE here would let
+  -- someone make that decision by accident.
+  archived_at timestamptz
+);
+
+-- file_key must be the key for THIS row's id. Nothing client-supplied
+-- reaches this column today -- marketing-material-file-url creates the row
+-- and writes the key under the service role, and `authenticated` holds no
+-- grant on it -- which makes this narrower than
+-- documents_file_key_matches_owner and worth having for a different
+-- reason. That constraint closes a demonstrated cross-agent read; this one
+-- pins an invariant the download path depends on, so a future "let an
+-- admin re-point a file" shortcut cannot quietly make {material_id}/ mean
+-- nothing.
+--
+-- Null passes, because the pre-upload row must be insertable. That is
+-- spelled out as `file_key is null or ...` rather than left to a CHECK's
+-- three-valued logic, so the next reader does not have to rediscover that
+-- a NULL result passes.
+--
+-- Exactly two segments, neither empty -- so a traversal segment, a
+-- trailing slash, or extra depth is rejected rather than half-understood.
+-- fileKeyMatchesMaterial() in
+-- supabase/functions/_shared/marketing-materials.ts enforces the same rule
+-- in front of Storage; two layers that agree exactly are worth more than
+-- two that agree approximately.
+alter table marketing_materials
+  add constraint marketing_materials_file_key_matches_id
+  check (
+    file_key is null
+    or (
+      starts_with(file_key, id::text || '/')
+      and split_part(file_key, '/', 2) <> ''
+      and split_part(file_key, '/', 3) = ''
+    )
+  );
+
+alter table marketing_materials enable row level security;
+
+-- SELECT for every active signed-in user, admin or rep. This is the only
+-- select policy in the schema with no agent_id comparison in it, and the
+-- `is_active_agent() or is_admin()` shape is doing real work rather than
+-- being decoration: a deactivated rep holds a working JWT until it
+-- expires, and without the active check they would keep reading the
+-- company's current rate cards after being let go.
+create policy "select active or admin" on marketing_materials
+  for select using (is_active_agent() or is_admin());
+
+-- Writes are admin-only. INSERT and UPDATE are policies rather than being
+-- left to the Edge Function's service_role (which bypasses both RLS and
+-- grants) because the admin UI edits title, category and archived_at
+-- through PostgREST directly -- only the file itself needs the function.
+create policy "admin inserts" on marketing_materials
+  for insert with check (is_admin());
+create policy "admin updates" on marketing_materials
+  for update using (is_admin()) with check (is_admin());
+-- No DELETE policy and no DELETE grant. See archived_at above.
+
+-- ---------------------------------------------------------------------
+-- MARKETING MATERIAL EVENTS — append-only engagement log.
+--
+-- One row per thing a rep did with a material: viewed it, downloaded it,
+-- printed it, or emailed it to a lead. This is the table the feature is
+-- actually for; marketing_materials is just the thing it points at.
+--
+-- APPEND-ONLY, like notes and support_ticket_replies: SELECT and INSERT
+-- grants, no UPDATE or DELETE in either policy or grant. A log that can be
+-- rewritten is not a log, and this one answers "what did we send them" in
+-- front of a merchant who says they were never told something.
+-- ---------------------------------------------------------------------
+create table marketing_material_events (
+  id serial primary key,
+  material_id int references marketing_materials(id) not null,
+
+  -- Nullable on purpose. A rep browsing the library and opening a rate
+  -- card to read it has done something worth logging, and there is no lead
+  -- in that act. Per-lead history is `where lead_id = $1`; the library's
+  -- own usage is `where lead_id is null`. Making this NOT NULL would have
+  -- forced the library page either to log nothing or to invent a lead, and
+  -- both lose information.
+  --
+  -- ON DELETE CASCADE, unlike material_id: a deleted lead takes its
+  -- engagement history with it, because the history is *about* that lead
+  -- and orphaned rows would leave a count no page can explain. A material
+  -- is not deletable at all (see archived_at), so the two sides of this
+  -- table have deliberately different answers.
+  lead_id int references leads(id) on delete cascade,
+
+  -- The acting rep. This is the TWENTY-FIRST column referencing
+  -- profiles(id), also ON DELETE NO ACTION -- it is evidence, and evidence
+  -- must block a delete until a person decides what happens to it.
+  agent_id uuid references profiles(id) not null,
+
+  event_type text not null
+    check (event_type in ('viewed', 'downloaded', 'printed', 'emailed')),
+  occurred_at timestamptz default now()
+);
+
+alter table marketing_material_events enable row level security;
+
+-- The standard own-or-admin read.
+create policy "select own or admin" on marketing_material_events
+  for select using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
+
+-- The insert policy carries the documents lesson, and that is why it is
+-- not the usual one-liner.
+--
+-- agent_id is checked against auth.uid() the way every other table does
+-- it. But lead_id is ALSO client-supplied and no other clause reads it,
+-- which is exactly the shape that made documents.file_key a live
+-- cross-agent read: a column the client chooses and no policy looks at is
+-- unvalidated, whatever the rest of the row proves. Without the `exists`
+-- below a rep could post events against another rep's lead_id -- not
+-- reading anything, but writing fabricated engagement history into a book
+-- that is not theirs, visible to the admin who reviews it.
+--
+-- The subquery spells out `leads.agent_id = auth.uid()` rather than
+-- leaning on RLS to filter it, matching the pre_apps child tables above.
+-- Same effect; a reader should not have to know that policies nest to see
+-- that the check is real.
+create policy "insert own via own lead" on marketing_material_events
+  for insert with check (
+    (
+      (agent_id = auth.uid() and is_active_agent())
+      or is_admin()
+    )
+    and (
+      lead_id is null
+      or is_admin()
+      or exists (
+        select 1 from leads
+         where leads.id = lead_id and leads.agent_id = auth.uid()
+      )
+    )
+  );
+-- No UPDATE or DELETE policy, and no grant for either. Append-only.
+
+-- Every read of this table is "events for this material" or "events for
+-- this lead", and the second is what the lead page runs on every load.
+create index idx_marketing_material_events_lead
+  on marketing_material_events(lead_id, occurred_at desc)
+  where lead_id is not null;
+create index idx_marketing_material_events_material
+  on marketing_material_events(material_id, occurred_at desc);
+
+-- Browsing is "what is in this category, newest first", and an archived
+-- material is never in a rep's list -- so the index is partial on exactly
+-- the rows the rep-facing query reads.
+create index idx_marketing_materials_category
+  on marketing_materials(category, title)
+  where archived_at is null;
+
+-- The cross-agent audit trigger is NOT attached to either table, and each
+-- has its own reason.
+--
+-- marketing_materials has no agent_id at all, so log_cross_agent_change()
+-- would read NULL and log every write -- the support_ticket_replies trap
+-- the rep_payout_* tables record. Admin action on it is audited where it
+-- happens instead: marketing-material-file-url writes an audit_log row per
+-- upload, the same way create-upload-url does.
+--
+-- marketing_material_events DOES carry an agent_id and the trigger would
+-- work on it, which is the more interesting omission: it is already an
+-- audit trail. Attaching a second one would write an audit_log row every
+-- time an admin's own browsing logged an event -- recording that an admin
+-- looked at something, in a table whose entire content is a record of who
+-- looked at what. The trail is not improved by being kept twice.
+
+-- =====================================================================
 -- DUPLICATE-DETECTION NORMALISERS — pure, immutable, and indexed.
 --
 -- These exist so check_duplicates() can be served by indexes. An expression
@@ -4088,6 +4337,23 @@ grant select, update on rep_payout_batches to authenticated;
 grant select on rep_payout_import_rows to authenticated;
 grant select on rep_payout_row_history to authenticated;
 
+-- marketing_materials: no DELETE, and no INSERT or UPDATE for a rep either --
+-- but all three verbs are reachable by an admin, because RLS is what separates
+-- them and a grant cannot. SELECT is the rep-facing browse; INSERT and UPDATE
+-- are backed by the two admin-only policies, so a rep holds the privilege and
+-- no policy admits their write (the same arrangement bug_reports and
+-- rep_payout_rows already have). DELETE is absent from both layers: a material
+-- is archived, never removed, so the events that name it stay readable.
+grant select, insert, update on marketing_materials to authenticated;
+
+-- marketing_material_events: append-only, so the same two verbs as notes and
+-- support_ticket_replies minus the delete those two allow. There is no way to
+-- edit or remove an engagement record from a client at all -- that is the
+-- property the table exists for, and leaving the grants off is what makes the
+-- answer "permission denied" rather than a filtered statement reporting a save
+-- that did nothing.
+grant select, insert on marketing_material_events to authenticated;
+
 -- profiles: SELECT only, matching its single SELECT policy. Every write is a
 -- security definer RPC or a service-role Edge Function, both of which bypass
 -- grants entirely, so nothing legitimate loses access here. The INSERT/UPDATE/
@@ -4126,7 +4392,17 @@ grant usage on
   support_ticket_replies_id_seq,
   notes_id_seq,
   tasks_id_seq,
-  bug_reports_id_seq
+  bug_reports_id_seq,
+  -- Both marketing sequences, for different callers. An admin's INSERT into
+  -- marketing_materials goes through PostgREST (the "New material" form writes
+  -- the row, then the Edge Function attaches the file), and every rep's INSERT
+  -- into marketing_material_events goes through it on every view, download,
+  -- print and email. Unlike the four rep_payout sequences, these are consumed
+  -- by `authenticated` and so must be granted -- the test that pins the
+  -- rep_payout omission would otherwise read as a rule to copy rather than a
+  -- consequence of those tables having no INSERT grant.
+  marketing_materials_id_seq,
+  marketing_material_events_id_seq
 to authenticated;
 -- The four rep_payout sequences are deliberately absent, for the same reason
 -- audit_log_id_seq is: nothing `authenticated` can do consumes them. None of the
@@ -4493,7 +4769,8 @@ $$;
 
 -- =====================================================================
 -- NOTE ON SUPABASE STORAGE (not SQL — set up in the dashboard/CLI)
--- Create TWO private buckets, `documents` and `residual-imports`. Neither
+-- Create THREE private buckets: `documents`, `residual-imports` and
+-- `marketing`. None of them
 -- gets public storage policies referencing these tables — all
 -- upload/download access goes through Edge Functions that authorize the
 -- caller first and only then mint a short-lived signed URL with the
@@ -4508,6 +4785,14 @@ $$;
 --                     every rep_payout_batches row, so a committed period
 --                     can always be traced back to the file it came from.
 --
+--   marketing         marketing-material-file-url. Keys:
+--                     {material_id}/{file_name}. Holds the company's sell
+--                     sheets and rate cards. UPLOAD is admin-only;
+--                     DOWNLOAD is open to every active signed-in user,
+--                     which makes it the only one of the three buckets
+--                     whose two directions have different answers — a rep
+--                     reads the library, an admin stocks it.
+--
 -- Why a second bucket rather than a new `documents.owner_type`: that
 -- table's access model resolves a PARENT RECORD's agent_id
 -- (resolveParentAgentId), and a residual import file has no owning rep --
@@ -4515,13 +4800,17 @@ $$;
 -- either a rep-owned table holding rows that belong to no rep, or filing
 -- the file under the importing admin, which is a fact about who clicked
 -- rather than about the data. Two buckets, two access stories, neither
--- bent to fit the other.
+-- bent to fit the other. `marketing` is a third for the same kind of
+-- reason and a different one: a material has no owning rep AND no parent
+-- record at all, so there is nothing for the documents key shape to
+-- resolve.
 --
--- Neither bucket is in any migration, so a freshly started local stack has
--- neither and every signing call 404s until they exist.
--- tests/live/helpers/stack.ts creates both as part of provisioning.
+-- NO bucket is in any migration, so a freshly started local stack has none
+-- of them and every signing call 404s until they exist -- and `npx supabase
+-- db reset` drops all three, which is the version that actually bites.
+-- tests/live/helpers/stack.ts creates all three as part of provisioning.
 --
--- SET A PER-BUCKET file_size_limit ON BOTH. This is not optional and it is
+-- SET A PER-BUCKET file_size_limit ON ALL THREE. This is not optional and it is
 -- not what config.toml's `[storage] file_size_limit` does. Measured on the
 -- local stack with that set to "50MiB": a 120 MiB PUT through
 -- uploadToSignedUrl was accepted, and so was a 120 MiB service-role
@@ -4531,9 +4820,9 @@ $$;
 -- the project's storage quota. `documents` is provisioned at
 -- MAX_DOCUMENT_BYTES (lib/documents.ts, 50 MiB) by
 -- tests/live/helpers/stack.ts, e2e/fixtures/seed.ts and
--- seed-dev-local.mjs; the hosted buckets need the same set from the
--- dashboard, or via storage.updateBucket, because no migration can carry
--- it. lib/documents.ts also refuses an over-size file client-side, which
+-- seed-dev-local.mjs; `marketing` is provisioned at the same ceiling by
+-- the first two. The hosted buckets need the same set from the dashboard,
+-- or via storage.updateBucket, because no migration can carry it. lib/documents.ts also refuses an over-size file client-side, which
 -- is what produces a readable message instead of a 413 from Storage --
 -- but a client-side check is a courtesy, not the boundary.
 -- =====================================================================

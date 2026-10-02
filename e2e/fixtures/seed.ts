@@ -709,7 +709,7 @@ export async function clearImportedUsers(
     if (!user.email || !wanted.has(user.email.toLowerCase())) continue;
     await db.from("audit_log").delete().eq("actor_id", user.id);
     await db.from("audit_log").delete().eq("row_id", user.id);
-    // profiles.manager_id, the nineteenth reference to profiles(id) and the
+    // profiles.manager_id, one of twenty-one references to profiles(id) and the
     // only `on delete set null` one — so unlike audit_log above it cannot make
     // this delete fail, and Postgres would clear it unprompted. Cleared here
     // anyway, and with an UPDATE rather than a DELETE because the row holding
@@ -720,6 +720,29 @@ export async function clearImportedUsers(
       .from("profiles")
       .update({ manager_id: null })
       .eq("manager_id", user.id);
+    // marketing_materials.uploaded_by and marketing_material_events.agent_id,
+    // the twentieth and twenty-first references to profiles(id) and both NO
+    // ACTION. An imported rep has no reason to own either today, which is
+    // exactly why this is here: the cost is one query against an empty set,
+    // and the alternative is this list being the one that forgot, the next
+    // time a spec logs an event as a provisioned account.
+    //
+    // Events before materials, and by material before by actor, because
+    // material_id is NO ACTION too — a material this user uploaded can carry
+    // another rep's events.
+    const { data: ownMaterials } = await db
+      .from("marketing_materials")
+      .select("id")
+      .eq("uploaded_by", user.id);
+    const materialIds = (ownMaterials ?? []).map((material) => material.id as number);
+    if (materialIds.length > 0) {
+      await db
+        .from("marketing_material_events")
+        .delete()
+        .in("material_id", materialIds);
+    }
+    await db.from("marketing_material_events").delete().eq("agent_id", user.id);
+    await db.from("marketing_materials").delete().eq("uploaded_by", user.id);
     await db.auth.admin.deleteUser(user.id);
   }
 
