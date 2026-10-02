@@ -542,6 +542,7 @@ describe("carrying a lead's fields into a new pre-app", () => {
     state: "TN",
     country: "USA",
     zip: "372011234",
+    website: "https://dotsdiner.test",
   };
 
   it("maps every overlapping column onto its pre_apps name", () => {
@@ -557,7 +558,19 @@ describe("carrying a lead's fields into a new pre-app", () => {
       state: "TN",
       country: "USA",
       zip: "37201-1234",
+      // Carried as typed. leads.website only exists as of 20261002; before it,
+      // a rep who found the site while working the lead retyped it here.
+      website: "https://dotsdiner.test",
     });
+  });
+
+  it("carries a website that is not a URL, rather than dropping it", () => {
+    // Neither column has a format rule, so there is nothing to validate against
+    // and no mask that could run without making the two records disagree. The
+    // browser's type="url" input is what nudges the rep, not this.
+    expect(preAppDefaultsFromLead({ ...lead, website: "dotsdiner" }).website).toBe(
+      "dotsdiner",
+    );
   });
 
   it("resolves a state NAME rather than truncating it", () => {
@@ -596,6 +609,7 @@ describe("carrying a lead's fields into a new pre-app", () => {
       state: null,
       country: null,
       zip: null,
+      website: "  ",
     });
 
     // The two NOT NULL columns are the exception: they feed form inputs, and a
@@ -605,6 +619,7 @@ describe("carrying a lead's fields into a new pre-app", () => {
     expect(blank.contact_name).toBeNull();
     expect(blank.contact_phone).toBeNull();
     expect(blank.city).toBeNull();
+    expect(blank.website).toBeNull();
   });
 
   it("trims the two required columns", () => {

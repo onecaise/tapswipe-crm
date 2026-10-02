@@ -10,9 +10,11 @@ import type { StatusIntent } from "@/components/status-badge";
  * copy for the UI's benefit. Same arrangement as MERCHANT_STATUSES.
  *
  * The column was deliberately constrained *because* this list filters on it.
- * `leads.status` is bare text and the leads list filters on next_followup_date
- * instead, for exactly the reason this file would otherwise demonstrate: a
- * vocabulary that exists only here is free to drift from what the column holds.
+ * `leads.status` was the one holdout — bare text, with the leads list filtering
+ * on next_followup_date instead — on the argument that a vocabulary existing
+ * only in TypeScript drifts from what the column holds. 20261002 settled that
+ * the other way: the vocabulary went into the column. Every filtered status
+ * here is now constrained.
  */
 export const SUPPORT_TICKET_STATUSES = ["open", "pending", "closed"] as const;
 

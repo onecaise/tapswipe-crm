@@ -5,14 +5,20 @@ import { PlusIcon } from "lucide-react";
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import {
-  LEAD_FILTER_OPTIONS,
+  LEAD_FOLLOWUP_FILTER_OPTIONS,
   LEAD_LIST_COLUMNS,
+  LEAD_STATUS_FILTER_OPTIONS,
+  LEAD_STATUS_LABELS,
   PG_TODAY,
   type LeadListRow,
+  isLeadStatus,
+  leadsHref,
   nextWeekBound,
-  parseLeadFilter,
+  parseLeadFollowupFilter,
+  parseLeadStatusFilter,
+  statusIntent,
 } from "@/lib/leads";
-import { formatDate, formatText } from "@/lib/format";
+import { formatDate, formatStatus, formatText } from "@/lib/format";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { FilterTabs } from "@/components/filter-tabs";
@@ -20,16 +26,20 @@ import { ListTable, type ListColumn } from "@/components/list-table";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 
+type LeadsSearchParams = Promise<{ status?: string; followup?: string }>;
+
 async function LeadsList({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string }>;
+  searchParams: LeadsSearchParams;
 }) {
-  // `status`, not `filter`. Every other list here (merchants, tickets, tasks,
-  // bug reports) uses ?status=, and this page was the sole holdout — enough to
-  // send someone hand-editing a URL to a page that silently ignored them.
-  const { status: rawFilter } = await searchParams;
-  const filter = parseLeadFilter(rawFilter);
+  // Two independent filters, two params. `?status=` is the pipeline stage, which
+  // is what every other list page here means by that name; the follow-up window
+  // it used to hold moved to `?followup=` when leads got a real status
+  // vocabulary — see lib/leads.ts.
+  const { status: rawStatus, followup: rawFollowup } = await searchParams;
+  const status = parseLeadStatusFilter(rawStatus);
+  const followup = parseLeadFollowupFilter(rawFollowup);
 
   const profile = await requireUser();
   const supabase = await createClient();
@@ -44,7 +54,11 @@ async function LeadsList({
     .order("next_followup_date", { ascending: true, nullsFirst: false })
     .order("id", { ascending: false });
 
-  switch (filter) {
+  if (status !== "all") {
+    query = query.eq("status", status);
+  }
+
+  switch (followup) {
     case "overdue":
       query = query.lt("next_followup_date", PG_TODAY);
       break;
@@ -91,12 +105,19 @@ async function LeadsList({
     );
   }
 
+  // Names which filter came up empty rather than saying "no leads" over a
+  // filtered view, which reads as an empty book. With two filters the stage is
+  // the one to name first — it is the one a rep just clicked.
   const emptyMessage =
-    filter === "all"
-      ? "No leads yet."
-      : filter === "unscheduled"
-        ? "Every lead has a follow-up date."
-        : "No leads match that follow-up window.";
+    status !== "all"
+      ? `No leads at ${LEAD_STATUS_LABELS[status].toLowerCase()}${
+          followup === "all" ? "" : " in that follow-up window"
+        }.`
+      : followup === "all"
+        ? "No leads yet."
+        : followup === "unscheduled"
+          ? "Every lead has a follow-up date."
+          : "No leads match that follow-up window.";
 
   // The list's shape as data, so the table and the stacked-card view below lg
   // cannot disagree about it. The admin-only Agent column is appended rather
@@ -123,9 +144,17 @@ async function LeadsList({
       cell: (lead) => formatDate(lead.next_followup_date),
     },
     {
-      header: "Status",
+      header: "Stage",
       cell: (lead) => (
-        <StatusBadge intent="neutral">{formatText(lead.status)}</StatusBadge>
+        <StatusBadge intent={statusIntent(lead.status)}>
+          {/* leads_status_vocabulary is NOT VALID, so a row written before it
+              can still hold anything a rep typed. Those render as-is rather
+              than crashing on a missing label — they are what the review query
+              in the migration is for, and hiding them would hide the work. */}
+          {isLeadStatus(lead.status)
+            ? LEAD_STATUS_LABELS[lead.status]
+            : formatStatus(lead.status)}
+        </StatusBadge>
       ),
     },
     ...(isAdmin
@@ -142,11 +171,30 @@ async function LeadsList({
 
   return (
     <div className="flex flex-col gap-4">
-      <FilterTabs
-        options={LEAD_FILTER_OPTIONS}
-        active={filter}
-        hrefFor={(value) => (value === "all" ? "/leads" : `/leads?status=${value}`)}
-      />
+      {/* Two rows, labelled, because an unlabelled second row of chips reads as
+          an overflow of the first and clicking one looks like it should clear
+          the other. Each tab preserves the other filter — see leadsHref. */}
+      <div className="flex flex-col gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Pipeline
+        </span>
+        <FilterTabs
+          options={LEAD_STATUS_FILTER_OPTIONS}
+          active={status}
+          hrefFor={(value) => leadsHref(value, followup)}
+        />
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Follow-up
+        </span>
+        <FilterTabs
+          options={LEAD_FOLLOWUP_FILTER_OPTIONS}
+          active={followup}
+          hrefFor={(value) => leadsHref(status, value)}
+        />
+      </div>
 
       <ListTable
         columns={columns}
@@ -161,13 +209,13 @@ async function LeadsList({
 export default function LeadsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string }>;
+  searchParams: LeadsSearchParams;
 }) {
   return (
     <PageShell width="list">
       <PageHeader
         title="Leads"
-        subtitle="Filtered by follow-up date. Agents see their own; admins see all."
+        subtitle="Filter by pipeline stage, follow-up date, or both. Agents see their own; admins see all."
         action={
           <Button asChild size="sm">
             <Link href="/leads/new">

@@ -301,6 +301,12 @@ export function prevStep(step: PreAppStep): PreAppStep | null {
  *     value as savable-but-not-valid, so the rep sees it and finishes it;
  *     silently dropping data they entered would be worse.
  *   - **`leads.mobile_phone` is not carried.** `pre_apps` has no column for it.
+ *   - **`website` is carried as typed.** It only became carryable on 20261002,
+ *     when `leads.website` was added — `pre_apps.website` has existed since the
+ *     initial schema, so until then a rep who found the merchant's site while
+ *     working the lead had nowhere to put it and retyped it here. Neither
+ *     column has a format rule, so there is nothing to normalise against and a
+ *     mask would only make the two records disagree.
  */
 export type PreAppLeadDefaults = {
   dba_name: string;
@@ -316,6 +322,7 @@ export type PreAppLeadDefaults = {
   | "zip"
   | "phone_number"
   | "email_address"
+  | "website"
 >;
 
 export function preAppDefaultsFromLead(
@@ -332,6 +339,7 @@ export function preAppDefaultsFromLead(
     | "state"
     | "country"
     | "zip"
+    | "website"
   >,
 ): PreAppLeadDefaults {
   return {
@@ -346,6 +354,10 @@ export function preAppDefaultsFromLead(
     state: lead.state ? matchState(lead.state) : null,
     country: clean(lead.country),
     zip: mapped(lead.zip, maskZip),
+    // Carried as typed, with no normalising. `pre_apps.website` has no format
+    // rule and neither does `leads.website`, so the only thing a mask here
+    // could do is disagree with whichever of the two the rep looks at.
+    website: clean(lead.website),
   };
 }
 

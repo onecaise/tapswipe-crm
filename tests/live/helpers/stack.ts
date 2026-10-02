@@ -388,7 +388,7 @@ export async function provisionFixtures(): Promise<Fixtures> {
         agent_id: created.user.id,
         dba: `Live ${persona.key} Lead`,
         merchant_legal_name: `Live ${persona.fullName} Lead LLC`,
-        status: "open",
+        status: "new",
       })
       .select("id")
       .single();

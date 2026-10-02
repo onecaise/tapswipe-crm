@@ -42,11 +42,13 @@ export type GhostSheetListRow = Pick<
 /**
  * Filters on conversion state rather than `status`.
  *
- * Like leads, `ghost_sheets.status` is unconstrained text — but unlike leads
- * there's a column that genuinely records the distinction that matters here.
- * Filtering on `lead_id is null` is derived from behaviour rather than an
- * invented vocabulary, and it can't disagree with reality the way a status
- * string could.
+ * `ghost_sheets.status` is unconstrained text, and unlike `leads.status` — which
+ * got a real vocabulary in 20261002 — it is staying that way, because there is
+ * a column here that genuinely records the distinction that matters. Filtering
+ * on `lead_id is null` is derived from behaviour rather than from a vocabulary
+ * at all, and it can't disagree with reality the way a status string could. A
+ * sheet has exactly one question to answer and the answer is already a fact
+ * about another table; a lead has seven stages and no record of which it is in.
  */
 export const GHOST_SHEET_FILTERS = ["all", "open", "converted"] as const;
 

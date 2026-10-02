@@ -549,10 +549,92 @@ create table leads (
   probability_to_close text,
   preferred_communication_method text,
   industry_vertical text,
-  status text default 'open',
+  website text,
+  -- A real vocabulary as of 20261002, replacing bare `text default 'open'`.
+  --
+  -- The old comment here argued that a vocabulary living only in TypeScript was
+  -- free to drift from the column's contents, and that was true — so the answer
+  -- is to put the vocabulary in the column, not to keep the column shapeless.
+  -- Both other filtered statuses (merchants, pre_apps) are constrained; this
+  -- was the holdout, and what it actually bought was a column holding 'open',
+  -- NULL, and whatever each rep typed into a free-text <input>.
+  --
+  -- NOT NULL is load-bearing, exactly as it is on pre_apps.status and
+  -- support_tickets.status: a CHECK evaluates to NULL for a NULL input, and a
+  -- CHECK that evaluates to NULL PASSES. Without `not null`, `set status = null`
+  -- is accepted and defeats both the vocabulary and every filter built on it.
+  -- The two clauses are one mechanism, not a constraint plus a nicety.
+  --
+  -- Seven values, and no 'won'. A lead's win is derived — an approved pre_app
+  -- or a merchant pointing back at it — never hand-set, which is the same
+  -- reasoning dashboard_counts() already uses for active_leads: a status column
+  -- a rep edits and a funnel position the records themselves prove are
+  -- different facts, and storing the second as the first lets them disagree.
+  -- 'application_sent' is as far as this column goes; what happens to that
+  -- application is pre_apps.status's business.
+  --
+  -- 'nurturing' is not a failure and not a stage — it is a lead parked on a
+  -- long timer, which is why it sits outside the otherwise forward order.
+  --
+  -- The vocabulary itself is the named CHECK below rather than a column
+  -- constraint here, because there are two rules on the same column pair and
+  -- both carry a review query worth keeping next to them.
+  status text not null default 'new',
+  -- Required when, and only when, status = 'lost'. Same shape as
+  -- pre_apps.decline_reason: a terminal state that owes the next person reading
+  -- the record an explanation, enforced by the database rather than by whichever
+  -- form happened to write the row.
+  --
+  -- btrim'd in the CHECK because '' is a value — a column that is `not null`
+  -- when lost but accepts a single space enforces nothing anyone cares about.
+  lost_reason text,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+
+-- Both constraints are named rather than inline so a test can match on the name
+-- and say which rule it caught, instead of matching a generic /check|violates/.
+--
+-- BOTH SHIP `not valid`, for the reason merchants_split_totals_100 does: they
+-- bind every insert and update from here on and leave existing rows alone.
+-- `leads.status` was a free-text <input> for its whole life, so real rows hold
+-- 'open', NULL, and arbitrary rep-typed strings. NULL and 'open' map to 'new'
+-- with no judgement required and the migration rewrites those; anything else is
+-- a human's words about a specific deal, and a migration that guesses at them
+-- loses information no backup brings back. List what is left with
+--   select id, agent_id, dba, status from leads
+--    where status not in ('new', 'contacted', 'qualified', 'proposal_sent',
+--                         'application_sent', 'nurturing', 'lost')
+--    order by status, id;
+-- fix those rows THROUGH THE APP (so the cross-agent audit trigger sees them
+-- and so the rep who typed the value is the one choosing its replacement),
+-- then `alter table leads validate constraint leads_status_vocabulary;` in a
+-- follow-up migration.
+--
+-- leads_lost_reason_required is `not valid` for a narrower reason: nothing
+-- stopped a rep typing the literal word 'lost' into the old free-text column,
+-- and those rows have no lost_reason because the column did not exist. They
+-- surface in the same review query. Its own check is
+--   select id, agent_id, dba from leads
+--    where status = 'lost' and (lost_reason is null or btrim(lost_reason) = '');
+alter table leads
+  add constraint leads_status_vocabulary check (status in (
+    'new', 'contacted', 'qualified', 'proposal_sent', 'application_sent',
+    'nurturing', 'lost'
+  )) not valid,
+  add constraint leads_lost_reason_required check (
+    status <> 'lost' or (lost_reason is not null and btrim(lost_reason) <> '')
+  ) not valid;
+
+-- NOTE ON TRANSITIONS: leads deliberately has NO state-machine trigger, unlike
+-- pre_apps (pre_apps_guard_transitions). Sales moves backwards as a matter of
+-- course — qualified back to contacted when a champion leaves — and no lead
+-- stage has a consequence the way a pre-app approval does, which creates a
+-- merchant. A guard here would stop a rep undoing a mis-click and nothing else.
+--
+-- The trail is already covered: leads is one of the seven tables carrying
+-- log_cross_agent_change(), so an admin moving someone else's lead is audited.
+-- Do not add a second trigger for it.
 
 alter table leads enable row level security;
 
@@ -1079,13 +1161,14 @@ create table support_tickets (
   serial_number_imei text,
   subject text not null,
   message text,
-  -- Constrained, and NOT NULL, because the list page filters on it. The two
-  -- other filtered statuses (merchants, pre_apps) are both constrained; leads
-  -- is bare text and its list deliberately filters on next_followup_date
-  -- instead, because a vocabulary that lives only in TypeScript is free to
-  -- drift from the column's real contents. NOT NULL for the same reason
-  -- pre_apps.status is: a CHECK that evaluates to NULL passes, so a nullable
-  -- status silently defeats both the check and every filter built on it.
+  -- Constrained, and NOT NULL, because the list page filters on it. Every
+  -- filtered status here is now constrained — merchants, pre_apps, leads and
+  -- this one. leads was the holdout until 20261002 and the argument for leaving
+  -- it bare (a vocabulary living only in TypeScript drifts from the column) was
+  -- answered by putting the vocabulary in the column instead. NOT NULL for the
+  -- same reason pre_apps.status is: a CHECK that evaluates to NULL passes, so a
+  -- nullable status silently defeats both the check and every filter built on
+  -- it.
   --
   -- Three values, not four: 'pending' covers waiting on the merchant, the
   -- processor or a hardware RMA, and a separate 'resolved' before 'closed'
@@ -2078,6 +2161,10 @@ create index idx_support_tickets_status on support_tickets(status);
 -- behind it forever -- that is the cost of clearing by status rather than by
 -- delete, and this is what keeps paying it cheap.
 create index idx_bug_reports_status on bug_reports(status);
+-- The pipeline view filters on this, alongside the follow-up window below.
+-- Both are secondary filters over the same already-agent-scoped set, so each
+-- gets its own index rather than a composite: the pair is never the predicate.
+create index idx_leads_status on leads(status);
 create index idx_leads_next_followup_date on leads(next_followup_date);
 
 -- The polymorphic owner pair. documents, notes and tasks are all read the same
@@ -3003,9 +3090,14 @@ begin
   -- 'Ghost sheet' rather than 'ghost_sheet'. lead_source is free text a rep
   -- types ("Referral", "Cold call", "Web form") and it renders raw on the lead
   -- page, so the machine-shaped value stood out as the one entry nobody wrote.
+  --
+  -- 'new', not 'open'. 'open' was never in a vocabulary because there was no
+  -- vocabulary; as of 20261002 there is, and leads_status_vocabulary is NOT
+  -- VALID rather than disabled — it binds every insert from here on, including
+  -- this one. A converted sheet is the most new a lead can be.
   insert into leads (agent_id, dba, contact_name, contact_phone, lead_source, status)
   values (sheet.agent_id, sheet.dba, sheet.contact_name, sheet.contact_phone,
-          'Ghost sheet', 'open')
+          'Ghost sheet', 'new')
   returning id into new_lead_id;
 
   -- leads has no notes column, so the sheet's notes become a row in the
@@ -3044,18 +3136,21 @@ $$;
 --
 --   active_merchants  merchants.status = 'active'. A real constrained
 --                     vocabulary, so this one means what it says.
---   active_leads      leads with no pre-app pointing at them. NOT
---                     `status = 'active'`: leads.status is nullable
---                     unconstrained text defaulting to 'open' (see the
---                     note on support_tickets.status for why that was
---                     deliberate), so there is no 'active' to compare
---                     against and a filter on it would invent the
---                     vocabulary this schema went out of its way not to
---                     have. pre_apps.lead_id is a real column with a real
+--   active_leads      leads with no pre-app pointing at them. Still NOT a
+--                     status filter, and deliberately unchanged by the
+--                     20261002 vocabulary: leads.status is now constrained,
+--                     but it is a stage a rep sets by hand and this count
+--                     is a funnel position the records themselves prove.
+--                     pre_apps.lead_id is a real column with a real
 --                     meaning, and it makes the dashboard read as a
 --                     funnel — a deal counted under Pre-Apps is no longer
 --                     counted under Leads, so the four figures sum to
---                     distinct work rather than double-counting.
+--                     distinct work rather than double-counting. Reading
+--                     `status <> 'lost'` instead would let a rep who never
+--                     updates a stage inflate the number, and would
+--                     double-count every lead already under Pre-Apps.
+--                     This is the same argument as "there is no 'won'
+--                     value" on leads.status: a derived fact stays derived.
 --
 -- ghost_sheets and pre_apps are deliberately unfiltered totals.
 -- =====================================================================

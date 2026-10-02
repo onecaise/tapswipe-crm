@@ -169,7 +169,7 @@ export const DEFAULT_TASK_INDEX_FILTER: TaskIndexFilter = "open";
  * Falls back to the default rather than passing the raw value into the query,
  * where an unrecognised filter would return zero rows and read as "you have no
  * tasks" instead of "that filter doesn't exist" — the same reasoning as
- * parseLeadFilter.
+ * parseLeadStatusFilter.
  */
 export function parseTaskIndexFilter(
   value: string | undefined,

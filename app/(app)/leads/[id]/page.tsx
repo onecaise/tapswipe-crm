@@ -10,7 +10,12 @@ import {
 
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
-import { type Lead } from "@/lib/leads";
+import {
+  LEAD_STATUS_LABELS,
+  type Lead,
+  isLeadStatus,
+  statusIntent,
+} from "@/lib/leads";
 import { formatDate, formatStatus, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { loadAnnotations } from "@/lib/annotations-data";
@@ -151,10 +156,16 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
         }
       >
         <div className="mt-1 flex items-center gap-2">
-          {/* `leads.status` is unconstrained text, so there is no vocabulary to
-              map to a colour — see lib/leads.ts. Every lead status is neutral
-              rather than guessed at. */}
-          <StatusBadge intent="neutral">{formatText(lead.status)}</StatusBadge>
+          {/* The vocabulary maps to the three shared intents — see statusIntent
+              in lib/leads.ts, and note `lost` is grey rather than red: a status
+              badge never wears brand or destructive colour. A value outside the
+              vocabulary (a row predating the NOT VALID constraint) renders raw
+              and neutral rather than crashing on a missing label. */}
+          <StatusBadge intent={statusIntent(lead.status)}>
+            {isLeadStatus(lead.status)
+              ? LEAD_STATUS_LABELS[lead.status]
+              : formatStatus(lead.status)}
+          </StatusBadge>
           {lead.next_followup_date && (
             <span className="text-sm text-muted-foreground">
               Follow up {formatDate(lead.next_followup_date)}
@@ -181,6 +192,7 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
         <Field label="Industry / vertical">
           {formatText(lead.industry_vertical)}
         </Field>
+        <Field label="Website">{formatText(lead.website)}</Field>
         <Field label="Address">{formatText(lead.address)}</Field>
         <Field label="City">{formatText(lead.city)}</Field>
         <Field label="State">{formatText(lead.state)}</Field>
@@ -198,7 +210,18 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
         </Field>
         {/* The badge in the header capitalises through CSS, so this rendered
             the same value in a second casing right below it. */}
-        <Field label="Status">{formatStatus(lead.status)}</Field>
+        <Field label="Stage">
+          {isLeadStatus(lead.status)
+            ? LEAD_STATUS_LABELS[lead.status]
+            : formatStatus(lead.status)}
+        </Field>
+        {/* Shown only when it applies. leads_lost_reason_required guarantees a
+            lost lead has one, so an empty "Lost reason" field would only ever
+            appear on rows that predate the constraint — and on every other lead
+            it would be a permanently blank row in the grid. */}
+        {lead.status === "lost" && (
+          <Field label="Lost reason">{formatText(lead.lost_reason)}</Field>
+        )}
         {agentName !== null && <Field label="Agent">{agentName}</Field>}
         <Field label="Last updated">{formatDate(lead.updated_at)}</Field>
       </Section>

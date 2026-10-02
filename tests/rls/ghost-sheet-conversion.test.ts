@@ -89,7 +89,10 @@ describe("convert_ghost_sheet_to_lead — happy path", () => {
     // as the one entry nobody had written. 20260813162634 changed it and
     // backfilled the existing rows.
     expect(lead.lead_source).toBe("Ghost sheet");
-    expect(lead.status).toBe("open");
+    // 'new', not 'open': 20261002120000 gave leads a vocabulary and 'open'
+    // is not in it. The constraint is NOT VALID, which exempts existing rows
+    // and not this INSERT, so the function had to change with it.
+    expect(lead.status).toBe("new");
 
     const [sheet] = await rows<{ lead_id: number; status: string }>(
       db,

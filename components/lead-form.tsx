@@ -4,7 +4,12 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
-import { type Lead } from "@/lib/leads";
+import {
+  LEAD_STATUSES,
+  LEAD_STATUS_LABELS,
+  type Lead,
+  isLeadStatus,
+} from "@/lib/leads";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -15,6 +20,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 
 /** Every editable column, as strings — form state is text until submit. */
 const FIELDS = [
@@ -30,12 +36,14 @@ const FIELDS = [
   "state",
   "zip",
   "country",
+  "website",
   "lead_source",
   "industry_vertical",
   "probability_to_close",
   "preferred_communication_method",
   "next_followup_date",
   "status",
+  "lost_reason",
 ] as const;
 
 type FieldName = (typeof FIELDS)[number];
@@ -54,14 +62,21 @@ const LABELS: Record<FieldName, string> = {
   state: "State",
   zip: "ZIP",
   country: "Country",
+  website: "Website",
   lead_source: "Lead source",
   industry_vertical: "Industry / vertical",
   probability_to_close: "Probability to close",
   preferred_communication_method: "Preferred contact method",
   next_followup_date: "Next follow-up date",
-  status: "Status",
+  status: "Stage",
+  lost_reason: "Why was it lost?",
 };
 
+/**
+ * The plain text inputs, by section. `status` and `lost_reason` are deliberately
+ * absent — they are a <select> and a conditional <textarea>, rendered after the
+ * Pipeline section's grid rather than inside it.
+ */
 const SECTIONS: { title: string; fields: readonly FieldName[] }[] = [
   {
     title: "Contact",
@@ -80,6 +95,7 @@ const SECTIONS: { title: string; fields: readonly FieldName[] }[] = [
       "dba",
       "merchant_legal_name",
       "industry_vertical",
+      "website",
       "address",
       "city",
       "state",
@@ -89,27 +105,53 @@ const SECTIONS: { title: string; fields: readonly FieldName[] }[] = [
   },
   {
     title: "Pipeline",
-    fields: [
-      "lead_source",
-      "probability_to_close",
-      "next_followup_date",
-      "status",
-    ],
+    fields: ["lead_source", "probability_to_close", "next_followup_date"],
   },
 ];
 
 const INPUT_TYPES: Partial<Record<FieldName, string>> = {
   contact_email: "email",
   next_followup_date: "date",
+  // `url`, not `text`. The browser's own validation is the whole point: a rep
+  // typing "acme.com" gets told before the round trip, and there is no CHECK on
+  // this column to catch it afterwards.
+  website: "url",
 };
 
+// Matches merchant-form.tsx's native select. Styled inline rather than as a ui/
+// primitive because there are two of them in the app and shadcn's Select pulls
+// in a popover for a list of seven.
+const SELECT_CLASS =
+  "border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none";
+
+/**
+ * New leads start at 'new', matching the column default.
+ *
+ * An edit keeps whatever the row holds, INCLUDING a value outside the
+ * vocabulary: `leads_status_vocabulary` ships NOT VALID, so rows written while
+ * the column was free text still hold arbitrary rep-typed strings. Coercing
+ * those to 'new' here would silently rewrite someone's note about a specific
+ * deal the moment they opened the form to fix a phone number — see the review
+ * path in 20261002120000.
+ */
 function toFormState(lead?: Lead): FormState {
   return Object.fromEntries(
-    FIELDS.map((field) => [field, lead?.[field] ?? ""]),
+    FIELDS.map((field) => [
+      field,
+      lead?.[field] ?? (field === "status" && lead === undefined ? "new" : ""),
+    ]),
   ) as FormState;
 }
 
-/** Empty strings become NULL rather than "", so absent data reads as absent. */
+/**
+ * Empty strings become NULL rather than "", so absent data reads as absent.
+ *
+ * `status` is the exception and cannot be nulled — the column is `not null`, and
+ * the <select> always holds a value anyway. `lost_reason` is cleared whenever
+ * the stage is not 'lost', so a lead worked back out of lost does not keep an
+ * explanation that no longer applies; `decline_reason` is cleared by the next
+ * successful `submit_pre_app()` for the same reason.
+ */
 function toPayload(form: FormState) {
   const payload = Object.fromEntries(
     FIELDS.map((field) => {
@@ -117,8 +159,33 @@ function toPayload(form: FormState) {
       return [field, value === "" ? null : value];
     }),
   );
+  payload.status = form.status;
+  if (form.status !== "lost") payload.lost_reason = null;
   // updated_at is deliberately absent — the set_updated_at() trigger owns it.
   return payload;
+}
+
+/**
+ * The reasons this lead cannot be saved, in plain language.
+ *
+ * A deliberate mirror of the two CHECK constraints, so the rep sees what is
+ * wrong before spending a round trip on it. **Postgres is the authority** —
+ * these only pre-empt it. The second one in particular is why the form can be
+ * opened on a pre-vocabulary row at all: the constraint is NOT VALID, so the
+ * row exists, but any UPDATE to it is checked on the way out and would fail
+ * with a bare constraint-violation message naming nothing a rep can act on.
+ */
+function saveBlockers(form: FormState): string[] {
+  const blockers: string[] = [];
+  if (!isLeadStatus(form.status)) {
+    blockers.push(
+      `"${form.status}" isn't a pipeline stage. Pick one before saving.`,
+    );
+  }
+  if (form.status === "lost" && form.lost_reason.trim() === "") {
+    blockers.push("A lost lead needs a reason.");
+  }
+  return blockers;
 }
 
 export function LeadForm({
@@ -136,8 +203,17 @@ export function LeadForm({
   const [isSaving, setIsSaving] = useState(false);
   const router = useRouter();
 
+  const blockers = saveBlockers(form);
+  const staleStatus = isLeadStatus(form.status) ? null : form.status;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (blockers.length > 0) {
+      setError(blockers.join(" "));
+      return;
+    }
+
     setIsSaving(true);
     setError(null);
 
@@ -218,14 +294,68 @@ export function LeadForm({
                     />
                   </div>
                 ))}
+
+                {section.title === "Pipeline" && (
+                <div className="grid gap-2">
+                  <Label htmlFor="status">{LABELS.status}</Label>
+                  <select
+                    id="status"
+                    className={SELECT_CLASS}
+                    value={form.status}
+                    onChange={(e) =>
+                      setForm((prev) => ({ ...prev, status: e.target.value }))
+                    }
+                  >
+                    {/* A value this build doesn't recognise is shown rather than
+                        hidden, and disabled so it cannot be chosen again. The
+                        rep sees what they typed and what it has to become; the
+                        alternative — silently preselecting 'new' — rewrites
+                        their words on a form they opened for another reason. */}
+                    {staleStatus !== null && (
+                      <option value={staleStatus} disabled>
+                        {staleStatus} — needs review
+                      </option>
+                    )}
+                    {LEAD_STATUSES.map((status) => (
+                      <option key={status} value={status}>
+                        {LEAD_STATUS_LABELS[status]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                )}
               </div>
+
+              {/* Rendered inside Pipeline, outside its two-column grid: a reason
+                  is a sentence, not a field, and it only exists at one stage. */}
+              {section.title === "Pipeline" && form.status === "lost" && (
+                <div className="grid gap-2">
+                  <Label htmlFor="lost_reason">{LABELS.lost_reason} *</Label>
+                  <Textarea
+                    id="lost_reason"
+                    required
+                    rows={3}
+                    value={form.lost_reason}
+                    onChange={(e) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        lost_reason: e.target.value,
+                      }))
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Price, timing, went with a competitor — whatever the next
+                    person reading this lead would want to know.
+                  </p>
+                </div>
+              )}
             </fieldset>
           ))}
 
           {error && <p className="text-sm text-destructive">{error}</p>}
 
           <div className="flex gap-2">
-            <Button type="submit" disabled={isSaving}>
+            <Button type="submit" disabled={isSaving || blockers.length > 0}>
               {isSaving ? "Saving…" : isEdit ? "Save changes" : "Create lead"}
             </Button>
             <Button
