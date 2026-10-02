@@ -467,6 +467,15 @@ describe("grant surface after all migrations", () => {
       await canExecute(db, "anon", "public.set_agent_number(uuid, text)"),
     ).toBe(false);
 
+    // set_territory is the newer of the two and writes a label rather than a
+    // commission key, which is exactly why it is enumerated here: the one most
+    // likely to be waved through as harmless is the one whose revoke line gets
+    // forgotten. It is `security definer` over profiles either way, so an anon
+    // EXECUTE writes the table that decides who is an admin.
+    expect(
+      await canExecute(db, "anon", "public.set_territory(uuid, text)"),
+    ).toBe(false);
+
     const [seq] = await rows<{ ok: boolean }>(
       db,
       `select has_sequence_privilege('anon', 'merchants_id_seq', 'usage') as ok`,

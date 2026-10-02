@@ -9,6 +9,7 @@ import { AgentNumberCell } from "@/components/agent-number-cell";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { StatusBadge } from "@/components/status-badge";
+import { TerritoryCell } from "@/components/territory-cell";
 import { UserRowActions } from "@/components/user-row-actions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,7 @@ type ProfileRow = {
   full_name: string;
   email: string | null;
   agent_number: string | null;
+  territory: string | null;
   role: Role;
   is_active: boolean;
   must_change_password: boolean;
@@ -47,7 +49,7 @@ async function UsersTable() {
   const { data, error } = await supabase
     .from("profiles")
     .select(
-      "id, full_name, email, agent_number, role, is_active, must_change_password, created_at",
+      "id, full_name, email, agent_number, territory, role, is_active, must_change_password, created_at",
     )
     .order("created_at", { ascending: true });
 
@@ -67,6 +69,7 @@ async function UsersTable() {
         <TableRow>
           <TableHead>Name</TableHead>
           <TableHead>Agent #</TableHead>
+          <TableHead>Territory</TableHead>
           <TableHead>Role</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Created</TableHead>
@@ -76,7 +79,7 @@ async function UsersTable() {
       <TableBody>
         {profiles.length === 0 ? (
           <TableRow>
-            <TableCell colSpan={6} className="text-muted-foreground">
+            <TableCell colSpan={7} className="text-muted-foreground">
               No users found.
             </TableCell>
           </TableRow>
@@ -110,6 +113,17 @@ async function UsersTable() {
                   userId={profile.id}
                   fullName={profile.full_name}
                   agentNumber={profile.agent_number}
+                />
+              </TableCell>
+              <TableCell>
+                {/* A reporting label, not an access boundary — nothing reads
+                    this to decide what the rep can see. Blank for everyone
+                    until someone fills it in; the column is new and there was
+                    nothing to backfill it from. */}
+                <TerritoryCell
+                  userId={profile.id}
+                  fullName={profile.full_name}
+                  territory={profile.territory}
                 />
               </TableCell>
               <TableCell>

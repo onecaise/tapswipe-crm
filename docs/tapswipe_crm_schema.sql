@@ -60,6 +60,34 @@ create table profiles (
   --
   -- Uniqueness is a partial index rather than a column constraint -- see below.
   agent_number text,
+  -- The rep's sales territory, as a label for grouping and reporting. Free
+  -- text, and deliberately NOT a check-constrained vocabulary: this is
+  -- reference data an admin extends as the company opens a region, the same
+  -- reasoning support_tickets.category / sub_category / priority stay free
+  -- text. Nothing computes on it -- no policy reads it, no query groups by it
+  -- in SQL, no import resolves through it -- so a vocabulary would buy nothing
+  -- but a migration every time someone opens an office.
+  --
+  -- Contrast agent_number directly above, which looks like the same shape of
+  -- thing and is not: that one is a join key with a uniqueness rule and a
+  -- length cap because a processor's file is matched against it. This is a
+  -- label. One rep per agent number; any number of reps per territory.
+  --
+  -- NOT AN ACCESS BOUNDARY, and this is the line to hold. RLS scopes every
+  -- agent_id table by `agent_id = auth.uid()`, and nothing anywhere reads
+  -- territory to decide what a caller may see. "Agents see their whole
+  -- territory" is a different and much larger feature -- it would rewrite the
+  -- own-row half of every policy on all seven owner tables, turn a per-row
+  -- check into a join against profiles, and need an answer for a rep whose
+  -- territory changes while holding live deals. If that is ever wanted, it is
+  -- its own migration with its own policy tests. Adding territory to a policy
+  -- as a convenience, without that work, silently widens every rep's book.
+  --
+  -- Nullable, for the reason agent_number is: every profile predating the
+  -- column has none and there is nothing to backfill from. Blank is normalised
+  -- to null by set_territory() rather than stored, so "not assigned" has one
+  -- representation instead of two that render identically and compare unequal.
+  territory text,
   -- When this user last opened the notifications panel behind the topbar bell.
   -- Everything the bell reports is derived from this one comparison: a support
   -- ticket or ghost sheet with created_at greater than this is "new to me".
@@ -462,12 +490,103 @@ begin
 end;
 $$;
 
+-- ---------------------------------------------------------------------
+-- set_territory(target_user_id uuid, new_territory text)
+--
+-- The same shape as set_agent_number above, and it exists for the same
+-- structural reason rather than as a matter of taste: profiles has no
+-- UPDATE policy at all, so there is no client write path to this column
+-- even for an admin. A `security definer` RPC with a hand-written
+-- is_admin() guard is the ONLY way a new profiles column becomes
+-- settable, and that is the pattern to copy -- not a policy.
+--
+-- Audited despite being a label. Not because territory decides anything
+-- (it decides nothing -- see the column comment), but because the write
+-- path is admin-only and every admin action on another person's profile
+-- leaves a trail. log_cross_agent_change() does that for the seven owner
+-- tables; profiles is not one of them, so each of these RPCs writes its
+-- own row. `security definer` bundles the update and the audit insert
+-- into one statement so they cannot come apart.
+--
+-- Blank clears, normalised to null rather than stored. No unique index
+-- forces this the way it does for agent_number -- many reps share a
+-- territory -- but "unassigned" having two representations that render
+-- identically and compare unequal is its own bug, and `where territory
+-- is null` is how any report will ask the question.
+--
+-- No duplicate check and no length cap beyond the 64 below: nothing
+-- resolves through this column, so there is no ambiguity to prevent and
+-- no second system whose limit has to be matched. The cap is only so a
+-- pasted paragraph fails as a readable message rather than becoming a
+-- table cell nobody can read.
+--
+-- NOT guarded against a self-target. An admin who also carries a book has
+-- a territory like anyone else, and setting their own removes no
+-- privilege -- the same reasoning set_agent_number gives, and the
+-- opposite of set_user_role, whose self-guard is what makes
+-- zero-active-admins unreachable.
+-- ---------------------------------------------------------------------
+create or replace function set_territory(
+  target_user_id uuid,
+  new_territory text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  normalised text;
+  target profiles;
+begin
+  if not is_admin() then
+    raise exception 'admin only' using errcode = 'PT403';
+  end if;
+
+  normalised := nullif(btrim(coalesce(new_territory, '')), '');
+
+  if normalised is not null and length(normalised) > 64 then
+    raise exception 'territory must be 64 characters or fewer'
+      using errcode = 'PT400';
+  end if;
+
+  select * into target from profiles where id = target_user_id;
+  if not found then
+    raise exception 'user not found' using errcode = 'PT404';
+  end if;
+
+  -- `is not distinct from` rather than `=`, so clearing an already-empty
+  -- territory is the no-op it looks like rather than falling through to an
+  -- audit row claiming something changed.
+  if target.territory is not distinct from normalised then
+    return;
+  end if;
+
+  update profiles set territory = normalised where id = target_user_id;
+
+  -- Distinct verbs rather than one action, for the reason set_user_role and
+  -- set_agent_number both give: audit_log has no detail column, so the
+  -- direction lives in `action` or is lost.
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (
+    auth.uid(),
+    case when normalised is null
+         then 'clear_territory'
+         else 'set_territory' end,
+    'profiles',
+    target_user_id::text
+  );
+end;
+$$;
+
 revoke all on function clear_must_change_password() from public;
 grant execute on function clear_must_change_password() to authenticated, service_role;
 revoke all on function set_user_role(uuid, text) from public;
 grant execute on function set_user_role(uuid, text) to authenticated, service_role;
 revoke all on function set_agent_number(uuid, text) from public;
 grant execute on function set_agent_number(uuid, text) to authenticated, service_role;
+revoke all on function set_territory(uuid, text) from public;
+grant execute on function set_territory(uuid, text) to authenticated, service_role;
 
 -- ---------------------------------------------------------------------
 -- MERCHANTS

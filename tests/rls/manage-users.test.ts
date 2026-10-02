@@ -18,7 +18,7 @@ import {
  * point of this test is that *that* query is safe, not some approximation.
  */
 const MANAGE_USERS_QUERY = `
-  select id, full_name, email, agent_number, role, is_active,
+  select id, full_name, email, agent_number, territory, role, is_active,
          must_change_password, created_at
   from profiles
   order by created_at asc
