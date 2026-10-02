@@ -554,3 +554,13 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/provision-user-batch/deno.json"
 entrypoint = "./functions/provision-user-batch/index.ts"
+
+# Two modes with DIFFERENT authorization, which is why it is one function and
+# not two: an admin stocks the library (upload), every active rep reads it
+# (download). verify_jwt = false like all the others — the handler authenticates
+# the caller itself, and the download branch deliberately does not require admin.
+[functions.marketing-material-file-url]
+enabled = true
+verify_jwt = false
+import_map = "./functions/marketing-material-file-url/deno.json"
+entrypoint = "./functions/marketing-material-file-url/index.ts"

@@ -215,7 +215,7 @@ for (const person of PEOPLE) {
 // exist`, which names neither the bucket nor the fix. Cheap to create, and the
 // pair is meant to be runnable back to back.
 const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
-for (const bucket of ["documents", "residual-imports"]) {
+for (const bucket of ["documents", "residual-imports", "marketing"]) {
   const { error: bucketError } = await db.storage.createBucket(bucket, {
     public: false,
     fileSizeLimit: MAX_DOCUMENT_BYTES,

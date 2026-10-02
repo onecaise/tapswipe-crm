@@ -255,6 +255,16 @@ export const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
 export const RESIDUAL_BUCKET = "residual-imports";
 
 /**
+ * The third private bucket, holding the marketing material library.
+ *
+ * Created out-of-band like the other two, and the one whose two directions
+ * have different answers: marketing-material-file-url requires an admin to
+ * upload and any active user to download, so a test that only ever signs in as
+ * an admin would not notice the download branch losing its rep access.
+ */
+export const MARKETING_BUCKET = "marketing";
+
+/**
  * Agent numbers given to the personas, so an import file can name them.
  *
  * Only the two active agents get one. The admin and the deactivated agent are
@@ -286,16 +296,16 @@ export async function provisionFixtures(): Promise<Fixtures> {
 
   await teardownFixtures();
 
-  // Both buckets are created out-of-band in production (neither is in any
+  // All three buckets are created out-of-band in production (none is in any
   // migration), so they have to be created here too or every signing call 404s.
   //
   // fileSizeLimit is applied on every run, not only at creation: a bucket that
   // predates the limit keeps accepting unbounded uploads and nothing says so.
   // It is also the ONLY thing that limits an upload — config.toml's
   // `[storage] file_size_limit` does not apply to a signed PUT (measured: 120 MiB
-  // accepted with it set to 50MiB), and both buckets came back from listBuckets()
+  // accepted with it set to 50MiB), and the buckets came back from listBuckets()
   // with file_size_limit = null.
-  for (const bucket of [BUCKET, RESIDUAL_BUCKET]) {
+  for (const bucket of [BUCKET, RESIDUAL_BUCKET, MARKETING_BUCKET]) {
     const { error: bucketError } = await admin.storage.createBucket(bucket, {
       public: false,
       fileSizeLimit: MAX_DOCUMENT_BYTES,

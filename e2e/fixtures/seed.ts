@@ -385,7 +385,13 @@ export async function seedE2E(): Promise<SeedResult> {
 }
 
 /**
- * The private `documents` bucket, with the size ceiling the app promises.
+ * The private `documents` and `marketing` buckets, with the size ceiling the
+ * app promises.
+ *
+ * NOT `residual-imports`: this file has never created it, and a passing e2e run
+ * still leaves residual imports broken on a freshly reset stack. That gap is
+ * recorded in CLAUDE.md rather than quietly closed here, because closing it
+ * would make this helper provision a bucket no e2e spec uses.
  *
  * The bucket is created out-of-band in production — it is in no migration — so a
  * freshly reset local stack has none and every signing call 404s. The size limit
@@ -396,19 +402,21 @@ export async function seedE2E(): Promise<SeedResult> {
  * The per-bucket limit is.
  */
 async function ensureDocumentsBucket(db: SupabaseClient): Promise<void> {
-  const { error: createError } = await db.storage.createBucket("documents", {
-    public: false,
-    fileSizeLimit: MAX_DOCUMENT_BYTES,
-  });
-  if (createError && !/exists/i.test(createError.message)) {
-    throw new Error(`documents bucket: ${createError.message}`);
-  }
-  const { error: updateError } = await db.storage.updateBucket("documents", {
-    public: false,
-    fileSizeLimit: MAX_DOCUMENT_BYTES,
-  });
-  if (updateError) {
-    throw new Error(`documents bucket limit: ${updateError.message}`);
+  for (const bucket of ["documents", "marketing"]) {
+    const { error: createError } = await db.storage.createBucket(bucket, {
+      public: false,
+      fileSizeLimit: MAX_DOCUMENT_BYTES,
+    });
+    if (createError && !/exists/i.test(createError.message)) {
+      throw new Error(`${bucket} bucket: ${createError.message}`);
+    }
+    const { error: updateError } = await db.storage.updateBucket(bucket, {
+      public: false,
+      fileSizeLimit: MAX_DOCUMENT_BYTES,
+    });
+    if (updateError) {
+      throw new Error(`${bucket} bucket limit: ${updateError.message}`);
+    }
   }
 }
 
