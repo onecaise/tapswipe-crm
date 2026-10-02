@@ -27,6 +27,7 @@ import {
   functionsAreServed,
   invoke,
   provisionFixtures,
+  userClient,
   warmFunctions,
   teardownFixtures,
   type Fixtures,
@@ -781,5 +782,184 @@ describe("set_agent_number through PostgREST", () => {
 
     expect(error).not.toBeNull();
     expect(error?.message).toMatch(/admin only/i);
+  });
+});
+
+describe("set_territory through PostgREST", () => {
+  // The guards are covered exhaustively in tests/rls/set-territory.test.ts.
+  // What only this suite can prove is the layer PGlite sits below: that the RPC
+  // is reachable over the Data API with a real JWT, that `authenticated` holds
+  // EXECUTE on it, that `anon` does NOT, and that the function's own `raise`
+  // messages survive PostgREST and arrive as something a person can read — the
+  // Territory cell shows `rpcError.message` verbatim, so a generic 500 there
+  // would be an unactionable error in the admin's face.
+  //
+  // Reads go through the service-role client rather than the admin's session,
+  // so an assertion about what was written cannot be satisfied by the select
+  // policy agreeing with the write.
+  const readTerritory = async () => {
+    const { data } = await adminClient()
+      .from("profiles")
+      .select("territory")
+      .eq("id", fixtures.userIds.intruder)
+      .single();
+    return data?.territory ?? null;
+  };
+
+  it("lets an admin set, change and clear a territory over HTTP", async () => {
+    const asAdmin = userClient(fixtures.tokens.admin);
+
+    const set = await asAdmin.rpc("set_territory", {
+      target_user_id: fixtures.userIds.intruder,
+      new_territory: "Live Southeast",
+    });
+    expect(set.error, set.error?.message).toBeNull();
+    expect(await readTerritory()).toBe("Live Southeast");
+
+    const changed = await asAdmin.rpc("set_territory", {
+      target_user_id: fixtures.userIds.intruder,
+      new_territory: "  Live Midwest  ",
+    });
+    expect(changed.error, changed.error?.message).toBeNull();
+    // Trimmed on the way in. Asserted over the wire because the trim happens in
+    // SQL and JSON carries the padding faithfully — nothing between the browser
+    // and the function would have removed it.
+    expect(await readTerritory()).toBe("Live Midwest");
+
+    // Blank clears, and stores null rather than ''. The Territory cell submits
+    // an empty string for this, so the normalisation has to survive a JSON
+    // round trip and not just a direct SQL call.
+    const cleared = await asAdmin.rpc("set_territory", {
+      target_user_id: fixtures.userIds.intruder,
+      new_territory: "",
+    });
+    expect(cleared.error, cleared.error?.message).toBeNull();
+    expect(await readTerritory()).toBeNull();
+  });
+
+  it("writes an audit row naming the admin who did it", async () => {
+    const asAdmin = userClient(fixtures.tokens.admin);
+
+    const { error } = await asAdmin.rpc("set_territory", {
+      target_user_id: fixtures.userIds.intruder,
+      new_territory: "Live Audited Region",
+    });
+    expect(error, error?.message).toBeNull();
+
+    // actor_id is auth.uid() inside a `security definer` function, which is the
+    // thing a service-role call cannot produce — so this also proves the RPC
+    // ran as the caller's identity rather than anonymously. PGlite can set the
+    // JWT claims GUC by hand; only this suite arrives with a real token.
+    const { data } = await adminClient()
+      .from("audit_log")
+      .select("actor_id, action, table_name, row_id")
+      .eq("row_id", fixtures.userIds.intruder)
+      .eq("action", "set_territory");
+
+    expect(data).toContainEqual({
+      actor_id: fixtures.userIds.admin,
+      action: "set_territory",
+      table_name: "profiles",
+      row_id: fixtures.userIds.intruder,
+    });
+  });
+
+  it("refuses an agent over HTTP, with a readable message", async () => {
+    const asAgent = userClient(fixtures.tokens.owner);
+
+    const { error } = await asAgent.rpc("set_territory", {
+      target_user_id: fixtures.userIds.intruder,
+      new_territory: "Live Stolen Region",
+    });
+
+    expect(error).not.toBeNull();
+    expect(error?.message).toMatch(/admin only/i);
+  });
+
+  it("refuses a deactivated account's token", async () => {
+    // A different refusal from the one above, and the one a JWT alone cannot
+    // make: this token is valid and well-formed, the account is simply switched
+    // off. Access tokens stay good for up to an hour after deactivation, so
+    // is_admin()'s is_active half is what has to catch this on every request.
+    const asDeactivated = userClient(fixtures.tokens.deactivated);
+
+    const { error } = await asDeactivated.rpc("set_territory", {
+      target_user_id: fixtures.userIds.intruder,
+      new_territory: "Live Ghost Region",
+    });
+
+    expect(error).not.toBeNull();
+    expect(error?.message).toMatch(/admin only/i);
+  });
+
+  it("refuses an unauthenticated caller", async () => {
+    // The assertion this suite exists for. Postgres grants EXECUTE to PUBLIC on
+    // every new function and PUBLIC includes anon, so without the revoke line in
+    // 20261002143000 this RPC would be callable with nothing but the publishable
+    // key — writing `profiles` as the owner. tests/rls/grants.test.ts checks the
+    // same thing in the catalog; this checks it the way an attacker would.
+    const { error } = await anonClient().rpc("set_territory", {
+      target_user_id: fixtures.userIds.intruder,
+      new_territory: "Live Anonymous Region",
+    });
+
+    expect(error, "anon must not be able to execute set_territory").not.toBeNull();
+    // Matching on /permission denied/ rather than just "an error happened" is
+    // what makes this spec non-vacuous, and it is worth understanding why.
+    //
+    // There are two ways this call can fail, and only one of them is the
+    // property being claimed. With the revoke line in place it dies at the
+    // PRIVILEGE layer and the message is Postgres's. Grant anon EXECUTE and the
+    // call gets in, runs the function body, and is turned away by its own
+    // is_admin() guard — auth.uid() is null for anon, so is_admin() is false —
+    // producing "admin only" instead. A regression therefore flips the message
+    // rather than removing it, and a bare not.toBeNull() would sail straight
+    // through the exact state this test exists to catch.
+    expect(error?.message).toMatch(/permission denied/i);
+  });
+
+  it("leaves the column untouched after every refusal", async () => {
+    // The three refusals above are only worth their assertions if nothing
+    // landed. Checked once, at the end, through the service-role client.
+    const { data } = await adminClient()
+      .from("profiles")
+      .select("territory")
+      .eq("id", fixtures.userIds.intruder)
+      .single();
+
+    // The audit test set this and nothing since was allowed to change it.
+    expect(data?.territory).toBe("Live Audited Region");
+  });
+
+  it("rejects an over-long territory with the function's own message", async () => {
+    const asAdmin = userClient(fixtures.tokens.admin);
+
+    const { error } = await asAdmin.rpc("set_territory", {
+      target_user_id: fixtures.userIds.intruder,
+      new_territory: "T".repeat(65),
+    });
+
+    expect(error).not.toBeNull();
+    // Shown verbatim by the Territory cell, so it has to read as a sentence
+    // rather than as a constraint name.
+    expect(error?.message).toMatch(/64 characters or fewer/i);
+  });
+
+  it("refuses a direct PATCH of profiles.territory over the Data API", async () => {
+    // Why the RPC exists at all, asserted where it actually matters. The
+    // hermetic suite proves `authenticated` holds SELECT and nothing else on
+    // profiles; this proves PostgREST enforces that for a real admin session —
+    // the one caller who might plausibly be let through, and the one whose UI
+    // would otherwise be written as a plain supabase-js update.
+    const asAdmin = userClient(fixtures.tokens.admin);
+
+    const { error } = await asAdmin
+      .from("profiles")
+      .update({ territory: "Live Bypassed Region" })
+      .eq("id", fixtures.userIds.intruder);
+
+    expect(error, "an admin must not be able to PATCH profiles").not.toBeNull();
+    expect(error?.message).toMatch(/permission denied/i);
+    expect(await readTerritory()).toBe("Live Audited Region");
   });
 });

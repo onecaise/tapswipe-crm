@@ -68,7 +68,7 @@ npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
 npm test               # hermetic suite — PGlite + pure logic, no Docker (982 tests)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (174 tests)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (185 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
 npm run test:e2e       # Playwright, real browser against the app on the local stack (73 tests)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
