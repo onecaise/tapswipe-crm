@@ -709,6 +709,17 @@ export async function clearImportedUsers(
     if (!user.email || !wanted.has(user.email.toLowerCase())) continue;
     await db.from("audit_log").delete().eq("actor_id", user.id);
     await db.from("audit_log").delete().eq("row_id", user.id);
+    // profiles.manager_id, the nineteenth reference to profiles(id) and the
+    // only `on delete set null` one — so unlike audit_log above it cannot make
+    // this delete fail, and Postgres would clear it unprompted. Cleared here
+    // anyway, and with an UPDATE rather than a DELETE because the row holding
+    // the pointer is a DIFFERENT rep's profile: an imported user who was made
+    // somebody's manager would otherwise have their reporting line silently
+    // removed from a persona this teardown is not supposed to touch.
+    await db
+      .from("profiles")
+      .update({ manager_id: null })
+      .eq("manager_id", user.id);
     await db.auth.admin.deleteUser(user.id);
   }
 

@@ -111,6 +111,21 @@ const PROFILE_REFERENCES = [
 ];
 
 for (const user of existing.users.filter((user) => wanted.has(user.email))) {
+  // profiles.manager_id -- the NINETEENTH reference to profiles(id) and the one
+  // that is NOT in PROFILE_REFERENCES above, deliberately. That list DELETES
+  // rows, and the row carrying a manager_id is another rep's whole profile.
+  //
+  // It also cannot block this delete the way the other eighteen can: it is the
+  // single `on delete set null` reference, so Postgres would clear it on its
+  // own. Done explicitly anyway, because the thing to avoid here is not a
+  // failed delete but a silent one -- a seeded reporting line quietly
+  // disappearing from a surviving rep's row, with nothing in this script
+  // admitting it happened.
+  await admin
+    .from("profiles")
+    .update({ manager_id: null })
+    .eq("manager_id", user.id);
+
   for (const [table, column] of PROFILE_REFERENCES) {
     await admin.from(table).delete().eq(column, user.id);
   }

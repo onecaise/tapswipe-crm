@@ -88,6 +88,54 @@ create table profiles (
   -- to null by set_territory() rather than stored, so "not assigned" has one
   -- representation instead of two that render identically and compare unequal.
   territory text,
+  -- The rep this rep reports to. A nullable self-reference, exactly one hop
+  -- deep, and NOT a role.
+  --
+  -- The NINETEENTH reference to profiles(id), and the ONE deliberate exception
+  -- to the NO ACTION pattern the other eighteen share. Those are NO ACTION
+  -- because what they carry is evidence -- an audit row, a ledger row, a record
+  -- a rep owns -- and dropping the pointer silently would drop the meaning with
+  -- it, so the delete is made to fail until a person decides what happens to
+  -- the evidence. This column is not evidence. It is a current fact about who
+  -- reports to whom, and a manager leaving the company should not block
+  -- deleting their profile the way an unresolved payout row correctly does. The
+  -- honest post-condition is "these reps now report to nobody", which is what
+  -- `on delete set null` writes. Chosen rather than inherited:
+  -- tests/rls/user-imports.test.ts counts nineteen AND names this column as the
+  -- single exception, so a twentieth arriving with a non-default ON DELETE
+  -- still goes red.
+  --
+  -- NOT A THIRD ROLE, and this is the line to hold. `role` stays
+  -- ('agent','admin'). Every policy in this file is a binary is_admin() check
+  -- -- around forty of them, plus the hand-written guard at the top of every
+  -- `security definer` RPC -- so a third role would need either a third branch
+  -- in all of them or a manages() helper called alongside is_admin()
+  -- everywhere. That is a rewrite of the access-control design, not a column,
+  -- and this column is deliberately the cheap half: it records the structure
+  -- without granting anything.
+  --
+  -- NOT AN ACCESS BOUNDARY either -- the same line territory holds directly
+  -- above, for the same reason and with the same consequence if it is crossed.
+  -- Nothing reads manager_id to decide what a caller may see. What it makes
+  -- possible is FILTERING by an admin who already sees every row
+  -- (`agent_id in (select id from profiles where manager_id = $1)` in a
+  -- dashboard query); it changes nothing about what a rep, or a manager, can
+  -- see of their own accord. "A manager sees their reps' books" is the larger
+  -- feature territory's note describes, with the same cost: it rewrites the
+  -- own-row half of all seven owner tables. tests/rls/set-manager.test.ts greps
+  -- pg_policies for the word and asserts zero hits.
+  --
+  -- EXACTLY ONE HOP, enforced by set_manager() in both directions: a rep who
+  -- already has a manager cannot be made one, and a rep who is already
+  -- somebody's manager cannot be given one. Together those rule out chains and
+  -- cycles by construction, which is what keeps "does X manage Y" a single
+  -- equality instead of a recursive CTE. The rule lives in the RPC rather than
+  -- in a CHECK because a CHECK constraint cannot see another row.
+  --
+  -- No index, for the reason territory has none: profiles is small, Manage
+  -- Users reads all of it anyway, and nothing resolves a rep THROUGH this
+  -- column the way the residuals import resolves one through agent_number.
+  manager_id uuid references profiles(id) on delete set null,
   -- When this user last opened the notifications panel behind the topbar bell.
   -- Everything the bell reports is derived from this one comparison: a support
   -- ticket or ghost sheet with created_at greater than this is "new to me".
@@ -579,6 +627,132 @@ begin
 end;
 $$;
 
+-- ---------------------------------------------------------------------
+-- set_manager(profile_id uuid, manager_id_input uuid)
+--
+-- The same shape as set_territory and set_agent_number above, and it exists
+-- for the same structural reason: profiles has no UPDATE policy and no UPDATE
+-- grant for `authenticated`, so a `security definer` RPC with a hand-written
+-- is_admin() guard is the only way a column there becomes settable. Do not
+-- answer this with a policy -- the missing UPDATE policy is the design.
+--
+-- Null clears. There is no separate "unassign" verb and no tombstone: a rep
+-- reporting to nobody is the default state, not an error state.
+--
+-- FOUR guards beyond is_admin(), and the last two are the whole reason this
+-- is an RPC rather than a column an admin could PATCH:
+--
+--   1. The target profile exists. Without it a typo'd uuid is a silent no-op
+--      that reports success.
+--   2. No self-management. Nothing breaks if a rep manages themselves -- it is
+--      a one-row cycle the queries would simply never terminate on -- but it
+--      is never a true statement about an org chart, and permitting it means
+--      "who reports to A" has to filter A out of its own answer forever.
+--   3. The proposed manager has no manager of their own.
+--   4. The target is not already somebody's manager.
+--
+-- Three and four are the same rule read in its two directions, and BOTH are
+-- needed to get what either alone suggests. Guard 3 alone blocks building a
+-- chain downward (giving B a manager when B already reports to A); it does
+-- nothing about building the same chain upward -- set_manager(A, C) with A
+-- already managing B would leave C -> A -> B, two hops, with guard 3 happy
+-- because C reports to nobody. Guard 4 closes that direction. With both, the
+-- graph can only ever be one layer of managers over a flat set of reps, and
+-- cycles of any length are unreachable: a two-cycle needs the second call to
+-- pass guard 3 against a row that already has a manager, and anything longer
+-- needs a chain that cannot be built.
+--
+-- That flatness is a deliberate limit rather than a simplification to fix
+-- later. A chain makes "is X somebody's manager" a recursive query and makes
+-- every reporting filter a transitive closure, which is a real amount of
+-- machinery for something nothing here needs -- the use is an admin narrowing
+-- a dashboard to one manager's reps.
+--
+-- Audited, for the reason set_territory is: profiles is not one of the seven
+-- tables log_cross_agent_change() covers, so each of these RPCs writes its own
+-- row, and `security definer` bundles the update and the audit insert into one
+-- statement so they cannot come apart. Distinct verbs, because audit_log has
+-- no detail column and the direction lives in `action` or is lost.
+--
+-- NOT guarded against the admin targeting themselves. The same reasoning
+-- set_territory and set_agent_number give and the opposite of set_user_role:
+-- an admin who also carries a book reports to somebody like anyone else, and
+-- naming a manager removes no privilege from them. (Guard 2 still applies --
+-- they cannot report to themselves, but nobody can.)
+-- ---------------------------------------------------------------------
+create or replace function set_manager(
+  profile_id uuid,
+  manager_id_input uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $
+declare
+  target profiles;
+  proposed profiles;
+  manages_someone boolean;
+begin
+  if not is_admin() then
+    raise exception 'admin only' using errcode = 'PT403';
+  end if;
+
+  select * into target from profiles where id = profile_id;
+  if not found then
+    raise exception 'user not found' using errcode = 'PT404';
+  end if;
+
+  if manager_id_input is not null then
+    if manager_id_input = profile_id then
+      raise exception 'a user cannot manage themselves' using errcode = 'PT400';
+    end if;
+
+    -- Existence and guard 3 in one read: a manager who is not in profiles is
+    -- `not found` here rather than a foreign-key violation at the update, so
+    -- the caller gets 'manager not found' instead of a constraint name.
+    select * into proposed from profiles where id = manager_id_input;
+    if not found then
+      raise exception 'manager not found' using errcode = 'PT404';
+    end if;
+
+    if proposed.manager_id is not null then
+      raise exception 'manager reporting lines are one level deep'
+        using errcode = 'PT400';
+    end if;
+
+    -- Guard 4, the same rule from the other end. Checked even when the target
+    -- already has this exact manager, because the short-circuit below runs
+    -- after it: a row that somehow holds a manager AND manages someone is a
+    -- state this function must never confirm as acceptable.
+    select exists (select 1 from profiles where manager_id = profile_id)
+      into manages_someone;
+    if manages_someone then
+      raise exception 'manager reporting lines are one level deep'
+        using errcode = 'PT400';
+    end if;
+  end if;
+
+  -- `is not distinct from` rather than `=`, so clearing a manager nobody had
+  -- is the no-op it looks like rather than an audit row claiming a change.
+  if target.manager_id is not distinct from manager_id_input then
+    return;
+  end if;
+
+  update profiles set manager_id = manager_id_input where id = profile_id;
+
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (
+    auth.uid(),
+    case when manager_id_input is null
+         then 'clear_manager'
+         else 'set_manager' end,
+    'profiles',
+    profile_id::text
+  );
+end;
+$;
+
 revoke all on function clear_must_change_password() from public;
 grant execute on function clear_must_change_password() to authenticated, service_role;
 revoke all on function set_user_role(uuid, text) from public;
@@ -587,6 +761,8 @@ revoke all on function set_agent_number(uuid, text) from public;
 grant execute on function set_agent_number(uuid, text) to authenticated, service_role;
 revoke all on function set_territory(uuid, text) from public;
 grant execute on function set_territory(uuid, text) to authenticated, service_role;
+revoke all on function set_manager(uuid, uuid) from public;
+grant execute on function set_manager(uuid, uuid) to authenticated, service_role;
 
 -- ---------------------------------------------------------------------
 -- MERCHANTS

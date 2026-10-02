@@ -571,13 +571,43 @@ async function clearUserImports(
 }
 
 /**
+ * Clears any reporting line pointing at `userId`.
+ *
+ * profiles.manager_id is the NINETEENTH reference to profiles(id) and the only
+ * one that is not NO ACTION — `on delete set null`, because a manager leaving
+ * should not block deleting their profile the way an unresolved payout row
+ * correctly does. So unlike clearPayoutRows and clearUserImports, this one is
+ * NOT here to stop deleteUser failing: Postgres would null the column by
+ * itself.
+ *
+ * It is here because of the other failure mode, which is quieter and therefore
+ * worse. A fixture that names a manager and a teardown that removes that
+ * manager leave a surviving persona whose reporting line vanished with no
+ * error anywhere — and the next test that asserts anything about the structure
+ * is reading state this file created by accident. Clearing it on purpose, with
+ * an UPDATE rather than a DELETE (the row belongs to the OTHER rep), keeps the
+ * teardown's effect equal to what it looks like.
+ */
+async function clearManagerReferences(
+  admin: SupabaseClient,
+  userId: string,
+): Promise<void> {
+  await admin
+    .from("profiles")
+    .update({ manager_id: null })
+    .eq("manager_id", userId);
+}
+
+/**
  * Removes everything provisionFixtures created, in FK order.
  *
  * merchants.agent_id and documents.agent_id reference profiles with no ON
  * DELETE clause, so deleting the auth user first would fail on the profiles
  * cascade. The five rep_payout references are the same trap with five doors —
- * see clearPayoutRows, and clearUserImports for the eighteenth. Storage objects
- * are removed by prefix, keyed on the user id.
+ * see clearPayoutRows, and clearUserImports for the eighteenth. The
+ * nineteenth, profiles.manager_id, is the one reference that cannot block a
+ * delete — clearManagerReferences explains why it is cleared anyway. Storage
+ * objects are removed by prefix, keyed on the user id.
  */
 export async function teardownFixtures(): Promise<void> {
   const admin = adminClient();
@@ -674,6 +704,7 @@ export async function teardownFixtures(): Promise<void> {
 
     await clearPayoutRows(admin, user.id);
     await clearUserImports(admin, user.id);
+    await clearManagerReferences(admin, user.id);
 
     // Residual import files, removed by the {batch_id}/ prefix. Listed rather
     // than guessed at, because the filename is whatever was uploaded.
@@ -717,6 +748,7 @@ export async function deleteUserCompletely(userId: string): Promise<void> {
   await admin.from("audit_log").delete().eq("row_id", userId);
   await clearPayoutRows(admin, userId);
   await clearUserImports(admin, userId);
+  await clearManagerReferences(admin, userId);
 
   const { error } = await admin.auth.admin.deleteUser(userId);
   if (error) {

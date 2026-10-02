@@ -33,10 +33,13 @@ import {
  *      profile. A foreign key there could never be satisfied, so the absence of
  *      one is a correctness requirement rather than an oversight, and it is
  *      asserted here so nobody "tidies up" by adding it.
- *   4. **imported_by is the eighteenth NO ACTION reference to profiles(id).**
- *      A leftover batch blocks deleting a user, which is the trap
- *      scripts/seed-local-users.mjs's teardown list exists to avoid. Asserted
- *      so the count in CLAUDE.md and that list stay honest.
+ *   4. **imported_by is one of nineteen references to profiles(id), and one
+ *      of the eighteen that are NO ACTION.** A leftover batch blocks deleting
+ *      a user, which is the trap the three teardown lists exist to avoid.
+ *      Asserted here, with profiles.manager_id named as the single
+ *      `on delete set null` exception, so the count in CLAUDE.md and those
+ *      lists stay honest — and so a twentieth column cannot arrive with an ON
+ *      DELETE of its own and pass as "the known exception".
  */
 
 type CountRow = { n: number };
@@ -403,7 +406,7 @@ describe("the two columns with deliberately no foreign key", () => {
   });
 });
 
-describe("imported_by is the eighteenth NO ACTION reference to profiles", () => {
+describe("imported_by is one of nineteen references to profiles", () => {
   it("blocks deleting the admin while their batch exists", async () => {
     // The trap scripts/seed-local-users.mjs's teardown list exists to avoid: an
     // unchecked delete fails on the FK, the user survives, and the next
@@ -415,28 +418,75 @@ describe("imported_by is the eighteenth NO ACTION reference to profiles", () => 
     ).rejects.toThrow(/foreign key|violates/i);
   });
 
-  it("counts eighteen columns referencing profiles(id), all NO ACTION", async () => {
-    // Pinned so CLAUDE.md's count and the teardown list cannot drift from the
-    // schema without something going red.
+  it("counts nineteen columns referencing profiles(id)", async () => {
+    // Pinned so CLAUDE.md's count and the three teardown lists cannot drift
+    // from the schema without something going red.
     await asPlatform(db);
-    const refs = await rows<{ n: number }>(
+    const [{ n }] = await rows<{ n: number }>(
       db,
       `select count(*)::int as n
          from pg_constraint c
          join pg_class t on t.oid = c.confrelid
         where c.contype = 'f' and t.relname = 'profiles'`,
     );
-    expect(refs[0].n).toBe(18);
+    expect(n).toBe(19);
+  });
 
-    const nonDefault = await rows<{ n: number }>(
+  it("has exactly one non-NO-ACTION reference, and it is manager_id", async () => {
+    // Named rather than counted, which is the whole point of this assertion.
+    // Bumping a bare "how many are non-default" from zero to one would let a
+    // TWENTIETH column arrive with an ON DELETE of its own and keep this green
+    // as long as something else in the list went back to NO ACTION. The
+    // identity is what has to be pinned: eighteen columns carry evidence and
+    // must block a delete until a person decides what happens to it, and
+    // profiles.manager_id is the single column that carries a current fact
+    // instead — a manager leaving means "these reps now report to nobody",
+    // which is what `set null` writes.
+    //
+    // confdeltype: 'a' = NO ACTION, 'n' = SET NULL.
+    await asPlatform(db);
+    const refs = await rows<{
+      table_name: string;
+      column_name: string;
+      on_delete: string;
+    }>(
       db,
-      `select count(*)::int as n
+      `select src.relname as table_name,
+              att.attname as column_name,
+              c.confdeltype as on_delete
          from pg_constraint c
-         join pg_class t on t.oid = c.confrelid
-        where c.contype = 'f' and t.relname = 'profiles'
-          and (c.confdeltype <> 'a')`,
+         join pg_class tgt on tgt.oid = c.confrelid
+         join pg_class src on src.oid = c.conrelid
+         join lateral unnest(c.conkey) as k(attnum) on true
+         join pg_attribute att
+           on att.attrelid = c.conrelid and att.attnum = k.attnum
+        where c.contype = 'f' and tgt.relname = 'profiles'
+          and c.confdeltype <> 'a'
+        order by src.relname, att.attname`,
     );
-    expect(nonDefault[0].n).toBe(0);
+
+    expect(refs).toEqual([
+      { table_name: "profiles", column_name: "manager_id", on_delete: "n" },
+    ]);
+  });
+
+  it("clears a manager rather than blocking the delete", async () => {
+    // The behavioural half of the exception above: the one thing `set null`
+    // buys over NO ACTION, asserted where someone can see it rather than left
+    // as a catalog letter.
+    await asPlatform(db);
+    await db.exec(
+      `update profiles set manager_id = '${ADMIN_ID}' where id = '${AGENT_ID}'`,
+    );
+    await db.exec(`delete from audit_log where actor_id = '${ADMIN_ID}'`);
+    await db.exec(`delete from user_import_batches`);
+    await db.exec(`delete from profiles where id = '${ADMIN_ID}'`);
+
+    const [survivor] = await rows<{ manager_id: string | null }>(
+      db,
+      `select manager_id from profiles where id = '${AGENT_ID}'`,
+    );
+    expect(survivor.manager_id).toBeNull();
   });
 });
 
