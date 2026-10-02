@@ -33,13 +33,13 @@ import {
  *      profile. A foreign key there could never be satisfied, so the absence of
  *      one is a correctness requirement rather than an oversight, and it is
  *      asserted here so nobody "tidies up" by adding it.
- *   4. **imported_by is one of twenty-one references to profiles(id), and
- *      one of the twenty that are NO ACTION.** A leftover batch blocks
+ *   4. **imported_by is one of twenty-two references to profiles(id), and
+ *      one of the twenty-one that are NO ACTION.** A leftover batch blocks
  *      deleting a user, which is the trap the FOUR teardown lists exist to
  *      avoid. Asserted here, with profiles.manager_id named as the single
  *      `on delete set null` exception, so the count in CLAUDE.md and those
- *      lists stay honest — and so a twenty-second column cannot arrive with
- *      an ON DELETE of its own and pass as "the known exception".
+ *      lists stay honest — and so a further column cannot arrive with an
+ *      ON DELETE of its own and pass as "the known exception".
  */
 
 type CountRow = { n: number };
@@ -406,7 +406,7 @@ describe("the two columns with deliberately no foreign key", () => {
   });
 });
 
-describe("imported_by is one of twenty-one references to profiles", () => {
+describe("imported_by is one of twenty-two references to profiles", () => {
   it("blocks deleting the admin while their batch exists", async () => {
     // The trap scripts/seed-local-users.mjs's teardown list exists to avoid: an
     // unchecked delete fails on the FK, the user survives, and the next
@@ -418,12 +418,22 @@ describe("imported_by is one of twenty-one references to profiles", () => {
     ).rejects.toThrow(/foreign key|violates/i);
   });
 
-  it("counts twenty-one columns referencing profiles(id)", async () => {
+  it("counts twenty-two columns referencing profiles(id)", async () => {
     // Pinned so CLAUDE.md's count and the four teardown lists cannot drift
     // from the schema without something going red. 20261002181500 took this
     // from nineteen to twenty-one: marketing_materials.uploaded_by and
     // marketing_material_events.agent_id, both NO ACTION, both provenance that
     // must block a delete until a person decides what happens to it.
+    //
+    // 20261002194500 added the twenty-second, quotes.agent_id -- also NO
+    // ACTION, and with a second table in front of it: quote_line_items
+    // references quotes, so a teardown that deletes profiles without clearing
+    // the lines first fails naming `quotes`, not the table actually in the way.
+    // The marketing pair set that precedent and this one repeats it.
+    //
+    // products is deliberately NOT here. It is the one new table in this phase
+    // with no profiles reference at all -- see its migration for why, and note
+    // that the saving is exactly this list and the four it keeps honest.
     await asPlatform(db);
     const [{ n }] = await rows<{ n: number }>(
       db,
@@ -432,7 +442,7 @@ describe("imported_by is one of twenty-one references to profiles", () => {
          join pg_class t on t.oid = c.confrelid
         where c.contype = 'f' and t.relname = 'profiles'`,
     );
-    expect(n).toBe(21);
+    expect(n).toBe(22);
   });
 
   it("has exactly one non-NO-ACTION reference, and it is manager_id", async () => {

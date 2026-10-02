@@ -230,6 +230,52 @@ describe("grant surface after all migrations", () => {
       "UPDATE",
     ]);
 
+    // quotes reports NO table-level UPDATE, which is the correct and
+    // slightly surprising answer: has_table_privilege is false when the
+    // privilege is held only on a column, so a column-level grant is
+    // genuinely invisible here rather than indistinguishable from a
+    // table-level one. (Measured -- the first draft of this assertion
+    // expected UPDATE and was wrong.)
+    //
+    // Which cuts both ways, and is why the per-column loop below exists as
+    // well. This line going from two verbs to three would catch a grant
+    // widened to the whole table; only the loop catches the UPDATE surface
+    // moving from status to some other single column.
+    expect(await tablePrivileges(db, "authenticated", "quotes")).toEqual([
+      "INSERT",
+      "SELECT",
+    ]);
+
+    // The actual quotes UPDATE surface: status and nothing else. This is the
+    // whole append-only mechanism, and it lives in a grant because a policy
+    // cannot express it -- RLS decides which ROWS an update may touch, only a
+    // column-level grant decides which COLUMNS.
+    for (const [column, allowed] of [
+      ["status", true],
+      ["title", false],
+      ["notes", false],
+      ["version", false],
+      ["quote_group_id", false],
+      ["lead_id", false],
+      ["agent_id", false],
+    ] as [string, boolean][]) {
+      const [row] = await rows<{ ok: boolean }>(
+        db,
+        `select has_column_privilege('authenticated','quotes','${column}','UPDATE') as ok`,
+      );
+      expect(
+        row.ok,
+        `authenticated ${allowed ? "needs" : "must not hold"} UPDATE on quotes.${column}`,
+      ).toBe(allowed);
+    }
+
+    // quote_line_items is stricter than its parent: no mutable column at all.
+    // A line is what the quote said when it was sent, and changing one is the
+    // edit that is supposed to produce a new version.
+    expect(
+      await tablePrivileges(db, "authenticated", "quote_line_items"),
+    ).toEqual(["INSERT", "SELECT"]);
+
     // Zero-policy RLS already denies these; the absent grant is the second
     // lock, so that a policy added by mistake still opens nothing.
     for (const secrets of [
@@ -275,6 +321,8 @@ describe("grant surface after all migrations", () => {
       "marketing_materials",
       "marketing_material_events",
       "products",
+      "quotes",
+      "quote_line_items",
     ]) {
       expect(
         await nonDmlPrivileges(db, "authenticated", table),
@@ -308,6 +356,12 @@ describe("grant surface after all migrations", () => {
       "marketing_materials_id_seq",
       "marketing_material_events_id_seq",
       "products_id_seq",
+      // Both quote sequences. create_quote_version() is security INVOKER, so
+      // it consumes nextval() as the CALLER -- an invoker RPC is exactly the
+      // case where a forgotten sequence grant produces "permission denied for
+      // sequence" from inside a function whose own EXECUTE grant looks right.
+      "quotes_id_seq",
+      "quote_line_items_id_seq",
     ]) {
       expect(
         await sequencePrivileges(db, "authenticated", sequence),

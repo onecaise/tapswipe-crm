@@ -96,6 +96,15 @@ const PROFILE_REFERENCES = [
   ["tasks", "agent_id"],
   ["bug_reports", "agent_id"],
   ["bug_reports", "resolved_by"],
+  // quotes, and only quotes: quote_line_items.quote_id is ON DELETE CASCADE,
+  // so a rep's lines go with their quotes and the child table needs no entry.
+  // The deliberate contrast with the marketing pair handled by hand below,
+  // where material_id is NO ACTION and the events must be cleared first.
+  //
+  // Before leads, because quotes.lead_id is also ON DELETE CASCADE — either
+  // order works, and deleting the quotes explicitly says so rather than
+  // leaving it to a cascade a reader has to go and look up.
+  ["quotes", "agent_id"],
   ["ghost_sheets", "agent_id"],
   ["pre_apps", "agent_id"],
   ["merchants", "agent_id"],

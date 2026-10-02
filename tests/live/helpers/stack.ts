@@ -601,6 +601,27 @@ async function clearUserImports(
  * holds company collateral, not per-user uploads, and a test that uploads one
  * removes it itself.
  */
+/**
+ * Deletes a user's quotes, which takes their quote line items with them.
+ *
+ * ONE delete, unlike clearMarketingMaterials below, and the difference is the
+ * ON DELETE clause rather than an oversight: quote_line_items.quote_id is
+ * CASCADE, so the lines cannot outlive the quote and cannot belong to anybody
+ * but the quote's owner. A marketing event can belong to a different rep from
+ * the material it names, which is why that one needs two passes.
+ *
+ * quotes.agent_id is the twenty-second reference to profiles(id) and NO
+ * ACTION, so a leftover row blocks deleteUser — the trap the four teardown
+ * lists exist for, and the one that presents as "user already registered" on
+ * the NEXT run rather than as a foreign key on this one.
+ */
+async function clearQuotes(
+  admin: SupabaseClient,
+  userId: string,
+): Promise<void> {
+  await admin.from("quotes").delete().eq("agent_id", userId);
+}
+
 async function clearMarketingMaterials(
   admin: SupabaseClient,
   userId: string,
@@ -756,6 +777,7 @@ export async function teardownFixtures(): Promise<void> {
 
     await clearPayoutRows(admin, user.id);
     await clearUserImports(admin, user.id);
+    await clearQuotes(admin, user.id);
     await clearMarketingMaterials(admin, user.id);
     await clearManagerReferences(admin, user.id);
 
@@ -801,6 +823,7 @@ export async function deleteUserCompletely(userId: string): Promise<void> {
   await admin.from("audit_log").delete().eq("row_id", userId);
   await clearPayoutRows(admin, userId);
   await clearUserImports(admin, userId);
+  await clearQuotes(admin, userId);
   await clearMarketingMaterials(admin, userId);
   await clearManagerReferences(admin, userId);
 

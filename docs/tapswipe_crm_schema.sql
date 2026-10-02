@@ -2876,10 +2876,18 @@ create table quotes (
   -- document no page can place. Deleting a lead is admin-only.
   lead_id int references leads(id) on delete cascade not null,
 
-  -- The owning rep, and one more column referencing profiles(id) -- ON
-  -- DELETE NO ACTION, like every one of them but profiles.manager_id. All
-  -- four teardown lists need it, and they need quote_line_items cleared
-  -- first.
+  -- The owning rep, and one more column referencing profiles(id) -- ON DELETE
+  -- NO ACTION, like every one of them but profiles.manager_id, so all four
+  -- teardown lists need an entry for it.
+  --
+  -- ONE entry, though, not two, and the contrast with the marketing pair is
+  -- the part worth knowing. There, events must be cleared by material and THEN
+  -- by actor, because marketing_material_events.material_id is NO ACTION -- so
+  -- a delete by uploaded_by alone fails on somebody else's row. Here
+  -- quote_line_items.quote_id is ON DELETE CASCADE, so deleting a rep's quotes
+  -- takes their lines with it and quote_line_items needs no entry at all. A
+  -- line cannot belong to anyone but its quote's owner, which is exactly what
+  -- was not true of a marketing event.
   agent_id uuid references profiles(id) not null,
 
   -- A vocabulary, unlike every other `category`-shaped text column here,
@@ -3691,6 +3699,53 @@ create trigger documents_audit_cross_agent
 create trigger bug_reports_audit_cross_agent
   after insert or update or delete on bug_reports
   for each row execute function log_cross_agent_change();
+
+-- quotes is the tenth, and the decision is worth stating rather than
+-- inferring, because the table it most resembles structurally
+-- (rep_payout_rows) is the one that is deliberately excluded.
+--
+-- It gets the trigger. It carries agent_id, it is written through Tier 1 by
+-- reps on their own leads, and the ordinary case is therefore actor =
+-- agent_id, which logs nothing. An ADMIN building or revising a quote on a
+-- rep's lead is exactly the privileged act the trail exists for -- and under
+-- the append-only design that lands as a cross_agent_insert naming the new
+-- version, which is the right granularity: the version added is named, and
+-- the one it supersedes is still there to compare against.
+--
+-- The rep_payout_rows exclusion does not transfer. Those tables are left out
+-- because nobody but an admin can write them at all, so `actor is distinct
+-- from row_agent_id` is true for EVERY write and one forty-row import would
+-- produce forty audit rows. Here the common writer is the owning rep, so this
+-- trigger is quiet by default and only speaks when something unusual happened.
+--
+-- Note the status UPDATE arm is reachable here, unlike the one on notes or
+-- documents: `grant update (status)` is a real privilege a rep holds, so an
+-- admin marking a rep's quote accepted writes a cross_agent_update. That is
+-- wanted -- it is a change to a commercial record on somebody else's deal.
+create trigger quotes_audit_cross_agent
+  after insert or update or delete on quotes
+  for each row execute function log_cross_agent_change();
+
+-- quote_line_items does NOT get it, for two reasons that each stand alone.
+--
+-- It has no agent_id, so the function would read NULL out of to_jsonb(NEW)
+-- and log every write -- the support_ticket_replies trap. That table answered
+-- the same problem with a sibling function resolving the parent's owner, and
+-- this one deliberately does not, because of the second reason:
+--
+-- Even with a working variant it would be pure duplication at a worse
+-- granularity. One admin edit is one quote row plus N line rows, so the trail
+-- would carry N+1 entries describing a single act, N of them naming a table
+-- nobody looks up by id. The parent row already records the event, and
+-- `assert on action, never on row counts` would stop being advice and start
+-- being the only way to read the table.
+--
+-- And the hole that forced documents into this list after it was first
+-- excluded does not exist here. documents was added because its DELETE fell
+-- through all three audit mechanisms: it is the one table whose delete policy
+-- is own-row-or-admin, and a delete mints no signed URL, so nothing fired.
+-- quote_line_items has no UPDATE and no DELETE in either layer, so there is no
+-- verb that could go unrecorded.
 
 -- The rep_payout tables are the deliberate exclusion, and the reasoning is the
 -- same shape as the one that kept documents out at first -- audit where the event

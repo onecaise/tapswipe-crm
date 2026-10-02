@@ -851,6 +851,16 @@ export async function clearImportedUsers(
       .from("profiles")
       .update({ manager_id: null })
       .eq("manager_id", user.id);
+    // quotes.agent_id, the twenty-second reference to profiles(id) and NO
+    // ACTION. One delete and no child pass: quote_line_items.quote_id is ON
+    // DELETE CASCADE, so the lines go with the quotes — unlike the marketing
+    // pair immediately below, where material_id is NO ACTION.
+    //
+    // Here for the same reason that pair is: an imported rep has no reason to
+    // own a quote today, the cost is one query against an empty set, and the
+    // alternative is this being the list that forgot the next time a spec
+    // builds a quote as a provisioned account.
+    await db.from("quotes").delete().eq("agent_id", user.id);
     // marketing_materials.uploaded_by and marketing_material_events.agent_id,
     // the twentieth and twenty-first references to profiles(id) and both NO
     // ACTION. An imported rep has no reason to own either today, which is
