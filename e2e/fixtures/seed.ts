@@ -134,6 +134,8 @@ export type DocOwnerIds = Record<DocOwnerType, number>;
 
 export type SeedResult = {
   ids: Record<PersonaKey, string>;
+  /** The one published marketing material, for the marketing specs. */
+  materialId: number;
   /** persona -> owner type -> record id, for the document specs. */
   /** Every persona but `logout`, which owns no records — see PERSONAS. */
   docOwners: Record<Exclude<PersonaKey, "logout">, DocOwnerIds>;
@@ -369,6 +371,16 @@ export async function seedE2E(): Promise<SeedResult> {
   const { error } = await db.from("rep_payout_rows").insert(rows);
   if (error) throw new Error(`ledger seed: ${error.message}`);
 
+  // Events from previous runs, cleared before the specs add more. They are
+  // append-only by design — no UPDATE or DELETE grant for `authenticated` —
+  // so this runs as the service role, which bypasses both. Without it the
+  // "sent to this lead" assertions would be reading an ever-growing pile from
+  // every run that came before.
+  await db
+    .from("marketing_material_events")
+    .delete()
+    .in("agent_id", Object.values(ids));
+
   const docOwners = {
     admin: await ensureDocOwners(db, "admin", ids.admin),
     agent: await ensureDocOwners(db, "agent", ids.agent),
@@ -380,8 +392,106 @@ export async function seedE2E(): Promise<SeedResult> {
   } satisfies Record<Exclude<PersonaKey, "logout">, DocOwnerIds>;
 
   await ensureDocumentsBucket(db);
+  const materialId = await ensureMarketingMaterial(db, ids.admin);
 
-  return { ids, docOwners, apiUrl };
+  return { ids, docOwners, materialId, apiUrl };
+}
+
+/**
+ * One published material with real bytes behind it.
+ *
+ * Seeded as the ADMIN, because marketing_materials has no agent_id and only an
+ * admin may write it — but what the specs exercise is the REP reading it, which
+ * is the asymmetry the whole feature turns on.
+ *
+ * The row is written before the object for the same reason
+ * marketing-material-file-url does it that way: the storage key is
+ * {material_id}/{file_name}, so the id has to exist before the key can be built.
+ * file_key is therefore set in a second statement — the CHECK constraint would
+ * reject any placeholder, which is why that column is nullable at all.
+ *
+ * Idempotent by title, so a second run reuses the row rather than filling the
+ * library with duplicates. The object is re-uploaded with upsert either way: a
+ * row whose bytes went missing (a `db reset` drops the bucket, not the table)
+ * would otherwise leave every View and Download 404ing with the row still
+ * looking healthy.
+ */
+async function ensureMarketingMaterial(
+  db: SupabaseClient,
+  adminId: string,
+): Promise<number> {
+  const title = "E2E rate card";
+
+  const { data: existing } = await db
+    .from("marketing_materials")
+    .select("id")
+    .eq("title", title)
+    .maybeSingle();
+
+  let materialId = existing?.id as number | undefined;
+
+  if (materialId === undefined) {
+    const { data, error } = await db
+      .from("marketing_materials")
+      .insert({
+        category: "E2E rate cards",
+        title,
+        file_name: "e2e-rate-card.txt",
+        mime_type: "text/plain",
+        uploaded_by: adminId,
+      })
+      .select("id")
+      .single();
+    if (error || !data) {
+      throw new Error(`marketing material: ${error?.message ?? "no row"}`);
+    }
+    materialId = data.id as number;
+  }
+
+  const fileKey = `${materialId}/e2e-rate-card.txt`;
+  const { error: uploadError } = await db.storage
+    .from("marketing")
+    .upload(fileKey, new Blob([MARKETING_MATERIAL_BODY]), {
+      contentType: "text/plain",
+      upsert: true,
+    });
+  if (uploadError) {
+    throw new Error(`marketing material object: ${uploadError.message}`);
+  }
+
+  const { error: keyError } = await db
+    .from("marketing_materials")
+    .update({ file_key: fileKey, archived_at: null })
+    .eq("id", materialId);
+  if (keyError) {
+    throw new Error(`marketing material key: ${keyError.message}`);
+  }
+
+  return materialId;
+}
+
+/** The bytes behind the seeded material, so a spec can assert the round trip. */
+export const MARKETING_MATERIAL_BODY = "E2E RATE CARD — interchange plus 0.35%";
+
+/**
+ * Clears one lead's engagement history.
+ *
+ * Needed because marketing_material_events is append-only BY DESIGN — no UPDATE
+ * or DELETE grant for `authenticated` — so a spec cannot undo its own writes,
+ * and a spec that asserts an empty history is otherwise at the mercy of
+ * whichever test ran before it. Service role, which bypasses both RLS and the
+ * missing grants.
+ *
+ * Per-lead rather than a blanket wipe: the file-level seed already clears the
+ * personas' events once, and a helper that emptied the whole table would let a
+ * spec quietly depend on being the only thing running.
+ */
+export async function clearMarketingEvents(leadId: number): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  await db.from("marketing_material_events").delete().eq("lead_id", leadId);
 }
 
 /**
@@ -488,7 +598,20 @@ async function ensureDocOwners(
     (await create("leads", {
       dba: marker,
       merchant_legal_name: `E2E Docs Lead ${persona} LLC`,
-      status: "open",
+      // 'new', not 'open': leads_status_vocabulary (20261002120000) retired
+      // 'open', and that migration backfills every such row to 'new'.
+      //
+      // This was latent for a month and only fires on a FRESHLY RESET database,
+      // which is what makes it worth a comment rather than a one-word diff. The
+      // find() above short-circuits whenever the fixture lead already exists, so
+      // every run against a stack that had seeded once before skipped this
+      // insert entirely. The first `npx supabase db reset` after the constraint
+      // landed turned the whole e2e suite red in SETUP, with 87 specs never
+      // running and an error naming leads rather than the migration.
+      //
+      // The support_tickets fixture below keeps 'open' deliberately: that
+      // column has no vocabulary and is unconstrained on purpose.
+      status: "new",
     }));
 
   const preApp =

@@ -49,6 +49,29 @@ import {
  *  that a leaked URL isn't a lasting grant. Matches create-download-url. */
 const SIGNED_URL_TTL_SECONDS = 60;
 
+/**
+ * The only types this function will sign for INLINE rendering.
+ *
+ * Everything else is served as an attachment even when the caller did not ask
+ * for one, because an inline response renders on the STORAGE origin with a
+ * live window.opener back to the tab that opened it. An allow-list rather than
+ * a block-list of dangerous types: the executable set is larger and far less
+ * stable than the passive one, and an unknown type downloading is a harmless
+ * surprise where an unknown type rendering is not.
+ *
+ * image/svg+xml is deliberately ABSENT. SVG is an image everywhere else in a
+ * product and a script host in a browser, which is exactly the trap an
+ * allow-list is for.
+ */
+const INLINE_SAFE_TYPES = new Set([
+  "application/pdf",
+  "text/plain",
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
 export default {
   fetch: withSupabase({ auth: "user" }, async (req, ctx) => {
     if (req.method !== "POST") {
@@ -131,12 +154,29 @@ export default {
       // whole reason the UI can offer four distinct actions instead of two
       // buttons that do the same thing with different log entries. "View" and
       // "Print" need the browser to RENDER a PDF; "Download" needs it to save
-      // one. create-download-url always passes `download`, because a document
-      // is never meant to be read in the tab — an uploaded .html rendering on
-      // the storage origin is the problem that option exists to avoid. The
-      // marketing bucket holds collateral an admin curated, not rep-supplied
-      // files, so rendering it is the point rather than the risk.
-      const wantsAttachment = body.download === true;
+      // one.
+      //
+      // ...EXCEPT for a type that could run script, which is forced to
+      // attachment whatever the caller asked for. create-download-url solves
+      // the same problem by always passing `download` — a document is never
+      // meant to be read in the tab, because an uploaded .html would render on
+      // the storage origin. This bucket cannot take that option, since
+      // rendering the collateral IS the feature, so it draws the line by type
+      // instead.
+      //
+      // Allow-list, not a block-list: a new dangerous type must not become
+      // renderable by default, and the set of things that can execute is much
+      // larger and much less stable than the set of things that cannot. An
+      // unknown or missing mime_type therefore downloads rather than renders,
+      // which is the safe direction to be wrong in.
+      //
+      // This also closes the tabnabbing route the opened tab would otherwise
+      // leave open — see the note on window.open in
+      // components/marketing-material-actions.tsx, which relies on this.
+      const inlineSafe =
+        typeof material.mime_type === "string" &&
+        INLINE_SAFE_TYPES.has(material.mime_type.split(";")[0].trim().toLowerCase());
+      const wantsAttachment = body.download === true || !inlineSafe;
       const { data, error } = await ctx.supabaseAdmin.storage
         .from(MARKETING_BUCKET)
         .createSignedUrl(

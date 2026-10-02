@@ -135,19 +135,31 @@ export function MarketingMaterialActions({
    * of calling window.open at all; here a new tab is wanted, so the handle is
    * taken first instead.
    *
-   * WITHOUT "noopener", deliberately, and this is not an oversight to tidy up.
-   * `window.open` with noopener RETURNS NULL BY SPEC — there is no handle to
-   * give back, because the whole point of the flag is to sever the link between
-   * the two windows. Passing it meant `tab` was always null, so every View and
-   * Print fell through to the fallback below and navigated the CURRENT tab,
-   * while the blank tab the browser had already created sat there orphaned.
-   * Measured in a real browser: the page navigated to the storage URL and a
-   * stray about:blank tab was left behind. Nothing failed, no error was logged,
-   * and the only symptom was the file opening in the wrong place.
+   * WITHOUT "noopener", and without `tab.opener = null` either. Both were
+   * tried, and each breaks the feature in its own silent way:
    *
-   * The opener link is cut on the next line instead, while the window is still
-   * about:blank and therefore same-origin enough to touch. Doing it after the
-   * cross-origin navigation would throw.
+   *   - `window.open(..., "noopener")` RETURNS NULL BY SPEC. There is no handle
+   *     to give back, because severing the link between the two windows is the
+   *     whole point of the flag. So `tab` was always null, every View and Print
+   *     fell through to the fallback below and navigated the CURRENT tab, and
+   *     the blank tab the browser had already created sat orphaned. Measured in
+   *     a real browser.
+   *   - `tab.opener = null` keeps the handle but disowns the window, and in
+   *     Chromium the assignment to `tab.location.href` afterwards then does
+   *     NOTHING. Measured under Playwright: no error, no console message, the
+   *     tab simply stays on about:blank forever.
+   *
+   * Both failures are silent, neither raises anything, and the only symptom of
+   * either is the file not being where the rep expects. That is why this is
+   * written down rather than left as a bare `window.open`.
+   *
+   * What the opener link would otherwise risk is tabnabbing — the opened page
+   * calling `window.opener.location = ...` to steer the CRM tab somewhere
+   * else. That is closed at the source instead: marketing-material-file-url
+   * refuses to sign an INLINE url for anything outside a small allow-list of
+   * passive types, so a material that could run script is served as an
+   * attachment and never renders in that tab at all. See INLINE_SAFE_TYPES
+   * there.
    *
    * Print does not call print() on the opened window: the document is on the
    * storage origin, so it is cross-origin and `tab.print()` would throw. What
@@ -161,7 +173,6 @@ export function MarketingMaterialActions({
     setBusy(eventType);
 
     const tab = window.open("", "_blank");
-    if (tab) tab.opener = null;
 
     if (!(await logEvent(eventType))) {
       tab?.close();
