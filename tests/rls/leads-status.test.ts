@@ -6,7 +6,7 @@ import {
   asPlatform,
   asUser,
   createTestDb,
-  migrationsExcept,
+  migrationsBefore,
   readMigration,
   resetData,
   rows,
@@ -25,17 +25,23 @@ type StatusRow = { dba: string; status: string };
  * the backfill is right, NOT NULL and the CHECK are one mechanism rather than
  * two, and NOT VALID binds new writes while exempting the rows that predate it.
  *
- * The backfill block builds its own database from every migration EXCEPT this
+ * The backfill block builds its own database from every migration BEFORE this
  * one, seeds the mess production actually holds, and then applies the migration
  * by hand. Asserting the backfill against a database that already ran it would
  * only prove `update` works — the rows have to exist in their pre-migration
  * shape first, and a free-text column cannot be put back once it is constrained.
+ *
+ * `migrationsBefore`, not `migrationsExcept`. The latter drops this file out of
+ * the middle and applies everything after it, which was fine until a later
+ * migration referenced a column this one adds — 20261002161500 indexes
+ * leads.website, and the whole block died on "column website does not exist" in
+ * a migration this test is not about.
  */
 describe("leads status backfill", () => {
   let db: TestDb;
 
   beforeAll(async () => {
-    db = await createTestDb(await migrationsExcept(MIGRATION));
+    db = await createTestDb(await migrationsBefore(MIGRATION));
     await seed(db);
 
     // The three shapes the column really holds, written while it was still

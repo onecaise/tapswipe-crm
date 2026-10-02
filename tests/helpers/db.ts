@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { PGlite } from "@electric-sql/pglite";
+import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 
 const MIGRATIONS_DIR = path.join(process.cwd(), "supabase", "migrations");
 
@@ -67,7 +68,16 @@ export const REVOKE_MIGRATION = "20260805210000_revoke_legacy_anon_grants.sql";
 export const NARROW_GRANTS_MIGRATION =
   "20260811143000_narrow_grants_and_audit_trigger.sql";
 
-/** Every migration filename in apply order, minus the ones named. */
+/**
+ * Every migration filename in apply order, minus the ones named.
+ *
+ * Only safe for a migration NOTHING LATER DEPENDS ON — it drops the named file
+ * out of the middle and still applies everything after it. That is what the
+ * grant regression tests want (they remove a grant migration to prove a later
+ * one restores it). For "what did the schema look like before X" use
+ * migrationsBefore, or a later migration referencing X's columns fails on a
+ * missing relation and points nowhere near the test.
+ */
 export async function migrationsExcept(
   ...exclude: string[]
 ): Promise<string[]> {
@@ -75,6 +85,28 @@ export async function migrationsExcept(
     .filter((f) => f.endsWith(".sql"))
     .sort();
   return files.filter((f) => !exclude.includes(f));
+}
+
+/**
+ * Every migration strictly BEFORE the named one, in apply order.
+ *
+ * The honest way to reconstruct a point in history, and the one a test wants
+ * when it is about to apply that migration by hand and assert on what it did.
+ * migrationsExcept cannot do this: it leaves the later files in, so anything
+ * added after the excluded one is applied against a schema missing the columns
+ * it was written for. 20261002161500 referencing leads.website is what first
+ * made that concrete — the leads-status backfill test died on "column website
+ * does not exist", in a migration the test is not about.
+ */
+export async function migrationsBefore(file: string): Promise<string[]> {
+  const files = (await readdir(MIGRATIONS_DIR))
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+  const index = files.indexOf(file);
+  if (index === -1) {
+    throw new Error(`No such migration: ${file}`);
+  }
+  return files.slice(0, index);
 }
 
 /** Raw SQL of one migration, for tests that apply it mid-scenario. */
@@ -113,7 +145,13 @@ export type TestDb = PGlite;
  *   a migration actually changes behavior — see the regression test.
  */
 export async function createTestDb(migrationFiles?: string[]): Promise<TestDb> {
-  const db = new PGlite();
+  // pg_trgm has to be handed to the CONSTRUCTOR, unlike on a real server where
+  // `create extension` is enough on its own. PGlite ships contrib extensions as
+  // separate wasm bundles that are not loaded unless named here, so without
+  // this line 20261002161500 fails with "could not open extension control file"
+  // — and because every suite applies every migration, that is not one red test
+  // but all of them, pointing at a file none of them are about.
+  const db = new PGlite({ extensions: { pg_trgm } });
 
   await db.exec(AUTH_SHIM);
 

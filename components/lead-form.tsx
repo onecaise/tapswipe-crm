@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { AlertTriangleIcon } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -10,7 +12,15 @@ import {
   type Lead,
   isLeadStatus,
 } from "@/lib/leads";
+import {
+  type DuplicateMatch,
+  duplicateHref,
+  ownMessage,
+  redactedMessage,
+  splitMatches,
+} from "@/lib/duplicates";
 import { Button } from "@/components/ui/button";
+import { Callout } from "@/components/callout";
 import {
   Card,
   CardContent,
@@ -201,10 +211,25 @@ export function LeadForm({
   const [form, setForm] = useState<FormState>(() => toFormState(lead));
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  /**
+   * Duplicate warnings from the last check, and whether the rep has seen them.
+   *
+   * `matches === null` means the check has not run for the form as it currently
+   * stands. Any edit resets it to null (see `update`), so changing the phone
+   * number after a warning re-checks rather than carrying a stale verdict.
+   */
+  const [matches, setMatches] = useState<DuplicateMatch[] | null>(null);
   const router = useRouter();
 
   const blockers = saveBlockers(form);
   const staleStatus = isLeadStatus(form.status) ? null : form.status;
+  const shown = matches === null ? null : splitMatches(matches);
+
+  /** Every field edit goes through here, so no change can skip the re-check. */
+  const update = (field: FieldName, value: string) => {
+    setForm((prev) => ({ ...prev, [field]: value }));
+    setMatches(null);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -219,6 +244,43 @@ export function LeadForm({
 
     const supabase = createClient();
     const payload = toPayload(form);
+
+    // Warn, then let them through. The check runs once per edit of the form;
+    // a second click on "Create anyway" saves. Creation only — an edit is
+    // mostly re-working a lead that already exists, where every field would
+    // match itself and the warning would be noise.
+    //
+    // A FAILING CHECK MUST NOT BLOCK THE SAVE. This is advisory: if the RPC
+    // errors we warn in the console and fall through to the insert, because
+    // refusing to create a lead because an advisory warning could not be
+    // computed is strictly worse than creating a possible duplicate.
+    if (!isEdit && matches === null) {
+      const { data, error: rpcError } = await supabase.rpc("check_duplicates", {
+        contact_email_input: form.contact_email,
+        contact_phone_input: form.contact_phone,
+        business_phone_input: form.business_phone,
+        mobile_phone_input: form.mobile_phone,
+        website_input: form.website,
+        dba_input: form.dba,
+        legal_name_input: form.merchant_legal_name,
+        address_input: form.address,
+        city_input: form.city,
+        state_input: form.state,
+        zip_input: form.zip,
+      });
+
+      if (rpcError) {
+        console.warn("Duplicate check did not run:", rpcError.message);
+      } else {
+        const found = (data ?? []) as DuplicateMatch[];
+        if (found.length > 0) {
+          setMatches(found);
+          setIsSaving(false);
+          return;
+        }
+        setMatches([]);
+      }
+    }
 
     try {
       if (isEdit) {
@@ -288,9 +350,7 @@ export function LeadForm({
                       type={INPUT_TYPES[field] ?? "text"}
                       required={field === "dba"}
                       value={form[field]}
-                      onChange={(e) =>
-                        setForm((prev) => ({ ...prev, [field]: e.target.value }))
-                      }
+                      onChange={(e) => update(field, e.target.value)}
                     />
                   </div>
                 ))}
@@ -302,9 +362,7 @@ export function LeadForm({
                     id="status"
                     className={SELECT_CLASS}
                     value={form.status}
-                    onChange={(e) =>
-                      setForm((prev) => ({ ...prev, status: e.target.value }))
-                    }
+                    onChange={(e) => update("status", e.target.value)}
                   >
                     {/* A value this build doesn't recognise is shown rather than
                         hidden, and disabled so it cannot be chosen again. The
@@ -336,12 +394,7 @@ export function LeadForm({
                     required
                     rows={3}
                     value={form.lost_reason}
-                    onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        lost_reason: e.target.value,
-                      }))
-                    }
+                    onChange={(e) => update("lost_reason", e.target.value)}
                   />
                   <p className="text-xs text-muted-foreground">
                     Price, timing, went with a competitor — whatever the next
@@ -352,11 +405,73 @@ export function LeadForm({
             </fieldset>
           ))}
 
+          {shown !== null && shown.own.length + shown.redacted.length > 0 && (
+            /* A warning, never a gate. The button below stays enabled and says
+               "Create anyway" — see lib/duplicates.ts for why a block on a
+               cross-book duplicate is unworkable. Warning amber rather than
+               destructive red: nothing here is irreversible. */
+            <Callout tone="warning" className="flex flex-col gap-3">
+              <p className="flex items-center gap-2 font-semibold text-warning">
+                <AlertTriangleIcon size={16} aria-hidden />
+                This may already be in the system
+              </p>
+
+              {shown.own.map((match) => {
+                const href = duplicateHref(match);
+                return (
+                  <div
+                    key={`own-${match.record_type}-${match.record_id}`}
+                    className="text-sm"
+                  >
+                    <span className="text-muted-foreground">
+                      {ownMessage(match)}
+                    </span>{" "}
+                    {href === null ? (
+                      <span className="font-medium">{match.title}</span>
+                    ) : (
+                      <Link
+                        href={href}
+                        target="_blank"
+                        className="font-medium underline underline-offset-4"
+                      >
+                        {match.title}
+                      </Link>
+                    )}
+                    {match.subtitle && (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        ({match.subtitle})
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* No id, no name, no link — there is nothing to link to. These
+                  rows arrive from the function already stripped; this renders
+                  what it is given and must never try to recover more. */}
+              {shown.redacted.map((match) => (
+                <p
+                  key={`redacted-${match.record_type}-${match.matched_field}-${match.strength}`}
+                  className="text-sm text-muted-foreground"
+                >
+                  {redactedMessage(match)}
+                </p>
+              ))}
+            </Callout>
+          )}
+
           {error && <p className="text-sm text-destructive">{error}</p>}
 
           <div className="flex gap-2">
             <Button type="submit" disabled={isSaving || blockers.length > 0}>
-              {isSaving ? "Saving…" : isEdit ? "Save changes" : "Create lead"}
+              {isSaving
+                ? "Saving…"
+                : isEdit
+                  ? "Save changes"
+                  : shown !== null && shown.own.length + shown.redacted.length > 0
+                    ? "Create anyway"
+                    : "Create lead"}
             </Button>
             <Button
               type="button"
