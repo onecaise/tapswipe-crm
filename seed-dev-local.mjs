@@ -57,26 +57,90 @@ const PEOPLE = [
 
 const ids = {};
 
+/**
+ * Every column that references profiles(id), in an order that satisfies the
+ * FKs between the tables themselves — replies before tickets, history before
+ * rows, rows before batches, children before leads.
+ *
+ * ALL EIGHTEEN are `ON DELETE NO ACTION`, so any single leftover row blocks the
+ * delete below. This list used to be eight entries covering only the owner
+ * tables, which held right up until seed-dev-payouts.mjs ran: the rep then
+ * owned rep_payout_rows and the admin owned a rep_payout_batches row, the
+ * delete failed on the FK, both users survived, and createUser reported
+ * `email_exists` (422) — an error naming the one thing that was not the
+ * problem. This is the THIRD teardown list to walk into that trap; the list
+ * below is copied verbatim from scripts/seed-local-users.mjs rather than
+ * re-derived, because re-deriving it is how they drift apart again.
+ *
+ * Regenerate after adding any table with an agent_id:
+ *
+ *   select c.conrelid::regclass, a.attname
+ *   from pg_constraint c
+ *   join unnest(c.conkey) with ordinality k(attnum, ord) on true
+ *   join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum
+ *   where c.contype = 'f' and c.confrelid = 'public.profiles'::regclass;
+ */
+const PROFILE_REFERENCES = [
+  // user_import_rows is deliberately absent: its user_id carries no FK, and its
+  // rows go with the batch by cascade. Only the batch references profiles.
+  ["user_import_batches", "imported_by"],
+  ["rep_payout_row_history", "agent_id"],
+  ["rep_payout_row_history", "changed_by"],
+  ["rep_payout_rows", "agent_id"],
+  ["rep_payout_import_rows", "agent_id"],
+  ["rep_payout_batches", "imported_by"],
+  ["support_ticket_replies", "author_id"],
+  ["support_tickets", "agent_id"],
+  ["documents", "agent_id"],
+  ["notes", "agent_id"],
+  ["tasks", "agent_id"],
+  ["bug_reports", "agent_id"],
+  ["bug_reports", "resolved_by"],
+  ["ghost_sheets", "agent_id"],
+  ["pre_apps", "agent_id"],
+  ["merchants", "agent_id"],
+  ["leads", "agent_id"],
+  ["audit_log", "actor_id"],
+];
+
 // Idempotent: drop any previous run's accounts first, in FK order.
 const { data: existing } = await db.auth.admin.listUsers({ perPage: 1000 });
 const emails = new Set(PEOPLE.map((p) => p.email));
 for (const user of existing?.users ?? []) {
   if (!user.email || !emails.has(user.email)) continue;
-  for (const table of [
-    "documents",
-    "notes",
-    "tasks",
-    "support_tickets",
-    "pre_apps",
-    "ghost_sheets",
-    "merchants",
-    "leads",
-  ]) {
-    await db.from(table).delete().eq("agent_id", user.id);
+
+  // profiles.manager_id — the NINETEENTH reference to profiles(id), and the one
+  // deliberately NOT in the list above, which deletes rows: the row carrying a
+  // manager_id is another rep's whole profile, so this is an UPDATE.
+  //
+  // It also cannot block the delete the way the other eighteen can — it is the
+  // single `on delete set null` reference, so Postgres would clear it unasked.
+  // Done explicitly anyway, because the failure to avoid here is not a failed
+  // delete but a silent one: a seeded reporting line vanishing from a surviving
+  // rep's row with nothing admitting it happened.
+  await db
+    .from("profiles")
+    .update({ manager_id: null })
+    .eq("manager_id", user.id);
+
+  for (const [table, column] of PROFILE_REFERENCES) {
+    await db.from(table).delete().eq(column, user.id);
   }
-  await db.from("audit_log").delete().eq("actor_id", user.id);
   await db.from("audit_log").delete().eq("row_id", user.id);
-  await db.auth.admin.deleteUser(user.id);
+
+  // Checked, rather than fired and forgotten. An unchecked delete that fails is
+  // exactly how a foreign key presents itself as `email_exists` three steps
+  // later instead of as the missing table it actually is.
+  const { error: deleteError } = await db.auth.admin.deleteUser(user.id);
+  if (deleteError) {
+    throw new Error(
+      `Could not delete the existing ${user.email}: ` +
+        `${deleteError.message || JSON.stringify(deleteError)}\n` +
+        `Something still references this profile — most likely a new table ` +
+        `with an agent_id that is missing from PROFILE_REFERENCES above. ` +
+        `Re-run the query in that comment to find it.`,
+    );
+  }
   console.log(`removed previous ${user.email}`);
 }
 // The seeds above run as service role, which has no auth.uid(), so every one
@@ -202,7 +266,12 @@ const leads = await insert("leads", [
     city: "San Diego",
     state: "CA",
     zip: "92109",
-    status: "open",
+    // 'open' until 20261002120000 retired it. That migration backfills every
+    // 'open' row to 'new', and two of the three below follow it — but not this
+    // one: it carries two notes recording a voicemail and then a real
+    // conversation, and a draft pre-app hangs off it. Seeding it 'new' would
+    // make the demo data contradict itself on the one page that shows both.
+    status: "qualified",
     probability_to_close: "High",
     industry_vertical: "Restaurant",
     next_followup_date: "2026-08-14",
@@ -234,7 +303,7 @@ const leads = await insert("leads", [
     city: "Austin",
     state: "TX",
     zip: "78704",
-    status: "open",
+    status: "new",
     probability_to_close: "Low",
     industry_vertical: "Health & Fitness",
   },
@@ -247,7 +316,7 @@ const leads = await insert("leads", [
     contact_phone: "(555) 330-7781",
     city: "Portland",
     state: "OR",
-    status: "open",
+    status: "new",
   },
 ]);
 
