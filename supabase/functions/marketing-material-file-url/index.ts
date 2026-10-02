@@ -5,7 +5,11 @@
 //   { category, title, file_name }  -> ADMIN ONLY. Creates the material row,
 //                                      returns a signed UPLOAD url.
 //   { material_id }                 -> ANY ACTIVE USER. Returns a signed
-//                                      DOWNLOAD url for that material's file.
+//                                      READ url for that material's file.
+//                                      `download: true` asks Storage for
+//                                      Content-Disposition: attachment; without
+//                                      it the URL renders inline, which is what
+//                                      "View" and "Print" need.
 //
 // An admin stocks the library; every rep reads it. That asymmetry is the reason
 // this is not simply modelled on residual-import-file-url, where both
@@ -123,11 +127,25 @@ export default {
         return json({ error: "Material not found" }, 404);
       }
 
-      // Only now the service-role client, and only to sign: the bucket has no
-      // storage policies at all, so nothing else can.
+      // Inline by default, attachment on request, and the difference is the
+      // whole reason the UI can offer four distinct actions instead of two
+      // buttons that do the same thing with different log entries. "View" and
+      // "Print" need the browser to RENDER a PDF; "Download" needs it to save
+      // one. create-download-url always passes `download`, because a document
+      // is never meant to be read in the tab — an uploaded .html rendering on
+      // the storage origin is the problem that option exists to avoid. The
+      // marketing bucket holds collateral an admin curated, not rep-supplied
+      // files, so rendering it is the point rather than the risk.
+      const wantsAttachment = body.download === true;
       const { data, error } = await ctx.supabaseAdmin.storage
         .from(MARKETING_BUCKET)
-        .createSignedUrl(material.file_key as string, SIGNED_URL_TTL_SECONDS);
+        .createSignedUrl(
+          material.file_key as string,
+          SIGNED_URL_TTL_SECONDS,
+          wantsAttachment
+            ? { download: (material.file_name as string) ?? true }
+            : undefined,
+        );
 
       if (error || !data) {
         return json(
@@ -144,6 +162,7 @@ export default {
         signedUrl: data.signedUrl,
         fileName: material.file_name,
         mimeType: material.mime_type,
+        disposition: wantsAttachment ? "attachment" : "inline",
       });
     }
 
@@ -292,8 +311,9 @@ export default {
     --header 'Content-Type: application/json' \
     --data '{"material_id":1}'
 
-  Expected: 200 with { signedUrl, fileName, mimeType } — for a REP as well as
-            an admin, which is the point of the library
+  Expected: 200 with { signedUrl, fileName, mimeType, disposition } — for a
+            REP as well as an admin, which is the point of the library.
+            Add "download": true for Content-Disposition: attachment.
             409 if the upload was never finished
             404 for a material id that does not exist
             403 if the caller's profile is deactivated

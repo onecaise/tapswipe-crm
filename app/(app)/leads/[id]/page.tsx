@@ -18,10 +18,18 @@ import {
 } from "@/lib/leads";
 import { formatDate, formatStatus, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
+import {
+  EVENT_COLUMNS,
+  MATERIAL_LIST_COLUMNS,
+  type MarketingEvent,
+  type MarketingMaterial,
+  hasFile,
+} from "@/lib/marketing-materials";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { DocumentsPanel } from "@/components/documents-panel";
+import { MarketingPanel } from "@/components/marketing-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
 import { StatusBadge } from "@/components/status-badge";
@@ -123,6 +131,46 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
   // owner_type is a literal here, never from the URL: owner_id has no foreign
   // key, so a mismatched pair is not something the database would catch.
   const { notes, tasks } = await loadAnnotations("lead", lead.id);
+
+  // The marketing library, and what has already been sent to THIS lead.
+  //
+  // Two queries rather than one join, because they are scoped by two different
+  // policies and the difference matters: materials are readable by every active
+  // user (company reference data, no agent_id), while events are own-or-admin.
+  // A rep therefore sees the whole library and only their own trail; an admin
+  // sees the whole library and everyone's trail on this lead. Expressing that
+  // as an embedded select would make the scoping depend on PostgREST's join
+  // semantics rather than on two policies that each say what they mean.
+  const [{ data: materialRows }, { data: eventRows }] = await Promise.all([
+    supabase
+      .from("marketing_materials")
+      .select(MATERIAL_LIST_COLUMNS)
+      .is("archived_at", null)
+      .order("category", { ascending: true })
+      .order("title", { ascending: true }),
+    supabase
+      .from("marketing_material_events")
+      .select(EVENT_COLUMNS)
+      .eq("lead_id", lead.id)
+      .order("occurred_at", { ascending: false })
+      .limit(50),
+  ]);
+
+  // Unfinished uploads are hidden from reps: every action on one would 409.
+  // /marketing/manage is where they are visible, because fixing one is admin
+  // work.
+  const allMaterials = (materialRows ?? []) as MarketingMaterial[];
+  const materials = allMaterials.filter(hasFile);
+  const marketingEvents = (eventRows ?? []) as MarketingEvent[];
+
+  // Built from the UNFILTERED list, so the history can still name a material
+  // whose upload never finished — or, once archiving is used in anger, one that
+  // has since been retired. That is the whole reason archiving exists instead
+  // of deleting, and a history reading "A material" where a title should be
+  // would quietly give it away.
+  const materialTitles = new Map(
+    allMaterials.map((material) => [material.id, material.title]),
+  );
 
   return (
     <>
@@ -246,6 +294,14 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
         ownerType="lead"
         ownerId={lead.id}
         documents={documents}
+      />
+
+      <MarketingPanel
+        materials={materials}
+        events={marketingEvents}
+        materialTitles={materialTitles}
+        leadId={lead.id}
+        agentId={profile.id}
       />
     </>
   );

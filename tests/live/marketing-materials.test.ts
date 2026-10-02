@@ -349,6 +349,72 @@ describe("download mode is open to every active user", () => {
   });
 });
 
+describe("view and download are genuinely different", () => {
+  // Without this the UI's four buttons would be two pairs of identical actions
+  // wearing different labels and writing different log rows — which is worse
+  // than three buttons, because the log would then claim a distinction the
+  // product does not make.
+  //
+  // View and Print need the browser to RENDER the file; Download needs it to
+  // save one. That is Content-Disposition, which is decided when the URL is
+  // signed and cannot be changed afterwards by the caller.
+  it("signs inline by default and attachment on request", async () => {
+    const { materialId } = await uploadMaterial(
+      "Disposition card",
+      "disposition bytes",
+    );
+
+    const inline = await invoke(
+      "marketing-material-file-url",
+      { material_id: materialId },
+      fx.tokens.owner,
+    );
+    report("inline read", inline.status, inline.body);
+    expect(inline.status).toBe(200);
+    expect(inline.body.disposition).toBe("inline");
+
+    const attachment = await invoke(
+      "marketing-material-file-url",
+      { material_id: materialId, download: true },
+      fx.tokens.owner,
+    );
+    report("attachment read", attachment.status, attachment.body);
+    expect(attachment.status).toBe(200);
+    expect(attachment.body.disposition).toBe("attachment");
+
+    // The response headers, not just the field the function echoes back.
+    // Asserting our own echo would pass with the download option dropped
+    // entirely, which is exactly the regression worth catching — Storage is
+    // what actually honours it.
+    //
+    // Measured, rather than assumed: the inline case sends NO
+    // Content-Disposition header at all, it does not send "inline". So the
+    // assertion is on absence, which is what makes a browser render the file.
+    // Expecting /inline/i here fails with "toMatch() expects a string, but got
+    // object" — a null header, reported as a type error three layers from the
+    // cause.
+    const inlineGet = await fetch(
+      toReachableUrl(inline.body.signedUrl as string),
+    );
+    expect(inlineGet.headers.get("content-disposition")).toBeNull();
+
+    const attachmentGet = await fetch(
+      toReachableUrl(attachment.body.signedUrl as string),
+    );
+    // Filename included, because the function passes material.file_name rather
+    // than a bare `true` — a download that saves as the storage uuid is a file
+    // nobody can find again.
+    expect(attachmentGet.headers.get("content-disposition")).toMatch(
+      /^attachment; filename=sheet\.txt/i,
+    );
+
+    // Same bytes either way — the disposition changes how the browser treats
+    // the response, not what is in it.
+    expect(await inlineGet.text()).toBe("disposition bytes");
+    expect(await attachmentGet.text()).toBe("disposition bytes");
+  });
+});
+
 describe("the stored file_key is never trusted", () => {
   it("refuses to sign a key that does not match its material", async () => {
     // The database CHECK is validated here, so this cannot be set up through

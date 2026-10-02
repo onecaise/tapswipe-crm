@@ -1,6 +1,7 @@
 import {
   BanknoteIcon,
   BugIcon,
+  MegaphoneIcon,
   ClipboardListIcon,
   FolderIcon,
   GhostIcon,
@@ -47,6 +48,11 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       { label: "Leads", href: "/leads", icon: TargetIcon },
       { label: "Ghost Sheets", href: "/ghost-sheets", icon: GhostIcon },
       { label: "Merchants", href: "/merchants", icon: StoreIcon },
+      // Not admin-only: publishing is admin work, reading is every rep's, and
+      // the select policy on marketing_materials has no agent_id to scope by at
+      // all. /marketing/manage is the admin half and needs no entry of its own
+      // — isNavItemActive is a prefix match, so it keeps this item lit.
+      { label: "Marketing", href: "/marketing", icon: MegaphoneIcon },
     ],
   },
   {
