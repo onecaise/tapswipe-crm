@@ -292,6 +292,50 @@ describe("a quote cannot be filed against another rep's lead", () => {
     ).rejects.toThrow(/row-level security/i);
   });
 
+  it("lets an admin file a quote for one rep on ANOTHER rep's lead", async () => {
+    // Odd-looking, and it follows from is_admin() satisfying both halves of
+    // the insert policy — the same latitude admins have everywhere else here.
+    //
+    // Pinned because a TEARDOWN argument depends on it. quotes.lead_id is ON
+    // DELETE CASCADE, so it is tempting to conclude that deleting a rep's
+    // leads takes their quotes with them and the `["quotes", "agent_id"]`
+    // entry in the four teardown lists is redundant. This row is the
+    // counterexample: it belongs to AGENT_ID but hangs off OTHER_AGENT_ID's
+    // lead, so deleting AGENT_ID's own leads cannot reach it, and
+    // quotes.agent_id (NO ACTION) then blocks deleting AGENT_ID.
+    //
+    // Verified against the running stack before this test was written:
+    // deleteUser stayed blocked until the quotes delete ran.
+    await asUser(db, ADMIN_ID);
+    await db.exec(
+      createQuoteSql({
+        leadId: otherLeadId,
+        agentId: AGENT_ID,
+        groupId: null,
+        title: "Cross-owner",
+        lines: [{ product_id: flexId, quantity: 1 }],
+      }),
+    );
+
+    await asPlatform(db);
+    const [row] = await rows<QuoteRow>(
+      db,
+      `select agent_id, lead_id from quotes where title = 'Cross-owner'`,
+    );
+    expect(row.agent_id).toBe(AGENT_ID);
+    expect(row.lead_id).toBe(otherLeadId);
+
+    // The teardown claim itself: this quote is NOT reachable by deleting
+    // AGENT_ID's own leads.
+    const [{ n }] = await rows<{ n: number }>(
+      db,
+      `select count(*)::int as n from quotes q
+         join leads l on l.id = q.lead_id
+        where q.agent_id = '${AGENT_ID}' and l.agent_id = '${AGENT_ID}'`,
+    );
+    expect(n).toBe(0);
+  });
+
   it("lets an admin quote on a rep's lead, in the rep's name", async () => {
     // The admin branch, and note the quote stays the REP's: agent_id comes
     // from the argument, not from auth.uid(), the same call

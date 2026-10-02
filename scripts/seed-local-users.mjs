@@ -108,9 +108,19 @@ const PROFILE_REFERENCES = [
   // The deliberate contrast with the marketing pair handled by hand below,
   // where material_id is NO ACTION and the events must be cleared first.
   //
-  // Before leads, because quotes.lead_id is also ON DELETE CASCADE — either
-  // order works, and deleting the quotes explicitly says so rather than
-  // leaving it to a cascade a reader has to go and look up.
+  // DO NOT DELETE THIS ENTRY on the grounds that quotes.lead_id is also ON
+  // DELETE CASCADE. That cascade is real, and for an ordinary quote — one a
+  // rep built on their own lead — deleting their leads would indeed take it.
+  // It is not enough, because an ADMIN may file a quote FOR one rep ON
+  // another rep's lead: is_admin() satisfies both halves of the insert
+  // policy, so the row carries rep X's agent_id while hanging off rep Y's
+  // lead, and deleting X's own leads cannot reach it. quotes.agent_id is NO
+  // ACTION, so that row then blocks deleting X — surfacing on the NEXT run as
+  // "user already registered", which names the one thing that is not wrong.
+  //
+  // Measured against the local stack, not reasoned about: deleteUser stayed
+  // blocked until this delete ran. tests/rls/quotes.test.ts pins the
+  // cross-owner insert that makes it possible.
   ["quotes", "agent_id"],
   ["ghost_sheets", "agent_id"],
   ["pre_apps", "agent_id"],

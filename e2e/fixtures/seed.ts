@@ -856,6 +856,11 @@ export async function clearImportedUsers(
     // DELETE CASCADE, so the lines go with the quotes — unlike the marketing
     // pair immediately below, where material_id is NO ACTION.
     //
+    // Not made redundant by quotes.lead_id also being ON DELETE CASCADE: an
+    // admin may file a quote for one rep on ANOTHER rep's lead, and that row
+    // carries this user's agent_id while hanging off a lead no delete of
+    // theirs will ever touch.
+    //
     // Here for the same reason that pair is: an imported rep has no reason to
     // own a quote today, the cost is one query against an empty set, and the
     // alternative is this being the list that forgot the next time a spec

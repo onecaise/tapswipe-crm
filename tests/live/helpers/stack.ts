@@ -610,6 +610,14 @@ async function clearUserImports(
  * but the quote's owner. A marketing event can belong to a different rep from
  * the material it names, which is why that one needs two passes.
  *
+ * But note what the cascade does NOT cover, because it is the reason this
+ * function exists at all. quotes.lead_id is ON DELETE CASCADE too, so an
+ * ordinary quote — built by a rep on their own lead — would go when their
+ * leads go. An ADMIN may file a quote FOR one rep ON another rep's lead
+ * (is_admin() satisfies both halves of the insert policy), and that row
+ * carries this user's agent_id while hanging off somebody else's lead, where
+ * no cascade of theirs can reach it.
+ *
  * quotes.agent_id is the twenty-second reference to profiles(id) and NO
  * ACTION, so a leftover row blocks deleteUser — the trap the four teardown
  * lists exist for, and the one that presents as "user already registered" on
