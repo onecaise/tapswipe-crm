@@ -139,8 +139,71 @@ export type SeedResult = {
   /** persona -> owner type -> record id, for the document specs. */
   /** Every persona but `logout`, which owns no records — see PERSONAS. */
   docOwners: Record<Exclude<PersonaKey, "logout">, DocOwnerIds>;
+  /** The agent's two-version quote, for the quote print spec. */
+  quote: QuoteFixture;
   apiUrl: string;
 };
+
+/**
+ * One quote group on the agent's lead, in two versions.
+ *
+ * Two rather than one because the print route's whole version story needs a
+ * superseded row to be about: "version 1 of 2", the warning that this sheet is
+ * not the current offer, and the `?quote=` path that selects it.
+ */
+export type QuoteFixture = {
+  /** The lead it hangs off — docOwners.agent.lead, restated for convenience. */
+  leadId: number;
+  /** The path segment: quote_group_id, which identifies the document. */
+  groupId: string;
+  /** Version 1 — superseded. Reached with `?quote=`. */
+  firstId: number;
+  /** Version 2 — what the bare group URL prints. */
+  currentId: number;
+};
+
+/**
+ * The quote fixture's figures, as data both the seed and the specs read.
+ *
+ * `price` is what the catalog held WHEN THE QUOTE WAS WRITTEN, and
+ * `repricedTo` is what it holds now — the seed bumps both products after the
+ * versions are saved. That gap is the point, and it is the only way to prove
+ * the snapshot claim from a browser: a printed quote must show `price`, and a
+ * page that joined `products` live would show `repricedTo` while looking
+ * entirely correct. Nothing else in the suite would notice.
+ */
+export const QUOTE_FIXTURE = {
+  title: "E2E countertop package",
+  notes: "E2E terms — 36 month agreement, no early termination fee.",
+  products: [
+    {
+      sku: "E2E-TERM-1",
+      name: "E2E Countertop Terminal",
+      price: 499,
+      repricedTo: 611.25,
+    },
+    {
+      sku: "E2E-PIN-1",
+      name: "E2E PIN Pad",
+      price: 149.5,
+      repricedTo: 203.75,
+    },
+  ],
+  /** Version 1: one terminal. 1 × 499.00 = $499.00. */
+  v1: [{ sku: "E2E-TERM-1", quantity: 1 }],
+  /** Version 2: 2 × 499.00 + 3 × 149.50 = $1,446.50. */
+  v2: [
+    { sku: "E2E-TERM-1", quantity: 2 },
+    { sku: "E2E-PIN-1", quantity: 3 },
+  ],
+} as const;
+
+/** The lead's contact, re-asserted by the seed so the quote can print it. */
+export const QUOTE_LEAD_CONTACT = {
+  contact_name: "E2E Quote Contact",
+  contact_phone: "555-0142",
+  contact_email: "quotes@e2e-lead.test",
+} as const;
 
 function localStackConfig(): { apiUrl: string; serviceKey: string } {
   const raw = execSync("npx supabase status -o env", { encoding: "utf8" });
@@ -393,8 +456,149 @@ export async function seedE2E(): Promise<SeedResult> {
 
   await ensureDocumentsBucket(db);
   const materialId = await ensureMarketingMaterial(db, ids.admin);
+  const quote = await ensureQuote(db, ids.agent, docOwners.agent.lead);
 
-  return { ids, docOwners, materialId, apiUrl };
+  return { ids, docOwners, materialId, quote, apiUrl };
+}
+
+/**
+ * The agent's quote, in two versions, with the catalog repriced underneath it.
+ *
+ * Written through create_quote_version() rather than by inserting the rows
+ * directly, so the fixture takes its snapshot the same way the app does — off
+ * the catalog, inside the transaction — and the version numbers come from
+ * quotes_enforce_version() rather than from this file's idea of them. A
+ * hand-built fixture here could hold a price the RPC would never have written,
+ * which is the one thing the specs below are checking.
+ *
+ * Deleted and rewritten every run rather than reused, like the payout rows:
+ * quotes are append-only, so a "top up if missing" version would add a third
+ * version on the second run and a fourth on the third, and the specs assert
+ * "version 1 of 2". quote_line_items.quote_id is ON DELETE CASCADE, so the
+ * lines go with them.
+ *
+ * ## The reprice at the end is the load-bearing part
+ *
+ * Products are created at QUOTE_FIXTURE price, the two versions are saved
+ * against them, and only THEN are the products repriced. So every figure on
+ * the printed quote is a price the catalog no longer holds. A print page that
+ * read `products` live would render a perfectly plausible document with the
+ * wrong numbers on it, and no policy, type or constraint would object — the
+ * gap between these two prices is the only thing that can see it.
+ */
+async function ensureQuote(
+  db: SupabaseClient,
+  agentId: string,
+  leadId: number,
+): Promise<QuoteFixture> {
+  // The lead carries no contact details from ensureDocOwners, and that helper
+  // short-circuits on an existing row — so setting them there would only ever
+  // reach a freshly reset database. Re-asserted here instead, which converges
+  // whether the lead was created a moment ago or a month ago.
+  const { error: leadError } = await db
+    .from("leads")
+    .update(QUOTE_LEAD_CONTACT)
+    .eq("id", leadId);
+  if (leadError) throw new Error(`quote lead contact: ${leadError.message}`);
+
+  // Products first, at the price the quote will snapshot.
+  const idBySku = new Map<string, number>();
+  for (const product of QUOTE_FIXTURE.products) {
+    const { data: existing } = await db
+      .from("products")
+      .select("id")
+      .eq("sku", product.sku)
+      .maybeSingle();
+
+    let productId = existing?.id as number | undefined;
+    if (productId === undefined) {
+      const { data, error } = await db
+        .from("products")
+        .insert({
+          name: product.name,
+          sku: product.sku,
+          category: "E2E hardware",
+          list_price: product.price,
+        })
+        .select("id")
+        .single();
+      if (error || !data) {
+        throw new Error(`product ${product.sku}: ${error?.message ?? "no row"}`);
+      }
+      productId = data.id as number;
+    } else {
+      // Back to the pre-quote price before the RPC reads it, so a second run
+      // snapshots the same figures as the first rather than the bumped ones.
+      const { error } = await db
+        .from("products")
+        .update({
+          name: product.name,
+          list_price: product.price,
+          archived_at: null,
+        })
+        .eq("id", productId);
+      if (error) throw new Error(`product ${product.sku}: ${error.message}`);
+    }
+    idBySku.set(product.sku, productId);
+  }
+
+  await db
+    .from("quotes")
+    .delete()
+    .eq("lead_id", leadId)
+    .eq("title", QUOTE_FIXTURE.title);
+
+  const saveVersion = async (
+    lines: readonly { sku: string; quantity: number }[],
+    groupId: string | null,
+  ): Promise<{ id: number; groupId: string }> => {
+    const { data, error } = await db.rpc("create_quote_version", {
+      lead_id_input: leadId,
+      agent_id_input: agentId,
+      quote_group_id_input: groupId,
+      status_input: "sent",
+      title_input: QUOTE_FIXTURE.title,
+      notes_input: QUOTE_FIXTURE.notes,
+      line_items_input: lines.map((line) => ({
+        product_id: idBySku.get(line.sku),
+        quantity: line.quantity,
+      })),
+    });
+    if (error || typeof data !== "number") {
+      throw new Error(`quote version: ${error?.message ?? "no id"}`);
+    }
+
+    const { data: row, error: readError } = await db
+      .from("quotes")
+      .select("quote_group_id")
+      .eq("id", data)
+      .single();
+    if (readError || !row) {
+      throw new Error(`quote group id: ${readError?.message ?? "no row"}`);
+    }
+    return { id: data, groupId: row.quote_group_id as string };
+  };
+
+  // v1 creates the group (null group id takes the column default); v2 passes
+  // the id back, and the trigger assigns version 2.
+  const first = await saveVersion(QUOTE_FIXTURE.v1, null);
+  const current = await saveVersion(QUOTE_FIXTURE.v2, first.groupId);
+
+  // And now the catalog moves on, after both snapshots are taken.
+  for (const product of QUOTE_FIXTURE.products) {
+    const { error } = await db
+      .from("products")
+      .update({ list_price: product.repricedTo })
+      .eq("id", idBySku.get(product.sku) as number);
+    if (error) throw new Error(`reprice ${product.sku}: ${error.message}`);
+  }
+
+  return {
+    leadId,
+    groupId: first.groupId,
+    firstId: first.id,
+    currentId: current.id,
+  };
 }
 
 /**

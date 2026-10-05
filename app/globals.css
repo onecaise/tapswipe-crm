@@ -122,9 +122,10 @@
 }
 
 /*
- * Print rules, for the three pages in this app meant to leave the screen: the
+ * Print rules, for the four pages in this app meant to leave the screen: the
  * payout summary at /payouts/[period]/summary/[agentId], the blank application
- * at /pre-apps/blank-form, and a merchant's record at /merchants/[id]/print.
+ * at /pre-apps/blank-form, a merchant's record at /merchants/[id]/print, and a
+ * quote at /leads/[id]/quotes/[quoteGroupId]/print.
  *
  * This block deliberately no longer hides the app chrome by element name. It
  * used to say `aside, header, nav { display: none }`, and that was wrong in a

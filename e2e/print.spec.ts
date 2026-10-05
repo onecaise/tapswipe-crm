@@ -1,12 +1,19 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { PERIODS, seedE2E, storageStateFor } from "./fixtures/seed";
+import {
+  PERIODS,
+  QUOTE_FIXTURE,
+  QUOTE_LEAD_CONTACT,
+  seedE2E,
+  storageStateFor,
+} from "./fixtures/seed";
 import { imagesPerPage, sheetMap } from "./helpers/pdf";
 
 /**
- * The printable pages: a blank application, one merchant's record, and — for
- * the letterhead only — a payout summary. The summary's own content is covered
- * by the payouts specs; it is here because the mark is shared by all three.
+ * The printable pages: a blank application, one merchant's record, a quote,
+ * and — for the letterhead only — a payout summary. The summary's own content
+ * is covered by the payouts specs; it is here because the mark is shared by
+ * all four.
  *
  * Only browser-only claims are here. Whether the field inventory covers every
  * column is settled by `satisfies` at compile time, and whether the labels match
@@ -177,7 +184,201 @@ test.describe("another agent's merchant", () => {
 });
 
 /**
- * The Tapswipe mark at the head of all three printed documents.
+ * The line-items table, which is NOT the only table on a printed quote.
+ *
+ * components/print-document.tsx wraps every document in a real <table> so its
+ * <thead> can repeat the letterhead on each sheet, so `article table` matches
+ * the scaffold as well. Excluding it by its own marker attribute is exact, and
+ * it fails loudly if that scaffold is ever swapped for something else rather
+ * than silently starting to measure the wrong rows.
+ */
+const lineItems = (page: Page) =>
+  page.locator("article table:not([data-print-document])");
+
+/** "$1,446.50" as 1446.5, so a sum can be compared against a rendered figure. */
+function money(text: string | null): number {
+  return Number((text ?? "").replace(/[^0-9.-]/g, ""));
+}
+
+test.describe("a quote, laid out to hand to a merchant", () => {
+  test.use({ storageState: storageStateFor("agent") });
+
+  test("drops the app chrome when printed, keeping the quote", async ({
+    page,
+  }) => {
+    const { quote } = await seedE2E();
+    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+
+    await expect(
+      page.getByRole("heading", { name: QUOTE_FIXTURE.title }),
+    ).toBeVisible();
+
+    await page.emulateMedia({ media: "print" });
+
+    await expectChromeHidden(page);
+    // The control row is screen-only; everything the merchant reads is not.
+    await expect(page.getByRole("button", { name: /Print/ })).toBeHidden();
+    await expect(
+      page.getByRole("heading", { name: QUOTE_FIXTURE.title }),
+      "the document lost its own header",
+    ).toBeVisible();
+    await expect(
+      page.getByText(QUOTE_LEAD_CONTACT.contact_name),
+      "the merchant contact did not print",
+    ).toBeVisible();
+    await expect(lineItems(page)).toBeVisible();
+  });
+
+  test("prints the current version by default", async ({ page }) => {
+    const { quote } = await seedE2E();
+    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+
+    // v2 by currentVersion(), with no ?quote= in the URL at all.
+    await expect(page.getByText("Version 2 of 2")).toBeVisible();
+
+    // Both of v2's lines, and not v1's single one.
+    await expect(lineItems(page).locator("tbody tr")).toHaveCount(
+      QUOTE_FIXTURE.v2.length,
+    );
+    await expect(
+      page.getByText(/Superseded/),
+      "the current version should not be marked superseded",
+    ).toHaveCount(0);
+  });
+
+  test("prints a past version when the URL names one", async ({ page }) => {
+    const { quote } = await seedE2E();
+    await page.goto(
+      `/leads/${quote.leadId}/quotes/${quote.groupId}/print?quote=${quote.firstId}`,
+    );
+
+    await expect(page.getByText("Version 1 of 2")).toBeVisible();
+    await expect(lineItems(page).locator("tbody tr")).toHaveCount(
+      QUOTE_FIXTURE.v1.length,
+    );
+  });
+
+  /**
+   * Its own spec rather than two assertions in the one above, and the split was
+   * measured rather than assumed: dropping `quote = found` so the param is
+   * ignored, and separately dropping the warning block, reddened the SAME
+   * single spec. Two independent breaks landing on one spec is the shape
+   * CLAUDE.md warns about — a failure there named neither cause.
+   */
+  test("marks a past version superseded, on the sheet itself", async ({
+    page,
+  }) => {
+    const { quote } = await seedE2E();
+    await page.goto(
+      `/leads/${quote.leadId}/quotes/${quote.groupId}/print?quote=${quote.firstId}`,
+    );
+
+    // Under print media, not just on screen: a superseded version handed to a
+    // merchant without this is indistinguishable from the current offer, and a
+    // `print:hidden` swept onto it would be invisible to a screen assertion.
+    await page.emulateMedia({ media: "print" });
+    await expect(
+      page.getByText(/Superseded — version 2 is the current one/),
+      "a past version printed without saying so",
+    ).toBeVisible();
+  });
+
+  test("totals the line items it shows", async ({ page }) => {
+    const { quote } = await seedE2E();
+    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+
+    const table = lineItems(page);
+    await expect(table.locator("tbody tr")).toHaveCount(QUOTE_FIXTURE.v2.length);
+
+    // Derived from what is ON THE PAGE rather than from the fixture's
+    // arithmetic, so this fails on a total that disagrees with its own lines —
+    // which is the bug — rather than on the figures simply being different
+    // from what this file expected.
+    const rows = await table.locator("tbody tr").all();
+    let summed = 0;
+    for (const row of rows) {
+      const cells = row.locator("td");
+      const quantity = money(await cells.nth(1).textContent());
+      const unitPrice = money(await cells.nth(2).textContent());
+      const lineTotal = money(await cells.nth(3).textContent());
+
+      expect(lineTotal, "a line total is not quantity × unit price").toBeCloseTo(
+        quantity * unitPrice,
+        2,
+      );
+      summed += lineTotal;
+    }
+
+    const printed = money(
+      await table.locator("tfoot td").last().textContent(),
+    );
+    expect(printed, "the grand total is not the sum of the lines").toBeCloseTo(
+      summed,
+      2,
+    );
+
+    // And it is the arithmetic the fixture set up, so a page that summed a
+    // completely different set of rows cannot pass the check above by being
+    // internally consistent about the wrong ones.
+    expect(printed).toBeCloseTo(1446.5, 2);
+  });
+
+  test("shows the price it was quoted at, not today's catalog price", async ({
+    page,
+  }) => {
+    const { quote } = await seedE2E();
+    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+
+    const body = await page.locator("article").innerText();
+
+    // The seed reprices both products AFTER saving the quote, so these two
+    // figures can only both be checked from a browser — and a page that joined
+    // `products` live would render a completely plausible document carrying
+    // the second one. Nothing else in the suite would see it: no policy, type
+    // or constraint is violated by printing the wrong price.
+    for (const product of QUOTE_FIXTURE.products) {
+      expect(
+        body,
+        `the snapshotted price of ${product.sku} is missing`,
+      ).toContain(product.price.toFixed(2));
+      expect(
+        body,
+        `${product.sku} printed at today's catalog price — the snapshot was ignored`,
+      ).not.toContain(product.repricedTo.toFixed(2));
+    }
+  });
+});
+
+test.describe("another agent's quote", () => {
+  test.use({ storageState: storageStateFor("agent2") });
+
+  test("refuses rather than admitting the quote exists", async ({ page }) => {
+    const { quote } = await seedE2E();
+
+    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+
+    // Asserted on what renders rather than on the HTTP status, for the reason
+    // written up on the merchant case above: under `cacheComponents` the
+    // static shell is flushed before the Suspense boundary streams, so
+    // notFound() lands as 200 with not-found content in the body.
+    await expect(page.getByText(/We couldn.t find that/)).toBeVisible();
+    await expect(
+      page.getByText(/belong to another rep/i),
+      "the copy should not distinguish absent from not-yours",
+    ).toBeVisible();
+
+    // And nothing about the quote leaked past the guard — not the title, not
+    // the merchant's contact, not a figure.
+    await expect(page.getByText(QUOTE_FIXTURE.title)).toHaveCount(0);
+    await expect(
+      page.getByText(QUOTE_LEAD_CONTACT.contact_name),
+    ).toHaveCount(0);
+    await expect(lineItems(page)).toHaveCount(0);
+  });
+});
+
+/**
+ * The Tapswipe mark at the head of all four printed documents.
  *
  * Its own describe rather than an extra assertion inside the tests above, so a
  * failure here means one thing: the letterhead. The tests above are about the
@@ -190,7 +391,7 @@ test.describe("another agent's merchant", () => {
  *   - **toBeVisible** catches the class of bug this whole suite exists for — a
  *     broad print selector sweeping up something that belongs on the page, the
  *     way `header { display: none }` once took every document's own title.
- *     Measured: adding `print:hidden` to the component reds all three of these
+ *     Measured: adding `print:hidden` to the component reds all four of these
  *     and nothing else.
  *   - **naturalWidth** separates a painted mark from an empty box. next/image
  *     lays out at its full size before it has any bytes, so toBeVisible passes
@@ -242,6 +443,17 @@ test.describe("the printed letterhead", () => {
     const { docOwners } = await seedE2E();
     await page.goto(`/merchants/${docOwners.agent.merchant}/print`);
     await expect(page.getByRole("heading", { name: "Tasks" })).toBeVisible();
+
+    await page.emulateMedia({ media: "print" });
+    await expectLetterheadPrinted(page);
+  });
+
+  test("heads a quote", async ({ page }) => {
+    const { quote } = await seedE2E();
+    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+    await expect(
+      page.getByRole("heading", { name: QUOTE_FIXTURE.title }),
+    ).toBeVisible();
 
     await page.emulateMedia({ media: "print" });
     await expectLetterheadPrinted(page);

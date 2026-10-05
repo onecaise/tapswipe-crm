@@ -5,11 +5,12 @@ import { type ReactNode } from "react";
  * The scaffold every printable document sits in, and the Tapswipe mark that
  * heads each of its sheets.
  *
- * Used by the three printable routes — /pre-apps/blank-form,
- * /merchants/[id]/print and /payouts/[period]/summary/[agentId] — so the three
- * cannot drift, and rendering `public/logo-icon.png`, the same file the
- * sidebar uses. There is no second copy of the asset and no print-specific
- * export of it: one file means the printed mark changes when the app's does.
+ * Used by the four printable routes — /pre-apps/blank-form,
+ * /merchants/[id]/print, /payouts/[period]/summary/[agentId] and
+ * /leads/[id]/quotes/[quoteGroupId]/print — so the four cannot drift, and
+ * rendering `public/logo-icon.png`, the same file the sidebar uses. There is
+ * no second copy of the asset and no print-specific export of it: one file
+ * means the printed mark changes when the app's does.
  *
  * ## Why this is a real <table>, which is not a decision taken lightly
  *

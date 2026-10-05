@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import {
@@ -7,6 +8,7 @@ import {
   ChevronRightIcon,
   PencilIcon,
   PlusIcon,
+  PrinterIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -322,6 +324,18 @@ export function QuotesPanel({
                     <span className="font-medium">
                       {formatMoney(quoteTotal(lines))}
                     </span>
+                    {/* No ?quote= — the bare group URL prints whatever is
+                        current, which is what this row is showing. A link
+                        pinned to today's row id would keep printing this
+                        version after the next revision. */}
+                    <Button asChild size="sm" variant="outline">
+                      <Link
+                        href={`/leads/${leadId}/quotes/${group.quoteGroupId}/print`}
+                      >
+                        <PrinterIcon size={14} />
+                        Print
+                      </Link>
+                    </Button>
                     <Button
                       size="sm"
                       variant="outline"
@@ -408,6 +422,17 @@ export function QuotesPanel({
                               quoteTotal(linesByQuote[version.id] ?? []),
                             )}
                           </span>
+                          {/* Pinned with ?quote=, unlike the current version's
+                              link above: printing history means printing THIS
+                              row, and it must not follow the group forward. The
+                              printed sheet says it is superseded. */}
+                          <Link
+                            className="flex items-center gap-1 underline underline-offset-2"
+                            href={`/leads/${leadId}/quotes/${group.quoteGroupId}/print?quote=${version.id}`}
+                          >
+                            <PrinterIcon size={12} />
+                            Print
+                          </Link>
                         </div>
                         <QuoteLines lines={linesByQuote[version.id] ?? []} />
                         {version.notes && (
