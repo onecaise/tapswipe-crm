@@ -78,6 +78,19 @@ async function PayoutPeriods() {
     { repPayout: 0, unfilled: 0 },
   );
 
+  // Where "Awaiting figures" should send someone — and only when that question
+  // has one answer. The card totals unfilled rows across every period, so it is
+  // a link exactly while a single period is waiting, which is the ordinary case
+  // (one import, one month, many blank rows). With two months outstanding an
+  // admin genuinely has to choose, and picking one for them would be a card
+  // reading 5 that lands on a page showing 2. The per-period badges below are
+  // linked either way, so nothing becomes unreachable when this is undefined.
+  const unfilledPeriods = periods.filter((period) => period.unfilled > 0);
+  const soleUnfilledHref =
+    unfilledPeriods.length === 1
+      ? `/payouts/${periodParam(unfilledPeriods[0].period)}`
+      : undefined;
+
   return (
     <div className="flex flex-col gap-6">
       <div className="grid gap-3 sm:grid-cols-3">
@@ -89,11 +102,20 @@ async function PayoutPeriods() {
         {/* Accented only for an admin, and only because it is the one figure on
             this page that represents outstanding work — rows still waiting for
             someone to enter a residual. A rep cannot act on it, so it stays
-            plain for them. */}
+            plain for them.
+
+            Linked for BOTH roles, though, and the asymmetry is deliberate: the
+            two props answer different questions. `accent` is about priority, and
+            only an admin can act, so only they get the emphasis. `href` is about
+            where the figures are — and the period page is useful to a rep too,
+            as the place they see WHICH of their merchants is still blank. Both
+            roles could already reach it from the period name; this just stops
+            the figure naming the work from being the one thing that is inert. */}
         <StatCard
           label="Awaiting figures"
           value={overall.unfilled}
           accent={isAdmin && overall.unfilled > 0}
+          href={soleUnfilledHref}
         />
       </div>
 
@@ -128,13 +150,40 @@ async function PayoutPeriods() {
               <TableCell>
                 {/* A period whose figures are all entered is settled; one with
                     blanks is waiting on someone. Exactly what the two intents
-                    mean everywhere else, so no new colour is needed. */}
+                    mean everywhere else, so no new colour is needed.
+
+                    "N to enter" is a LINK to the period, because it was the one
+                    thing on this page naming the outstanding work and the one
+                    thing that could not be clicked — the period name in the
+                    first column was the only way in, and it reads as a label
+                    rather than as the place the work is done. Only the warning
+                    branch links: "complete" names no work, so a link from it
+                    would be decoration.
+
+                    Wrapped rather than given an href prop, so StatusBadge stays
+                    a presentational span with no opinion about navigation — the
+                    same reason StatCard's href is opt-in. */}
                 {period.unfilled === 0 ? (
                   <StatusBadge intent="success">complete</StatusBadge>
                 ) : (
-                  <StatusBadge intent="warning">
-                    {period.unfilled} to enter
-                  </StatusBadge>
+                  <Link
+                    href={`/payouts/${periodParam(period.period)}`}
+                    // Named rather than left to read as a bare "1 to enter",
+                    // which says nothing out of its row. Deliberately NOT "Enter
+                    // figures for…": a rep reaches this link too and cannot
+                    // enter anything (update on rep_payout_rows is admin-only),
+                    // so the label states the fact both roles share and neither
+                    // is promised an action they do not have.
+                    aria-label={`${formatPeriod(period.period)} — ${period.unfilled} awaiting figures`}
+                    className="rounded-full focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    <StatusBadge
+                      intent="warning"
+                      className="transition-opacity hover:opacity-80"
+                    >
+                      {period.unfilled} to enter
+                    </StatusBadge>
+                  </Link>
                 )}
               </TableCell>
             </TableRow>

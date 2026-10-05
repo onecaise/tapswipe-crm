@@ -21,6 +21,7 @@ import {
   UNKNOWN_AGENT_NUMBER,
   adminClient,
   functionsAreServed,
+  getStackConfig,
   invoke,
   provisionFixtures,
   teardownFixtures,
@@ -777,5 +778,107 @@ describe("the export is scoped by RLS and re-importable", () => {
     expect(row?.rep_split_pct).toBe(45);
     // Recomputed by the database from the two figures the spreadsheet supplied.
     expect(row?.rep_payout).toBe(54.23);
+  });
+});
+
+describe("the export survives the path the browser actually takes", () => {
+  /**
+   * WHY THIS EXISTS, AND WHY THE SUITE ABOVE COULD NOT CATCH IT.
+   *
+   * `exportWorkbook` uses raw fetch + arrayBuffer(), so it reads the body itself
+   * and the response's Content-Type never matters. The browser does not: it goes
+   * through supabase-js's `functions.invoke()`, which picks its parser FROM that
+   * header against a fixed list — application/json -> .json(), octet-stream and
+   * pdf -> .blob(), event-stream, form-data, and everything else -> **.text()**.
+   *
+   * The function used to send the real spreadsheet media type
+   * (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet), which is
+   * correct and is not on that list. So invoke() resolved
+   * { error: null, data: <string> }, the export button's `data instanceof Blob`
+   * guard failed, and a 200 carrying a perfectly good workbook was reported to
+   * the user as "Could not build the export." Every assertion in this file stayed
+   * green throughout, because none of them went through supabase-js.
+   *
+   * Worse than the message: decoding a zip as UTF-8 is lossy — 16,597 bytes came
+   * back as a 16,509-character string — so "just accept the string" would have
+   * produced a silently corrupt .xlsx.
+   *
+   * The assertions below are therefore about the CLIENT-VISIBLE shape, not about
+   * spreadsheet contents (covered above). Byte length is compared against a raw
+   * fetch of the same call, because that is the assertion that fails on a lossy
+   * decode while `instanceof Blob` alone would not.
+   */
+  it("invoke() hands the caller a Blob, byte-identical to the raw response", async () => {
+    const supabase = userClient(fixtures.tokens.admin);
+
+    const { data, error } = await supabase.functions.invoke("export-residuals", {
+      body: {},
+    });
+
+    expect(error).toBeNull();
+    // The exact guard components/payout-export-button.tsx applies before it
+    // builds the download. A string here is the bug this test exists for.
+    expect(data instanceof Blob, `invoke returned ${typeof data}`).toBe(true);
+
+    const viaInvoke = new Uint8Array(await (data as Blob).arrayBuffer());
+
+    // PK — a zip local file header. A truncated or re-encoded body loses this.
+    expect(Array.from(viaInvoke.slice(0, 2))).toEqual([0x50, 0x4b]);
+
+    const { apiUrl, anonKey } = getStackConfig();
+    const raw = await fetch(`${apiUrl}/functions/v1/export-residuals`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${fixtures.tokens.admin}`,
+        "Content-Type": "application/json",
+        apikey: anonKey,
+      },
+      body: "{}",
+    });
+    expect(raw.status).toBe(200);
+
+    // Not a fixed number: the fixtures' row count moves. Equality with the raw
+    // read is what proves nothing was lost in transport.
+    const viaFetch = new Uint8Array(await raw.arrayBuffer());
+    expect(viaInvoke.byteLength).toBe(viaFetch.byteLength);
+
+    // And the bytes invoke() produced still open as a workbook.
+    const book = XLSX.read(viaInvoke, { type: "array" });
+    expect(book.SheetNames).toContain("Residuals");
+  });
+
+  it("declares a Content-Type that supabase-js parses as binary", async () => {
+    // Pinned directly, because it is the single line that decides the above and
+    // it looks wrong: the generic type is deliberate, the accurate one is the
+    // bug. Asserting the header — not just the parsed result — is what makes a
+    // future "correction" back to the spreadsheet MIME type fail HERE, naming the
+    // cause, rather than in the UI as an unexplained error message.
+    const { apiUrl, anonKey } = getStackConfig();
+    const response = await fetch(`${apiUrl}/functions/v1/export-residuals`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${fixtures.tokens.admin}`,
+        "Content-Type": "application/json",
+        apikey: anonKey,
+      },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    // The two types supabase-js reads with .blob(). Not a single-value equality,
+    // so application/pdf would also pass — either is a legitimate fix.
+    expect(
+      (response.headers.get("content-type") ?? "").split(";")[0].trim(),
+    ).toMatch(/^application\/(octet-stream|pdf)$/);
+
+    // The filename still travels, for a direct fetch or the curl example. The
+    // browser download is named by the component's own anchor.download — a Blob
+    // URL carries no headers — so this is documentation of intent, not the
+    // mechanism.
+    expect(response.headers.get("content-disposition")).toContain(
+      'filename="residuals-all-periods.xlsx"',
+    );
+
+    await response.arrayBuffer();
   });
 });

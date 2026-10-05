@@ -184,11 +184,31 @@ export default {
 
     const name = period === null ? "all-periods" : period.slice(0, 7);
 
+    // application/octet-stream, NOT the real XLSX media type — and this is
+    // load-bearing rather than laziness. DO NOT "correct" it back.
+    //
+    // supabase-js decides how to READ a function's body from this header, and it
+    // matches an explicit list (FunctionsClient: application/json -> .json(),
+    // application/octet-stream and application/pdf -> .blob(), text/event-stream,
+    // multipart/form-data, and **everything else -> .text()**). The spreadsheet
+    // type is not on that list, so the correct header sent the caller down the
+    // text branch: invoke() resolved { error: null, data: <string> }, the export
+    // button's `data instanceof Blob` guard failed, and it reported "Could not
+    // build the export." on a 200 that had just returned a perfectly good file.
+    //
+    // Worse than a bad message: UTF-8-decoding a zip is lossy (16,597 bytes came
+    // back as a 16,509-character string), so relaxing that guard to accept the
+    // text would have produced a silently corrupt .xlsx — the failure mode this
+    // file already refuses elsewhere, for the same reason it writes no total row.
+    //
+    // Nothing is lost by the generic type. The filename still travels in
+    // Content-Disposition below for a direct fetch or the curl example, and the
+    // browser download is named by the component's own `anchor.download` — a Blob
+    // URL carries no headers, so that has always been the naming mechanism.
     return new Response(bytes, {
       status: 200,
       headers: {
-        "Content-Type":
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Type": "application/octet-stream",
         "Content-Disposition": `attachment; filename="residuals-${name}.xlsx"`,
       },
     });

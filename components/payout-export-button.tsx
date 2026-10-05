@@ -48,13 +48,33 @@ export function PayoutExportButton({
       { body: { period, agent_id: agentId } },
     );
 
-    if (callError || !(data instanceof Blob)) {
+    if (callError) {
       // The function's own message sits in the response body on a non-2xx, so it
       // is unwrapped rather than shown as the generic invoke() message. Not
       // invokeEdgeFunction() here: this response is a Blob, not JSON, and that
       // helper's null-data guard would be reading the wrong shape.
       setError(
         await edgeFunctionErrorMessage(callError, "Could not build the export."),
+      );
+      setBusy(false);
+      return;
+    }
+
+    // A 2xx whose body did not arrive as a Blob. Split out from the branch above
+    // rather than folded into it, because the two are not the same failure and
+    // merging them cost a debugging session: supabase-js picks its parser from
+    // the response Content-Type and falls back to .text(), so the function
+    // returning the real spreadsheet media type produced { error: null, data:
+    // <string> } — a completely successful export reported as "Could not build
+    // the export.", a fallback message with no error behind it to unwrap.
+    //
+    // Fixed at the source (export-residuals now sends application/octet-stream,
+    // which supabase-js reads as a Blob), so reaching here means that agreement
+    // has broken again. Say so, because the generic sentence is what hid it.
+    if (!(data instanceof Blob)) {
+      setError(
+        "The export came back in an unexpected format and was not saved. " +
+          "This is a bug — please report it.",
       );
       setBusy(false);
       return;

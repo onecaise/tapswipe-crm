@@ -93,15 +93,53 @@ test("the periods list links to each period it lists", async ({ page }) => {
   await page.goto("/payouts");
 
   // The three periods this suite owns that have rows for this rep.
+  //
+  // exact: true throughout, because a period with unfilled figures now carries a
+  // SECOND link to itself — the "N to enter" badge, labelled "March 2027 — 1
+  // awaiting figures". Playwright matches an accessible name by substring by
+  // default, so the loose form resolved to two elements and tripped strict mode
+  // on exactly the unfilled period. The right fix is here rather than on the
+  // badge: this test is about the period-NAME column, and shortening the badge's
+  // label to dodge it would cost a screen-reader user the context that makes a
+  // bare "1 to enter" mean anything.
   for (const label of ["April 2027", "May 2027", "March 2027"]) {
-    await expect(page.getByRole("link", { name: label })).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: label, exact: true }),
+    ).toBeVisible();
   }
   // And not the empty one, which has no rows for anybody.
   await expect(
-    page.getByRole("link", { name: "September 2027" }),
+    page.getByRole("link", { name: "September 2027", exact: true }),
   ).toHaveCount(0);
 
-  await page.getByRole("link", { name: "May 2027" }).click();
+  await page.getByRole("link", { name: "May 2027", exact: true }).click();
   await expect(page).toHaveURL(/\/payouts\/2027-05$/);
   await expect(page.getByRole("cell", { name: "E2E-SOLO" })).toBeVisible();
+});
+
+test("the outstanding-figures count is itself the way in", async ({ page }) => {
+  // The discoverability bug this pairs with: /payouts named the outstanding work
+  // in two places — the "N to enter" badge and the "Awaiting figures" card — and
+  // neither could be clicked. The period name in the first column was the only
+  // route to the screen where those figures are entered, and it reads as a label
+  // rather than as somewhere to go.
+  //
+  // In e2e rather than a unit test because there is nowhere else: these are async
+  // server components, and whether a rendered element is a link with a working
+  // destination is only observable by driving the page.
+  await page.goto("/payouts");
+
+  const badge = page.getByRole("link", {
+    name: "March 2027 — 1 awaiting figures",
+    exact: true,
+  });
+  await expect(badge).toBeVisible();
+
+  await badge.click();
+  await expect(page).toHaveURL(/\/payouts\/2027-03$/);
+
+  // Landed somewhere that actually holds the work, not merely somewhere.
+  await expect(
+    page.getByRole("heading", { name: "March 2027" }),
+  ).toBeVisible();
 });
