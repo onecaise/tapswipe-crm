@@ -24,10 +24,24 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 /** Known, throwaway, local-only. Mirrors PASSWORD in tests/live/helpers. */
 export const E2E_PASSWORD = "e2e-test-password-123";
 
+/**
+ * The two territory labels, and who carries which.
+ *
+ * profiles.territory is free text with no vocabulary, so these are just
+ * strings — prefixed like everything else here so they cannot collide with a
+ * real label somebody set by hand in the dev database.
+ *
+ * The split is what makes the territory filter falsifiable from a browser: the
+ * agent is alone in North, and the OTHER agent is alone in South, so filtering
+ * an admin's dashboard by South has to produce the other agent's numbers and
+ * not the agent's, and not the company's.
+ */
+export const TERRITORIES = { agent: "E2E North", agent2: "E2E South" } as const;
+
 export const PERSONAS = {
-  admin: { email: "e2e-admin@tapswipe.test", fullName: "E2E Admin", role: "admin", agentNumber: "9001" },
-  agent: { email: "e2e-agent@tapswipe.test", fullName: "E2E Agent", role: "agent", agentNumber: "9002" },
-  agent2: { email: "e2e-agent2@tapswipe.test", fullName: "E2E Agent Two", role: "agent", agentNumber: "9003" },
+  admin: { email: "e2e-admin@tapswipe.test", fullName: "E2E Admin", role: "admin", agentNumber: "9001", territory: null },
+  agent: { email: "e2e-agent@tapswipe.test", fullName: "E2E Agent", role: "agent", agentNumber: "9002", territory: TERRITORIES.agent },
+  agent2: { email: "e2e-agent2@tapswipe.test", fullName: "E2E Agent Two", role: "agent", agentNumber: "9003", territory: TERRITORIES.agent2 },
   /**
    * Exists to be signed out, and is shared with nothing.
    *
@@ -43,7 +57,7 @@ export const PERSONAS = {
    * later, with a failure that points at the proxy rather than at the cause.
    * Hence a persona whose session nothing else depends on. Do not reuse it.
    */
-  logout: { email: "e2e-logout@tapswipe.test", fullName: "E2E Logout", role: "agent", agentNumber: "9004" },
+  logout: { email: "e2e-logout@tapswipe.test", fullName: "E2E Logout", role: "agent", agentNumber: "9004", territory: null },
 } as const;
 
 export type PersonaKey = keyof typeof PERSONAS;
@@ -275,7 +289,28 @@ export const QUOTE_LEAD_CONTACT = {
   contact_email: "quotes@e2e-lead.test",
 } as const;
 
+/**
+ * Read once per process, because reading it is a PROCESS SPAWN.
+ *
+ * `npx supabase status` costs 2-4 seconds here, and this function has twelve
+ * call sites — several of them inside `expect.poll` loops, where it was being
+ * spawned once per poll iteration. That is what made
+ * `documents-panel.spec.ts`'s two-tabs test marginal against the 30s per-test
+ * timeout: it calls documentRows() twice and then polls storageObjectExists()
+ * for up to ten seconds per file, so most of its wall clock was `npx` starting
+ * up, not Storage being slow. Measured at ~1 failure in 3 in isolation before
+ * this, with passing runs landing at 23-29s against a 30s budget.
+ *
+ * Safe to cache: the stack's ports and keys cannot change while a suite is
+ * running — a `supabase stop` mid-run breaks the suite far more loudly than a
+ * stale cache would. The non-local guard below still runs, on the first call,
+ * which is the only call that could be wrong about it.
+ */
+let cachedStackConfig: { apiUrl: string; serviceKey: string } | null = null;
+
 function localStackConfig(): { apiUrl: string; serviceKey: string } {
+  if (cachedStackConfig !== null) return cachedStackConfig;
+
   const raw = execSync("npx supabase status -o env", { encoding: "utf8" });
   const cfg = new Map<string, string>();
   for (const line of raw.split(/\r?\n/)) {
@@ -294,7 +329,8 @@ function localStackConfig(): { apiUrl: string; serviceKey: string } {
     throw new Error(`Refusing to seed a non-local host: ${apiUrl}`);
   }
 
-  return { apiUrl, serviceKey };
+  cachedStackConfig = { apiUrl, serviceKey };
+  return cachedStackConfig;
 }
 
 async function ensurePersona(
@@ -318,6 +354,11 @@ async function ensurePersona(
         is_active: true,
         must_change_password: false,
         agent_number: persona.agentNumber,
+        // Re-asserted rather than set only on creation, for the reason
+        // agent_number is: a persona provisioned before this column was part of
+        // the fixture would otherwise keep a null territory forever, and the
+        // dashboard's territory filter would quietly have nothing to select.
+        territory: persona.territory,
       })
       .eq("id", found.id);
     if (error) throw new Error(`${persona.email} profile: ${error.message}`);
@@ -343,6 +384,7 @@ async function ensurePersona(
     is_active: true,
     must_change_password: false,
     agent_number: persona.agentNumber,
+    territory: persona.territory,
   });
   if (profileError) {
     // Half an account is the ghost-user state lib/auth.ts routes to
@@ -528,8 +570,44 @@ export async function seedE2E(): Promise<SeedResult> {
   const materialId = await ensureMarketingMaterial(db, ids.admin);
   const quote = await ensureQuote(db, ids.agent, docOwners.agent.lead);
   const tasks = await ensureTasks(db, ids, docOwners);
+  await ensureReportingLine(db, ids);
 
   return { ids, docOwners, materialId, quote, tasks, apiUrl };
+}
+
+/**
+ * One reporting line, for the dashboard's manager filter.
+ *
+ * `agent2` plays the manager: `agent` reports to them, and they report to
+ * nobody. That is the one-hop shape set_manager() enforces, written directly
+ * here because this runs as the service role and profiles has no update policy
+ * at all — the same reason every other field in this file is set this way.
+ *
+ * Re-asserted every run rather than set once. manager_id is `on delete set
+ * null`, and it is the one profiles column another persona's teardown can clear
+ * without touching this row: a seeded reporting line can vanish with nothing
+ * reporting that it happened, which is exactly the failure the four teardown
+ * lists' manager_id entries exist to make visible.
+ *
+ * NOTE what this does NOT do. It grants nothing. No policy reads manager_id, so
+ * `agent2` sees no more of `agent`'s book than before. The line exists only so
+ * an ADMIN has a manager to filter their own already-complete view by.
+ */
+async function ensureReportingLine(
+  db: SupabaseClient,
+  ids: Record<PersonaKey, string>,
+): Promise<void> {
+  const { error: clearError } = await db
+    .from("profiles")
+    .update({ manager_id: null })
+    .in("id", [ids.admin, ids.agent2, ids.logout]);
+  if (clearError) throw new Error(`clear manager: ${clearError.message}`);
+
+  const { error } = await db
+    .from("profiles")
+    .update({ manager_id: ids.agent2 })
+    .eq("id", ids.agent);
+  if (error) throw new Error(`reporting line: ${error.message}`);
 }
 
 /**

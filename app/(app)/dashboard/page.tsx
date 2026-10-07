@@ -13,43 +13,153 @@ import {
   type WithOwner,
 } from "@/lib/annotations";
 import { loadMyTaskDigest } from "@/lib/annotations-data";
+import {
+  dashboardCountArgs,
+  parseDashboardFilters,
+  type DashboardCounts,
+  type DashboardFilters,
+  type DashboardSearchParams,
+} from "@/lib/dashboard";
+import { LEAD_STATUS_LABELS, isLeadStatus } from "@/lib/leads";
 import { formatDate } from "@/lib/format";
+import {
+  DashboardFilterBar,
+  type DashboardFilterOptions,
+} from "@/components/dashboard-filters";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { StatCard } from "@/components/stat-card";
 import { Badge } from "@/components/ui/badge";
 
 /**
- * Counts for the stat row.
+ * The filter bar and the stat row it drives.
  *
- * One `dashboard_counts()` RPC rather than five head:true selects. The function
- * is SECURITY INVOKER, so the caller's own RLS scopes every count inside it: an
- * agent gets the size of their own book, an admin the company's, and there is no
- * agent_id filter here to fall out of step with the policies. It also makes the
- * five figures a single snapshot instead of five reads that can disagree.
+ * One `dashboard_counts()` RPC rather than five head:true selects, which makes
+ * the figures a single snapshot instead of five reads that can disagree. The
+ * function is SECURITY INVOKER, so the caller's own RLS scopes every count
+ * inside it: an agent gets the size of their own book, an admin the company's,
+ * with no role branch anywhere.
  *
- * Ordered as a funnel, left to right — ghost sheet, lead, pre-app, merchant —
- * which is also why `active_leads` excludes leads that already have a pre-app.
- * A deal is counted once, at the stage it has reached. See the migration.
+ * **The filters do not change that, and the distinction is worth holding on
+ * to.** This page used to carry no `agent_id` filter at all, on the grounds
+ * that a copy of a policy in application code is how the two drift apart. That
+ * rule is about a query meaning *everything I may see*. What goes to the RPC
+ * here means *a subset of it, chosen by the reader* — it is ANDed with the
+ * policy rather than standing in for it, which is why a rep sending
+ * `?rep=<someone else>` gets zeros and why there is no permission check in this
+ * function. Adding one would imply the RPC needed it. See lib/dashboard.ts and
+ * tests/rls/dashboard-filters.test.ts.
  *
- * `count(*)` is bigint, so PostgREST sends these as strings; Number() rather
- * than trusting the shape. A failed RPC renders "—" rather than a confident
- * zero, which would read as an empty book.
+ * The cards are ordered as a funnel, left to right — ghost sheet, lead,
+ * pre-app, merchant — which is also why `active_leads` excludes leads that
+ * already have a pre-app. A deal is counted once, at the stage it has reached.
  */
-async function DashboardStats() {
-  const supabase = await createClient();
-  const { data, error } = await supabase.rpc("dashboard_counts").maybeSingle();
+async function DashboardOverview({
+  searchParams,
+}: {
+  searchParams: Promise<DashboardSearchParams>;
+}) {
+  const filters = parseDashboardFilters(await searchParams);
+  const profile = await requireUser();
+  const isAdmin = profile.role === "admin";
 
-  if (error || !data) {
+  const supabase = await createClient();
+
+  // The filter arguments ride straight into the same invoker RPC. There is no
+  // permission check here and there must not be one: an agent who sends
+  // ?rep=<another rep> gets zeros because the policy and the filter cannot both
+  // hold, which is a property of the function rather than of this page. Adding
+  // a check would imply the function needed one.
+  const [{ data, error }, options] = await Promise.all([
+    supabase.rpc("dashboard_counts", dashboardCountArgs(filters)).maybeSingle(),
+    loadFilterOptions(isAdmin),
+  ]);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <DashboardFilterBar
+        filters={filters}
+        isAdmin={isAdmin}
+        options={options}
+      />
+      <DashboardStats
+        counts={data as DashboardCounts | null}
+        error={error?.message ?? null}
+        filters={filters}
+      />
+    </div>
+  );
+}
+
+/**
+ * The rep, manager and territory lists behind the admin-only selects.
+ *
+ * One read of `profiles`, derived three ways. RLS does the scoping as usual —
+ * an admin sees every row, which is why this is only called for one — and the
+ * manager list is built from the manager_id values actually in use rather than
+ * from every profile: a "manager" who manages nobody is an option whose every
+ * result is zero.
+ */
+async function loadFilterOptions(
+  isAdmin: boolean,
+): Promise<DashboardFilterOptions> {
+  if (!isAdmin) return { reps: [], managers: [], territories: [] };
+
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("profiles")
+    .select("id, full_name, territory, manager_id")
+    .order("full_name", { ascending: true });
+
+  const profiles = (data ?? []) as {
+    id: string;
+    full_name: string;
+    territory: string | null;
+    manager_id: string | null;
+  }[];
+
+  const managerIds = new Set(
+    profiles.map((p) => p.manager_id).filter((id): id is string => id !== null),
+  );
+
+  return {
+    reps: profiles.map((p) => ({ id: p.id, full_name: p.full_name })),
+    managers: profiles
+      .filter((p) => managerIds.has(p.id))
+      .map((p) => ({ id: p.id, full_name: p.full_name })),
+    territories: [
+      ...new Set(
+        profiles
+          .map((p) => p.territory)
+          .filter((t): t is string => t !== null && t.trim() !== ""),
+      ),
+    ].sort((a, b) => a.localeCompare(b)),
+  };
+}
+
+function DashboardStats({
+  counts,
+  error,
+  filters,
+}: {
+  counts: DashboardCounts | null;
+  error: string | null;
+  filters: DashboardFilters;
+}) {
+  if (error || !counts) {
     return (
       <p className="text-sm text-destructive">
-        Could not load your counts{error ? `: ${error.message}` : "."}
+        Could not load your counts{error ? `: ${error}` : "."}
       </p>
     );
   }
 
-  const counts = data as Record<string, number | string | null>;
-  const show = (key: string) => {
+  // `count(*)` is bigint, so PostgREST sends these as strings; Number() rather
+  // than trusting the shape. An absent figure renders "—" rather than a
+  // confident zero, which would read as an empty book — and that is also what
+  // makes `leads_at_stage` safe to leave null: "you did not ask" never prints
+  // as "there are none".
+  const show = (key: keyof DashboardCounts) => {
     const raw = counts[key];
     return raw === null || raw === undefined ? "—" : Number(raw);
   };
@@ -70,6 +180,24 @@ async function DashboardStats() {
       {/* The one red figure on the row: open tickets are the only number here
           that represents work someone still has to do. */}
       <StatCard label="Open tickets" value={show("open_tickets")} accent />
+
+      {/* A SIXTH card, shown only when a stage was asked for, and deliberately
+          not folded into "Unconverted leads". That figure means "a lead no
+          pre-app points at yet" — a funnel position the records prove — while a
+          stage is something a rep types. One card cannot be both: filtering the
+          funnel figure by 'application_sent' would read as near-zero, because
+          those leads are exactly the ones a pre-app points at. See the
+          leads_at_stage note in the migration. */}
+      {filters.stage !== "all" && (
+        <StatCard
+          label={`Leads at ${
+            isLeadStatus(filters.stage)
+              ? LEAD_STATUS_LABELS[filters.stage].toLowerCase()
+              : filters.stage
+          }`}
+          value={show("leads_at_stage")}
+        />
+      )}
     </div>
   );
 }
@@ -116,7 +244,17 @@ async function DashboardTasks() {
   return (
     <section className="flex flex-col gap-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="font-semibold text-lg">Your tasks</h2>
+        <div className="flex flex-col gap-0.5">
+          <h2 className="font-semibold text-lg">Your tasks</h2>
+          {/* Said on the page, because the filter bar sits directly above and
+              an admin who has just narrowed the overview to one rep would
+              otherwise read this list as that rep's. It is always the
+              signed-in user's own: DashboardTasks never touches searchParams,
+              and loadMyTaskDigest takes profile.id and nothing else. */}
+          <p className="text-xs text-muted-foreground">
+            Your own work. Not affected by the filters above.
+          </p>
+        </div>
         {/* Both the word and the URL come from TASK_INDEX_FILTER_OPTIONS, so
             this page and /tasks cannot come to call the same filter two
             different things. */}
@@ -241,15 +379,24 @@ async function DashboardHeader() {
   );
 }
 
-export default function DashboardPage() {
+export default function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<DashboardSearchParams>;
+}) {
   // The grid of nav buttons that used to be here is gone: the sidebar does
   // navigation now, and a second copy of the same links is just something else
   // to keep in step with lib/nav.ts.
+  //
+  // searchParams is passed down UNAWAITED. Awaiting it here would pull the
+  // dynamic read outside the Suspense boundary, which cacheComponents rejects
+  // at build time — the same rule the lead detail page follows for params.
   return (
     <PageShell width="detail">
       {/* cacheComponents: true in next.config.ts means dynamic data fetching
-          must sit inside a Suspense boundary. Two boundaries rather than one so
-          the greeting doesn't wait on four count queries. */}
+          must sit inside a Suspense boundary. Three boundaries rather than one
+          so the greeting doesn't wait on the counts, and the counts don't wait
+          on the digest. */}
       <Suspense
         fallback={<p className="text-sm text-muted-foreground">Loading…</p>}
       >
@@ -257,12 +404,14 @@ export default function DashboardPage() {
       </Suspense>
 
       <Suspense fallback={<StatsSkeleton />}>
-        <DashboardStats />
+        <DashboardOverview searchParams={searchParams} />
       </Suspense>
 
-      {/* Its own boundary for the same reason the other two have theirs: the
-          counts and the digest are separate reads, and neither should hold the
-          other off the screen. */}
+      {/* A SEPARATE boundary, and separate data. The digest is the signed-in
+          user's own tasks and takes no part in the filters above: it reads
+          profile.id, never searchParams, so no combination of filters can
+          change, empty or widen it. Keeping it outside DashboardOverview is
+          what makes that structural rather than a promise. */}
       <Suspense
         fallback={
           <p className="text-sm text-muted-foreground">Loading your tasks…</p>

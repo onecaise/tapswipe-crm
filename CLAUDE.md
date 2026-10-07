@@ -70,7 +70,7 @@ npx tsc --noEmit       # type-check only
 npm test               # hermetic suite — PGlite + pure logic, no Docker (1124 tests)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (205 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (113 tests, 5 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (123 tests, 5 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -94,7 +94,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm test` | the migrations themselves | nothing (in-process Postgres) |
 | `npm run test:live` | the local Supabase stack | Docker, `supabase start`, `functions serve` |
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
-| `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, Chromium |
+| `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
 - **`npm test`** — vitest + `@electric-sql/pglite`, applying `supabase/migrations/` over a deliberately minimal auth shim (`tests/helpers/db.ts`: three Data API roles, `auth.users`, `auth.uid()` reading the `request.jwt.claims` GUC). Covers RLS policies (`tests/rls/*`) and the grant surface (`tests/rls/grants.test.ts`). **Run this for any schema change.** Queries must run as `authenticated`, not the owner — Postgres bypasses RLS for a table's owner, so an owner-run test passes regardless of policy.
 - **Never write a literal `\xHH`-shaped escape inside a JS template literal**, including inside text meant to read as a SQL comment. `tests/helpers/db.ts` builds SQL in template literals, so JavaScript consumes the escape before Postgres ever sees the string: `\x00` becomes a real NUL byte, which desyncs the wire protocol and fails dozens of *unrelated* tests with a bare `invalid message format` from the pg-protocol parser, naming no statement and pointing nowhere near the cause. (It cost an hour once, in a comment that existed to warn about exactly this.) For `bytea` fixtures use `decode('0011', 'hex')` — no backslash to get wrong.
@@ -104,11 +104,13 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 - **A live test that writes `audit_log` must clean it up before deleting its users.** `audit_log.actor_id references profiles(id)` with **no `ON DELETE`**, so `deleteUser` fails on the FK while those rows exist — the persona survives teardown and the next run dies on "user already registered". `teardownFixtures()` and `deleteUserCompletely()` both delete by `actor_id` and by `row_id` first. The FK is deliberately left strict: production never deletes users (§8), so only tests pay for it.
 - **`npm run test:deployed`** — read-only Auth-config and schema-drift assertions against every project in `.env.deployed.local`, not just whichever one is linked. It used to read `.env.local`, which names dev, so "compliance checks against the deployed project" never once looked at production — and production sat with public sign-up enabled and 12 unpushed migrations until the 2 Sep 2026 outage found it. A project named `prod` is now required and the suite refuses to run without one, so coverage cannot be quietly dropped. A red result means a deployed project drifted, not that code broke. Uses only publishable keys.
 - **`npm run test:e2e`** — Playwright + Chromium against `next dev` on the local stack (`playwright.config.ts`, specs in `e2e/`). Covers only what needs a browser: **layout, paint, client state across a refresh, and `<input type="file">`.** `e2e/fixtures/seed.ts` provisions its own personas and its own periods (deliberately in **2027**, so it never collides with the `seed-dev-*` scripts' 2026), and `e2e/auth.setup.ts` signs each persona in once into `e2e/.auth/*.json` — so no spec logs in and no spec holds a password. Reuses a running dev server.
+- **`npm run test:e2e` needs `functions serve` running, and the table above said it did not until 7 Oct 2026.** `playwright.config.ts` starts `next dev` and nothing else, so the app is up but every signed-URL mint, document delete and user-import call 404s. The symptom is **18 specs failing at once** across `documents-panel` and `user-import` with ordinary-looking assertion errors — "expected visible", "expected 1 to be 0" — and not one of them naming a function or a port. Nothing in the run says the functions are missing. If a block of e2e failures appears all at once in files you did not touch, check `functions serve` before reading the diff.
 - **Do not put RLS, PostgREST or pure-logic assertions in `e2e/`.** They are faster and more precise in the other three, and a browser copy is just a slower flakier duplicate. The rule of thumb: a spec belongs there only if a person could **only** find it by looking.
 - **A geometric bug needs a geometric assertion, and bounding boxes are usually the wrong one.** The `StatCard` clipping bug (a figure painted outside its card, hidden by the next card's opaque background) passed a bounding-box comparison: a block element's box is constrained by its parent, so the *ink* overflows while `getBoundingClientRect` reports the parent's width unchanged — measured, 213px box against a 270px `scrollWidth`. `scrollWidth > clientWidth` is what actually detects it. A text assertion cannot see it either, which is how it shipped.
 - **Prove an e2e spec is non-vacuous by reverting the fix.** Cheap here and worth doing every time, because a spec that drives a whole page can pass for reasons unrelated to what it claims. All seven specs covering the three browser-only payouts bugs were checked this way: revert the fix, watch exactly those specs go red, restore. Two of them were rewritten as a result of that check — they had passed against the reverted bug. The document pass repeated it for all six of its browser-only fixes and rewrote one spec: **`setInputFiles` dispatches `change` unconditionally**, so Playwright cannot reproduce "the user re-picks the identical file and no event fires" — the retry assertion passed with the fix reverted, and had to be replaced with one on the input's value, which is observable.
 - **A partial revert is the sharper instrument, and `e2e/root-redirect.spec.ts` is the worked example.** Its four specs go red together on the *full* original state — stuck on `http://localhost:3000/` — but reverting one layer at a time says much more. Restoring the starter page while leaving the proxy fixed changes **nothing**: all four still pass, because the proxy redirects before the page can render, so the "no starter markup" assertions in them are decoration rather than coverage. Reverting the proxy's `/` branch while leaving `app/page.tsx` fixed also leaves three of the four green, because the page's own redirect still gets you to `/dashboard` — only the rotated-cookie spec goes red, on `/ should redirect rather than render`. That one spec is therefore the entire proof that the proxy layer exists, and removing the cookie copy alone reds it and nothing else. Kept as-is rather than tightened: the URL assertions are the load-bearing ones and they are honest, and a spec that fails for two reasons at once is worse than two that each fail for one.
 - **A spec that fails ~1 run in 3 but passes 3/3 in isolation is measuring the wrong thing, not flaky infrastructure.** The two-tabs document spec asserted that each tab's own row appeared after two *concurrent* `router.refresh()` calls, which is a claim about Next's refresh timing under contention rather than about documents; and it read `storage.list()` once immediately after a PUT, making a read-after-write lag indistinguishable from a lost file. Rewritten to wait for an observable settled state, reload both tabs (a fresh server render races nothing), and poll the storage read. Same claims, no races. `retries: 0` is what surfaces this instead of hiding it.
+- **And when a spec fails ~1 run in 3 *in isolation too*, it is not a race — look at the clock.** The same two-tabs spec went on failing about one run in three, with passing runs landing at 23–29s against the 30s per-test timeout. The cause was not in the spec: `localStackConfig()` in `e2e/fixtures/seed.ts` ran `execSync("npx supabase status -o env")` on **every** call, and it has twelve call sites — including inside `expect.poll` loops, so it was spawning a CLI process per poll iteration. Roughly 17 of those seconds were `npx` starting up. Memoised (the ports cannot change mid-run), the spec now runs in a flat 10.0–10.7s, 4/4. The general form: a test whose *passing* runs sit just under the timeout is already failing, it just has not been unlucky yet — read the duration, not only the pass.
 - **Sometimes the right answer to a revert experiment is to DELETE the spec.** The marketing View button had a real, shipped bug — `window.open(url, "_blank", "noopener")` **returns null by spec**, so the handle was always null, the fallback navigated the *current* tab, and the blank tab the browser had already created sat orphaned. Found by hand in Chrome; fixed and re-verified by hand. Playwright can see none of it: the cross-origin assignment never moves the page object (`waitForURL` dies with `net::ERR_ABORTED; maybe frame was detached?`, polling `opened.url()` sits on `about:blank`), and crucially the **fallback does not navigate under Playwright either** — so the broken version is indistinguishable from the fixed one. Two drafts went green with the bug deliberately restored, the first because it read `page.url()` before the fallback had had time to run, the second because the fallback never runs there at all. A spec green for the bug *and* the fix is worse than no spec: it claims coverage that does not exist. It was removed, with the reasoning left in `e2e/marketing.spec.ts` where the next person will look for it.
 - **A spec that asserts an empty state is at the mercy of whatever ran before it.** `marketing_material_events` is append-only by design — no UPDATE or DELETE grant for `authenticated` — so a spec cannot undo its own writes, and the first draft of the Email test passed or failed on test ORDER. `clearMarketingEvents(leadId)` runs as the service role for exactly that reason. Per-lead rather than a blanket wipe, so a spec cannot quietly come to depend on being the only thing running.
 - **Expect leftovers after a revert experiment.** Reverting the delete-document fix leaves a storage object with no row; reverting the orphan-cleanup leaves the same. Both are invisible (private bucket) and neither is a product bug — but the file names a spec *refuses* have to be in its cleanup list too, or the next run's empty-state assertion fails for an unrelated reason.
@@ -166,7 +168,7 @@ Postgres grants `EXECUTE` to `PUBLIC` on every new function, and `PUBLIC` includ
 3. **`commit_residual_import(batch_id_input int)` RPC** — `security definer`, guarded by an explicit `is_admin()`, moves a reviewed batch's staging rows into `rep_payout_rows`. It is an RPC and **not** an eighth Edge Function on purpose: supabase-js has no client-side transaction, so a function would insert ledger rows, delete staging rows and flip the batch status as three round trips with a real window where a period is half-imported. It also sidesteps PostgREST's row cap (`insert … select` has none), gets a fail-closed audit row for free, and keeps `auth.uid()` — so the history rows the merge triggers name the committing admin. **The `coalesce(excluded.<col>, rep_payout_rows.<col>)` on the two money columns is the entire merge rule**: reverse those arguments and every re-import silently clears a month of hand-entered residuals, violating no constraint and raising no error. `tests/rls/commit-residual-import.test.ts` asserts both directions and greps the function body for it.
 4. **`approve_pre_app(pre_app_id_input int)` RPC** — `security definer` plpgsql that creates a `merchants` row from a pre-app, flips its status to `approved`, and writes `audit_log`. It guards itself with an explicit `is_admin()` check at the top; keep that check if you edit it.
 
-**A `security definer` RPC is the exception, not the default.** `convert_ghost_sheet_to_lead`, `dashboard_counts` and `search_crm` are all plain **security invoker** functions on purpose: the caller's own policies scope every read inside them, so an agent gets their own rows and an admin the company's with no role branch in the SQL and no `agent_id` filter to fall out of step with the policies. Reach for `definer` only when the function must touch something the caller genuinely may not (the `*_secrets` tables, writing `audit_log`, creating a merchant) — and then it owes you a hand-written ownership check plus `set search_path`.
+**A `security definer` RPC is the exception, not the default.** `convert_ghost_sheet_to_lead`, `dashboard_counts` and `search_crm` are all plain **security invoker** functions on purpose: the caller's own policies scope every read inside them, so an agent gets their own rows and an admin the company's with no role branch in the SQL and no `agent_id` filter to fall out of step with the policies. Reach for `definer` only when the function must touch something the caller genuinely may not (the `*_secrets` tables, writing `audit_log`, creating a merchant) — and then it owes you a hand-written ownership check plus `set search_path`. **`dashboard_counts()` keeps that property while taking filter parameters** (`20261007120000`), including one for another rep's `agent_id` — which sounds like exactly the thing a definer is reached for and is the opposite: see the dashboard-filters section below.
 
 **`check_duplicates()` is the deliberate mirror of that, and the pair is worth reading together.** `search_crm` is invoker *so that* a search box cannot return a record the app hides; `check_duplicates` cannot be, because the duplicates that matter most are exactly the ones RLS hides — two reps working the same merchant. So it is `security definer` over `leads`, `ghost_sheets` and `merchants`, and it pays for that reach two ways: a hand-written `is_active_agent()` guard, and a return shape that for any record the caller could **not** already see carries the fact of a match plus the field it matched on and **nothing else** — `record_id`, `title` and `subtitle` are NULL from the function, not blanked in the UI. Redacted rows are also **aggregated** to `(record_type, matched_field, strength)`, so the row count cannot be read as a census of other people's books. `tests/rls/check-duplicates.test.ts` asserts `prosecdef` is **true** here — the opposite of `tests/rls/dashboard-and-search.test.ts`, and copying that file's assertion over would be asserting this function is broken.
 
@@ -335,6 +337,78 @@ Note what this means for a grants test: `has_table_privilege(…, 'UPDATE')` ret
 **The audit trigger is on `quotes` and deliberately not on `quote_line_items`.** `quotes` carries `agent_id` and the ordinary writer is the owning rep, so `log_cross_agent_change()` is quiet by default and speaks only when an admin acts on somebody else's deal — this is *not* the `rep_payout_rows` case, where no rep can write at all and the trigger would fire on every row of a forty-row import. The child table is excluded twice over: it has no `agent_id` (the `support_ticket_replies` trap), and even a working sibling function would write N+1 rows for one admin edit, N of them naming a table nobody looks up by id. The `documents` hole does not apply either — there is no UPDATE or DELETE on line items to go unrecorded.
 
 **No bulk product import yet, deliberately.** `/admin/products` adds one at a time. A column-mapping and blocker pipeline of the `rep_payout_import_rows` / `user_import_rows` kind encodes rules read off a real file, and the hardware pricing sheet does not exist yet — guessing its columns means a parser to be rewritten and a staging table whose shape is a guess. **The catalog is also deliberately unseeded:** a quote snapshots the price it was built from, so a plausible-looking placeholder figure ends up on a document a merchant reads.
+
+### The dashboard's filters narrow a view the caller already had in full
+
+`dashboard_counts()` takes six optional parameters as of `20261007120000` — rep
+(`agent_id`), manager (via `profiles.manager_id`), territory, lead stage, and a
+`created_at` range — and **stays security invoker**. That is the whole design,
+not a property it happens to retain.
+
+Every parameter is an extra `WHERE` clause **ANDed on top of** the caller's own
+policies, never a substitute for one. An agent who passes another rep's
+`agent_id` gets `agent_id = other` and the policy's `agent_id = auth.uid()`,
+which is unsatisfiable — so the answer is zero, and that is a consequence of the
+function not bypassing anything rather than a check it performs. The manager and
+territory filters resolve *through* `profiles`, and that subselect is RLS-scoped
+too (own-row plus admin), so for an agent it can only ever return their own row:
+**the same call gives an admin the whole team and a rep only themselves.**
+`tests/rls/dashboard-filters.test.ts` asserts both halves, and asserts
+`prosecdef` is false — flip that and every scoping assertion in the file
+silently becomes an assertion about nothing.
+
+**It is not an access change.** No policy is touched, and none reads
+`manager_id` or `territory` — both stay the reporting labels their column
+comments describe. A manager gains no wider book by being nameable here; what
+this adds is filtering **for an admin who already sees every row**, which is the
+exact use `profiles.manager_id`'s own comment anticipates. The test greps
+`pg_policies` for both words, the same way `set-manager` and `set-territory` do.
+
+Three decisions worth knowing before changing any of it:
+
+- **The zero-argument function is DROPPED, not replaced.** Left beside the new
+  one it would give a bare `dashboard_counts()` two candidates, since every new
+  parameter has a default — an ambiguity Postgres reports at call time, from the
+  browser, not in the migration. A test asserts the name resolves exactly once.
+- **A stage filter gets its own output column, `leads_at_stage`**, rather than
+  narrowing `active_leads`. That column means "a lead no pre-app points at yet",
+  a funnel position the records prove; a stage is something a rep types. Folded
+  together, one output would mean two things depending on a parameter — and
+  would read as near-zero for `application_sent`, whose leads are precisely the
+  ones a pre-app points at, while looking entirely healthy. It is **null** when
+  no stage was asked for, which is a different fact from zero and renders as a
+  different thing (no card at all).
+- **The upper date bound is `< to + 1`, not `<= to`.** `created_at` is a
+  timestamptz, so `<=` compares against midnight and drops everything created on
+  the last day of the range the person believes they asked for — a plausible set
+  of smaller numbers with nothing to say it is wrong.
+
+The filter bar (`components/dashboard-filters.tsx`) is a **server component with
+no client JavaScript**: stage is a `FilterTabs` row whose chips carry the other
+five filters (the job `leadsHref` does for the leads list's pair), and
+rep/manager/territory/dates are a plain GET form with an Apply button. A rep
+list is unbounded, so those four could not be chips; a form keeps them linkable
+and working with JS off rather than introducing a second interaction model. The
+three people controls are **admin-only in the UI** — not because a rep sending
+`?rep=…` would learn anything, but because for a rep every setting of them is
+their own numbers again or a blank page, and a control whose every option is a
+no-op is a broken control.
+
+**The "Your tasks" digest takes no part in any of it**, and that is structural
+rather than a promise: `DashboardTasks` reads `profile.id` and never
+`searchParams`, and sits in its own `<Suspense>` boundary *outside*
+`DashboardOverview`. The page says so in a line under the heading, because the
+filter bar sits directly above it and an admin who has just narrowed the
+overview to one rep would otherwise read that list as that rep's.
+`e2e/dashboard-filters.spec.ts` pins it by choosing a date range that empties
+every figure above and showing the digest did not move.
+
+**The e2e specs assert no hardcoded counts.** Numbers in the dev database move —
+the live suite writes to the same stack — so each filter is checked by
+*cross-reading*: an admin filtering by one rep must see exactly what that rep
+sees on their own dashboard, which the suite can load because it holds a storage
+state for them. That is both robust and a sharper claim than a constant: it says
+the filter selected the same rows the policy would.
 
 ### Follow-ups live in two places, and they are reconciled in the UI rather than in the schema
 

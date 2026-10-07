@@ -43,8 +43,17 @@ for (const persona of Object.keys(PERSONAS) as PersonaKey[]) {
     // renders from requireUser(), so reaching it proves both auth and a profile
     // row. Waiting on a URL alone would pass for the ghost-user state that
     // routes to /auth/error?error=no-profile.
+    //
+    // Scoped to the sidebar, which is what "the shell's identity block" always
+    // meant — it was an unscoped page search until the dashboard's admin-only
+    // Rep filter started rendering every profile's name as an <option>, at
+    // which point the admin's own name matched twice and this failed strict
+    // mode in SETUP, taking the whole suite with it. The sidebar is the thing
+    // being asserted; naming it is both the fix and the more honest locator.
     await expect(
-      page.getByText(PERSONAS[persona].fullName, { exact: true }),
+      page.locator("#app-sidebar").getByText(PERSONAS[persona].fullName, {
+        exact: true,
+      }),
     ).toBeVisible();
     await expect(page).not.toHaveURL(/\/auth\//);
 

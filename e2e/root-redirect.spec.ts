@@ -75,9 +75,16 @@ test.describe("the root route sends you somewhere real", () => {
 
         // The identity block renders from requireUser(), so seeing it proves we
         // arrived with a real session and a profile row — not merely that the
-        // URL changed. Same signal auth.setup.ts waits on.
+        // URL changed. Same signal auth.setup.ts waits on, and scoped to the
+        // sidebar for the same reason: the dashboard's admin-only Rep filter
+        // renders every profile's name as an <option>, so an unscoped search
+        // for the ADMIN's own name matches twice and fails strict mode. The
+        // agent never saw it, which is why this failed for one persona of the
+        // two and looked like a redirect bug.
         await expect(
-          page.getByText(PERSONAS[persona].fullName, { exact: true }),
+          page.locator("#app-sidebar").getByText(PERSONAS[persona].fullName, {
+            exact: true,
+          }),
         ).toBeVisible();
 
         // `/` must not have a page to look at. A redirect body is either empty
