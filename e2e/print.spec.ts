@@ -209,9 +209,13 @@ test.describe("a quote, laid out to hand to a merchant", () => {
     const { quote } = await seedE2E();
     await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
 
+    // The HEADING is the document type, not the rep's title. That is the
+    // sheet saying what it is to the person holding it; "Countertop package"
+    // says which one, and rides below as a subtitle.
     await expect(
-      page.getByRole("heading", { name: QUOTE_FIXTURE.title }),
+      page.getByRole("heading", { name: "Hardware Proposal" }),
     ).toBeVisible();
+    await expect(page.getByText(QUOTE_FIXTURE.title)).toBeVisible();
 
     await page.emulateMedia({ media: "print" });
 
@@ -219,8 +223,12 @@ test.describe("a quote, laid out to hand to a merchant", () => {
     // The control row is screen-only; everything the merchant reads is not.
     await expect(page.getByRole("button", { name: /Print/ })).toBeHidden();
     await expect(
-      page.getByRole("heading", { name: QUOTE_FIXTURE.title }),
+      page.getByRole("heading", { name: "Hardware Proposal" }),
       "the document lost its own header",
+    ).toBeVisible();
+    await expect(
+      page.getByText(QUOTE_FIXTURE.title),
+      "the rep's own title did not print",
     ).toBeVisible();
     await expect(
       page.getByText(QUOTE_LEAD_CONTACT.contact_name),
@@ -452,7 +460,26 @@ test.describe("the printed letterhead", () => {
     const { quote } = await seedE2E();
     await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
     await expect(
-      page.getByRole("heading", { name: QUOTE_FIXTURE.title }),
+      page.getByRole("heading", { name: "Hardware Proposal" }),
+    ).toBeVisible();
+
+    await page.emulateMedia({ media: "print" });
+    await expectLetterheadPrinted(page);
+  });
+
+  test("heads a merchant's proposal, on the route that shares the document", async ({
+    page,
+  }) => {
+    // The fifth printable route. Worth its own letterhead check rather than
+    // trusting the shared component: PrintDocument's running head is the one
+    // element on these pages that must SURVIVE print media, and a route that
+    // forgot to wrap its document in it would look identical on screen.
+    const { merchantProposal } = await seedE2E();
+    await page.goto(
+      `/merchants/${merchantProposal.merchantId}/quotes/${merchantProposal.groupId}/print`,
+    );
+    await expect(
+      page.getByRole("heading", { name: "Hardware Proposal" }),
     ).toBeVisible();
 
     await page.emulateMedia({ media: "print" });

@@ -156,8 +156,101 @@ export type SeedResult = {
   tasks: TaskFixture;
   /** The agent's own lead for the timeline spec, with one row per source. */
   timeline: TimelineFixture;
+  /** The store catalog: a branded device, what fits it, and what does not. */
+  store: StoreFixture;
+  /** A saved proposal on the agent's MERCHANT, for the second print route. */
+  merchantProposal: MerchantProposalFixture;
   apiUrl: string;
 };
+
+/**
+ * The catalog the store specs browse, with the ids resolved.
+ *
+ * Five products rather than two, because each is a different thing the store
+ * has to get right and only this combination can tell a working filter from no
+ * filter at all:
+ *
+ *   * `deviceId`          — a branded device. The one a rep adds.
+ *   * `otherDeviceId`     — a device of a DIFFERENT brand, so "filter by
+ *                           brand" and "filter by type" have something to
+ *                           exclude. Without it a filter that returned
+ *                           everything would pass.
+ *   * `fittingAddonId`    — linked to `deviceId`, and MONTHLY, so it is both
+ *                           the compatibility assertion and the monthly half
+ *                           of the split.
+ *   * `nonFittingAddonId` — linked to `otherDeviceId` only. The assertion that
+ *                           matters most: an add-on that exists, is priced,
+ *                           and must NOT be offered under `deviceId`. A
+ *                           fixture without it would pass against a store that
+ *                           ignored product_compatibility entirely.
+ *   * `archivedDeviceId`  — live-looking but archived, so "an inactive product
+ *                           is hidden" is about a row that is really there.
+ */
+export type StoreFixture = {
+  deviceId: number;
+  otherDeviceId: number;
+  fittingAddonId: number;
+  nonFittingAddonId: number;
+  archivedDeviceId: number;
+};
+
+/** The agent's merchant, with one saved proposal on it. */
+export type MerchantProposalFixture = {
+  merchantId: number;
+  /** The quote_group_id, which is what the print path is keyed on. */
+  groupId: string;
+  quoteId: number;
+};
+
+/**
+ * The store catalog's text and figures, as data both the seed and the specs
+ * read.
+ *
+ * Every name carries the E2E prefix so `ensureStoreCatalog` can converge on it
+ * by sku, and so a spec locating by name cannot accidentally match a real
+ * product if one is ever added to a dev database.
+ *
+ * The figures are chosen so the two totals cannot be confused for each other:
+ * one device at 400.00 and two monthly add-ons at 25.00 gives $400.00 one-time
+ * and $50.00 monthly. Nothing here sums to anything either total could be
+ * mistaken for, and no two products share a price.
+ */
+export const STORE_FIXTURE = {
+  brand: "E2E Hardware Co",
+  otherBrand: "E2E Rival Co",
+  deviceType: "E2E countertop",
+  otherDeviceType: "E2E full POS",
+  device: {
+    sku: "E2E-STORE-TERM",
+    name: "E2E Store Terminal",
+    price: 400,
+  },
+  otherDevice: {
+    sku: "E2E-STORE-POS",
+    name: "E2E Store POS Station",
+    price: 1200,
+  },
+  /** Fits `device`. Monthly, so it is the recurring half of the split. */
+  fittingAddon: {
+    sku: "E2E-STORE-DOCK",
+    name: "E2E Store Charging Dock",
+    price: 25,
+  },
+  /** Fits `otherDevice` ONLY. Must never be offered under `device`. */
+  nonFittingAddon: {
+    sku: "E2E-STORE-SLEEVE",
+    name: "E2E Store POS Sleeve",
+    price: 15,
+  },
+  /** Archived, so it must not appear in the store at all. */
+  archivedDevice: {
+    sku: "E2E-STORE-OLD",
+    name: "E2E Store Retired Terminal",
+    price: 99,
+  },
+  /** The title the proposal specs save under, and clear by. */
+  proposalTitle: "E2E store proposal",
+} as const;
 
 /**
  * A lead of the agent's carrying exactly one row from every timeline source.
@@ -646,8 +739,226 @@ export async function seedE2E(): Promise<SeedResult> {
   // After ensureQuote, which is what guarantees the catalog product this
   // fixture's own quote is built from.
   const timeline = await ensureTimelineLead(db, ids, materialId);
+  const store = await ensureStoreCatalog(db);
+  const merchantProposal = await ensureMerchantProposal(
+    db,
+    ids.agent,
+    docOwners.agent.merchant,
+    store,
+  );
 
-  return { ids, docOwners, materialId, quote, tasks, timeline, apiUrl };
+  return {
+    ids,
+    docOwners,
+    materialId,
+    quote,
+    tasks,
+    timeline,
+    store,
+    merchantProposal,
+    apiUrl,
+  };
+}
+
+/**
+ * The store's catalog: two devices of different brands, two add-ons of which
+ * only one fits the first device, and an archived device.
+ *
+ * Converges by sku rather than truncating, like ensureQuote's products: the
+ * catalog is referenced by quote_line_items.product_id, and a truncate would
+ * cascade every historical proposal line away — including the ones other
+ * specs assert on.
+ *
+ * COMPATIBILITY IS REWRITTEN each run, which the products are not. The links
+ * are the thing a spec asserts a negative about ("the sleeve is not offered
+ * under the terminal"), so a stale row from an earlier shape of this fixture
+ * would make that assertion pass or fail on history. Deleting by addon id is
+ * enough: product_compatibility allows DELETE for exactly this kind of
+ * current-state correction, and the two add-ons here own no other links.
+ */
+async function ensureStoreCatalog(db: SupabaseClient): Promise<StoreFixture> {
+  const upsert = async (spec: {
+    sku: string;
+    name: string;
+    price: number;
+    brand: string | null;
+    category: string;
+    kind: "device" | "addon";
+    billing: "one_time" | "monthly";
+    archived: boolean;
+  }): Promise<number> => {
+    const row = {
+      name: spec.name,
+      sku: spec.sku,
+      category: spec.category,
+      brand: spec.brand,
+      kind: spec.kind,
+      billing: spec.billing,
+      list_price: spec.price,
+      // Re-asserted both ways on every run, so a spec that archived something
+      // by hand (or a half-finished revert experiment) does not leak into the
+      // next run as a product that silently is not in the store.
+      archived_at: spec.archived ? new Date().toISOString() : null,
+    };
+
+    const { data: existing } = await db
+      .from("products")
+      .select("id")
+      .eq("sku", spec.sku)
+      .maybeSingle();
+
+    if (existing) {
+      const { error } = await db
+        .from("products")
+        .update(row)
+        .eq("id", existing.id as number);
+      if (error) throw new Error(`store product ${spec.sku}: ${error.message}`);
+      return existing.id as number;
+    }
+
+    const { data, error } = await db
+      .from("products")
+      .insert(row)
+      .select("id")
+      .single();
+    if (error || !data) {
+      throw new Error(`store product ${spec.sku}: ${error?.message ?? "no row"}`);
+    }
+    return data.id as number;
+  };
+
+  const deviceId = await upsert({
+    ...STORE_FIXTURE.device,
+    brand: STORE_FIXTURE.brand,
+    category: STORE_FIXTURE.deviceType,
+    kind: "device",
+    billing: "one_time",
+    archived: false,
+  });
+
+  const otherDeviceId = await upsert({
+    ...STORE_FIXTURE.otherDevice,
+    brand: STORE_FIXTURE.otherBrand,
+    category: STORE_FIXTURE.otherDeviceType,
+    kind: "device",
+    billing: "one_time",
+    archived: false,
+  });
+
+  const fittingAddonId = await upsert({
+    ...STORE_FIXTURE.fittingAddon,
+    brand: STORE_FIXTURE.brand,
+    category: STORE_FIXTURE.deviceType,
+    kind: "addon",
+    // MONTHLY, so this add-on is both the compatibility assertion and the
+    // recurring half of the two totals.
+    billing: "monthly",
+    archived: false,
+  });
+
+  const nonFittingAddonId = await upsert({
+    ...STORE_FIXTURE.nonFittingAddon,
+    brand: STORE_FIXTURE.otherBrand,
+    category: STORE_FIXTURE.otherDeviceType,
+    kind: "addon",
+    billing: "one_time",
+    archived: false,
+  });
+
+  const archivedDeviceId = await upsert({
+    ...STORE_FIXTURE.archivedDevice,
+    brand: STORE_FIXTURE.brand,
+    category: STORE_FIXTURE.deviceType,
+    kind: "device",
+    billing: "one_time",
+    archived: true,
+  });
+
+  // Rewritten, not topped up — see the header.
+  await db
+    .from("product_compatibility")
+    .delete()
+    .in("addon_product_id", [fittingAddonId, nonFittingAddonId]);
+
+  const { error } = await db.from("product_compatibility").insert([
+    { addon_product_id: fittingAddonId, device_product_id: deviceId },
+    // The sleeve fits the OTHER device only. That asymmetry is what makes "a
+    // non-fitting add-on is not offered" a real assertion rather than a
+    // statement about an empty table.
+    { addon_product_id: nonFittingAddonId, device_product_id: otherDeviceId },
+  ]);
+  if (error) throw new Error(`store compatibility: ${error.message}`);
+
+  return {
+    deviceId,
+    otherDeviceId,
+    fittingAddonId,
+    nonFittingAddonId,
+    archivedDeviceId,
+  };
+}
+
+/**
+ * One saved proposal on the agent's MERCHANT — a device with its add-on.
+ *
+ * Exists so /merchants/[id]/quotes/[quoteGroupId]/print has something real to
+ * render without a spec having to build one first. Written through
+ * `create_quote_version()` rather than by inserting the rows, for the reason
+ * ensureQuote does it that way: the RPC assigns the version, takes the price
+ * snapshot and writes sort_order from the array's order — and that order IS
+ * the device/add-on grouping the printed sheet reads back, so a hand-inserted
+ * fixture would be testing a shape the app never produces.
+ *
+ * Deleted and rewritten each run, matched on merchant_id + title: the lines
+ * snapshot a price, and a row surviving from an earlier version of this
+ * fixture would carry figures the spec no longer expects.
+ */
+async function ensureMerchantProposal(
+  db: SupabaseClient,
+  agentId: string,
+  merchantId: number,
+  store: StoreFixture,
+): Promise<MerchantProposalFixture> {
+  await db
+    .from("quotes")
+    .delete()
+    .eq("merchant_id", merchantId)
+    .eq("title", STORE_FIXTURE.proposalTitle);
+
+  const { data: quoteId, error } = await db.rpc("create_quote_version", {
+    // merchant_id, lead_id null — exactly one owner, which is what
+    // quotes_exactly_one_owner requires and what this fixture exists to
+    // exercise from the browser.
+    lead_id_input: null,
+    merchant_id_input: merchantId,
+    agent_id_input: agentId,
+    quote_group_id_input: null,
+    status_input: "sent",
+    title_input: STORE_FIXTURE.proposalTitle,
+    notes_input: null,
+    line_items_input: [
+      { product_id: store.deviceId, quantity: 1 },
+      { product_id: store.fittingAddonId, quantity: 2 },
+    ],
+  });
+  if (error || typeof quoteId !== "number") {
+    throw new Error(`merchant proposal: ${error?.message ?? "no id"}`);
+  }
+
+  const { data: row, error: groupError } = await db
+    .from("quotes")
+    .select("quote_group_id")
+    .eq("id", quoteId)
+    .single();
+  if (groupError || !row) {
+    throw new Error(`merchant proposal group: ${groupError?.message ?? "no row"}`);
+  }
+
+  return {
+    merchantId,
+    groupId: row.quote_group_id as string,
+    quoteId,
+  };
 }
 
 /**
