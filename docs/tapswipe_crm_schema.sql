@@ -4455,14 +4455,86 @@ $$;
 --                     value" on leads.status: a derived fact stays derived.
 --
 -- ghost_sheets and pre_apps are deliberately unfiltered totals.
+--
+-- ---------------------------------------------------------------------
+-- THE FILTERS (added 20261007) AND WHY THEY DO NOT NEED A DEFINER
+--
+-- Six optional parameters, every one defaulting to null, so a bare
+-- dashboard_counts() is byte-for-byte the function above and every
+-- existing caller keeps working untouched.
+--
+-- All of them are EXTRA WHERE CLAUSES ON TOP OF RLS, never instead of
+-- it. That is the whole security argument and it is worth stating
+-- plainly, because "filter by another rep's id" sounds like exactly the
+-- thing a definer would be reached for: an agent who passes
+-- agent_id_input = <someone else> gets `agent_id = other` ANDed with the
+-- policy's `agent_id = auth.uid()`, which is unsatisfiable, so the answer
+-- is zero rather than a disclosure. A definer version would have to
+-- re-derive the policy by hand before it could apply any of this, which
+-- is six more places for the access rule to drift in a function whose
+-- entire output is numbers about other people's books.
+--
+-- The manager and territory filters resolve THROUGH profiles, and that
+-- subselect is itself RLS-scoped: the profiles select policy is own-row
+-- plus admin, so for an agent it can only ever return their own row. A
+-- rep filtering by a manager they do not report to therefore gets zero,
+-- by the same mechanism and with no extra check.
+--
+-- NONE OF THIS IS AN ACCESS CHANGE. manager_id and territory stay the
+-- reporting labels their column comments describe -- no policy reads
+-- either, and a manager does not gain a wider book by being named here.
+-- What this adds is filtering FOR AN ADMIN WHO ALREADY SEES EVERY ROW,
+-- which is precisely the use the manager_id comment anticipates.
+--
+--   agent_id_input    one rep.
+--   manager_id_input  every rep reporting to that manager. One hop, which
+--                     is an equality rather than a recursive CTE because
+--                     set_manager() makes chains unreachable.
+--   territory_input   every rep carrying that label. Many reps per
+--                     territory, so this is a set like the manager one.
+--   from/to_date      created_at window, applied to all five tables.
+--                     to_date is INCLUSIVE of its whole day --
+--                     `< to_date + 1`, not `<= to_date`, because
+--                     created_at is a timestamptz and anything created
+--                     after midnight on the last day would otherwise
+--                     vanish from the range a person believes they asked
+--                     for.
+--   status_input      leads.status, and ONLY leads: a pipeline stage is
+--                     meaningless for a merchant or a ticket.
+--
+-- The three agent filters are applied together as one set, via
+-- scoped_agents, and only when at least one of them is given. The
+-- `by_agent` guard is not an optimisation: without it the UNFILTERED
+-- counts would start depending on the profiles select policy, so a future
+-- change there would silently move every figure on the dashboard.
+--
+-- status_input gets its OWN output column rather than narrowing
+-- active_leads, and that is the important one. active_leads means "a lead
+-- no pre-app points at yet" -- a funnel position the records prove. A
+-- stage is something a rep types. Folding the stage filter into that
+-- column would make one output mean two different things depending on a
+-- parameter, and would read as near-zero for 'application_sent' (those
+-- leads are exactly the ones a pre-app points at) while looking perfectly
+-- healthy. leads_at_stage is null when no stage was asked for, which is a
+-- different fact from zero and is rendered as a different thing.
 -- =====================================================================
-create or replace function dashboard_counts()
+drop function if exists dashboard_counts();
+
+create or replace function dashboard_counts(
+  agent_id_input uuid default null,
+  manager_id_input uuid default null,
+  territory_input text default null,
+  status_input text default null,
+  from_date_input date default null,
+  to_date_input date default null
+)
 returns table (
   active_merchants bigint,
   active_leads bigint,
   ghost_sheets_total bigint,
   pre_apps_total bigint,
-  open_tickets bigint
+  open_tickets bigint,
+  leads_at_stage bigint
 )
 language sql
 stable
@@ -4470,22 +4542,73 @@ stable
 -- `returns table` makes each one a parameter that is in scope inside the body,
 -- so an output called `ghost_sheets` would collide with the relation of the
 -- same name. Every reference below is schema- or alias-qualified for the same
--- reason.
-as $$
+-- reason. The parameters carry _input for the same reason.
+as $
+  with filters as (
+    select (agent_id_input is not null
+         or manager_id_input is not null
+         or territory_input is not null) as by_agent
+  ),
+  scoped_agents as (
+    -- RLS applies to this read like any other. For an admin it is every
+    -- matching rep; for an agent it is at most their own row, which is what
+    -- makes "filter by somebody else" return nothing instead of something.
+    select p.id
+      from public.profiles p, filters f
+     where f.by_agent
+       and (agent_id_input is null or p.id = agent_id_input)
+       and (manager_id_input is null or p.manager_id = manager_id_input)
+       and (territory_input is null or p.territory = territory_input)
+  )
   select
-    (select count(*) from public.merchants m where m.status = 'active'),
     (select count(*)
-       from public.leads l
+       from public.merchants m, filters f
+      where m.status = 'active'
+        and (not f.by_agent or m.agent_id in (select id from scoped_agents))
+        and (from_date_input is null or m.created_at >= from_date_input)
+        and (to_date_input is null or m.created_at < to_date_input + 1)),
+    (select count(*)
+       from public.leads l, filters f
       where not exists (
-        select 1 from public.pre_apps p where p.lead_id = l.id
-      )),
-    (select count(*) from public.ghost_sheets),
-    (select count(*) from public.pre_apps),
-    (select count(*) from public.support_tickets t where t.status = 'open');
-$$;
+            select 1 from public.pre_apps p where p.lead_id = l.id
+          )
+        and (not f.by_agent or l.agent_id in (select id from scoped_agents))
+        and (from_date_input is null or l.created_at >= from_date_input)
+        and (to_date_input is null or l.created_at < to_date_input + 1)),
+    (select count(*)
+       from public.ghost_sheets g, filters f
+      where (not f.by_agent or g.agent_id in (select id from scoped_agents))
+        and (from_date_input is null or g.created_at >= from_date_input)
+        and (to_date_input is null or g.created_at < to_date_input + 1)),
+    (select count(*)
+       from public.pre_apps a, filters f
+      where (not f.by_agent or a.agent_id in (select id from scoped_agents))
+        and (from_date_input is null or a.created_at >= from_date_input)
+        and (to_date_input is null or a.created_at < to_date_input + 1)),
+    (select count(*)
+       from public.support_tickets t, filters f
+      where t.status = 'open'
+        and (not f.by_agent or t.agent_id in (select id from scoped_agents))
+        and (from_date_input is null or t.created_at >= from_date_input)
+        and (to_date_input is null or t.created_at < to_date_input + 1)),
+    -- Null, not zero, when no stage was asked for. Zero would read as "no
+    -- leads at that stage" on a dashboard that was never asked about one.
+    case when status_input is null then null else (
+      select count(*)
+        from public.leads ls, filters f
+       where ls.status = status_input
+         and (not f.by_agent or ls.agent_id in (select id from scoped_agents))
+         and (from_date_input is null or ls.created_at >= from_date_input)
+         and (to_date_input is null or ls.created_at < to_date_input + 1)
+    ) end;
+$;
 
-revoke all on function dashboard_counts() from public;
-grant execute on function dashboard_counts() to authenticated, service_role;
+-- The signature changed, so these have to name the new one: the privileges on
+-- the dropped zero-argument function went with it, and a function with no
+-- explicit grants is callable by PUBLIC -- which includes anon.
+revoke all on function dashboard_counts(uuid, uuid, text, text, date, date) from public;
+grant execute on function dashboard_counts(uuid, uuid, text, text, date, date)
+  to authenticated, service_role;
 
 -- =====================================================================
 -- GLOBAL SEARCH — Tier 2. Plain function, NOT security definer, and here

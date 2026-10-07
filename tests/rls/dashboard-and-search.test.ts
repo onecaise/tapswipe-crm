@@ -304,7 +304,17 @@ describe("search_crm is scoped by the caller's own RLS", () => {
 });
 
 describe("both functions are locked down like every other RPC", () => {
-  const SIGNATURES = ["dashboard_counts()", "search_crm(text, int)"];
+  // dashboard_counts carries its full parameter list here, not `()`. The text
+  // form has_function_privilege takes is a SIGNATURE rather than a call, so it
+  // does not fill in defaults: after 20261007 added the six filter parameters,
+  // `dashboard_counts()` names a function that no longer exists and the lookup
+  // errors rather than returning false. The filters themselves are covered in
+  // dashboard-filters.test.ts; this file still owns the unfiltered scoping,
+  // which every assertion above exercises through the defaults.
+  const SIGNATURES = [
+    "dashboard_counts(uuid, uuid, text, text, date, date)",
+    "search_crm(text, int)",
+  ];
 
   it("is not executable by anon", async () => {
     await asPlatform(db);
