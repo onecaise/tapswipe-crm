@@ -96,6 +96,9 @@ function quote(over: Partial<Quote> = {}): Quote {
     quote_group_id: "group-a",
     version: 1,
     lead_id: LEAD_ID,
+    // Null, because quotes_exactly_one_owner permits exactly one owner and
+    // the timeline is a LEAD feature — a merchant quote never reaches it.
+    merchant_id: null,
     // The owning rep, because the page passes lead.agent_id into the builder.
     agent_id: "agent-uuid",
     status: "draft",

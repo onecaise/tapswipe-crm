@@ -9,7 +9,6 @@ import {
   PencilIcon,
   PlusIcon,
   PrinterIcon,
-  Trash2Icon,
   XIcon,
 } from "lucide-react";
 
@@ -19,27 +18,31 @@ import { priceNumber, type Product } from "@/lib/products";
 import {
   QUOTE_STATUSES,
   QUOTE_STATUS_LABELS,
-  type DraftLine,
+  type CartDevice,
   type Quote,
   type QuoteGroup,
   type QuoteLineItem,
-  draftProblem,
-  draftTotal,
+  type QuoteOwnerType,
+  cartFromLines,
+  cartProblem,
+  cartToPayload,
+  groupQuoteLines,
   isQuoteStatus,
-  lineItemsPayload,
-  quoteTotal,
+  lineTotals,
+  quotePrintHref,
   statusIntent,
 } from "@/lib/quotes";
+import { QuoteStore } from "@/components/quote-store";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 /**
- * The quote builder and version history on a lead.
+ * The hardware-proposal builder and version history, on a LEAD or a MERCHANT.
  *
  * **Quotes are append-only on edit, and this panel has no in-place edit
- * affordance for anything but `status`.** Revising a quote opens the builder
+ * affordance for anything but `status`.** Revising one opens the builder
  * pre-filled from the current version and SAVES A NEW VERSION; the old one
  * stays exactly as it was. That is not a UI convention a later change could
  * quietly undo — `authenticated` holds `grant update (status)` and nothing
@@ -47,59 +50,100 @@ import { Textarea } from "@/components/ui/textarea";
  * an edit from here would come back "permission denied for column" rather
  * than reporting a save that rewrote history.
  *
- * `leadId` and `agentId` arrive as props from a server page that has already
- * loaded that lead under RLS, the same discipline NotesPanel follows. Here the
- * database would in fact catch a forged lead_id — the insert policy carries an
- * `exists` on leads precisely because lead_id is client-supplied — but the
- * prop is still never read from the URL, because relying on the policy to
- * catch it means the UI's correctness depends on a clause somebody could
- * decide looks redundant.
+ * ## One component for both owner kinds
  *
- * A whole quote is written by ONE call to create_quote_version(), which is a
- * security-invoker RPC rather than two supabase-js inserts. supabase-js has no
- * client-side transaction, so the alternative leaves a real window where the
- * quote row exists and its lines do not — a $0.00 quote against a lead,
- * indistinguishable from one the rep meant to send.
+ * `ownerType` + `ownerId` arrive as props from a server page that has already
+ * loaded that record under RLS, the same discipline NotesPanel follows — and
+ * `ownerType` is a LITERAL at both call sites, never read from the URL. Here
+ * the database would in fact catch a forged id (the insert policy carries an
+ * `exists` on leads and another on merchants, precisely because both columns
+ * are client-supplied), but the prop is still never taken from a searchParam,
+ * because relying on the policy to catch it means the UI's correctness depends
+ * on a clause somebody could decide looks redundant.
+ *
+ * Two real foreign keys rather than the polymorphic owner_type/owner_id that
+ * notes and documents use — see the schema doc on quotes.lead_id. So this prop
+ * pair is a UI convenience over two nullable columns, not a stored shape, and
+ * `ownerColumn()` below is the one place it turns back into a column name.
+ *
+ * ## A whole proposal is written by ONE call
+ *
+ * `create_quote_version()` is a security-invoker RPC rather than two
+ * supabase-js inserts, because supabase-js has no client-side transaction: the
+ * alternative leaves a real window where the quote row exists and its lines do
+ * not — a $0.00 proposal against a record, indistinguishable from one the rep
+ * meant to send.
+ *
+ * ## Prices leave here, and never arrive
+ *
+ * The cart sends product_id and quantity. Price, name, sku, billing and kind
+ * are read off the catalog server-side inside the transaction, then re-derived
+ * by `snapshot_quote_line_item()` at a layer no caller can skip. So there is
+ * no field to hide and nothing to validate: a rep cannot set a price because
+ * there is no parameter for one.
  */
 export function QuotesPanel({
-  leadId,
+  ownerType,
+  ownerId,
   agentId,
   groups,
   linesByQuote,
-  products,
+  devices,
+  addons,
+  addonsByDevice,
 }: {
-  leadId: number;
+  ownerType: QuoteOwnerType;
+  ownerId: number;
+  /**
+   * The OWNING rep's id, not the viewer's.
+   *
+   * An admin building on a rep's behalf passes the REP's id — the proposal
+   * must not move into the admin's book. Same call convert_ghost_sheet_to_lead
+   * makes, and the reason documents and quotes carry no byline on the lead
+   * timeline: `agent_id` on these tables is the owner, not the actor.
+   */
   agentId: string;
   groups: QuoteGroup[];
   linesByQuote: Record<number, QuoteLineItem[]>;
-  products: Product[];
+  devices: Product[];
+  addons: Product[];
+  addonsByDevice: Map<number, number[]>;
 }) {
   const router = useRouter();
 
   /** The open builder, or null when nothing is being drafted. */
   const [draft, setDraft] = useState<{
-    /** null starts a new quote; a group id adds a version to that group. */
+    /** null starts a new proposal; a group id adds a version to that group. */
     groupId: string | null;
     basedOnVersion: number | null;
     title: string;
     notes: string;
-    lines: DraftLine[];
+    cart: CartDevice[];
   } | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const priceOf = useMemo(() => {
-    const prices = new Map(
-      products.map((p) => [p.id, priceNumber(p.list_price)]),
-    );
-    return (productId: number) => prices.get(productId) ?? null;
-  }, [products]);
+  const productOf = useMemo(() => {
+    const all = new Map<number, Product>();
+    for (const product of [...devices, ...addons]) all.set(product.id, product);
+    return all;
+  }, [devices, addons]);
 
-  const productOf = useMemo(
-    () => new Map(products.map((p) => [p.id, p])),
-    [products],
-  );
+  /**
+   * Which products the RPC would refuse, for the Save button's message.
+   *
+   * Only reachable through a revision: the store offers nothing unpriced. A
+   * revision is pre-filled from the SNAPSHOT, so a product priced when the
+   * quote was sent and unpriced now comes back into the cart — and the save
+   * would fail server-side with a message naming no line.
+   */
+  const unpriceable = (productId: number) => {
+    const product = productOf.get(productId);
+    return (
+      product === undefined || priceNumber(product.list_price) === null
+    );
+  };
 
   const startNew = () => {
     setError(null);
@@ -108,80 +152,108 @@ export function QuotesPanel({
       basedOnVersion: null,
       title: "",
       notes: "",
-      lines: [],
+      cart: [],
     });
   };
 
   /**
-   * Opens the builder pre-filled from a quote's current version.
+   * Opens the builder pre-filled from a proposal's current version.
    *
-   * Pre-filled from the SAVED LINE ITEMS rather than from the catalog, so a
-   * revision starts from what the merchant was actually shown. The quantities
-   * carry across; the prices do not, because create_quote_version() re-reads
-   * them server-side — a revision therefore picks up the current list price,
-   * which is what revising a quote means.
+   * Through cartFromLines(), which reads the device/add-on nesting off
+   * (sort_order, product_kind) — the one definition of that grouping, shared
+   * with the printed document. A second spelling here is how a revision comes
+   * to nest the add-ons differently from the sheet the rep is looking at.
    */
   const revise = (group: QuoteGroup) => {
     setError(null);
-    const lines = linesByQuote[group.current.id] ?? [];
     setDraft({
       groupId: group.quoteGroupId,
       basedOnVersion: group.current.version,
       title: group.current.title ?? "",
       notes: group.current.notes ?? "",
-      lines: lines.map((line) => ({
-        productId: line.product_id,
-        quantity: line.quantity,
-      })),
+      cart: cartFromLines(linesByQuote[group.current.id] ?? []),
     });
   };
 
-  const addLine = (productId: number) => {
-    setDraft((d) => {
-      if (!d) return d;
-      // Bump the quantity rather than adding a second line for the same
-      // product: two lines reading "Clover Flex × 1" on a document a merchant
-      // reads is a mistake, not a choice.
-      const existing = d.lines.find((line) => line.productId === productId);
+  const mutateCart = (fn: (cart: CartDevice[]) => CartDevice[]) =>
+    setDraft((d) => (d ? { ...d, cart: fn(d.cart) } : d));
+
+  const addDevice = (productId: number) =>
+    mutateCart((cart) => {
+      // Bump the quantity rather than adding a second entry for the same
+      // device: two rows reading "Flex × 1" on a document a merchant reads is
+      // a mistake, not a choice. And a second entry would also split the
+      // add-ons chosen under it across two groups.
+      const existing = cart.find((device) => device.productId === productId);
       if (existing) {
-        return {
-          ...d,
-          lines: d.lines.map((line) =>
-            line.productId === productId
-              ? { ...line, quantity: line.quantity + 1 }
-              : line,
-          ),
-        };
+        return cart.map((device) =>
+          device.productId === productId
+            ? { ...device, quantity: device.quantity + 1 }
+            : device,
+        );
       }
-      return { ...d, lines: [...d.lines, { productId, quantity: 1 }] };
+      return [...cart, { productId, quantity: 1, addons: [] }];
     });
-  };
 
-  const setQuantity = (productId: number, quantity: number) => {
-    setDraft((d) =>
-      d
-        ? {
-            ...d,
-            lines: d.lines.map((line) =>
-              line.productId === productId ? { ...line, quantity } : line,
-            ),
-          }
-        : d,
+  const deviceQuantity = (productId: number, quantity: number) =>
+    mutateCart((cart) =>
+      cart.map((device) =>
+        device.productId === productId ? { ...device, quantity } : device,
+      ),
     );
-  };
 
-  const removeLine = (productId: number) => {
-    setDraft((d) =>
-      d
-        ? { ...d, lines: d.lines.filter((line) => line.productId !== productId) }
-        : d,
+  const removeDevice = (productId: number) =>
+    // Takes its add-ons with it, which is the nesting doing its job: an add-on
+    // only exists in the context of the device it fits, so leaving one behind
+    // would strand a line the store has no way to render.
+    mutateCart((cart) => cart.filter((device) => device.productId !== productId));
+
+  const addAddon = (deviceId: number, addonId: number) =>
+    mutateCart((cart) =>
+      cart.map((device) => {
+        if (device.productId !== deviceId) return device;
+        if (device.addons.some((a) => a.productId === addonId)) return device;
+        return {
+          ...device,
+          addons: [...device.addons, { productId: addonId, quantity: 1 }],
+        };
+      }),
     );
-  };
+
+  const addonQuantity = (
+    deviceId: number,
+    addonId: number,
+    quantity: number,
+  ) =>
+    mutateCart((cart) =>
+      cart.map((device) =>
+        device.productId === deviceId
+          ? {
+              ...device,
+              addons: device.addons.map((addon) =>
+                addon.productId === addonId ? { ...addon, quantity } : addon,
+              ),
+            }
+          : device,
+      ),
+    );
+
+  const removeAddon = (deviceId: number, addonId: number) =>
+    mutateCart((cart) =>
+      cart.map((device) =>
+        device.productId === deviceId
+          ? {
+              ...device,
+              addons: device.addons.filter((a) => a.productId !== addonId),
+            }
+          : device,
+      ),
+    );
 
   const save = async () => {
     if (!draft) return;
 
-    const problem = draftProblem(draft.lines);
+    const problem = cartProblem(draft.cart, unpriceable);
     if (problem) {
       setError(problem);
       return;
@@ -192,19 +264,19 @@ export function QuotesPanel({
 
     const supabase = createClient();
     const { error: rpcError } = await supabase.rpc("create_quote_version", {
-      lead_id_input: leadId,
-      // The rep's own id, which the insert policy's `with check` requires. An
-      // admin building on a rep's behalf passes the REP's id — the quote must
-      // not move into the admin's book, which is the call
-      // convert_ghost_sheet_to_lead makes for the same reason.
+      // Exactly one of these is the record; the other is null, which is what
+      // quotes_exactly_one_owner requires. Neither parameter has a default,
+      // so this call has to say which.
+      lead_id_input: ownerType === "lead" ? ownerId : null,
+      merchant_id_input: ownerType === "merchant" ? ownerId : null,
       agent_id_input: agentId,
       quote_group_id_input: draft.groupId,
       status_input: "draft",
       title_input: draft.title,
       notes_input: draft.notes,
-      // product_id and quantity only. Price, name and sku are snapshotted
-      // server-side inside the same transaction.
-      line_items_input: lineItemsPayload(draft.lines),
+      // product_id and quantity only, in device-then-add-ons order — that
+      // order IS the grouping the printed sheet reads back.
+      line_items_input: cartToPayload(draft.cart),
     });
 
     if (rpcError) {
@@ -252,54 +324,121 @@ export function QuotesPanel({
   return (
     <section className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
-        <h2 className="font-semibold text-lg">Quotes</h2>
+        <h2 className="font-semibold text-lg">Hardware proposals</h2>
         {draft === null && (
           <Button size="sm" onClick={startNew}>
             <PlusIcon size={16} />
-            New quote
+            New proposal
           </Button>
         )}
       </div>
 
       {draft !== null && (
-        <QuoteBuilder
-          draft={draft}
-          products={products}
-          productOf={productOf}
-          priceOf={priceOf}
-          busy={busy}
-          onTitle={(title) => setDraft((d) => (d ? { ...d, title } : d))}
-          onNotes={(notes) => setDraft((d) => (d ? { ...d, notes } : d))}
-          onAdd={addLine}
-          onQuantity={setQuantity}
-          onRemove={removeLine}
-          onCancel={() => {
-            setDraft(null);
-            setError(null);
-          }}
-          onSave={() => void save()}
-        />
+        <div className="flex flex-col gap-3 rounded-md border p-3 sm:p-4">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="min-w-0 font-medium">
+              {draft.groupId === null
+                ? "New proposal"
+                : `Revising version ${draft.basedOnVersion} — saves as a new version`}
+            </h3>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => {
+                setDraft(null);
+                setError(null);
+              }}
+            >
+              <XIcon size={14} />
+              Cancel
+            </Button>
+          </div>
+
+          <div className="grid gap-1.5">
+            <label
+              className="text-xs text-muted-foreground"
+              htmlFor="quote-title"
+            >
+              Title
+            </label>
+            <Input
+              id="quote-title"
+              value={draft.title}
+              onChange={(e) =>
+                setDraft((d) => (d ? { ...d, title: e.target.value } : d))
+              }
+              placeholder="Countertop package"
+            />
+          </div>
+
+          <QuoteStore
+            devices={devices}
+            addons={addons}
+            addonsByDevice={addonsByDevice}
+            cart={draft.cart}
+            busy={busy}
+            onAddDevice={addDevice}
+            onDeviceQuantity={deviceQuantity}
+            onRemoveDevice={removeDevice}
+            onAddAddon={addAddon}
+            onAddonQuantity={addonQuantity}
+            onRemoveAddon={removeAddon}
+          />
+
+          <div className="grid gap-1.5">
+            <label
+              className="text-xs text-muted-foreground"
+              htmlFor="quote-notes"
+            >
+              Notes / terms
+            </label>
+            <Textarea
+              id="quote-notes"
+              value={draft.notes}
+              onChange={(e) =>
+                setDraft((d) => (d ? { ...d, notes: e.target.value } : d))
+              }
+              rows={2}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+            <Button
+              disabled={busy || cartProblem(draft.cart, unpriceable) !== null}
+              onClick={() => void save()}
+            >
+              <PlusIcon size={16} />
+              {draft.groupId === null ? "Save proposal" : "Save new version"}
+            </Button>
+          </div>
+
+          {cartProblem(draft.cart, unpriceable) !== null &&
+            draft.cart.length > 0 && (
+              <p className="text-sm text-destructive">
+                {cartProblem(draft.cart, unpriceable)}
+              </p>
+            )}
+        </div>
       )}
 
       {groups.length === 0 && draft === null ? (
         <p className="text-sm text-muted-foreground">
-          No quotes on this lead yet.
+          No proposals on this {ownerType === "lead" ? "lead" : "merchant"} yet.
         </p>
       ) : (
         <ul className="flex flex-col divide-y rounded-md border">
           {groups.map((group) => {
             const lines = linesByQuote[group.current.id] ?? [];
+            const totals = lineTotals(lines);
             const isOpen = expanded.has(group.quoteGroupId);
             return (
-              <li
-                key={group.quoteGroupId}
-                className="flex flex-col gap-2 p-3"
-              >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="flex flex-col gap-1">
-                    <div className="flex items-center gap-2">
+              <li key={group.quoteGroupId} className="flex flex-col gap-2 p-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">
-                        {group.current.title ?? "Untitled quote"}
+                        {group.current.title ?? "Untitled proposal"}
                       </span>
                       <StatusBadge intent={statusIntent(group.current.status)}>
                         {isQuoteStatus(group.current.status)
@@ -320,9 +459,22 @@ export function QuotesPanel({
                     </span>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">
-                      {formatMoney(quoteTotal(lines))}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {/* Two figures, never summed — see lineTotals(). */}
+                    <span className="text-sm tabular-nums">
+                      <span className="font-medium">
+                        {formatMoney(totals.oneTime)}
+                      </span>
+                      <span className="text-muted-foreground"> one-time</span>
+                      {totals.monthly > 0 && (
+                        <>
+                          {" · "}
+                          <span className="font-medium">
+                            {formatMoney(totals.monthly)}
+                          </span>
+                          <span className="text-muted-foreground">/mo</span>
+                        </>
+                      )}
                     </span>
                     {/* No ?quote= — the bare group URL prints whatever is
                         current, which is what this row is showing. A link
@@ -330,7 +482,11 @@ export function QuotesPanel({
                         version after the next revision. */}
                     <Button asChild size="sm" variant="outline">
                       <Link
-                        href={`/leads/${leadId}/quotes/${group.quoteGroupId}/print`}
+                        href={quotePrintHref(
+                          ownerType,
+                          ownerId,
+                          group.quoteGroupId,
+                        )}
                       >
                         <PrinterIcon size={14} />
                         Print
@@ -339,7 +495,7 @@ export function QuotesPanel({
                     <Button
                       size="sm"
                       variant="outline"
-                      disabled={busy}
+                      disabled={busy || draft !== null}
                       onClick={() => revise(group)}
                     >
                       <PencilIcon size={14} />
@@ -348,25 +504,12 @@ export function QuotesPanel({
                   </div>
                 </div>
 
-                <QuoteLines lines={lines} />
-
                 <div className="flex flex-wrap items-center gap-2">
-                  <label
-                    className="text-xs text-muted-foreground"
-                    htmlFor={`quote-status-${group.current.id}`}
-                  >
-                    Status
-                  </label>
-                  {/* The one mutable column, and a plain select because
-                      moving a quote to "sent" is not a destructive act and
-                      needs no confirmation step. A superseded version keeps
-                      whatever status it had, which is why only the current
-                      one is editable here. */}
                   <select
-                    id={`quote-status-${group.current.id}`}
-                    className="h-8 rounded-md border bg-background px-2 text-sm"
+                    className="h-8 rounded-md border bg-background px-2 text-xs"
                     value={group.current.status}
                     disabled={busy}
+                    aria-label={`Status of ${group.current.title ?? "proposal"}`}
                     onChange={(e) =>
                       void setStatus(group.current, e.target.value)
                     }
@@ -377,72 +520,58 @@ export function QuotesPanel({
                       </option>
                     ))}
                   </select>
-
-                  {group.versions.length > 1 && (
-                    <button
-                      type="button"
-                      className="ml-auto flex items-center gap-1 text-xs underline underline-offset-2"
-                      onClick={() => toggle(group.quoteGroupId)}
-                    >
-                      {isOpen ? (
-                        <ChevronDownIcon size={14} />
-                      ) : (
-                        <ChevronRightIcon size={14} />
-                      )}
-                      {isOpen
-                        ? "Hide earlier versions"
-                        : `${group.versions.length - 1} earlier version${
-                            group.versions.length === 2 ? "" : "s"
-                          }`}
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
+                    onClick={() => toggle(group.quoteGroupId)}
+                  >
+                    {isOpen ? (
+                      <ChevronDownIcon size={14} />
+                    ) : (
+                      <ChevronRightIcon size={14} />
+                    )}
+                    {isOpen ? "Hide" : "Lines and history"}
+                  </button>
                 </div>
 
-                {/* The history. Every superseded version renders in full,
-                    with ITS OWN snapshotted prices — which is the whole point
-                    of the design: what the merchant was shown in March does
-                    not change because the catalog did in April. */}
                 {isOpen && (
-                  <ol className="flex flex-col gap-3 border-l pl-3">
-                    {group.versions.slice(1).map((version) => (
-                      <li key={version.id} className="flex flex-col gap-1">
-                        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                          <span className="font-medium text-foreground">
-                            Version {version.version}
-                          </span>
-                          <StatusBadge intent={statusIntent(version.status)}>
-                            {isQuoteStatus(version.status)
-                              ? QUOTE_STATUS_LABELS[version.status]
-                              : version.status}
-                          </StatusBadge>
-                          <span>{formatDateTime(version.created_at)}</span>
-                          <span>·</span>
-                          <span>
-                            {formatMoney(
-                              quoteTotal(linesByQuote[version.id] ?? []),
-                            )}
-                          </span>
-                          {/* Pinned with ?quote=, unlike the current version's
-                              link above: printing history means printing THIS
-                              row, and it must not follow the group forward. The
-                              printed sheet says it is superseded. */}
-                          <Link
-                            className="flex items-center gap-1 underline underline-offset-2"
-                            href={`/leads/${leadId}/quotes/${group.quoteGroupId}/print?quote=${version.id}`}
-                          >
-                            <PrinterIcon size={12} />
-                            Print
-                          </Link>
-                        </div>
-                        <QuoteLines lines={linesByQuote[version.id] ?? []} />
-                        {version.notes && (
-                          <p className="text-xs text-muted-foreground">
-                            {version.notes}
-                          </p>
-                        )}
-                      </li>
-                    ))}
-                  </ol>
+                  <div className="flex flex-col gap-3">
+                    <QuoteLines lines={lines} />
+
+                    <ol className="flex flex-col gap-1.5 border-t pt-2">
+                      {group.versions.map((version) => (
+                        <li
+                          key={version.id}
+                          className="flex flex-col gap-0.5 text-xs"
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-medium">
+                              Version {version.version}
+                            </span>
+                            <span className="text-muted-foreground">
+                              {formatDateTime(version.created_at)}
+                            </span>
+                            <Link
+                              className="text-primary hover:underline"
+                              href={quotePrintHref(
+                                ownerType,
+                                ownerId,
+                                group.quoteGroupId,
+                                version.id,
+                              )}
+                            >
+                              Print this version
+                            </Link>
+                          </div>
+                          {version.notes && (
+                            <p className="text-muted-foreground">
+                              {version.notes}
+                            </p>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
                 )}
 
                 {group.current.notes && (
@@ -459,228 +588,78 @@ export function QuotesPanel({
       {error && <p className="text-sm text-destructive">{error}</p>}
 
       <p className="text-xs text-muted-foreground">
-        Quotes are never edited in place. Revising one saves a new version and
-        leaves the old one exactly as it was, with the prices it was sent at —
-        so a merchant disputing what they were offered can be answered from the
-        record.
+        Proposals are never edited in place. Revising one saves a new version
+        and leaves the old one exactly as it was, with the prices it was sent at
+        — so a merchant disputing what they were offered can be answered from
+        the record.
       </p>
     </section>
   );
 }
 
-/** The saved lines of one version, read-only. */
+/** The saved lines of one version, grouped device-then-add-ons. */
 function QuoteLines({ lines }: { lines: QuoteLineItem[] }) {
   if (lines.length === 0) {
     // create_quote_version() refuses a quote with no lines, so this is
     // unreachable through the app. Rendered rather than omitted because the
-    // alternative — a quote that silently shows nothing — is exactly the state
-    // the RPC exists to make impossible, and it should be legible if it ever
-    // appears.
+    // alternative — a proposal that silently shows nothing — is exactly the
+    // state the RPC exists to make impossible, and it should be legible if it
+    // ever appears.
     return (
       <p className="text-xs text-muted-foreground">No line items recorded.</p>
     );
   }
 
+  // The same grouping the printed sheet uses, from the same function: read off
+  // (sort_order, product_kind) rather than from a live join against
+  // product_compatibility, so a saved proposal does not re-group itself when
+  // an admin unlinks an accessory.
+  const groups = groupQuoteLines(lines);
+
   return (
-    <ul className="flex flex-col gap-0.5 text-sm">
-      {lines.map((line) => (
-        <li key={line.id} className="flex items-baseline gap-2">
-          <span className="text-muted-foreground tabular-nums">
-            {line.quantity}×
-          </span>
-          <span>{line.product_name}</span>
-          {line.product_sku && (
-            <span className="text-xs text-muted-foreground">
-              {line.product_sku}
-            </span>
+    <ul className="flex flex-col gap-1.5 text-sm">
+      {groups.map((group, index) => (
+        <li
+          key={group.device?.id ?? `orphans-${index}`}
+          className="flex flex-col gap-0.5"
+        >
+          {group.device !== null && <LineRow line={group.device} />}
+          {group.addons.length > 0 && (
+            <ul className="flex flex-col gap-0.5 border-l pl-3">
+              {group.addons.map((addon) => (
+                <li key={addon.id}>
+                  <LineRow line={addon} />
+                </li>
+              ))}
+            </ul>
           )}
-          <span className="ml-auto tabular-nums text-muted-foreground">
-            {formatMoney(line.unit_price)}
-          </span>
-          <span className="w-24 text-right tabular-nums">
-            {formatMoney(line.line_total)}
-          </span>
         </li>
       ))}
     </ul>
   );
 }
 
-/** The draft builder: pick from the catalog, set quantities, see the total. */
-function QuoteBuilder({
-  draft,
-  products,
-  productOf,
-  priceOf,
-  busy,
-  onTitle,
-  onNotes,
-  onAdd,
-  onQuantity,
-  onRemove,
-  onCancel,
-  onSave,
-}: {
-  draft: {
-    groupId: string | null;
-    basedOnVersion: number | null;
-    title: string;
-    notes: string;
-    lines: DraftLine[];
-  };
-  products: Product[];
-  productOf: Map<number, Product>;
-  priceOf: (productId: number) => number | null;
-  busy: boolean;
-  onTitle: (value: string) => void;
-  onNotes: (value: string) => void;
-  onAdd: (productId: number) => void;
-  onQuantity: (productId: number, quantity: number) => void;
-  onRemove: (productId: number) => void;
-  onCancel: () => void;
-  onSave: () => void;
-}) {
-  const problem = draftProblem(draft.lines);
-  const total = draftTotal(draft.lines, priceOf);
-
+function LineRow({ line }: { line: QuoteLineItem }) {
   return (
-    <div className="flex flex-col gap-3 rounded-md border p-4">
-      <div className="flex items-center justify-between">
-        <h3 className="font-medium">
-          {draft.groupId === null
-            ? "New quote"
-            : `Revising version ${draft.basedOnVersion} — saves as a new version`}
-        </h3>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
-          <XIcon size={14} />
-          Cancel
-        </Button>
-      </div>
-
-      <div className="grid gap-2">
-        <label className="text-xs text-muted-foreground" htmlFor="quote-title">
-          Title
-        </label>
-        <Input
-          id="quote-title"
-          value={draft.title}
-          onChange={(e) => onTitle(e.target.value)}
-          placeholder="Countertop package"
-        />
-      </div>
-
-      <div className="grid gap-2">
-        <label
-          className="text-xs text-muted-foreground"
-          htmlFor="quote-product"
-        >
-          Add from the catalog
-        </label>
-        {products.length === 0 ? (
-          // The catalog is deliberately empty until the real pricing sheet
-          // arrives, so this is the expected state rather than an error — and
-          // it has to say where the fix lives, since a rep cannot add a
-          // product themselves.
-          <p className="text-sm text-muted-foreground">
-            Nothing in the catalog can be quoted yet. An admin adds products,
-            with a list price, under Products.
-          </p>
-        ) : (
-          <select
-            id="quote-product"
-            className="h-9 rounded-md border bg-background px-2 text-sm"
-            value=""
-            disabled={busy}
-            onChange={(e) => {
-              const id = Number(e.target.value);
-              if (Number.isInteger(id) && id > 0) onAdd(id);
-            }}
-          >
-            <option value="">Pick a product…</option>
-            {products.map((product) => (
-              <option key={product.id} value={product.id}>
-                {product.name}
-                {product.sku ? ` (${product.sku})` : ""} —{" "}
-                {formatMoney(priceNumber(product.list_price))}
-              </option>
-            ))}
-          </select>
-        )}
-      </div>
-
-      {draft.lines.length > 0 && (
-        <ul className="flex flex-col gap-2">
-          {draft.lines.map((line) => {
-            const product = productOf.get(line.productId);
-            const price = priceOf(line.productId);
-            return (
-              <li key={line.productId} className="flex items-center gap-2">
-                <Input
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={line.quantity}
-                  disabled={busy}
-                  onChange={(e) =>
-                    onQuantity(line.productId, Number(e.target.value))
-                  }
-                  className="w-20"
-                  aria-label={`Quantity of ${product?.name ?? "product"}`}
-                />
-                <span className="text-sm">{product?.name ?? "—"}</span>
-                <span className="ml-auto text-sm tabular-nums text-muted-foreground">
-                  {formatMoney(price)}
-                </span>
-                <span className="w-24 text-right text-sm tabular-nums">
-                  {formatMoney(price === null ? null : price * line.quantity)}
-                </span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() => onRemove(line.productId)}
-                  aria-label={`Remove ${product?.name ?? "line"}`}
-                >
-                  <Trash2Icon size={14} />
-                </Button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-
-      <div className="grid gap-2">
-        <label className="text-xs text-muted-foreground" htmlFor="quote-notes">
-          Notes / terms
-        </label>
-        <Textarea
-          id="quote-notes"
-          value={draft.notes}
-          onChange={(e) => onNotes(e.target.value)}
-          rows={2}
-        />
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <span className="text-sm">
-          Total <span className="font-medium">{formatMoney(total)}</span>
-          {/* Said out loud, because it is the one place the preview can
-              disagree with what gets saved: the server re-reads the catalog
-              inside the transaction, so an admin repricing between these two
-              moments wins. */}
-          <span className="ml-2 text-xs text-muted-foreground">
-            Prices are taken from the catalog when the quote is saved.
-          </span>
+    <div className="flex items-baseline gap-2">
+      <span className="tabular-nums text-muted-foreground">
+        {line.quantity}×
+      </span>
+      <span className="min-w-0 truncate">{line.product_name}</span>
+      {line.product_sku && (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {line.product_sku}
         </span>
-        <Button disabled={busy || problem !== null} onClick={onSave}>
-          <PlusIcon size={16} />
-          {draft.groupId === null ? "Save quote" : "Save new version"}
-        </Button>
-      </div>
-
-      {problem !== null && draft.lines.length > 0 && (
-        <p className="text-sm text-destructive">{problem}</p>
       )}
+      {line.product_billing === "monthly" && (
+        <span className="shrink-0 text-xs text-muted-foreground">/mo</span>
+      )}
+      <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">
+        {formatMoney(line.unit_price)}
+      </span>
+      <span className="w-24 shrink-0 text-right tabular-nums">
+        {formatMoney(line.line_total)}
+      </span>
     </div>
   );
 }

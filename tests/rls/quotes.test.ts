@@ -130,9 +130,17 @@ async function seedCatalog(): Promise<void> {
   otherLeadId = otherLead.id;
 }
 
-/** Shorthand for the RPC, which has seven positional arguments. */
+/**
+ * Shorthand for the RPC, which has EIGHT positional arguments as of
+ * 20261007150000 — lead_id, then merchant_id.
+ *
+ * Both owner arguments are accepted here and neither defaults, matching the
+ * signature: `leadId: null, merchantId: 4` is how a merchant quote is written,
+ * and passing neither (or both) is a case the tests exercise on purpose.
+ */
 function createQuoteSql(args: {
-  leadId: number;
+  leadId?: number | null;
+  merchantId?: number | null;
   agentId: string;
   groupId: string | null;
   status?: string;
@@ -140,12 +148,14 @@ function createQuoteSql(args: {
   notes?: string | null;
   lines: { product_id: number; quantity: number }[];
 }): string {
+  const lead = args.leadId == null ? "null" : String(args.leadId);
+  const merchant = args.merchantId == null ? "null" : String(args.merchantId);
   const group = args.groupId === null ? "null" : `'${args.groupId}'`;
   const title = args.title == null ? "null" : `'${args.title}'`;
   const notes = args.notes == null ? "null" : `'${args.notes}'`;
   const lines = JSON.stringify(args.lines).replace(/'/g, "''");
   return `select create_quote_version(
-    ${args.leadId}, '${args.agentId}', ${group},
+    ${lead}, ${merchant}, '${args.agentId}', ${group},
     '${args.status ?? "draft"}', ${title}, ${notes}, '${lines}'::jsonb
   ) as id`;
 }
@@ -890,12 +900,35 @@ describe("the cross-agent audit trigger", () => {
     // The table has no agent_id (the support_ticket_replies trap), and even a
     // working variant would write N+1 audit rows for one admin edit, N of them
     // naming a table nobody looks up by id. The parent row records the event.
-    const [{ n }] = await rows<{ n: number }>(
+    //
+    // ASSERTED BY FUNCTION, not by a trigger count. This used to read
+    // `count(*) = 0` over every non-internal trigger on the table, which was a
+    // true statement standing in for the claim rather than the claim itself —
+    // and it broke the moment 20261007150000 added quote_line_items_snapshot,
+    // reporting an audit regression in a migration that added a price lock.
+    // The named-function form says what the test is about and cannot be
+    // falsified by an unrelated trigger.
+    const audit = await rows<{ tgname: string }>(
       db,
-      `select count(*)::int as n from pg_trigger
-        where tgrelid = 'quote_line_items'::regclass and not tgisinternal`,
+      `select t.tgname from pg_trigger t
+         join pg_proc p on p.oid = t.tgfoid
+        where t.tgrelid = 'quote_line_items'::regclass
+          and not t.tgisinternal
+          and p.proname = 'log_cross_agent_change'`,
     );
-    expect(n).toBe(0);
+    expect(audit).toEqual([]);
+
+    // And the snapshot trigger IS there, which is the other half of the same
+    // query and the reason the count form was ambiguous.
+    const snapshot = await rows<{ tgname: string }>(
+      db,
+      `select t.tgname from pg_trigger t
+         join pg_proc p on p.oid = t.tgfoid
+        where t.tgrelid = 'quote_line_items'::regclass
+          and not t.tgisinternal
+          and p.proname = 'snapshot_quote_line_item'`,
+    );
+    expect(snapshot).toHaveLength(1);
 
     await asUser(db, ADMIN_ID);
     await db.exec(

@@ -3116,10 +3116,30 @@ create table quotes (
   -- rep's ordinary second edit into an error they cannot act on.
   version int not null default 1 check (version >= 1),
 
-  -- ON DELETE CASCADE, like marketing_material_events.lead_id and for the
-  -- same reason: a quote is ABOUT the lead, and an orphaned one is a
-  -- document no page can place. Deleting a lead is admin-only.
-  lead_id int references leads(id) on delete cascade not null,
+  -- A quote belongs to a LEAD or to a MERCHANT -- exactly one of the two.
+  --
+  -- Both nullable with a CHECK rather than NOT NULL on either, because
+  -- the two cases are the same document at different points in a
+  -- relationship: a rep quotes hardware to win a deal, and quotes more
+  -- hardware to the same business two years later when it is a merchant
+  -- on the books. One table, one append-only version history, one
+  -- printable document.
+  --
+  -- WHY NOT a polymorphic owner_type + owner_id, which notes, tasks and
+  -- documents all use. Those three point at FOUR tables and carry no
+  -- foreign key at all, which is a documented cost -- a row can be filed
+  -- against an owner the writer cannot see, deleting an owner orphans its
+  -- rows, and `owner_type` has to be in every query or ids collide. Here
+  -- there are only two targets, so two real foreign keys cost one extra
+  -- column and buy back every one of those: the database refuses an id
+  -- that does not exist, the cascade is declared, and a query naming
+  -- lead_id cannot accidentally match a merchant.
+  --
+  -- ON DELETE CASCADE on both, like marketing_material_events.lead_id and
+  -- for the same reason: a quote is ABOUT its owner, and an orphaned one
+  -- is a document no page can place. Deleting either owner is admin-only.
+  lead_id     int references leads(id)     on delete cascade,
+  merchant_id int references merchants(id) on delete cascade,
 
   -- The owning rep, and one more column referencing profiles(id) -- ON DELETE
   -- NO ACTION, like every one of them but profiles.manager_id, so all four
@@ -3161,14 +3181,45 @@ create table quotes (
   -- same instant both compute the same number -- at which point this
   -- rejects the loser rather than letting the group fork into two rows
   -- that each think they are current.
-  unique (quote_group_id, version)
+  unique (quote_group_id, version),
+
+  -- EXACTLY ONE OWNER. num_nonnulls() rather than a spelled-out
+  -- `(a is null) <> (b is null)`: it says the rule in the words the rule
+  -- is in, and it stays right if a third owner kind is ever added.
+  --
+  -- ORDINARY, NOT `not valid`, and that is a decision rather than a
+  -- default. NOT VALID is for a constraint added over data that predates
+  -- it -- documents_file_key_matches_owner and
+  -- merchants_split_totals_100 both carry it because hand-rolled rows
+  -- already violated them. Here the existing rows can be PROVEN clean:
+  -- lead_id was `not null` until the migration that added this, and
+  -- merchant_id is brand new and therefore null on every row, so
+  -- num_nonnulls is exactly 1 for every row in the table by
+  -- construction. Reaching for NOT VALID anyway would give up a
+  -- guarantee for nothing -- and silently, because a NOT VALID
+  -- constraint looks identical in the schema and enforces nothing on the
+  -- rows that were there first.
+  constraint quotes_exactly_one_owner
+    check (num_nonnulls(lead_id, merchant_id) = 1)
 );
 
 -- "Every version of this quote, newest first" is served by the unique
--- constraint's own index on (quote_group_id, version). This one exists
--- for the OTHER query -- the lead page's "every quote on this lead",
+-- constraint's own index on (quote_group_id, version). These two exist
+-- for the OTHER query -- a detail page's "every quote on this record",
 -- which that index cannot help with at all.
-create index idx_quotes_lead on quotes(lead_id, quote_group_id, version desc);
+--
+-- PARTIAL on each owner column, which a plain two-column index could not
+-- replace: every merchant quote has a null lead_id and vice versa, so an
+-- unpartitioned index would carry a null half for each. Postgres can use
+-- a partial index only when the query's WHERE implies the predicate, and
+-- both pages do exactly that -- the lead page asks
+-- `where lead_id = $1`, which implies `lead_id is not null`.
+create index idx_quotes_lead
+  on quotes(lead_id, quote_group_id, version desc)
+  where lead_id is not null;
+create index idx_quotes_merchant
+  on quotes(merchant_id, quote_group_id, version desc)
+  where merchant_id is not null;
 create index idx_quotes_agent_id on quotes(agent_id);
 
 alter table quotes enable row level security;
@@ -3176,18 +3227,36 @@ alter table quotes enable row level security;
 create policy "select own or admin" on quotes
   for select using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
 
--- The lead_id `exists` is the documents.file_key lesson in its third
--- form, and it is here for exactly the reason the marketing events policy
--- carries one. lead_id is client-supplied and no other clause in this
--- policy reads it -- the shape that made documents.file_key a live
--- cross-agent read. Without it a rep could file quotes against another
--- rep's lead: not reading anything, but putting a document the merchant
--- never saw in front of the admin reviewing that deal.
+-- The owner `exists` clauses are the documents.file_key lesson in its
+-- third form, and they are here for exactly the reason the marketing
+-- events policy carries one. lead_id and merchant_id are both
+-- client-supplied and no other clause in this policy reads either -- the
+-- shape that made documents.file_key a live cross-agent read. Without
+-- them a rep could file quotes against another rep's lead or merchant:
+-- not reading anything, but putting a document the merchant never saw in
+-- front of the admin reviewing somebody else's deal.
 --
--- The subquery states `leads.agent_id = auth.uid()` rather than leaning on
--- RLS to filter it, matching the pre_apps child tables: same effect, and a
--- reader does not have to know policies nest to see the check is real.
-create policy "insert own via own lead" on quotes
+-- The subqueries state `agent_id = auth.uid()` rather than leaning on
+-- RLS to filter them, matching the pre_apps child tables: same effect, and
+-- a reader does not have to know policies nest to see the check is real.
+-- TWO owner branches now, and the merchant one is not optional. With
+-- lead_id nullable, the old single `exists (… leads.id = lead_id …)`
+-- returns no rows for a merchant quote -- so without the second branch a
+-- rep could not quote a merchant at all, while an admin silently could.
+--
+-- The merchant branch MIRRORS the merchants select policy
+-- (`agent_id = auth.uid() and is_active_agent()`) rather than inventing a
+-- rule: a rep may quote exactly the merchants they could already see, so
+-- there is no new reachable surface here at all. Spelled out rather than
+-- leaning on RLS to filter the subquery, matching the leads branch and
+-- the pre_apps children.
+--
+-- The `is not null` guards are what keep the two branches honest. Without
+-- them a merchant quote (lead_id null) would evaluate the leads `exists`
+-- against null and a lead quote the merchants one -- both harmlessly
+-- false today, but it would read as if either subquery could admit the
+-- other kind of row.
+create policy "insert own via own lead or merchant" on quotes
   for insert with check (
     (
       (agent_id = auth.uid() and is_active_agent())
@@ -3195,9 +3264,19 @@ create policy "insert own via own lead" on quotes
     )
     and (
       is_admin()
-      or exists (
-        select 1 from leads
-         where leads.id = lead_id and leads.agent_id = auth.uid()
+      or (
+        lead_id is not null
+        and exists (
+          select 1 from leads
+           where leads.id = lead_id and leads.agent_id = auth.uid()
+        )
+      )
+      or (
+        merchant_id is not null
+        and exists (
+          select 1 from merchants
+           where merchants.id = merchant_id and merchants.agent_id = auth.uid()
+        )
       )
     )
   );
@@ -3263,6 +3342,44 @@ create table quote_line_items (
   -- to a merchant is worse than a stale one.
   product_name text not null,
   product_sku text,
+
+  -- The other two facts a printed proposal needs, snapshotted for
+  -- exactly the reason the price and the name are.
+  --
+  -- `product_billing` decides which of the document's TWO TOTALS a line
+  -- lands in. Re-deriving it from products at print time would restate
+  -- what a merchant was shown: an admin moving a gateway from one-time to
+  -- monthly would silently move a figure between the totals on every
+  -- proposal ever printed, and the restated sheet would look exactly like
+  -- the original.
+  --
+  -- `product_kind` is what makes the document's STRUCTURE survive too.
+  -- The proposal groups each device with the add-ons under it, and that
+  -- grouping is read off (sort_order, product_kind) and nothing else: a
+  -- device line opens a group and the addon lines following it belong to
+  -- it. The alternative was joining product_compatibility live, which
+  -- would mean a saved quote re-grouping itself when an admin unlinks an
+  -- accessory -- the one thing the append-only design exists to prevent.
+  -- So the structure is derived from two snapshotted facts rather than
+  -- from the catalog, and create_quote_version() writes sort_order from
+  -- the array's own order to make that true.
+  --
+  -- Both NOT NULL. Both were backfilled from products in the migration
+  -- that added them, which is safe because `products.billing` and
+  -- `products.kind` are themselves NOT NULL with defaults, so every row
+  -- the FK points at really does have a value to copy.
+  --
+  -- NO CHECK constraint on either, deliberately, and this is where a
+  -- snapshot differs from its source. products.kind and products.billing
+  -- each carry a two-value CHECK because they are current state a person
+  -- types. These are a record of what was true WHEN THE QUOTE WAS SENT --
+  -- so if the vocabulary is ever widened or narrowed, an old row holding
+  -- a retired value is correct history, and a constraint would turn the
+  -- migration that changed the vocabulary into one that has to rewrite
+  -- documents. lib/quotes.ts guards both on read instead, the way the
+  -- lead status badge does.
+  product_billing text not null,
+  product_kind text not null,
 
   -- STORED GENERATED, like rep_payout_rows.rep_payout, and for the same
   -- reason: a total computed in the browser and written as data is a
@@ -3364,13 +3481,21 @@ security definer
 set search_path = public
 as $$
 declare
-  group_agent_id uuid;
-  max_version int;
+  group_agent_id    uuid;
+  group_lead_id     int;
+  group_merchant_id int;
+  max_version       int;
 begin
-  -- One scan for both facts. An empty group yields NULLs in both, which
-  -- is the brand-new-quote case.
-  select q.agent_id, max(q.version)
-    into group_agent_id, max_version
+  -- One scan for every fact about the group. An empty group yields NULLs
+  -- throughout, which is the brand-new-quote case.
+  --
+  -- min() on the two owner columns rather than a bare reference: they are
+  -- not in the GROUP BY, and they are constant across the group precisely
+  -- because of the check below -- so any aggregate reads the group's one
+  -- value, and min() says "whatever this group holds" without claiming an
+  -- ordering means anything.
+  select q.agent_id, min(q.lead_id), min(q.merchant_id), max(q.version)
+    into group_agent_id, group_lead_id, group_merchant_id, max_version
     from quotes q
    where q.quote_group_id = NEW.quote_group_id
    group by q.agent_id;
@@ -3380,6 +3505,30 @@ begin
     -- are already indistinguishable everywhere else here, and an error
     -- message is as good an id oracle as a status code.
     raise exception 'quote group belongs to another agent';
+  end if;
+
+  -- A GROUP CANNOT CHANGE WHO IT IS ABOUT, and this cannot be a CHECK for
+  -- the reason the agent test above cannot: a CHECK sees one row, and
+  -- this is a fact about its siblings.
+  --
+  -- Reachable without it, and not hypothetically: create_quote_version()
+  -- takes a group id and an owner as separate arguments, so a rep passing
+  -- their own group id with a different (also their own) merchant_id
+  -- would add a "version 2" about another business entirely. Nothing
+  -- would be leaked -- both records are theirs -- but the version history
+  -- would be a record of two different negotiations, and the print route
+  -- filters by owner, so it would render "version 2 of 1" on one page and
+  -- "version 1 of 1" on the other. The append-only design is there to
+  -- settle what a merchant was shown; a group spanning two merchants
+  -- cannot.
+  --
+  -- `is distinct from` on both, so a NULL on either side compares as a
+  -- real difference. Plain `<>` would be NULL -- not false -- for a lead
+  -- quote whose group_merchant_id is null, and the `if` would not fire.
+  if group_agent_id is not null
+     and (group_lead_id     is distinct from NEW.lead_id
+       or group_merchant_id is distinct from NEW.merchant_id) then
+    raise exception 'quote group belongs to a different lead or merchant';
   end if;
 
   NEW.version := coalesce(max_version, 0) + 1;
@@ -3396,6 +3545,125 @@ revoke all on function enforce_quote_version() from anon, authenticated;
 create trigger quotes_enforce_version
   before insert on quotes
   for each row execute function enforce_quote_version();
+
+-- =====================================================================
+-- snapshot_quote_line_item() — THE PRICE LOCK.
+--
+-- A rep cannot put a price on a quote. This is the layer that makes that
+-- true, and it is a trigger rather than any of the three more obvious
+-- answers, each of which fails for its own reason:
+--
+--   * HIDING THE FIELD IN THE UI. Not a boundary at all. The grant below
+--     is `grant select, insert on quote_line_items to authenticated` and
+--     the insert policy only asks whether the parent quote is the
+--     caller's -- so a rep's own session can POST a line item straight to
+--     PostgREST with any unit_price it likes, on their own quote, and
+--     every policy agrees. That is the hole this closes.
+--
+--   * A COLUMN-LEVEL GRANT, i.e. `grant insert (quote_id, product_id,
+--     quantity, sort_order)` and no privilege on unit_price. This is the
+--     right instinct -- it is exactly what makes `quotes.status` the only
+--     mutable column, and CLAUDE.md's rule is that an immutable column is
+--     a grant and not a policy. It does not work HERE, and the reason is
+--     specific: create_quote_version() is `security INVOKER`, so it
+--     inserts as the caller and would be refused its own snapshot. Making
+--     it definer to get around that would trade a narrow problem for the
+--     broad one invoker exists to avoid -- the caller's policies would
+--     stop scoping every write inside it.
+--
+--   * REVOKING INSERT ON THE TABLE ENTIRELY. Same objection, same
+--     reason: the invoker RPC needs it.
+--
+-- So: a BEFORE INSERT trigger that OVERWRITES the five snapshot columns
+-- from products, whatever the caller supplied. It sits below every
+-- caller -- the RPC, a direct PostgREST insert, a psql session -- and
+-- there is no path to the table that skips it.
+--
+-- OVERWRITE RATHER THAN RAISE on a supplied price, which is the one
+-- debatable call here. The argument for raising is CLAUDE.md's own: a
+-- write the grant refuses is an error a rep can act on, where a write RLS
+-- filters is a save that silently did nothing. It does not apply, because
+-- nothing legitimate ever supplies a price -- create_quote_version()'s
+-- signature has no parameter for one and the browser sends product_id and
+-- quantity. A supplied price is therefore always a forged request, and
+-- the honest treatment of a column the client does not own is to derive
+-- it rather than to negotiate about it. `unit_price` is a DERIVED column
+-- that happens not to be generated, because `generated always as` cannot
+-- reach another table.
+--
+-- SECURITY DEFINER, and the reason is not reach. Every active user can
+-- already read every product, so this sees nothing a caller could not.
+-- It is definer so that the figure on a document cannot be changed by
+-- changing a POLICY: an invoker trigger would read products through the
+-- caller's own select policy, so narrowing that policy later would stop
+-- the lookup finding a row and break the snapshot -- in a function whose
+-- whole job is to be the layer nobody can weaken. Compare
+-- enforce_compatibility_kinds(), which is invoker precisely because it
+-- has no such claim to make.
+--
+-- IT ALSO RE-REFUSES what create_quote_version() refuses -- a product
+-- that is absent, archived or unpriced. Not redundant: the RPC's checks
+-- produce the message a rep can act on, and these cover the direct-insert
+-- path where the RPC never ran. Without them an archived product would
+-- reach `unit_price := null` and surface as a NOT NULL violation naming
+-- the column instead of the cause.
+-- =====================================================================
+create or replace function snapshot_quote_line_item()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  p record;
+begin
+  select name, sku, list_price, billing, kind, archived_at
+    into p
+    from products
+   where id = NEW.product_id;
+
+  -- Checked rather than left to the foreign key, because a BEFORE trigger
+  -- runs ahead of constraint checks: without this the assignments below
+  -- would read NULL off an unassigned record and the insert would fail on
+  -- `product_name` being null, naming a column rather than the cause.
+  if not found then
+    raise exception 'a quote line item must name a product that is in the catalog';
+  end if;
+
+  if p.archived_at is not null then
+    raise exception 'a quote line item cannot name an archived product';
+  end if;
+
+  -- null means "not priced yet", never zero. Coalescing here is the exact
+  -- failure products.list_price is nullable to prevent: it would put a
+  -- free terminal on a document a merchant reads and raise nothing.
+  if p.list_price is null then
+    raise exception 'a quote line item must name a product that has a list price';
+  end if;
+
+  NEW.unit_price      := p.list_price;
+  NEW.product_name    := p.name;
+  NEW.product_sku     := p.sku;
+  NEW.product_billing := p.billing;
+  NEW.product_kind    := p.kind;
+
+  return NEW;
+end;
+$$;
+
+revoke all on function snapshot_quote_line_item() from public;
+-- Trigger function: revoked and deliberately NOT granted, like
+-- enforce_quote_version(), enforce_compatibility_kinds() and
+-- set_updated_at(). A trigger fires whether or not the querying role
+-- holds EXECUTE.
+revoke all on function snapshot_quote_line_item() from anon, authenticated;
+
+-- INSERT only. There is no UPDATE grant or policy on this table at either
+-- layer, so there is no update to intercept -- and adding `or update`
+-- here would quietly imply one exists.
+create trigger quote_line_items_snapshot
+  before insert on quote_line_items
+  for each row execute function snapshot_quote_line_item();
 
 -- =====================================================================
 -- create_quote_version() — writes a quote and its line items in ONE
@@ -3424,8 +3692,25 @@ create trigger quotes_enforce_version
 -- sheet. A rep passing anybody else's id is refused by the insert policy,
 -- not by code here.
 -- =====================================================================
+-- THE SEVEN-ARGUMENT VERSION IS DROPPED, NOT LEFT BESIDE THIS ONE.
+--
+-- Giving merchant_id_input a default and relying on `create or replace`
+-- does not work: `create or replace function` with a different number of
+-- parameters creates a SECOND function rather than replacing the first,
+-- and a 7-argument call would then have two candidates. Postgres reports
+-- that ambiguity at CALL time -- from the browser, as a failed save --
+-- not in the migration. Exactly the trap dashboard_counts() hit, and the
+-- answer is the same: drop the old signature in the same migration, and
+-- assert in a test that the name resolves to exactly one function.
+--
+-- Neither owner argument has a default, deliberately. supabase-js calls
+-- this with named parameters so a default would cost nothing to use --
+-- but it would let a caller pass neither and get a constraint violation
+-- naming quotes_exactly_one_owner instead of a signature that made them
+-- say which record they meant.
 create or replace function create_quote_version(
   lead_id_input int,
+  merchant_id_input int,
   agent_id_input uuid,
   quote_group_id_input uuid,
   status_input text,
@@ -3440,6 +3725,13 @@ as $$
 declare
   new_quote_id int;
 begin
+  -- Refused here as well as by quotes_exactly_one_owner, so the message
+  -- says what to do. The constraint's own error names a constraint and a
+  -- row; this names the choice the caller failed to make.
+  if (lead_id_input is null) = (merchant_id_input is null) then
+    raise exception 'a quote belongs to exactly one of a lead or a merchant';
+  end if;
+
   -- A quote with no lines is the state this function exists to make
   -- unreachable, so it is refused here rather than written and reported.
   if line_items_input is null
@@ -3493,11 +3785,12 @@ begin
   -- coalesce on the group id so a brand-new quote can pass NULL and take
   -- the column default rather than needing the caller to generate a uuid.
   insert into quotes (
-    quote_group_id, lead_id, agent_id, status, title, notes
+    quote_group_id, lead_id, merchant_id, agent_id, status, title, notes
   )
   values (
     coalesce(quote_group_id_input, gen_random_uuid()),
     lead_id_input,
+    merchant_id_input,
     agent_id_input,
     coalesce(status_input, 'draft'),
     nullif(btrim(coalesce(title_input, '')), ''),
@@ -3520,9 +3813,24 @@ begin
   -- `with ordinality` supplies sort_order from the array's own order, so
   -- the document renders in the order the rep built it rather than in
   -- whatever order the ids happen to sort.
+  --
+  -- Written here AND re-derived by snapshot_quote_line_item(), which is
+  -- two layers computing the same thing from the same table in the same
+  -- transaction, so they cannot disagree. Deliberate, and the same
+  -- arrangement documents_file_key_matches_owner has with
+  -- fileKeyMatchesOwner(): this copy is the one a reader of the RPC can
+  -- see, and the trigger is the one no caller can skip. Either alone is
+  -- correct; keeping both means dropping one does not open the hole.
+  --
+  -- `with ordinality` supplies sort_order from the array's own order, so
+  -- the document renders in the order the rep built it rather than in
+  -- whatever order the ids happen to sort. That is load-bearing rather
+  -- than cosmetic now: the printed proposal reads its device/add-on
+  -- GROUPING off (sort_order, product_kind), so the cart's order is what
+  -- puts each add-on under the device it was chosen for.
   insert into quote_line_items (
     quote_id, product_id, quantity, unit_price,
-    product_name, product_sku, sort_order
+    product_name, product_sku, product_billing, product_kind, sort_order
   )
   select
     new_quote_id,
@@ -3531,6 +3839,8 @@ begin
     p.list_price,
     p.name,
     p.sku,
+    p.billing,
+    p.kind,
     (elem.ord - 1)::int
   from jsonb_array_elements(line_items_input) with ordinality as elem(value, ord)
   join products p
@@ -3541,9 +3851,9 @@ begin
 end;
 $$;
 
-revoke all on function create_quote_version(int, uuid, uuid, text, text, text, jsonb)
+revoke all on function create_quote_version(int, int, uuid, uuid, text, text, text, jsonb)
   from public;
-grant execute on function create_quote_version(int, uuid, uuid, text, text, text, jsonb)
+grant execute on function create_quote_version(int, int, uuid, uuid, text, text, text, jsonb)
   to authenticated, service_role;
 
 

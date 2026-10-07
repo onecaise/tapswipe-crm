@@ -25,14 +25,8 @@ import {
   type MarketingMaterial,
   hasFile,
 } from "@/lib/marketing-materials";
-import { PRODUCT_COLUMNS, type Product, isQuotable } from "@/lib/products";
-import {
-  QUOTE_COLUMNS,
-  QUOTE_LINE_COLUMNS,
-  type Quote,
-  type QuoteLineItem,
-  groupQuotes,
-} from "@/lib/quotes";
+import { groupQuotes } from "@/lib/quotes";
+import { loadQuoteContext } from "@/lib/quotes-data";
 import { earliestOpenTaskDue } from "@/lib/annotations";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { buildLeadTimeline } from "@/lib/timeline";
@@ -186,55 +180,16 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
     allMaterials.map((material) => [material.id, material.title]),
   );
 
-  // Quotes on this lead, every version of every one of them, plus the catalog
-  // the builder picks from.
+  // Every proposal on this lead, every version of each, plus the catalog the
+  // store browses and which add-ons fit which devices.
   //
-  // EVERY version, not just the current one, and that is the point of the
-  // append-only design rather than an over-fetch: the history view renders
-  // superseded versions in full, with their own snapshotted prices. "Which
-  // version is current" is then decided in one place — groupQuotes(), which
-  // calls currentVersion() — because the database stores no is_current flag,
-  // only the uniqueness that makes "highest version" unambiguous.
-  //
-  // Both reads are scoped by their own policies: quotes is own-or-admin, and
-  // quote_line_items reaches the same answer through an `exists` on its
-  // parent quote. Two queries rather than an embedded select, for the reason
-  // the marketing pair above uses two — the scoping should be two policies
-  // each saying what they mean, not PostgREST's join semantics.
-  const { data: quoteRows } = await supabase
-    .from("quotes")
-    .select(QUOTE_COLUMNS)
-    .eq("lead_id", lead.id)
-    .order("created_at", { ascending: false })
-    .order("version", { ascending: false });
-  const quotes = (quoteRows ?? []) as Quote[];
-
-  const quoteIds = quotes.map((quote) => quote.id);
-  const { data: lineRows } = quoteIds.length
-    ? await supabase
-        .from("quote_line_items")
-        .select(QUOTE_LINE_COLUMNS)
-        .in("quote_id", quoteIds)
-        .order("sort_order", { ascending: true })
-    : { data: [] };
-
-  const linesByQuote: Record<number, QuoteLineItem[]> = {};
-  for (const line of (lineRows ?? []) as QuoteLineItem[]) {
-    (linesByQuote[line.quote_id] ??= []).push(line);
-  }
-
-  // Only what can actually go on a quote: live, and priced. An unpriced
-  // product is legitimate in the catalog ("call for pricing") and is refused
-  // by create_quote_version(), so offering it in the picker would be offering
-  // a choice that fails on save. The admin page is where that is visible and
-  // fixable.
-  const { data: productRows } = await supabase
-    .from("products")
-    .select(PRODUCT_COLUMNS)
-    .is("archived_at", null)
-    .order("category", { ascending: true })
-    .order("name", { ascending: true });
-  const products = ((productRows ?? []) as Product[]).filter(isQuotable);
+  // One loader shared with the merchant page, because the reads differ only in
+  // which owner column is filtered and the catalog half does not depend on the
+  // owner at all. See lib/quotes-data.ts for what each of the five policies
+  // decides, and for why an archived product is hidden by this query rather
+  // than by RLS.
+  const { quotes, linesByQuote, devices, addons, addonsByDevice } =
+    await loadQuoteContext("lead", lead.id);
 
   // The timeline, which re-sorts rows this function has ALREADY read rather
   // than reading them again: notes, tasks, documents, quotes and marketing
@@ -404,11 +359,14 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
       />
 
       <QuotesPanel
-        leadId={lead.id}
+        ownerType="lead"
+        ownerId={lead.id}
         agentId={lead.agent_id}
         groups={groupQuotes(quotes)}
         linesByQuote={linesByQuote}
-        products={products}
+        devices={devices}
+        addons={addons}
+        addonsByDevice={addonsByDevice}
       />
 
       <MarketingPanel

@@ -74,7 +74,7 @@ import {
 } from "@/lib/marketing-materials";
 import type { DocumentRow } from "@/lib/documents";
 import type { Note, Task, WithAuthor } from "@/lib/annotations";
-import type { Quote } from "@/lib/quotes";
+import { quotePrintHref, type Quote } from "@/lib/quotes";
 
 /**
  * The feed's row cap.
@@ -325,6 +325,12 @@ export function documentEntries(
  *
  * No byline, for the same reason documents have none: the page passes
  * `lead.agent_id` into the builder, so `quotes.agent_id` is the owning rep.
+ *
+ * `leadId` is taken as an argument rather than read off `quote.lead_id`, and
+ * that is still right now the column is nullable: the timeline is a LEAD
+ * feature, the page already has the lead it is rendering, and a quote reaching
+ * here with a null lead_id would be a merchant quote that does not belong on
+ * this feed at all. Trusting the column would print a link to `/leads/null`.
  */
 export function quoteEntries(
   quotes: readonly Quote[],
@@ -344,7 +350,7 @@ export function quoteEntries(
         ? `Version ${quote.version}`
         : `${quote.title} — version ${quote.version}`,
     actorName: null,
-    href: `/leads/${leadId}/quotes/${quote.quote_group_id}/print?quote=${quote.id}`,
+    href: quotePrintHref("lead", leadId, quote.quote_group_id, quote.id),
   }));
 }
 

@@ -940,6 +940,10 @@ async function ensureTimelineLead(
     "create_quote_version",
     {
       lead_id_input: leadId,
+      // Explicit null, because neither owner argument has a default: the
+      // signature makes a caller say which record a proposal is about rather
+      // than letting them pass neither and get a constraint violation.
+      merchant_id_input: null,
       agent_id_input: ids.agent,
       quote_group_id_input: null,
       status_input: "sent",
@@ -1202,6 +1206,7 @@ async function ensureQuote(
   ): Promise<{ id: number; groupId: string }> => {
     const { data, error } = await db.rpc("create_quote_version", {
       lead_id_input: leadId,
+      merchant_id_input: null,
       agent_id_input: agentId,
       quote_group_id_input: groupId,
       status_input: "sent",
