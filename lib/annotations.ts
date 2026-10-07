@@ -47,6 +47,16 @@ export type Task = {
   title: string;
   due_date: string | null;
   completed: boolean;
+  /**
+   * When the task was written, which is a different fact from when it is due.
+   *
+   * Read by the lead timeline, which places a task at its CREATION — a due
+   * date is a plan, and dating an event by it would put next Tuesday's task
+   * above everything that has already happened. The panels ignore this column:
+   * they order by `completed` then `due_date`, because what a rep wants from a
+   * task list is what to do next rather than when it was typed.
+   */
+  created_at: string | null;
 };
 
 /** Columns each panel reads. One place, so the tests assert the same sets. */
@@ -54,7 +64,7 @@ export const NOTE_LIST_COLUMNS =
   "id, agent_id, owner_type, owner_id, body, created_at";
 
 export const TASK_LIST_COLUMNS =
-  "id, agent_id, owner_type, owner_id, title, due_date, completed";
+  "id, agent_id, owner_type, owner_id, title, due_date, completed, created_at";
 
 /**
  * A row plus its author's display name, resolved server-side.

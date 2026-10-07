@@ -35,10 +35,13 @@ import {
 } from "@/lib/quotes";
 import { earliestOpenTaskDue } from "@/lib/annotations";
 import { loadAnnotations } from "@/lib/annotations-data";
+import { buildLeadTimeline } from "@/lib/timeline";
+import { loadLeadTimelineExtras } from "@/lib/timeline-data";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { DocumentsPanel } from "@/components/documents-panel";
 import { FollowupReconcile } from "@/components/followup-reconcile";
+import { LeadTimeline } from "@/components/lead-timeline";
 import { MarketingPanel } from "@/components/marketing-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { QuotesPanel } from "@/components/quotes-panel";
@@ -233,6 +236,37 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
     .order("name", { ascending: true });
   const products = ((productRows ?? []) as Product[]).filter(isQuotable);
 
+  // The timeline, which re-sorts rows this function has ALREADY read rather
+  // than reading them again: notes, tasks, documents, quotes and marketing
+  // events are all above, each under its own policy. The only new read is the
+  // admin-only `audit_log`, and it comes back empty for a rep — see the header
+  // of lib/timeline.ts for what each role ends up seeing and why no role
+  // branch is written anywhere in the feed.
+  //
+  // Only the marketing authors need resolving here. Note and task bylines were
+  // attached by loadAnnotations() already, and documents and quotes carry no
+  // byline at all — their agent_id is the lead's owner rather than whoever
+  // acted, so printing it would attribute an admin's upload to the rep.
+  const { auditRows, actorNames } = await loadLeadTimelineExtras({
+    leadId: lead.id,
+    quoteIds: quotes.map((quote) => quote.id),
+    preAppId: preApp?.id ?? null,
+    knownActorIds: marketingEvents.map((event) => event.agent_id),
+  });
+
+  const timeline = buildLeadTimeline({
+    leadId: lead.id,
+    notes,
+    tasks,
+    documents,
+    quotes,
+    marketingEvents,
+    materialTitles,
+    auditRows,
+    preAppId: preApp?.id ?? null,
+    actorNames,
+  });
+
   return (
     <>
       <PageHeader
@@ -384,6 +418,12 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
         leadId={lead.id}
         agentId={profile.id}
       />
+
+      {/* Last, because it is the one section nobody acts on. The panels above
+          are where work happens; this is the recap, and putting sixty rows of
+          history between a rep and their task list would bury the thing they
+          opened the page for. */}
+      <LeadTimeline timeline={timeline} />
     </>
   );
 }

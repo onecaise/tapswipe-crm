@@ -61,23 +61,10 @@ export async function loadAnnotations(
   const notes = (noteRows ?? []) as Note[];
   const tasks = (taskRows ?? []) as Task[];
 
-  // One lookup for both lists. Unconditional rather than admin-only: for an
-  // agent it returns their own profile row and nothing else (the profiles select
-  // policy is own-row plus admin), so it costs one cheap query and means a rep
-  // sees their own name rather than a blank byline.
-  const authorIds = [
-    ...new Set([...notes, ...tasks].map((row) => row.agent_id)),
-  ];
-  let authors = new Map<string, string>();
-  if (authorIds.length > 0) {
-    const { data: profiles } = await supabase
-      .from("profiles")
-      .select("id, full_name")
-      .in("id", authorIds);
-    authors = new Map(
-      (profiles ?? []).map((p) => [p.id as string, p.full_name as string]),
-    );
-  }
+  // One lookup for both lists, through the shared resolver — see
+  // resolveProfileNames on why a missing id means "someone else" rather than a
+  // failed query.
+  const authors = await resolveAuthors(supabase, [...notes, ...tasks]);
 
   const withAuthor = <T extends { agent_id: string }>(row: T) => ({
     ...row,
@@ -126,29 +113,47 @@ const OWNER_NAME_SOURCES: Record<
   ghost_sheet: { table: "ghost_sheets", nameColumn: "dba" },
 };
 
-type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
+export type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 
 /**
- * Author display names for a set of rows.
+ * Display names for a set of profile ids.
  *
  * Unconditional rather than admin-only: for an agent it returns their own
  * profile row and nothing else (the profiles select policy is own-row plus
  * admin), so it costs one cheap query and means a rep sees their own byline.
+ * Every caller therefore has to treat a MISSING id as "someone else", not as a
+ * lookup failure — which is why this returns a map rather than throwing on a
+ * short result.
+ *
+ * Exported because the lead timeline resolves bylines for audit actors and
+ * marketing events as well as for notes and tasks, and a second copy of this
+ * query is a second place for the own-row-or-admin subtlety to be forgotten.
  */
-async function resolveAuthors(
+export async function resolveProfileNames(
   supabase: SupabaseServerClient,
-  rows: { agent_id: string }[],
+  ids: readonly string[],
 ): Promise<Map<string, string>> {
-  const authorIds = [...new Set(rows.map((row) => row.agent_id))];
-  if (authorIds.length === 0) return new Map();
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return new Map();
 
   const { data } = await supabase
     .from("profiles")
     .select("id, full_name")
-    .in("id", authorIds);
+    .in("id", unique);
 
   return new Map(
     (data ?? []).map((p) => [p.id as string, p.full_name as string]),
+  );
+}
+
+/** Author names for a set of rows — resolveProfileNames, keyed off agent_id. */
+async function resolveAuthors(
+  supabase: SupabaseServerClient,
+  rows: readonly { agent_id: string }[],
+): Promise<Map<string, string>> {
+  return resolveProfileNames(
+    supabase,
+    rows.map((row) => row.agent_id),
   );
 }
 
