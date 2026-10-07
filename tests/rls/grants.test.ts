@@ -230,6 +230,17 @@ describe("grant surface after all migrations", () => {
       "UPDATE",
     ]);
 
+    // product_compatibility: products' three verbs PLUS DELETE, which is the
+    // one place the two catalog tables deliberately differ. A product is
+    // archived rather than deleted because quote_line_items snapshots what it
+    // said, so the row is history; a compatibility row is a current-state
+    // claim nothing snapshots, so an admin unlinking an accessory a vendor
+    // stopped supporting should remove it rather than leave a tombstone every
+    // reader has to filter. Asserted so the difference stays a decision.
+    expect(
+      await tablePrivileges(db, "authenticated", "product_compatibility"),
+    ).toEqual(["DELETE", "INSERT", "SELECT", "UPDATE"]);
+
     // quotes reports NO table-level UPDATE, which is the correct and
     // slightly surprising answer: has_table_privilege is false when the
     // privilege is held only on a column, so a column-level grant is
@@ -321,6 +332,7 @@ describe("grant surface after all migrations", () => {
       "marketing_materials",
       "marketing_material_events",
       "products",
+      "product_compatibility",
       "quotes",
       "quote_line_items",
     ]) {

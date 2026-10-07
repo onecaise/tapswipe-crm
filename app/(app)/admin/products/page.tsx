@@ -3,7 +3,9 @@ import { Suspense } from "react";
 import { requireAdmin } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import {
+  COMPATIBILITY_COLUMNS,
   PRODUCT_COLUMNS,
+  type CompatibilityRow,
   type Product,
   groupByCategory,
   priceNumber,
@@ -48,6 +50,30 @@ async function ManageCatalog() {
   ).length;
   const groups = groupByCategory(products);
 
+  // Every compatibility row, read once for the whole page. Per-row reads would
+  // be one identical query per add-on.
+  const { data: compatRows } = await supabase
+    .from("product_compatibility")
+    .select(COMPATIBILITY_COLUMNS);
+
+  // Keyed by ADD-ON here, which is the opposite of what the store needs. The
+  // store asks "a rep added this terminal, what fits it"; this page asks "this
+  // accessory is open, which devices is it ticked against" — so the same table
+  // is indexed both ways and compatibilityByDevice() serves the other caller.
+  const fitsByAddon = new Map<number, number[]>();
+  for (const row of (compatRows ?? []) as CompatibilityRow[]) {
+    const list = fitsByAddon.get(row.addon_product_id);
+    if (list) list.push(row.device_product_id);
+    else fitsByAddon.set(row.addon_product_id, [row.device_product_id]);
+  }
+
+  // Live devices only, in catalog order. Linking an add-on to an ARCHIVED
+  // device would record a pairing the store can never offer, because an
+  // archived device is not in the store to be a parent.
+  const devices = products.filter(
+    (product) => product.kind === "device" && product.archived_at === null,
+  );
+
   return (
     <>
       <ProductCreateForm />
@@ -80,7 +106,12 @@ async function ManageCatalog() {
               </h3>
               <ul className="flex flex-col divide-y rounded-md border">
                 {group.products.map((product) => (
-                  <ProductAdminRow key={product.id} product={product} />
+                  <ProductAdminRow
+                    key={product.id}
+                    product={product}
+                    devices={devices}
+                    fitsDeviceIds={fitsByAddon.get(product.id) ?? []}
+                  />
                 ))}
               </ul>
             </div>

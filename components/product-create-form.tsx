@@ -6,10 +6,17 @@ import { PlusIcon } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
 import {
+  PRODUCT_BILLINGS,
+  PRODUCT_BILLING_LABELS,
+  PRODUCT_KINDS,
+  PRODUCT_KIND_LABELS,
   SUGGESTED_PRODUCT_CATEGORIES,
+  normalizeBrand,
   normalizeSku,
   parsePriceInput,
   parseSpecsInput,
+  type ProductBilling,
+  type ProductKind,
 } from "@/lib/products";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,6 +43,11 @@ export function ProductCreateForm() {
   const [category, setCategory] = useState<string>(
     SUGGESTED_PRODUCT_CATEGORIES[0],
   );
+  const [brand, setBrand] = useState("");
+  // The column defaults match these, so a form submitted without touching
+  // either writes what the database would have written anyway.
+  const [kind, setKind] = useState<ProductKind>("device");
+  const [billing, setBilling] = useState<ProductBilling>("one_time");
   const [price, setPrice] = useState("");
   const [description, setDescription] = useState("");
   const [specs, setSpecs] = useState("");
@@ -71,6 +83,13 @@ export function ProductCreateForm() {
       // neither admin meant to touch.
       sku: normalizeSku(sku),
       category: category.trim(),
+      // Normalised to null for a related but different reason than sku's: a
+      // blank brand collides with nothing, so it would simply render as an
+      // empty heading in the rep's store. products_brand_not_blank is the
+      // boundary; this is the courtesy that keeps it from being hit.
+      brand: normalizeBrand(brand),
+      kind,
+      billing,
       list_price: parsedPrice.value,
       description: description.trim() === "" ? null : description.trim(),
       specs: parsedSpecs.value,
@@ -87,6 +106,10 @@ export function ProductCreateForm() {
     setPrice("");
     setDescription("");
     setSpecs("");
+    // brand, kind, billing and category deliberately KEEP their value. An
+    // admin entering a lineup types six terminals from one vendor in a row,
+    // and clearing these would mean re-typing the same four every time. The
+    // per-product facts are cleared; the per-batch ones are not.
     setBusy(false);
     router.refresh();
   };
@@ -145,6 +168,56 @@ export function ProductCreateForm() {
         </div>
 
         <div className="grid gap-2">
+          <Label htmlFor="product_brand">Brand</Label>
+          <Input
+            id="product_brand"
+            value={brand}
+            onChange={(e) => setBrand(e.target.value)}
+            placeholder="Clover"
+            className="w-40"
+          />
+        </div>
+
+        {/* A select, not a datalist, and that is the opposite call to
+            Category right above it. Both columns look like free text and only
+            one is: `kind` and `billing` carry two-value CHECKs because code
+            reads them — the compatibility trigger, the store's device list,
+            the proposal's two totals — so an invented value is a row all
+            three silently skip, not a new label. The control should refuse
+            what the column refuses. */}
+        <div className="grid gap-2">
+          <Label htmlFor="product_kind">Kind</Label>
+          <select
+            id="product_kind"
+            className="h-9 rounded-md border bg-background px-2 text-sm"
+            value={kind}
+            onChange={(e) => setKind(e.target.value as ProductKind)}
+          >
+            {PRODUCT_KINDS.map((value) => (
+              <option key={value} value={value}>
+                {PRODUCT_KIND_LABELS[value]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="grid gap-2">
+          <Label htmlFor="product_billing">Billing</Label>
+          <select
+            id="product_billing"
+            className="h-9 rounded-md border bg-background px-2 text-sm"
+            value={billing}
+            onChange={(e) => setBilling(e.target.value as ProductBilling)}
+          >
+            {PRODUCT_BILLINGS.map((value) => (
+              <option key={value} value={value}>
+                {PRODUCT_BILLING_LABELS[value]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="grid gap-2">
           <Label htmlFor="product_price">List price</Label>
           <Input
             id="product_price"
@@ -156,6 +229,12 @@ export function ProductCreateForm() {
           />
         </div>
       </div>
+
+      <p className="text-xs text-muted-foreground">
+        An <strong>add-on</strong> is only offered to a rep underneath a device
+        it is linked to, so one with no links is invisible in the store. Links
+        are set per add-on in the list below.
+      </p>
 
       <div className="grid gap-2">
         <Label htmlFor="product_description">Description</Label>

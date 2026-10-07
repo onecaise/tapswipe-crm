@@ -2741,7 +2741,63 @@ create table products (
   -- profiles.territory. Reference data an admin extends when the lineup
   -- grows a new kind of thing, where a CHECK would mean a migration
   -- every time a vendor ships a product category.
+  --
+  -- This is ALSO the store's "device type" filter. A second column for
+  -- that would be the same fact twice: "Countertop terminals" is what a
+  -- rep filtering by type is choosing, and two columns holding it would
+  -- drift the moment an admin filed a product under one and not the
+  -- other.
   category text not null,
+
+  -- The manufacturer, and the axis the store browses by. Free text with
+  -- no vocabulary, for the reason `category` has none.
+  --
+  -- NULLABLE, unlike category, and the store has a bucket for the nulls.
+  -- Making it NOT NULL reads like the obvious way to keep browse-by-brand
+  -- total, and it is worse: the catalog legitimately holds things no
+  -- manufacturer makes ("Gateway monthly", "PCI compliance"), so an admin
+  -- would have to type something -- and whatever they typed would then
+  -- appear in the rep's brand list as if it were a vendor.
+  --
+  -- '' must never be stored, for sku's reason one step further on: an
+  -- empty brand is not a uniqueness collision here, it is a blank heading
+  -- in the store's browse list. Both write paths normalise it to null --
+  -- normalizeBrand() in lib/products.ts, beside normalizeSku().
+  brand text,
+
+  -- Whether this is a thing a rep puts in the cart on its own, or a thing
+  -- that hangs off one.
+  --
+  -- A two-value CHECK rather than free text, which is the opposite call
+  -- to `category` and `brand` above -- and the difference is who reads
+  -- it. Those two are labels a person reads; this one is read by CODE:
+  -- product_compatibility's trigger checks it, the store lists devices
+  -- and nests add-ons, and the printed proposal groups by it. A third
+  -- value typed by an admin would not be a new kind of label, it would be
+  -- a row that every one of those three silently skips.
+  --
+  -- Defaults to 'device' so the column can be NOT NULL from the first
+  -- migration without a backfill decision: a product nobody has marked as
+  -- an accessory is a standalone thing, which is the safe reading -- it
+  -- stays visible in the store rather than vanishing into an add-on list
+  -- under a device it was never linked to.
+  kind text not null default 'device'
+    check (kind in ('device', 'addon')),
+
+  -- One-off hardware, or a recurring charge. Same closed vocabulary and
+  -- the same reason: the proposal totals two columns off this value, and
+  -- a third value would land in neither.
+  --
+  -- NOT a per-quote choice. Whether a gateway is billed monthly is a fact
+  -- about the product, so it lives here and is SNAPSHOTTED onto
+  -- quote_line_items.product_billing when a quote is written -- exactly
+  -- as the price is, and for the same reason: re-deriving it later would
+  -- restate what a merchant was shown.
+  --
+  -- Defaults to 'one_time' because every product predating this column is
+  -- hardware.
+  billing text not null default 'one_time'
+    check (billing in ('one_time', 'monthly')),
 
   -- NULLABLE, and null means "not priced yet" or "call for pricing" --
   -- never zero. The same distinction rep_payout_rows.rep_payout draws,
@@ -2825,6 +2881,195 @@ create trigger products_set_updated_at
 -- No cross-agent audit trigger: no agent_id, so log_cross_agent_change()
 -- would read NULL and log every write -- the support_ticket_replies trap,
 -- and the same answer marketing_materials gives.
+
+-- =====================================================================
+-- PRODUCT COMPATIBILITY — which add-ons fit which devices.
+--
+-- The THIRD client-readable table with no agent_id, and it inherits that
+-- shape from its parents rather than choosing it: a fact about two
+-- catalog rows cannot be owned by a rep. So the checklist in CLAUDE.md
+-- applies with its first step struck out -- there is no
+-- `agent_id uuid references profiles(id) not null` to add, and the select
+-- policy is `is_active_agent() or is_admin()` with nothing to compare an
+-- owner against, exactly as products and marketing_materials are.
+--
+-- NO SURROGATE KEY. The pair IS the key: "this add-on fits that device"
+-- is either recorded or it is not, and there is nothing a row id would
+-- identify that the pair does not. One consequence worth stating because
+-- the checklist's step 4 names it: there is no `_id_seq`, so there is no
+-- sequence grant to forget. The usual `grant usage on <t>_id_seq` line is
+-- absent here because it would refer to an object that does not exist,
+-- not because it was overlooked.
+--
+-- WHY A JOIN TABLE RATHER THAN A COLUMN. An array of device ids on the
+-- add-on, or a `fits` key in products.specs, would both store the same
+-- thing -- and neither can be a foreign key. specs in particular is the
+-- column whose documented cost is that nothing validates its keys, so a
+-- typo'd device id there is a compatibility rule that silently matches
+-- nothing. Here the FK means a device id that does not exist cannot be
+-- written at all.
+--
+-- BOTH SIDES ARE `no action`, deliberately, and it never fires. products
+-- has no DELETE policy and no DELETE grant -- retirement is archived_at
+-- -- so nothing in the app can delete the parent. If a service-role write
+-- ever tried, blocking it is the honest answer: a compatibility row whose
+-- device is gone is a claim about nothing, and cascading would delete the
+-- admin's work without saying so.
+-- =====================================================================
+create table product_compatibility (
+  addon_product_id  int references products(id) not null,
+  device_product_id int references products(id) not null,
+
+  -- Ordinary, not NOT VALID: the table is new, so it has no rows that
+  -- could fail it. See quotes_exactly_one_owner for the opposite case
+  -- handled the same way -- NOT VALID is for constraints added over data
+  -- that predates them, and reaching for it when the rows can be proven
+  -- clean buys nothing and gives up the guarantee.
+  constraint product_compatibility_distinct
+    check (addon_product_id <> device_product_id),
+
+  primary key (addon_product_id, device_product_id)
+);
+
+-- "Which add-ons fit this device" is the store's query, run every time a
+-- rep adds a device to the cart. The primary key's index leads with
+-- addon_product_id, so it cannot serve a lookup by device.
+create index idx_product_compatibility_device
+  on product_compatibility(device_product_id, addon_product_id);
+
+alter table product_compatibility enable row level security;
+
+-- Copied from products, down to is_active_agent() being the load-bearing
+-- half for the same reason: a deactivated rep holds a working JWT until
+-- it expires, and the catalog's shape is as much company information as
+-- its prices.
+create policy "select active or admin" on product_compatibility
+  for select using (is_active_agent() or is_admin());
+
+create policy "admin inserts" on product_compatibility
+  for insert with check (is_admin());
+create policy "admin updates" on product_compatibility
+  for update using (is_admin()) with check (is_admin());
+-- DELETE, unlike products. The two tables differ here and the difference
+-- is what the row MEANS. Archiving a product preserves history, because
+-- quote_line_items snapshots what it said. A compatibility row is not
+-- history -- nothing snapshots it, nothing references it, and no quote
+-- depends on it -- it is a current-state claim that an admin got wrong or
+-- that a vendor has stopped being true. An archived_at here would mean
+-- carrying tombstones that every reader has to remember to filter.
+create policy "admin deletes" on product_compatibility
+  for delete using (is_admin());
+
+-- =====================================================================
+-- The kinds, enforced where a CHECK cannot reach.
+--
+-- A CHECK sees only its own row, and the rule here is about two OTHER
+-- rows -- the same reason set_manager()'s one-hop rule lives in a
+-- function. So: a trigger.
+--
+-- WHY IT IS WORTH HAVING AT ALL, given that a wrong row is inert rather
+-- than dangerous. The store only ever asks "which add-ons fit this
+-- device", keyed on device_product_id, and only devices are offered as
+-- cart parents -- so a row written with the two ids the wrong way round
+-- matches nothing, ever, and nothing reports it. That is the
+-- `dup_digits` failure mode in another costume: an admin links an
+-- accessory to a terminal, the store does not offer it, and the catalog
+-- looks correct in /admin/products. A refusal at write time turns a
+-- silent nothing into a sentence.
+--
+-- KNOWN LIMIT, stated rather than discovered: this fires on
+-- product_compatibility, so it cannot see a product whose `kind` is
+-- changed AFTERWARDS. An admin flipping a device to 'addon' leaves its
+-- existing rows in exactly the inert state above. Guarding that needs a
+-- second trigger on products, and it is deliberately not here -- the
+-- failure is a row that does nothing, not a wrong figure on a document,
+-- and /admin/products is where a kind is changed and where the
+-- consequence belongs. If it turns out to bite, the fix is a trigger on
+-- products that refuses the change while rows reference it, not a CHECK.
+--
+-- security INVOKER, which in this repo is the default that needs no
+-- defence -- but note why no definer is wanted: only an admin may write
+-- this table, and an admin can read every product, so there is nothing
+-- here the caller may not already see. Compare snapshot_quote_line_item()
+-- below, which IS definer, and whose reason is that the price on a
+-- document must not depend on a policy.
+-- =====================================================================
+create or replace function enforce_compatibility_kinds()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare
+  addon_kind  text;
+  device_kind text;
+begin
+  select kind into addon_kind  from products where id = NEW.addon_product_id;
+  select kind into device_kind from products where id = NEW.device_product_id;
+
+  -- A missing row is left to the foreign key, which reports it precisely.
+  -- Raising here too would mean two messages for one cause, and this one
+  -- would be the vaguer of them.
+  if addon_kind is not null and addon_kind <> 'addon' then
+    raise exception 'the add-on side of a compatibility row must be a product of kind addon';
+  end if;
+
+  if device_kind is not null and device_kind <> 'device' then
+    raise exception 'the device side of a compatibility row must be a product of kind device';
+  end if;
+
+  return NEW;
+end;
+$$;
+
+revoke all on function enforce_compatibility_kinds() from public;
+-- Trigger function: revoked and deliberately NOT granted, like
+-- enforce_quote_version(), log_cross_agent_change() and set_updated_at().
+-- A trigger fires whether or not the querying role holds EXECUTE.
+
+create trigger product_compatibility_enforce_kinds
+  before insert or update on product_compatibility
+  for each row execute function enforce_compatibility_kinds();
+
+-- No cross-agent audit trigger, for the reason products has none: no
+-- agent_id, so log_cross_agent_change() would read NULL and log 100% of
+-- writes.
+
+-- =====================================================================
+-- WHAT HIDES AN ARCHIVED PRODUCT FROM A REP: THE QUERY, NOT RLS.
+--
+-- Worth stating outright, because "reps must not be offered retired
+-- hardware" sounds like a policy and must not become one.
+--
+-- The select policy on products and on product_compatibility is
+-- `is_active_agent() or is_admin()` with no row filter, and the store's
+-- query carries `.is("archived_at", null)` -- which is what
+-- app/(app)/leads/[id]/page.tsx and the merchant page already do, plus
+-- isQuotable() in lib/products.ts. Three reasons it belongs there:
+--
+--   1. AN ADMIN MUST STILL SEE EVERYTHING. /admin/products is where a
+--      product is un-archived, so a policy hiding archived rows would
+--      need a role branch -- which is two policies wearing one name, and
+--      the thing that makes a policy hard to reason about.
+--
+--   2. ARCHIVING IS A LIFECYCLE STATE, NOT AN ACCESS BOUNDARY. This is
+--      profiles.territory's lesson: a label that reads like an access
+--      rule must not be wired into one, because then changing the label
+--      silently changes who can see what. Un-archiving a terminal should
+--      put it back in the picker, not re-grant a row.
+--
+--   3. A QUOTE OUTLIVES THE PRODUCT ON IT. quote_line_items snapshots
+--      name, sku, price, billing and kind precisely so a printed
+--      proposal survives the catalog moving on -- but product_id is
+--      still a live FK, and a policy that hid archived rows would make
+--      any future join from a historical line come back empty while
+--      looking perfectly correct.
+--
+-- The consequence to accept: nothing in the DATABASE stops a rep from
+-- naming an archived product. That is covered where it matters instead,
+-- and twice -- create_quote_version() refuses one by name, and
+-- snapshot_quote_line_item() refuses it again at the one layer no caller
+-- can skip. A hidden row is a courtesy; a refused write is the boundary.
+-- =====================================================================
 
 -- =====================================================================
 -- QUOTES — what a rep offered a lead, and what it said when they sent it.
@@ -5150,6 +5395,18 @@ grant select, insert on marketing_material_events to authenticated;
 -- those is RLS's job and a grant cannot express it. No DELETE in either layer:
 -- a product is archived so the quote lines that name it stay whole.
 grant select, insert, update on products to authenticated;
+
+-- product_compatibility: products' three verbs plus DELETE, which products
+-- deliberately withholds. The difference is not an inconsistency -- see the
+-- policy's own note. A product is archived because quote lines name it; a
+-- compatibility row is a current-state claim nothing snapshots, so an admin
+-- unlinking an accessory a vendor stopped supporting should remove the row
+-- rather than leave a tombstone every reader must filter.
+--
+-- No sequence grant, and that is not a missed line from the checklist: the
+-- primary key is the (addon, device) PAIR, so the table has no `_id_seq` for a
+-- grant to refer to.
+grant select, insert, update, delete on product_compatibility to authenticated;
 
 -- quotes: SELECT and INSERT in full, and UPDATE ON ONE COLUMN.
 --

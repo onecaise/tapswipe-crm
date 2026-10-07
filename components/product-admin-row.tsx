@@ -11,8 +11,17 @@ import { formatMoney } from "@/lib/format";
 // renders once on the same page. Declaring a second copy per row would mean
 // one duplicate element id per product.
 import {
+  PRODUCT_BILLINGS,
+  PRODUCT_BILLING_LABELS,
+  PRODUCT_KINDS,
+  PRODUCT_KIND_LABELS,
   type Product,
+  type ProductBilling,
+  type ProductKind,
   formatSpecs,
+  isProductBilling,
+  isProductKind,
+  normalizeBrand,
   normalizeSku,
   parsePriceInput,
   parseSpecsInput,
@@ -38,10 +47,38 @@ import { Textarea } from "@/components/ui/textarea";
  * state, and no quote depends on its history because quote_line_items
  * snapshots the name, sku and price at quote time.
  */
-export function ProductAdminRow({ product }: { product: Product }) {
+export function ProductAdminRow({
+  product,
+  devices,
+  fitsDeviceIds,
+}: {
+  product: Product;
+  /**
+   * Every live device in the catalog, for an add-on's compatibility list.
+   *
+   * Passed from the page rather than fetched per row: forty add-ons would be
+   * forty identical reads of the same list. Live only — linking an add-on to
+   * an archived device records a pairing the store can never offer, because an
+   * archived device is not in it.
+   */
+  devices: Product[];
+  /** The device ids this add-on is already recorded as fitting. */
+  fitsDeviceIds: number[];
+}) {
   const [name, setName] = useState(product.name);
   const [sku, setSku] = useState(product.sku ?? "");
   const [category, setCategory] = useState(product.category);
+  const [brand, setBrand] = useState(product.brand ?? "");
+  // Guarded rather than cast: the column is `not null` with a CHECK, so these
+  // always hold a known value in practice — but PostgREST types them as
+  // `string`, and a widened vocabulary should fall back to a sane control
+  // rather than render a select with no matching option.
+  const [kind, setKind] = useState<ProductKind>(
+    isProductKind(product.kind) ? product.kind : "device",
+  );
+  const [billing, setBilling] = useState<ProductBilling>(
+    isProductBilling(product.billing) ? product.billing : "one_time",
+  );
   const [price, setPrice] = useState(
     priceNumber(product.list_price)?.toFixed(2) ?? "",
   );
@@ -59,6 +96,9 @@ export function ProductAdminRow({ product }: { product: Product }) {
     name.trim() !== product.name ||
     normalizeSku(sku) !== product.sku ||
     category.trim() !== product.category ||
+    normalizeBrand(brand) !== product.brand ||
+    kind !== product.kind ||
+    billing !== product.billing ||
     price.trim() !== (currentPrice?.toFixed(2) ?? "") ||
     description.trim() !== (product.description ?? "") ||
     specs.trim() !== formatSpecs(product.specs).trim();
@@ -93,6 +133,9 @@ export function ProductAdminRow({ product }: { product: Product }) {
         name: name.trim(),
         sku: normalizeSku(sku),
         category: category.trim(),
+        brand: normalizeBrand(brand),
+        kind,
+        billing,
         list_price: parsedPrice.value,
         description: description.trim() === "" ? null : description.trim(),
         specs: parsedSpecs.value,
@@ -128,6 +171,50 @@ export function ProductAdminRow({ product }: { product: Product }) {
     setBusy(false);
     router.refresh();
   };
+
+  /**
+   * Links or unlinks this add-on from one device.
+   *
+   * A DELETE and an INSERT rather than an upsert, because the row IS the fact
+   * — there is nothing to update. product_compatibility is the one catalog
+   * table that allows a delete, and the reason is here: a compatibility row is
+   * a current-state claim rather than history, so an admin unticking a device
+   * a vendor stopped supporting should remove it, not leave a tombstone every
+   * reader has to filter.
+   *
+   * No optimistic state. The row re-reads through router.refresh(), so what is
+   * ticked is always what the database holds — which matters more here than
+   * for a text field, because the trigger can REFUSE the insert (an add-on
+   * side that is not of kind 'addon'), and an optimistic tick would show a
+   * link that does not exist.
+   */
+  const setFits = async (deviceId: number, fits: boolean) => {
+    setBusy(true);
+    setError(null);
+
+    const supabase = createClient();
+    const { error: writeError } = fits
+      ? await supabase.from("product_compatibility").insert({
+          addon_product_id: product.id,
+          device_product_id: deviceId,
+        })
+      : await supabase
+          .from("product_compatibility")
+          .delete()
+          .eq("addon_product_id", product.id)
+          .eq("device_product_id", deviceId);
+
+    if (writeError) {
+      setError(writeError.message);
+      setBusy(false);
+      return;
+    }
+
+    setBusy(false);
+    router.refresh();
+  };
+
+  const fitsSet = new Set(fitsDeviceIds);
 
   return (
     <li className="flex flex-col gap-2 p-3">
@@ -175,6 +262,60 @@ export function ProductAdminRow({ product }: { product: Product }) {
               onChange={(e) => setCategory(e.target.value)}
               className="w-48"
             />
+          </div>
+          <div className="grid gap-1">
+            <label
+              className="text-xs text-muted-foreground"
+              htmlFor={`product-brand-${product.id}`}
+            >
+              Brand
+            </label>
+            <Input
+              id={`product-brand-${product.id}`}
+              value={brand}
+              onChange={(e) => setBrand(e.target.value)}
+              className="w-36"
+            />
+          </div>
+          <div className="grid gap-1">
+            <label
+              className="text-xs text-muted-foreground"
+              htmlFor={`product-kind-${product.id}`}
+            >
+              Kind
+            </label>
+            <select
+              id={`product-kind-${product.id}`}
+              className="h-9 rounded-md border bg-background px-2 text-sm"
+              value={kind}
+              onChange={(e) => setKind(e.target.value as ProductKind)}
+            >
+              {PRODUCT_KINDS.map((value) => (
+                <option key={value} value={value}>
+                  {PRODUCT_KIND_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="grid gap-1">
+            <label
+              className="text-xs text-muted-foreground"
+              htmlFor={`product-billing-${product.id}`}
+            >
+              Billing
+            </label>
+            <select
+              id={`product-billing-${product.id}`}
+              className="h-9 rounded-md border bg-background px-2 text-sm"
+              value={billing}
+              onChange={(e) => setBilling(e.target.value as ProductBilling)}
+            >
+              {PRODUCT_BILLINGS.map((value) => (
+                <option key={value} value={value}>
+                  {PRODUCT_BILLING_LABELS[value]}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="grid gap-1">
             <label
@@ -250,7 +391,60 @@ export function ProductAdminRow({ product }: { product: Product }) {
             No price — cannot be quoted
           </StatusBadge>
         )}
+        {/* An add-on reaches a rep ONLY underneath a device it is linked to,
+            so one with no links is invisible in the store however well it is
+            priced. Warning rather than error for the same reason the missing
+            price is: the fix is an admin ticking a box. */}
+        {kind === "addon" && fitsDeviceIds.length === 0 && !isArchived && (
+          <StatusBadge intent="warning">
+            Fits nothing — not offered in the store
+          </StatusBadge>
+        )}
       </div>
+
+      {/* Only for add-ons. A device has no compatibility list of its own: the
+          relation is recorded once, on the add-on, and the store reads it from
+          the device side through idx_product_compatibility_device. Offering
+          the mirror image here would be the same fact entered twice. */}
+      {kind === "addon" && (
+        <fieldset className="flex flex-col gap-1.5 rounded-md border p-2.5">
+          <legend className="px-1 text-xs text-muted-foreground">
+            Fits these devices
+          </legend>
+          {devices.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              No live devices in the catalog to link to yet.
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+              {devices.map((device) => (
+                <label
+                  key={device.id}
+                  className="flex items-center gap-1.5 text-sm"
+                >
+                  <input
+                    type="checkbox"
+                    className="size-4 rounded border"
+                    checked={fitsSet.has(device.id)}
+                    disabled={busy}
+                    onChange={(e) => void setFits(device.id, e.target.checked)}
+                  />
+                  {device.name}
+                </label>
+              ))}
+            </div>
+          )}
+          {/* Said out loud because the kind select above is live state: an
+              admin can flip a device to Add-on without saving, and the list
+              would then be offering links that the trigger refuses. */}
+          {kind !== product.kind && (
+            <p className="text-xs text-warning">
+              Save the kind change first — links are written against what the
+              catalog currently holds.
+            </p>
+          )}
+        </fieldset>
+      )}
 
       {/* Collapsed by default: these two are the long fields, and a catalog of
           forty products would otherwise be unscannable. */}

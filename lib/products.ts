@@ -9,11 +9,64 @@
 
 import type { StatusIntent } from "@/components/status-badge";
 
+/**
+ * Whether a product stands on its own in a cart, or hangs off one that does.
+ *
+ * A closed vocabulary mirroring the CHECK, unlike `category` and `brand` —
+ * and the difference is who reads it. Those two are labels a person reads;
+ * this is read by code (the compatibility trigger, the store's device list,
+ * the printed proposal's grouping), so a third value would not be a new label
+ * but a row all three silently skip.
+ */
+export const PRODUCT_KINDS = ["device", "addon"] as const;
+export type ProductKind = (typeof PRODUCT_KINDS)[number];
+
+export const PRODUCT_KIND_LABELS: Record<ProductKind, string> = {
+  device: "Device",
+  addon: "Add-on",
+};
+
+/** One-off hardware, or a recurring charge. Mirrors the CHECK. */
+export const PRODUCT_BILLINGS = ["one_time", "monthly"] as const;
+export type ProductBilling = (typeof PRODUCT_BILLINGS)[number];
+
+export const PRODUCT_BILLING_LABELS: Record<ProductBilling, string> = {
+  one_time: "One-time",
+  monthly: "Monthly",
+};
+
+/**
+ * Both guards exist for the reason isQuoteStatus() does.
+ *
+ * The columns are `not null` with a CHECK, so every row really does hold one
+ * of the two — but PostgREST types them as `string`, and a widened vocabulary
+ * would otherwise surface as a crash on a missing label rather than as a value
+ * that renders plainly. Neither is an access rule; both are display guards.
+ */
+export function isProductKind(value: string | null): value is ProductKind {
+  return (PRODUCT_KINDS as readonly string[]).includes(value ?? "");
+}
+
+export function isProductBilling(value: string | null): value is ProductBilling {
+  return (PRODUCT_BILLINGS as readonly string[]).includes(value ?? "");
+}
+
 export type Product = {
   id: number;
   name: string;
   sku: string | null;
   category: string;
+  /**
+   * The manufacturer, and the store's primary browse axis.
+   *
+   * Nullable, and the store buckets the nulls under one explicit heading.
+   * The catalog legitimately holds things no manufacturer makes, so NOT NULL
+   * would have forced an admin to type a value that then appears in a rep's
+   * brand list as if it were a vendor.
+   */
+  brand: string | null;
+  kind: string;
+  billing: string;
   list_price: string | number | null;
   description: string | null;
   specs: Record<string, unknown>;
@@ -23,7 +76,35 @@ export type Product = {
 };
 
 export const PRODUCT_COLUMNS =
-  "id, name, sku, category, list_price, description, specs, archived_at, created_at, updated_at";
+  "id, name, sku, category, brand, kind, billing, list_price, description, specs, archived_at, created_at, updated_at";
+
+/**
+ * Which add-ons fit which devices, as the store needs to ask it.
+ *
+ * Keyed by DEVICE, because the only question anything asks is "a rep just
+ * added this terminal — what fits it". The row is stored
+ * (addon_product_id, device_product_id) and the table's extra index leads
+ * with the device for exactly this lookup.
+ */
+export type CompatibilityRow = {
+  addon_product_id: number;
+  device_product_id: number;
+};
+
+export const COMPATIBILITY_COLUMNS = "addon_product_id, device_product_id";
+
+/** device id -> the add-on ids recorded as fitting it. */
+export function compatibilityByDevice(
+  rows: readonly CompatibilityRow[],
+): Map<number, number[]> {
+  const byDevice = new Map<number, number[]>();
+  for (const row of rows) {
+    const list = byDevice.get(row.device_product_id);
+    if (list) list.push(row.addon_product_id);
+    else byDevice.set(row.device_product_id, [row.addon_product_id]);
+  }
+  return byDevice;
+}
 
 /**
  * Suggested categories, mirroring SUGGESTED_CATEGORIES in
@@ -92,6 +173,72 @@ export function unquotableReason(product: Product): string | null {
 export function normalizeSku(input: string): string | null {
   const trimmed = input.trim();
   return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * Normalises a brand input to what the column should hold.
+ *
+ * Same shape as normalizeSku and a different reason. A blank sku collides with
+ * the next blank sku on idx_products_sku, so it fails loudly on the second
+ * one; `brand` has no uniqueness to trip over, so '' would simply render as an
+ * empty heading in the store's browse list and nothing would object. That is
+ * why this column — unlike sku — also carries a CHECK
+ * (`products_brand_not_blank`): this function is the courtesy, the constraint
+ * is the boundary.
+ */
+export function normalizeBrand(input: string): string | null {
+  const trimmed = input.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+/** The brand heading for products that have none. Shown, never stored. */
+export const UNBRANDED_LABEL = "Other";
+
+/**
+ * The brands present in a set of products, in display order, with the
+ * unbranded bucket last.
+ *
+ * Last rather than alphabetical: "Other" is a residue, and sorting it between
+ * two real manufacturers reads as a third manufacturer. Returns null for the
+ * bucket rather than the label, so a caller filters on the column's real value
+ * and the label stays a display concern.
+ */
+export function brandOptions(products: readonly Product[]): (string | null)[] {
+  const named = new Set<string>();
+  let hasUnbranded = false;
+  for (const product of products) {
+    if (product.brand === null || product.brand === "") hasUnbranded = true;
+    else named.add(product.brand);
+  }
+  const sorted: (string | null)[] = [...named].sort((a, b) =>
+    a.localeCompare(b),
+  );
+  if (hasUnbranded) sorted.push(null);
+  return sorted;
+}
+
+/** The categories present in a set of products — the store's "type" filter. */
+export function categoryOptions(products: readonly Product[]): string[] {
+  return [...new Set(products.map((p) => p.category))].sort((a, b) =>
+    a.localeCompare(b),
+  );
+}
+
+/**
+ * Whether a product matches a free-text search over the fields a rep would
+ * type: name, sku and brand.
+ *
+ * Not `category` or `description`. Category is already a filter beside the
+ * box, so including it means typing "terminal" silently widens to every row in
+ * that folder; description is prose, and matching it makes a search for "mini"
+ * hit anything whose blurb says "minimal setup".
+ */
+export function matchesProductSearch(product: Product, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (needle === "") return true;
+  return [product.name, product.sku, product.brand].some(
+    (field) => field !== null && field.toLowerCase().includes(needle),
+  );
 }
 
 /**
