@@ -248,8 +248,18 @@ export const STORE_FIXTURE = {
     name: "E2E Store Retired Terminal",
     price: 99,
   },
-  /** The title the proposal specs save under, and clear by. */
+  /** The title the proposal specs SAVE under, and clear by. */
   proposalTitle: "E2E store proposal",
+  /**
+   * The SEEDED merchant proposal's title, and deliberately a different string.
+   *
+   * It must not be `proposalTitle`: the specs that save a proposal clear by
+   * title first, so sharing one would make the lead specs delete the fixture
+   * the merchant print spec needs. Found exactly that way — the merchant print
+   * test passed in isolation and failed in the file run, which is the shape
+   * CLAUDE.md warns is a wrong measurement rather than flaky infrastructure.
+   */
+  merchantProposalTitle: "E2E seeded merchant proposal",
 } as const;
 
 /**
@@ -923,7 +933,7 @@ async function ensureMerchantProposal(
     .from("quotes")
     .delete()
     .eq("merchant_id", merchantId)
-    .eq("title", STORE_FIXTURE.proposalTitle);
+    .eq("title", STORE_FIXTURE.merchantProposalTitle);
 
   const { data: quoteId, error } = await db.rpc("create_quote_version", {
     // merchant_id, lead_id null — exactly one owner, which is what
@@ -934,7 +944,7 @@ async function ensureMerchantProposal(
     agent_id_input: agentId,
     quote_group_id_input: null,
     status_input: "sent",
-    title_input: STORE_FIXTURE.proposalTitle,
+    title_input: STORE_FIXTURE.merchantProposalTitle,
     notes_input: null,
     line_items_input: [
       { product_id: store.deviceId, quantity: 1 },
@@ -1660,6 +1670,79 @@ export async function clearMarketingEvents(leadId: number): Promise<void> {
     auth: { persistSession: false, autoRefreshToken: false },
   });
   await db.from("marketing_material_events").delete().eq("lead_id", leadId);
+}
+
+/**
+ * Removes the proposals a store spec SAVED, by title.
+ *
+ * Service role, because `quotes` has no DELETE policy and no DELETE grant at
+ * either layer — a proposal is evidence of what a merchant was offered, so
+ * nothing in the app can remove one. Same reason clearMarketingEvents runs as
+ * the service role.
+ *
+ * Needed because the store specs assert on what the panel LISTS after a save,
+ * and the panel lists every proposal on the record. Without this the second
+ * run would see the first run's rows and a count or an nth-match would be
+ * reading history. Scoped by title rather than wiping the record's quotes:
+ * the merchant already carries the seed's own proposal, and the agent's lead
+ * carries the print spec's two-version fixture.
+ *
+ * quote_line_items needs no clause of its own — quote_id is ON DELETE CASCADE,
+ * so the lines go with the quote. That is the contrast the schema doc draws
+ * with the marketing pair, where the child had to be cleared first.
+ */
+export async function clearProposalsTitled(title: string): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { error } = await db.from("quotes").delete().eq("title", title);
+  if (error) throw new Error(`clear proposals: ${error.message}`);
+}
+
+/**
+ * One saved proposal's lines, straight from the table.
+ *
+ * The price lock's claim is that the SNAPSHOT comes from the catalog, and the
+ * rendered page is a consequence — a store that displayed the right figure
+ * while saving a different one would look identical. So the store specs read
+ * the rows as well as the page, the way the follow-up specs read
+ * next_followup_date after a click.
+ */
+export async function proposalLines(title: string): Promise<
+  {
+    product_name: string;
+    quantity: number;
+    unit_price: string;
+    product_billing: string;
+    product_kind: string;
+    sort_order: number;
+  }[]
+> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const { data: quotes, error: quoteError } = await db
+    .from("quotes")
+    .select("id")
+    .eq("title", title)
+    .order("id", { ascending: false })
+    .limit(1);
+  if (quoteError) throw new Error(`proposal lookup: ${quoteError.message}`);
+  if (!quotes || quotes.length === 0) return [];
+
+  const { data, error } = await db
+    .from("quote_line_items")
+    .select(
+      "product_name, quantity, unit_price, product_billing, product_kind, sort_order",
+    )
+    .eq("quote_id", quotes[0].id as number)
+    .order("sort_order", { ascending: true });
+  if (error) throw new Error(`proposal lines: ${error.message}`);
+
+  return (data ?? []) as Awaited<ReturnType<typeof proposalLines>>;
 }
 
 /**
