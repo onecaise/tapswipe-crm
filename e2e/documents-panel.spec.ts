@@ -114,6 +114,18 @@ function pathFor(
 const panel = (page: Page) => page.getByRole("heading", { name: "Documents" });
 
 /**
+ * The panel's <section>, for assertions that must not match the whole page.
+ *
+ * A document's file name is no longer unique on a lead: components/lead-timeline.tsx
+ * renders an entry per upload, so a page-wide `getByText("e2e-lead.txt")`
+ * resolves to two elements and dies on strict mode. That is the feed working as
+ * intended rather than a problem to route around — but it means an assertion
+ * about THIS PANEL has to say so, which these specs always meant anyway.
+ */
+const panelSection = (page: Page) =>
+  panel(page).locator("xpath=ancestor::section[1]");
+
+/**
  * Waits until React has attached its listeners to the file input.
  *
  * `page.goto()` resolves on `load`, which is BEFORE hydration. Until React
@@ -236,8 +248,9 @@ test.describe("upload and download from every owner type's page", () => {
 
       // The row appearing is the whole three-step upload having worked: signed
       // URL, bytes into a private bucket, metadata row, then router.refresh()
-      // re-reading it through RLS.
-      await expect(page.getByText(fileName)).toBeVisible();
+      // re-reading it through RLS. Scoped to the panel: on a lead the timeline
+      // renders the same file name a second time.
+      await expect(panelSection(page).getByText(fileName)).toBeVisible();
       await expect(
         page.getByText("No documents attached yet."),
       ).toBeHidden();
@@ -860,8 +873,10 @@ test.describe("two sessions on one record", () => {
     // survived, and neither tab is missing the other's work.
     for (const tab of [one, two]) {
       await freshRender(tab);
-      await expect(tab.getByText("e2e-tab-one.txt")).toBeVisible();
-      await expect(tab.getByText("e2e-tab-two.txt")).toBeVisible();
+      // Scoped to the panel: the lead's timeline renders an entry per upload,
+      // so each file name is on this page twice.
+      await expect(panelSection(tab).getByText("e2e-tab-one.txt")).toBeVisible();
+      await expect(panelSection(tab).getByText("e2e-tab-two.txt")).toBeVisible();
     }
 
     const [rowOne] = await documentRows("e2e-tab-one.txt");

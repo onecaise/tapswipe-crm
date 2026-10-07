@@ -108,11 +108,8 @@ export const HUGE_FIGURE = 999999999999.99;
  * a spec that could bypass RLS could not prove anything about it.
  */
 export function publicStackConfig(): { apiUrl: string; publishableKey: string } {
-  const { apiUrl } = localStackConfig();
-  const raw = execSync("npx supabase status -o env", { encoding: "utf8" });
-  const match = /^PUBLISHABLE_KEY="?(.*?)"?$/m.exec(raw);
-  if (!match) throw new Error("No PUBLISHABLE_KEY from supabase status");
-  return { apiUrl, publishableKey: match[1] };
+  const { apiUrl, publishableKey } = localStackConfig();
+  return { apiUrl, publishableKey };
 }
 
 /**
@@ -157,8 +154,72 @@ export type SeedResult = {
   quote: QuoteFixture;
   /** The task rows behind the dashboard digest and the follow-up affordance. */
   tasks: TaskFixture;
+  /** The agent's own lead for the timeline spec, with one row per source. */
+  timeline: TimelineFixture;
   apiUrl: string;
 };
+
+/**
+ * A lead of the agent's carrying exactly one row from every timeline source.
+ *
+ * ## Why a dedicated lead rather than the agent's main one
+ *
+ * The main lead already has four tasks, two quote versions and documents, so it
+ * looks like the cheaper fixture. It is not, for two reasons that bite in
+ * different ways:
+ *
+ *   * marketing.spec.ts calls `clearMarketingEvents(docOwners.agent.lead)` to
+ *     get a clean empty state. Specs run in parallel across files, so a
+ *     timeline assertion about a marketing event on that lead would pass or
+ *     fail on which file got there first.
+ *   * Its audit trail is not knowable. The seed's own service-role UPDATEs to
+ *     that lead (the follow-up reset, the quote contact re-assert) each fire
+ *     log_cross_agent_change() with `auth.uid()` null, so every run leaves
+ *     another `cross_agent_update` row behind. Counting audit entries there
+ *     means counting how many times anybody has ever run the suite.
+ *
+ * Same reasoning as `quietLeadId`: a spec's precondition should not depend on
+ * another spec's cleanup.
+ *
+ * ## And why exactly one row per source
+ *
+ * The spec's claim is about WHICH sources a role can see, not about volume. One
+ * row each makes "the admin sees six kinds of event and the rep sees five"
+ * countable, and makes the one absent kind unambiguous.
+ */
+export type TimelineFixture = {
+  /** The lead, owned by `agent`. Nothing else in the suite touches it. */
+  leadId: number;
+  /** Its single quote version, and the group the print link is keyed on. */
+  quoteId: number;
+  quoteGroupId: string;
+};
+
+/**
+ * The timeline fixture's text, as data both the seed and the spec read.
+ *
+ * Every string is distinctive enough to locate by, because the spec asserts on
+ * what is RENDERED rather than on row counts — the lead page draws these same
+ * rows into five panels as well as into the feed, so a locator scoped to the
+ * timeline section plus a unique string is what keeps the two apart.
+ */
+export const TIMELINE_FIXTURE = {
+  dba: "E2E-TIMELINE-agent",
+  noteBody: "E2E timeline note — merchant asked about chargeback fees",
+  taskTitle: "E2E timeline task — confirm bank letter",
+  quoteTitle: "E2E timeline quote",
+  docType: "E2E timeline statement",
+  docFileName: "e2e-timeline-statement.pdf",
+  /**
+   * What the admin writes into `lead_source`, which is what makes the audit
+   * row exist at all: log_cross_agent_change() fires only when the actor is
+   * not the row's `agent_id`, so a rep's own edit leaves no trail and an
+   * admin's does. A free-text column nothing else asserts on.
+   */
+  adminLeadSource: "E2E admin edit",
+  /** The status the admin moves the quote to, for the quotes-table audit row. */
+  adminQuoteStatus: "accepted",
+} as const;
 
 /**
  * The seeded tasks, with the dates resolved.
@@ -306,9 +367,15 @@ export const QUOTE_LEAD_CONTACT = {
  * stale cache would. The non-local guard below still runs, on the first call,
  * which is the only call that could be wrong about it.
  */
-let cachedStackConfig: { apiUrl: string; serviceKey: string } | null = null;
+type StackConfig = {
+  apiUrl: string;
+  serviceKey: string;
+  publishableKey: string;
+};
 
-function localStackConfig(): { apiUrl: string; serviceKey: string } {
+let cachedStackConfig: StackConfig | null = null;
+
+function localStackConfig(): StackConfig {
   if (cachedStackConfig !== null) return cachedStackConfig;
 
   const raw = execSync("npx supabase status -o env", { encoding: "utf8" });
@@ -320,7 +387,12 @@ function localStackConfig(): { apiUrl: string; serviceKey: string } {
 
   const apiUrl = cfg.get("API_URL");
   const serviceKey = cfg.get("SERVICE_ROLE_KEY");
-  if (!apiUrl || !serviceKey) {
+  // Taken from the SAME output rather than by spawning `supabase status` a
+  // second time, which is what publicStackConfig() used to do. The memoisation
+  // note above is the whole reason: the cost of this function is the process
+  // spawn, so a second reader of the same text must not pay for it twice.
+  const publishableKey = cfg.get("PUBLISHABLE_KEY");
+  if (!apiUrl || !serviceKey || !publishableKey) {
     throw new Error(
       "Local Supabase stack is not running. Start it with `npx supabase start`.",
     );
@@ -329,7 +401,7 @@ function localStackConfig(): { apiUrl: string; serviceKey: string } {
     throw new Error(`Refusing to seed a non-local host: ${apiUrl}`);
   }
 
-  cachedStackConfig = { apiUrl, serviceKey };
+  cachedStackConfig = { apiUrl, serviceKey, publishableKey };
   return cachedStackConfig;
 }
 
@@ -571,8 +643,11 @@ export async function seedE2E(): Promise<SeedResult> {
   const quote = await ensureQuote(db, ids.agent, docOwners.agent.lead);
   const tasks = await ensureTasks(db, ids, docOwners);
   await ensureReportingLine(db, ids);
+  // After ensureQuote, which is what guarantees the catalog product this
+  // fixture's own quote is built from.
+  const timeline = await ensureTimelineLead(db, ids, materialId);
 
-  return { ids, docOwners, materialId, quote, tasks, apiUrl };
+  return { ids, docOwners, materialId, quote, tasks, timeline, apiUrl };
 }
 
 /**
@@ -735,6 +810,278 @@ async function ensureQuietLead(
     throw new Error(`quiet lead: ${error?.message ?? "no row"}`);
   }
   return data.id as number;
+}
+
+/**
+ * The timeline lead: one row from every source, and a knowable audit trail.
+ *
+ * Children are DELETED AND REWRITTEN each run rather than topped up, like
+ * ensureTasks and ensureQuote. The reason is sharper here than for either of
+ * them: the spec counts entries per source, so a row surviving from a previous
+ * run turns "one note" into "one note per run anybody has ever done".
+ *
+ * ## The audit rows, which are the point of the whole fixture
+ *
+ * `log_cross_agent_change()` writes to `audit_log` only when `auth.uid()` is
+ * not the row's `agent_id`. So:
+ *
+ *   * a rep editing their own lead leaves NO trail — which is why the five
+ *     service-role inserts below cannot be the source of the audit rows this
+ *     spec is about. They DO each write one (service role has no `auth.uid()`,
+ *     so `actor_id` lands null), which is exactly why the trail is cleared
+ *     after them and before the admin acts;
+ *   * an admin editing a rep's lead leaves one row, attributed to the admin.
+ *
+ * That second case is seeded by signing in as the admin persona and making two
+ * real writes — one on the lead, one on its quote's `status`. Going through a
+ * genuine JWT rather than inserting into `audit_log` directly matters: an
+ * inserted row would prove only that the page can render a row, while this
+ * proves the whole chain the admin's view depends on. `audit_log` has no
+ * INSERT policy in any case, so a client could not fabricate one.
+ *
+ * Two tables rather than one because the feed resolves audit rows on the
+ * (table_name, row_id) PAIR, and a fixture with only `leads` rows would pass
+ * identically against a version that matched on `row_id` alone.
+ */
+async function ensureTimelineLead(
+  db: SupabaseClient,
+  ids: Record<PersonaKey, string>,
+  materialId: number,
+): Promise<TimelineFixture> {
+  const leadId = await ensureTimelineLeadRow(db, ids.agent);
+
+  const onLead = {
+    agent_id: ids.agent,
+    owner_type: "lead" as const,
+    owner_id: leadId,
+  };
+
+  // Notes are append-only to `authenticated` (no UPDATE policy, and since
+  // 20260812143407 no UPDATE grant either), so a fixture can only converge by
+  // deleting and rewriting — as the service role, which bypasses both.
+  await db.from("notes").delete().eq("owner_type", "lead").eq("owner_id", leadId);
+  const { error: noteError } = await db
+    .from("notes")
+    .insert({ ...onLead, body: TIMELINE_FIXTURE.noteBody });
+  if (noteError) throw new Error(`timeline note: ${noteError.message}`);
+
+  await db.from("tasks").delete().eq("owner_type", "lead").eq("owner_id", leadId);
+  const { error: taskError } = await db.from("tasks").insert({
+    ...onLead,
+    title: TIMELINE_FIXTURE.taskTitle,
+    // Dated, so the entry's detail carries a due date and the "a task is
+    // placed at its CREATION, not its due date" claim has something to be
+    // about. Far enough out that it never lands in the dashboard digest's
+    // 7-day window and starts affecting followups.spec.ts.
+    due_date: taskDueDate(120),
+    completed: false,
+  });
+  if (taskError) throw new Error(`timeline task: ${taskError.message}`);
+
+  // One document, metadata AND bytes. The row alone would render the timeline
+  // entry perfectly well, but it is also the orphan state delete-document's
+  // file_key mode exists to clean up, and leaving one permanently in the
+  // fixtures is how a real orphan stops being noticeable.
+  //
+  // The key shape is not cosmetic: documents_file_key_matches_owner requires
+  // `{agent_id}/{owner_type}/{owner_id}/` and EXACTLY four segments, and the
+  // constraint is NOT VALID only for rows that already existed — a new insert
+  // is checked. Deterministic rather than a uuid, so re-running upserts the
+  // same object instead of accumulating one per run.
+  const fileKey = `${ids.agent}/lead/${leadId}/e2e-timeline-doc`;
+  await db.from("documents").delete().eq("file_key", fileKey);
+  const { error: uploadError } = await db.storage
+    .from("documents")
+    .upload(fileKey, new Blob(["E2E timeline statement"]), {
+      contentType: "application/pdf",
+      upsert: true,
+    });
+  if (uploadError) throw new Error(`timeline doc bytes: ${uploadError.message}`);
+  const { error: docError } = await db.from("documents").insert({
+    ...onLead,
+    doc_type: TIMELINE_FIXTURE.docType,
+    file_key: fileKey,
+    file_name: TIMELINE_FIXTURE.docFileName,
+    mime_type: "application/pdf",
+  });
+  if (docError) throw new Error(`timeline doc: ${docError.message}`);
+
+  // One marketing event, on THIS lead. marketing.spec.ts clears events on the
+  // agent's main lead, which is half of why this fixture has a lead of its own.
+  await db.from("marketing_material_events").delete().eq("lead_id", leadId);
+  const { error: eventError } = await db
+    .from("marketing_material_events")
+    .insert({
+      material_id: materialId,
+      lead_id: leadId,
+      agent_id: ids.agent,
+      event_type: "viewed",
+    });
+  if (eventError) throw new Error(`timeline event: ${eventError.message}`);
+
+  // One quote version. Built from the catalog product ensureQuote guarantees,
+  // which is why this helper runs after it.
+  const { data: product, error: productError } = await db
+    .from("products")
+    .select("id")
+    .eq("sku", QUOTE_FIXTURE.products[0].sku)
+    .single();
+  if (productError || !product) {
+    throw new Error(`timeline product: ${productError?.message ?? "no row"}`);
+  }
+
+  await db
+    .from("quotes")
+    .delete()
+    .eq("lead_id", leadId)
+    .eq("title", TIMELINE_FIXTURE.quoteTitle);
+
+  const { data: quoteId, error: quoteError } = await db.rpc(
+    "create_quote_version",
+    {
+      lead_id_input: leadId,
+      agent_id_input: ids.agent,
+      quote_group_id_input: null,
+      status_input: "sent",
+      title_input: TIMELINE_FIXTURE.quoteTitle,
+      notes_input: null,
+      line_items_input: [{ product_id: product.id as number, quantity: 1 }],
+    },
+  );
+  if (quoteError || typeof quoteId !== "number") {
+    throw new Error(`timeline quote: ${quoteError?.message ?? "no id"}`);
+  }
+
+  const { data: quoteRow, error: groupError } = await db
+    .from("quotes")
+    .select("quote_group_id")
+    .eq("id", quoteId)
+    .single();
+  if (groupError || !quoteRow) {
+    throw new Error(`timeline quote group: ${groupError?.message ?? "no row"}`);
+  }
+
+  // Everything above ran as the service role, so each insert left a
+  // `cross_agent_insert` row with a null actor. Cleared here — AFTER the
+  // writes, which is the ordering the whole fixture depends on — so the only
+  // audit rows left are the two the admin is about to make.
+  await clearTimelineAudit(db, leadId, quoteId);
+  await stampAdminTimelineEdits(leadId, quoteId);
+
+  return {
+    leadId,
+    quoteId,
+    quoteGroupId: quoteRow.quote_group_id as string,
+  };
+}
+
+/** The timeline lead itself. Created once, then reused — like the quiet lead. */
+async function ensureTimelineLeadRow(
+  db: SupabaseClient,
+  agentId: string,
+): Promise<number> {
+  const { data: existing } = await db
+    .from("leads")
+    .select("id")
+    .eq("agent_id", agentId)
+    .eq("dba", TIMELINE_FIXTURE.dba)
+    .maybeSingle();
+  if (existing) return existing.id as number;
+
+  const { data, error } = await db
+    .from("leads")
+    .insert({
+      agent_id: agentId,
+      dba: TIMELINE_FIXTURE.dba,
+      merchant_legal_name: "E2E Timeline Lead LLC",
+      // 'new' for the reason ensureDocOwners gives: leads_status_vocabulary
+      // retired 'open', and that only bites on a freshly reset database.
+      status: "new",
+      lead_source: "E2E",
+    })
+    .select("id")
+    .single();
+  if (error || !data) {
+    throw new Error(`timeline lead: ${error?.message ?? "no row"}`);
+  }
+  return data.id as number;
+}
+
+/**
+ * Wipes the lead's and its quote's audit rows.
+ *
+ * Service role, because `audit_log` grants `authenticated` SELECT only — there
+ * is no client delete path and there should not be. Scoped to the (table_name,
+ * row_id) pairs this fixture owns rather than by actor: a blanket wipe would
+ * take out rows other specs' admins had written, and `row_id` is text so the
+ * table has to be named alongside it.
+ */
+async function clearTimelineAudit(
+  db: SupabaseClient,
+  leadId: number,
+  quoteId: number,
+): Promise<void> {
+  await db
+    .from("audit_log")
+    .delete()
+    .eq("table_name", "leads")
+    .eq("row_id", String(leadId));
+  await db
+    .from("audit_log")
+    .delete()
+    .eq("table_name", "quotes")
+    .eq("row_id", String(quoteId));
+}
+
+/**
+ * Two admin writes on the agent's lead, as the admin, through a real JWT.
+ *
+ * This is the only place the seed acts as somebody rather than as the service
+ * role, and it has to: `log_cross_agent_change()` reads `auth.uid()`, so a
+ * service-role write produces a row with `actor_id` null and no name to render.
+ * The claim the spec makes — an admin sees an attributed trail of what was done
+ * to a rep's record — cannot be fixtured any other way.
+ *
+ * `persistSession: false` and NO signOut. supabase-js's `signOut()` defaults to
+ * `scope: "global"`, which would revoke the admin's refresh tokens on every
+ * device — including the session auth.setup.ts stored for every admin spec in
+ * the suite. That is the trap PERSONAS.logout exists for, and here it would
+ * fire in the seed, so every file would carry it.
+ */
+async function stampAdminTimelineEdits(
+  leadId: number,
+  quoteId: number,
+): Promise<void> {
+  const { apiUrl, publishableKey } = publicStackConfig();
+  const asAdmin = createClient(apiUrl, publishableKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const { error: signInError } = await asAdmin.auth.signInWithPassword({
+    email: PERSONAS.admin.email,
+    password: E2E_PASSWORD,
+  });
+  if (signInError) throw new Error(`timeline admin sign-in: ${signInError.message}`);
+
+  // The lead: an ordinary UPDATE an admin is allowed by `update own or admin`,
+  // on a free-text column nothing else asserts on.
+  const { error: leadError } = await asAdmin
+    .from("leads")
+    .update({ lead_source: TIMELINE_FIXTURE.adminLeadSource })
+    .eq("id", leadId);
+  if (leadError) throw new Error(`timeline admin lead edit: ${leadError.message}`);
+
+  // The quote: `status` is the ONLY column `authenticated` may update on
+  // quotes, and the privilege is column-level — an attempt on `title` would
+  // fail with `permission denied for column` before RLS was consulted. So this
+  // is both a realistic admin action and the only one available.
+  const { error: quoteError } = await asAdmin
+    .from("quotes")
+    .update({ status: TIMELINE_FIXTURE.adminQuoteStatus })
+    .eq("id", quoteId);
+  if (quoteError) {
+    throw new Error(`timeline admin quote edit: ${quoteError.message}`);
+  }
 }
 
 /**
