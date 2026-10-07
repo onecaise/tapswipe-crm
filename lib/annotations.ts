@@ -188,3 +188,62 @@ export function parseTaskIndexFilter(
  * everything".
  */
 export const ANNOTATION_INDEX_LIMIT = 200;
+
+/**
+ * The /tasks URL for one filter, and the label that filter wears there.
+ *
+ * Both derived from TASK_INDEX_FILTER_OPTIONS rather than spelled out again, so
+ * anything linking into the task index — the index's own tabs, the dashboard
+ * digest — names the same filters with the same words. A second copy of
+ * `/tasks?status=overdue` is how a renamed param leaves a dead link behind on
+ * the one page nobody opens while editing the other.
+ */
+export function taskIndexHref(filter: TaskIndexFilter): string {
+  return `/tasks?status=${filter}`;
+}
+
+const TASK_INDEX_LABELS = new Map<TaskIndexFilter, string>(
+  TASK_INDEX_FILTER_OPTIONS.map((option) => [option.value, option.label]),
+);
+
+export function taskIndexLabel(filter: TaskIndexFilter): string {
+  // Every member of the union is in the options list, so this never falls back
+  // in practice; the default keeps the signature honest rather than asserting.
+  return TASK_INDEX_LABELS.get(filter) ?? filter;
+}
+
+/**
+ * The soonest due date among a record's still-open tasks, or null.
+ *
+ * Undated open tasks are skipped rather than sorted last: this answers "what is
+ * the next dated thing to do on this record", and a task with no date is not an
+ * answer to it. Completed tasks are skipped for the obvious reason.
+ *
+ * Compared as YYYY-MM-DD strings, which is a total order for ISO dates and
+ * sidesteps the timezone question a Date comparison would raise — the same
+ * reasoning taskIsOverdue above is built on.
+ *
+ * This is the one definition of "the earliest open task", for the same reason
+ * currentVersion() in lib/quotes.ts is the one definition of a quote's current
+ * version: spelled inline, a page that surfaces the date and a control that
+ * writes it can come to disagree about which task they mean.
+ */
+export function earliestOpenTaskDue(
+  tasks: readonly Pick<Task, "due_date" | "completed">[],
+): string | null {
+  let earliest: string | null = null;
+  for (const task of tasks) {
+    if (task.completed || task.due_date === null) continue;
+    if (earliest === null || task.due_date < earliest) earliest = task.due_date;
+  }
+  return earliest;
+}
+
+/**
+ * How many tasks the dashboard digest renders.
+ *
+ * Small on purpose: the digest is a prompt to go and work, not a second task
+ * list. When it bites, the page says so and points at /tasks rather than
+ * quietly stopping — the same rule ANNOTATION_INDEX_LIMIT follows.
+ */
+export const DASHBOARD_TASK_LIMIT = 8;

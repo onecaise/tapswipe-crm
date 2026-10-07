@@ -67,10 +67,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (1123 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (1124 tests)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (205 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (97 tests)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (113 tests, 5 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -335,6 +335,60 @@ Note what this means for a grants test: `has_table_privilege(…, 'UPDATE')` ret
 **The audit trigger is on `quotes` and deliberately not on `quote_line_items`.** `quotes` carries `agent_id` and the ordinary writer is the owning rep, so `log_cross_agent_change()` is quiet by default and speaks only when an admin acts on somebody else's deal — this is *not* the `rep_payout_rows` case, where no rep can write at all and the trigger would fire on every row of a forty-row import. The child table is excluded twice over: it has no `agent_id` (the `support_ticket_replies` trap), and even a working sibling function would write N+1 rows for one admin edit, N of them naming a table nobody looks up by id. The `documents` hole does not apply either — there is no UPDATE or DELETE on line items to go unrecorded.
 
 **No bulk product import yet, deliberately.** `/admin/products` adds one at a time. A column-mapping and blocker pipeline of the `rep_payout_import_rows` / `user_import_rows` kind encodes rules read off a real file, and the hardware pricing sheet does not exist yet — guessing its columns means a parser to be rewritten and a staging table whose shape is a guess. **The catalog is also deliberately unseeded:** a quote snapshots the price it was built from, so a plausible-looking placeholder figure ends up on a document a merchant reads.
+
+### Follow-ups live in two places, and they are reconciled in the UI rather than in the schema
+
+`leads.next_followup_date` and the generic `tasks` table both answer "when is
+the next thing to do on this lead", and they stay **separate columns on
+purpose**. Three things decided it, and all three are reasons not to "fix" the
+duplication later:
+
+- **`tasks.owner_id` carries no foreign key** — it points into four tables — and
+  PostgREST needs one to embed. So a lead cannot cheaply pull its own tasks.
+- **The leads list would lose its single indexed query.** Today "order by next
+  follow-up, show overdue" is one scan of one table. Derived from `tasks` it is
+  N+1 or a new view/RPC, and the "Unscheduled" filter becomes a `NOT EXISTS`
+  with no FK for the planner to use.
+- **A sync trigger was considered and rejected.** Writing the lead from a task
+  would fire the lead's own `log_cross_agent_change()`, so an admin adding a
+  task on a rep's lead would produce **two audit rows for one event** — noise
+  bought for a convenience.
+
+The accepted cost is real and is written down rather than hidden: a rep can
+leave `next_followup_date` blank while a task is due tomorrow, and the leads
+list files that lead under "Unscheduled". The mitigation is two UI surfaces,
+neither of which stores anything new — nothing is duplicated, so nothing can
+drift silently afterwards:
+
+- `components/followup-reconcile.tsx` on the lead detail page, which surfaces
+  the earliest open task's date beside the lead's own and offers one click that
+  writes `leads.next_followup_date`. It renders **nothing** when there is no
+  dated open task; a permanent banner on every lead is how a prompt becomes
+  wallpaper.
+- The **"Your tasks" digest** on `/dashboard`, which is the login-surfaced half:
+  what is late, and what is due inside `nextWeekBound()` — literally the leads
+  list's own "Next 7 days", so a rep working a day sees one horizon rather than
+  two.
+
+`earliestOpenTaskDue()` in `lib/annotations.ts` is the one definition of "the
+earliest open task", for the reason `currentVersion()` is the one definition of
+a quote's current version: spelled inline, the surface that *shows* the date and
+the control that *writes* it come to disagree about which task they mean. It
+skips completed tasks — a bare `Math.min` over the panel's rows offers the date
+of work already done, which is the fixture's `done` row and the trap it exists
+for.
+
+**The digest narrows by `agent_id` in application code, and that is not the rule
+this repo otherwise follows.** `TaskIndexScope` in `lib/annotations-data.ts` is
+the distinction: the standing "don't copy a policy into application code" rule
+is about a query that means *everything I may see*; this means *a subset of it,
+chosen by the page*. RLS hands an admin every task in the database and is right
+to — `/tasks` shows them all — but an admin's own landing page listing the whole
+company's work is not a digest. A company-wide view is a different feature with
+a different shape. Because no policy expresses this, **no RLS test can see it**:
+`e2e/followups.spec.ts` is the only place that promise is checked, and it checks
+both halves (the admin's dashboard omits the rep's task; `/tasks` still shows it
+to them), so a broken read cannot pass as correct scoping.
 
 ### Next.js / auth wiring
 

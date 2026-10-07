@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import {
   ANNOTATION_INDEX_LIMIT,
+  DASHBOARD_TASK_LIMIT,
   NOTE_LIST_COLUMNS,
   TASK_LIST_COLUMNS,
   annotationOwnerHref,
@@ -12,7 +13,7 @@ import {
   type WithAuthor,
   type WithOwner,
 } from "@/lib/annotations";
-import { PG_TODAY } from "@/lib/leads";
+import { PG_TODAY, nextWeekBound } from "@/lib/leads";
 
 /**
  * Every note and task hanging off one owner record, authors resolved.
@@ -257,11 +258,38 @@ export async function loadNoteIndex(): Promise<
   };
 }
 
-/** Every task the caller can see, filtered by status. */
+/**
+ * How a caller narrows the task index below what RLS already allows.
+ *
+ * Every field here is a DELIBERATE narrowing, which is a different thing from
+ * the `agent_id` filter the rest of this file is careful never to write. The
+ * standing rule — don't copy a policy into application code — is about a query
+ * that means "everything I may see"; these mean "a subset of it, chosen by the
+ * page". The index page passes none of them and gets the policy's own answer.
+ */
+export type TaskIndexScope = {
+  /**
+   * Restrict to one person's tasks.
+   *
+   * The dashboard digest is the only caller, and it passes the signed-in user's
+   * own id — including when that user is an admin, who would otherwise get the
+   * whole company's work on their own landing page. "An admin's view of
+   * everyone's tasks" is a different feature with a different shape, and
+   * silently making the dashboard into it is how a digest stops being a digest.
+   */
+  agentId?: string;
+  /** Latest due date to include. A row with no due date never matches. */
+  dueOnOrBefore?: string;
+  limit?: number;
+};
+
+/** Every task the caller can see, filtered by status and any explicit scope. */
 export async function loadTaskIndex(
   filter: TaskIndexFilter,
+  scope: TaskIndexScope = {},
 ): Promise<AnnotationIndexResult<WithOwner<WithAuthor<Task>>>> {
   const supabase = await createClient();
+  const limit = scope.limit ?? ANNOTATION_INDEX_LIMIT;
 
   let query = supabase
     .from("tasks")
@@ -270,7 +298,16 @@ export async function loadTaskIndex(
     .order("completed", { ascending: true })
     .order("due_date", { ascending: true, nullsFirst: false })
     .order("id", { ascending: false })
-    .limit(ANNOTATION_INDEX_LIMIT + 1);
+    .limit(limit + 1);
+
+  if (scope.agentId !== undefined) {
+    query = query.eq("agent_id", scope.agentId);
+  }
+  if (scope.dueOnOrBefore !== undefined) {
+    // A null due_date fails this comparison rather than passing it, which is
+    // what the digest wants: an undated task is not "due in the next 7 days".
+    query = query.lte("due_date", scope.dueOnOrBefore);
+  }
 
   switch (filter) {
     case "open":
@@ -293,7 +330,7 @@ export async function loadTaskIndex(
   if (error) return { rows: [], truncated: false, error: error.message };
 
   const all = (data ?? []) as Task[];
-  const tasks = all.slice(0, ANNOTATION_INDEX_LIMIT);
+  const tasks = all.slice(0, limit);
   const authors = await resolveAuthors(supabase, tasks);
 
   return {
@@ -304,7 +341,26 @@ export async function loadTaskIndex(
         author_name: authors.get(task.agent_id) ?? null,
       })),
     ),
-    truncated: all.length > ANNOTATION_INDEX_LIMIT,
+    truncated: all.length > limit,
     error: null,
   };
+}
+
+/**
+ * The signed-in user's own open tasks, overdue or due inside the next week.
+ *
+ * A thin call onto loadTaskIndex rather than a second query, so the digest and
+ * /tasks agree on what "open" means, resolve owners the same way, and stay one
+ * thing to change. The window is nextWeekBound() — literally the leads list's
+ * "Next 7 days" bound — because a rep working a day should see one horizon,
+ * not one drawn for leads and a different one drawn for tasks.
+ */
+export async function loadMyTaskDigest(
+  agentId: string,
+): Promise<AnnotationIndexResult<WithOwner<WithAuthor<Task>>>> {
+  return loadTaskIndex("open", {
+    agentId,
+    dueOnOrBefore: nextWeekBound(),
+    limit: DASHBOARD_TASK_LIMIT,
+  });
 }

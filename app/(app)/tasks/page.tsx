@@ -6,6 +6,7 @@ import {
   ANNOTATION_INDEX_LIMIT,
   TASK_INDEX_FILTER_OPTIONS,
   parseTaskIndexFilter,
+  taskIndexHref,
 } from "@/lib/annotations";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
@@ -53,7 +54,7 @@ async function TasksList({
       <FilterTabs
         options={TASK_INDEX_FILTER_OPTIONS}
         active={filter}
-        hrefFor={(value) => `/tasks?status=${value}`}
+        hrefFor={taskIndexHref}
       />
 
       <TasksIndexTable

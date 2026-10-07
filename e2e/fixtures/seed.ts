@@ -141,8 +141,78 @@ export type SeedResult = {
   docOwners: Record<Exclude<PersonaKey, "logout">, DocOwnerIds>;
   /** The agent's two-version quote, for the quote print spec. */
   quote: QuoteFixture;
+  /** The task rows behind the dashboard digest and the follow-up affordance. */
+  tasks: TaskFixture;
   apiUrl: string;
 };
+
+/**
+ * The seeded tasks, with the dates resolved.
+ *
+ * Dates are returned rather than recomputed in a spec: they are offsets from
+ * "today", so a spec that worked them out again would be a second clock to
+ * disagree with this one — and the whole point of the overdue/upcoming split is
+ * which side of today a date falls on.
+ */
+export type TaskFixture = {
+  /** The agent's lead, which carries the overdue and the upcoming task. */
+  leadId: number;
+  /** The agent's merchant, carrying the one task outside the 7-day window. */
+  merchantId: number;
+  /**
+   * A second lead of the agent's, deliberately carrying no tasks at all.
+   *
+   * Exists so "the reconciliation block renders nothing" can be asserted on a
+   * lead that is simply quiet, rather than by completing the other lead's tasks
+   * and putting them back — which would make one spec's precondition depend on
+   * another spec's cleanup, and leave the fixture mutated if it failed halfway.
+   */
+  quietLeadId: number;
+  /** YYYY-MM-DD of the agent's earliest OPEN task — the one the button adopts. */
+  earliestOpenDue: string;
+  /** YYYY-MM-DD of the agent's upcoming task, inside the window. */
+  upcomingDue: string;
+};
+
+/**
+ * Titles and due-date offsets, as data both the seed and the specs read.
+ *
+ * Four tasks for the agent rather than one, because each is a different thing
+ * the digest has to get right, and only the last two can tell a working window
+ * from no window at all:
+ *
+ *   * overdue  — late. Must appear, under Overdue.
+ *   * upcoming — inside the 7-day window. Must appear, and not under Overdue.
+ *   * distant  — open and dated, well past the window. Must NOT appear.
+ *   * done     — completed, and dated EARLIER than overdue. Must not appear,
+ *                and must not be picked as "the earliest open task" — which is
+ *                the only way to tell a digest that filters on completed from
+ *                one that forgot to.
+ *
+ * The admin gets one of their own so the admin's digest is non-empty, which is
+ * what makes "and it does not show the agent's" a real assertion rather than a
+ * page that happens to be blank.
+ */
+export const TASK_FIXTURE = {
+  overdue: { title: "E2E overdue pricing call", dueOffset: -3 },
+  upcoming: { title: "E2E upcoming paperwork", dueOffset: 2 },
+  distant: { title: "E2E distant annual review", dueOffset: 60 },
+  done: { title: "E2E already handled callback", dueOffset: -9 },
+  adminOwn: { title: "E2E admin own reconciliation", dueOffset: -1 },
+} as const;
+
+/**
+ * A date `offset` days from today, as YYYY-MM-DD.
+ *
+ * UTC throughout, matching nextWeekBound() in lib/leads.ts and the Postgres
+ * `today` the queries resolve against — both the local stack's database and the
+ * Node runtime run UTC, so there is one calendar here rather than two.
+ */
+export function taskDueDate(offset: number): string {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + offset);
+  return date.toISOString().slice(0, 10);
+}
 
 /**
  * One quote group on the agent's lead, in two versions.
@@ -457,8 +527,161 @@ export async function seedE2E(): Promise<SeedResult> {
   await ensureDocumentsBucket(db);
   const materialId = await ensureMarketingMaterial(db, ids.admin);
   const quote = await ensureQuote(db, ids.agent, docOwners.agent.lead);
+  const tasks = await ensureTasks(db, ids, docOwners);
 
-  return { ids, docOwners, materialId, quote, apiUrl };
+  return { ids, docOwners, materialId, quote, tasks, apiUrl };
+}
+
+/**
+ * The agent's four tasks and the admin's one, with the agent's lead reset to
+ * carrying no follow-up date.
+ *
+ * Deleted and rewritten every run rather than topped up, like the quote: the
+ * due dates are offsets from today, so a row left behind from yesterday is a
+ * task whose date has quietly moved relative to the window the specs assert on.
+ * Matched by title, which is why every title here carries the E2E prefix.
+ *
+ * The next_followup_date reset is the load-bearing line. The affordance spec
+ * CLICKS a button that sets that column, so without this the second run of the
+ * suite would start with the lead already reconciled and the button already
+ * gone — the spec would fail, correctly, for a reason that has nothing to do
+ * with the app. ensureQuote's lead update cannot carry it: the two want the
+ * lead in different states, and keeping the reset beside the tasks keeps the
+ * reason beside the thing it is about.
+ */
+async function ensureTasks(
+  db: SupabaseClient,
+  ids: Record<PersonaKey, string>,
+  docOwners: Record<Exclude<PersonaKey, "logout">, DocOwnerIds>,
+): Promise<TaskFixture> {
+  const quietLeadId = await ensureQuietLead(db, ids.agent);
+
+  const titles = Object.values(TASK_FIXTURE).map((task) => task.title);
+  const { error: clearError } = await db
+    .from("tasks")
+    .delete()
+    .in("title", titles);
+  if (clearError) throw new Error(`clear tasks: ${clearError.message}`);
+
+  const onAgentLead = {
+    agent_id: ids.agent,
+    owner_type: "lead",
+    owner_id: docOwners.agent.lead,
+  };
+
+  const { error } = await db.from("tasks").insert([
+    {
+      ...onAgentLead,
+      title: TASK_FIXTURE.overdue.title,
+      due_date: taskDueDate(TASK_FIXTURE.overdue.dueOffset),
+      completed: false,
+    },
+    {
+      ...onAgentLead,
+      title: TASK_FIXTURE.upcoming.title,
+      due_date: taskDueDate(TASK_FIXTURE.upcoming.dueOffset),
+      completed: false,
+    },
+    {
+      ...onAgentLead,
+      title: TASK_FIXTURE.done.title,
+      due_date: taskDueDate(TASK_FIXTURE.done.dueOffset),
+      completed: true,
+    },
+    // On the MERCHANT, not the lead: a task outside the window should be absent
+    // from the digest wherever it hangs, and putting it on another owner type
+    // also means the digest's owner resolution is exercised by more than one.
+    {
+      agent_id: ids.agent,
+      owner_type: "merchant",
+      owner_id: docOwners.agent.merchant,
+      title: TASK_FIXTURE.distant.title,
+      due_date: taskDueDate(TASK_FIXTURE.distant.dueOffset),
+      completed: false,
+    },
+    {
+      agent_id: ids.admin,
+      owner_type: "lead",
+      owner_id: docOwners.admin.lead,
+      title: TASK_FIXTURE.adminOwn.title,
+      due_date: taskDueDate(TASK_FIXTURE.adminOwn.dueOffset),
+      completed: false,
+    },
+  ]);
+  if (error) throw new Error(`task seed: ${error.message}`);
+
+  const { error: leadError } = await db
+    .from("leads")
+    .update({ next_followup_date: null })
+    .eq("id", docOwners.agent.lead);
+  if (leadError) throw new Error(`lead follow-up reset: ${leadError.message}`);
+
+  return {
+    leadId: docOwners.agent.lead,
+    merchantId: docOwners.agent.merchant,
+    quietLeadId,
+    earliestOpenDue: taskDueDate(TASK_FIXTURE.overdue.dueOffset),
+    upcomingDue: taskDueDate(TASK_FIXTURE.upcoming.dueOffset),
+  };
+}
+
+/** The agent's second lead: no tasks, ever. Created once, then reused. */
+async function ensureQuietLead(
+  db: SupabaseClient,
+  agentId: string,
+): Promise<number> {
+  const dba = "E2E-QUIET-agent";
+
+  const { data: existing } = await db
+    .from("leads")
+    .select("id")
+    .eq("agent_id", agentId)
+    .eq("dba", dba)
+    .maybeSingle();
+  if (existing) return existing.id as number;
+
+  const { data, error } = await db
+    .from("leads")
+    .insert({
+      agent_id: agentId,
+      dba,
+      merchant_legal_name: "E2E Quiet Lead LLC",
+      // 'new' for the reason ensureDocOwners gives: leads_status_vocabulary
+      // retired 'open', and that only bites on a freshly reset database.
+      status: "new",
+      lead_source: "E2E",
+    })
+    .select("id")
+    .single();
+  if (error || !data) {
+    throw new Error(`quiet lead: ${error?.message ?? "no row"}`);
+  }
+  return data.id as number;
+}
+
+/**
+ * One lead's stored next_followup_date, straight from the column.
+ *
+ * The follow-up affordance's claim is that a click WRITES that column — the
+ * rendered page afterwards is a consequence, and a component that re-rendered
+ * its own optimistic state without saving anything would look identical. Read
+ * as the service role for the reason the other helpers here are: a spec holds
+ * no key and should not grow one.
+ */
+export async function leadFollowupDate(
+  leadId: number,
+): Promise<string | null> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await db
+    .from("leads")
+    .select("next_followup_date")
+    .eq("id", leadId)
+    .single();
+  if (error) throw new Error(`lead follow-up read: ${error.message}`);
+  return (data?.next_followup_date as string | null) ?? null;
 }
 
 /**

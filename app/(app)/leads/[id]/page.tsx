@@ -33,10 +33,12 @@ import {
   type QuoteLineItem,
   groupQuotes,
 } from "@/lib/quotes";
+import { earliestOpenTaskDue } from "@/lib/annotations";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { DocumentsPanel } from "@/components/documents-panel";
+import { FollowupReconcile } from "@/components/followup-reconcile";
 import { MarketingPanel } from "@/components/marketing-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { QuotesPanel } from "@/components/quotes-panel";
@@ -332,6 +334,18 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
         {agentName !== null && <Field label="Agent">{agentName}</Field>}
         <Field label="Last updated">{formatDate(lead.updated_at)}</Field>
       </Section>
+
+      {/* The bridge between the two follow-up stories this page holds: the
+          lead's own next_followup_date, in the Pipeline section above, and the
+          tasks below. They are deliberately separate columns — see the header
+          of components/followup-reconcile.tsx — so this surfaces the gap rather
+          than closing it in the schema. Renders nothing when there is no dated
+          open task to compare against. */}
+      <FollowupReconcile
+        leadId={lead.id}
+        nextFollowupDate={lead.next_followup_date}
+        earliestTaskDue={earliestOpenTaskDue(tasks)}
+      />
 
       <TasksPanel
         ownerType="lead"
