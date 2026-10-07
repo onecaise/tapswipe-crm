@@ -8,12 +8,12 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 
 **Current state matters when reading the code**, and it is a mix — real CRM pages alongside untouched starter scaffolding:
 
-- **Built:** every CRM route lives under the `app/(app)/` route group so it renders inside the shell — `app/(app)/{dashboard,merchants,leads,ghost-sheets,pre-apps,support-tickets,documents,notes,tasks,payouts,marketing,marketing/manage,admin/users,admin/users/import,admin/products}`. Route groups don't affect URLs, so the paths are still `/dashboard`, `/merchants/7` and so on. Data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,annotations-data,documents,payouts,user-imports,products,quotes,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks are **written** through panels (`components/{notes,tasks}-panel.tsx`) on the four owner records; `/notes` and `/tasks` are the cross-record view of the same rows, and are read-only (notes) or read plus the complete toggle (tasks). Creation stays on the record, because `owner_id` has no FK and the panels take the pair from a parent row already loaded under RLS. `components/documents-panel.tsx` hangs off **all four** `documents.owner_type` values — merchants, leads, pre-apps and support tickets — and `/documents` is the cross-record Document Center over the same rows. Quotes have no page of their own: `components/quotes-panel.tsx` is the builder and the version history, and it lives on the lead, because a quote without a lead is not a thing this CRM has.
+- **Built:** every CRM route lives under the `app/(app)/` route group so it renders inside the shell — `app/(app)/{dashboard,merchants,leads,ghost-sheets,pre-apps,support-tickets,documents,notes,tasks,payouts,marketing,marketing/manage,admin/users,admin/users/import,admin/products}`. Route groups don't affect URLs, so the paths are still `/dashboard`, `/merchants/7` and so on. Data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,annotations-data,documents,payouts,user-imports,products,quotes,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks are **written** through panels (`components/{notes,tasks}-panel.tsx`) on the four owner records; `/notes` and `/tasks` are the cross-record view of the same rows, and are read-only (notes) or read plus the complete toggle (tasks). Creation stays on the record, because `owner_id` has no FK and the panels take the pair from a parent row already loaded under RLS. `components/documents-panel.tsx` hangs off **all four** `documents.owner_type` values — merchants, leads, pre-apps and support tickets — and `/documents` is the cross-record Document Center over the same rows. Quotes have no page of their own: `components/quotes-panel.tsx` is the builder and the version history, and it lives on **both the lead and the merchant** — `quotes_exactly_one_owner` means a proposal hangs off exactly one of them, and a rep sells hardware to win a deal and again to the same business once it is on the books. The two printable routes (`/{leads,merchants}/[id]/quotes/[quoteGroupId]/print`) share one document component.
 - **Not built yet:** My Submissions.
 - **Still [starter-kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase) template, not product code:** `README.md`, and that is now the whole list. The scaffold's UI was deleted on 14 Sep 2026 — `app/protected/*`, `components/tutorial/*`, `components/{hero,deploy-button,next-logo,supabase-logo,env-var-warning,auth-button,theme-switcher}.tsx`, the `hasEnvVars` export, and the two `app/{opengraph,twitter}-image.png` banners that served a "Next.js Starter Kit" social preview from an internal tool. `app/page.tsx` is product code now: it renders nothing and redirects (see below). Don't reintroduce a greyed-out template page for the same reason `lib/nav.ts` shouldn't carry a permanently-disabled row.
 - **Edge Functions:** all fourteen are implemented — `create-upload-url`, `create-download-url`, `delete-document`, `submit-pre-app-secrets`, `read-pre-app-secrets`, `create-user`, `deactivate-user`, `admin-reset-password`, `residual-import-file-url`, `parse-residual-import`, `export-residuals`, `stage-user-import`, `provision-user-batch`, `marketing-material-file-url` (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env,admin-users,provision-user,residuals,residual-imports,user-imports,marketing-materials}.ts`).
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Thirty-eight migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Forty-one migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi` — and note **which** project that is: `tapswipe-crm-dev`. The second project `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) is **not linked, but it is deployed and real**: `PRE_APP_SECRETS_KEY` is set and both private buckets exist. Treat it as live production, not as a spare project.
 
@@ -67,10 +67,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (1182 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (1261 tests)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (205 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (131 tests, 5 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (146 tests, 5 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -174,7 +174,7 @@ Postgres grants `EXECUTE` to `PUBLIC` on every new function, and `PUBLIC` includ
 
 **It only ever warns, and must never become a block.** A hard block on a cross-book duplicate is unrecoverable from the UI by construction: the rep cannot see the offending record, so the only move left is to make the check miss, and the workaround reps find is typing the phone number wrong — which destroys the most reliable field the check depends on.
 
-**pg_trgm lives in the `extensions` schema** (Supabase convention), which is why everything downstream carries `set search_path = public, extensions`; without it the failure is a bare `operator does not exist: text % text` at runtime. In the hermetic suite it must additionally be handed to the **PGlite constructor** (`new PGlite({ extensions: { pg_trgm } })` in `tests/helpers/db.ts`) — `create extension` alone is not enough there, and because every suite applies every migration, forgetting it reds all 53 files at once. The `dup_digits` / `dup_email` / `dup_host` normalisers exist to be indexed: never `create or replace` one with different behaviour without reindexing, because Postgres leaves existing index entries computed by the old definition and a duplicate check that silently stops matching looks exactly like no duplicates.
+**pg_trgm lives in the `extensions` schema** (Supabase convention), which is why everything downstream carries `set search_path = public, extensions`; without it the failure is a bare `operator does not exist: text % text` at runtime. In the hermetic suite it must additionally be handed to the **PGlite constructor** (`new PGlite({ extensions: { pg_trgm } })` in `tests/helpers/db.ts`) — `create extension` alone is not enough there, and because every suite applies every migration, forgetting it reds all 56 files at once. The `dup_digits` / `dup_email` / `dup_host` normalisers exist to be indexed: never `create or replace` one with different behaviour without reindexing, because Postgres leaves existing index entries computed by the old definition and a duplicate check that silently stops matching looks exactly like no duplicates.
 
 **`migrationsBefore()`, not `migrationsExcept()`, when a test reconstructs a point in history.** `migrationsExcept` drops a file out of the middle and still applies everything after it, which is right for the grant regression tests and wrong for everything else: the moment a later migration references a column the excluded one added, the suite dies on a missing relation in a migration the test is not about. That is not hypothetical — `20261002161500` indexes `leads.website` and broke the `leads-status` backfill block exactly this way.
 
@@ -337,6 +337,176 @@ Note what this means for a grants test: `has_table_privilege(…, 'UPDATE')` ret
 **The audit trigger is on `quotes` and deliberately not on `quote_line_items`.** `quotes` carries `agent_id` and the ordinary writer is the owning rep, so `log_cross_agent_change()` is quiet by default and speaks only when an admin acts on somebody else's deal — this is *not* the `rep_payout_rows` case, where no rep can write at all and the trigger would fire on every row of a forty-row import. The child table is excluded twice over: it has no `agent_id` (the `support_ticket_replies` trap), and even a working sibling function would write N+1 rows for one admin edit, N of them naming a table nobody looks up by id. The `documents` hole does not apply either — there is no UPDATE or DELETE on line items to go unrecorded.
 
 **No bulk product import yet, deliberately.** `/admin/products` adds one at a time. A column-mapping and blocker pipeline of the `rep_payout_import_rows` / `user_import_rows` kind encodes rules read off a real file, and the hardware pricing sheet does not exist yet — guessing its columns means a parser to be rewritten and a staging table whose shape is a guess. **The catalog is also deliberately unseeded:** a quote snapshots the price it was built from, so a plausible-looking placeholder figure ends up on a document a merchant reads.
+
+### A proposal belongs to a lead OR a merchant, and a rep cannot price one
+
+As of `20261007150000`, `quotes` carries **both** `lead_id` and `merchant_id`,
+both nullable, with `quotes_exactly_one_owner`
+(`check (num_nonnulls(lead_id, merchant_id) = 1)`). A rep quotes hardware to
+win a deal, and quotes more to the same business two years later when it is a
+merchant on the books — one table, one append-only version history, one
+printable document.
+
+**Two real foreign keys, NOT the polymorphic `owner_type` + `owner_id`** that
+`notes`, `tasks` and `documents` use. Those three point at four tables and
+carry no FK at all, which costs them three documented problems (a row filed
+against an invisible owner, orphans on delete, `owner_type` required in every
+query or ids collide). With two targets, one extra column buys all three back.
+
+**The constraint is ORDINARY, not `NOT VALID`,** and that is a decision rather
+than a default. `NOT VALID` is for a constraint added over data that predates
+it — `documents_file_key_matches_owner` and `merchants_split_totals_100` both
+carry it. Here the rows can be *proven* clean: `lead_id` was `not null` until
+that migration and `merchant_id` was added by it, so `num_nonnulls` is exactly
+1 for every pre-existing row by construction. Reaching for `NOT VALID` anyway
+gives up the guarantee for nothing, and silently — it looks identical in the
+schema. A test asserts `convalidated`.
+
+**THE PRICE LOCK is `snapshot_quote_line_item()`, a BEFORE INSERT trigger, and
+the hole it closes was real.** `grant select, insert on quote_line_items to
+authenticated` plus an insert policy that only asks whether the parent quote is
+the caller's means **a rep's own session can POST a line item with any
+`unit_price` it likes, on their own quote, and every policy agrees.** The three
+more obvious answers each fail for a specific reason worth knowing:
+
+- **Hiding the field in the UI** is not a boundary at all.
+- **A column-level grant** (`grant insert (quote_id, product_id, quantity,
+  sort_order)`) is the right instinct — it is exactly what makes
+  `quotes.status` the only mutable column, and the standing rule is that an
+  immutable column is a grant and not a policy. It fails *here* because
+  `create_quote_version()` is `security INVOKER`, so it inserts as the caller
+  and would be refused its own snapshot. Making it `definer` to work around
+  that trades a narrow problem for the broad one invoker exists to avoid.
+- **Revoking INSERT outright** fails identically.
+
+So the trigger **overwrites** all five snapshot columns from `products`,
+whatever the caller supplied — it sits below every path to the table.
+Overwrite rather than raise, because nothing legitimate ever supplies a price:
+`unit_price` is a **derived** column that merely cannot be `generated always
+as`, since that cannot reach another table. It is `security definer`, and
+**not for reach** (every active user already reads every product) — it is
+definer so the figure on a document cannot be changed by changing a *policy*.
+Contrast `enforce_compatibility_kinds()`, which is invoker precisely because it
+has no such claim to make. The RPC also snapshots, independently: two layers
+reading the same table in the same transaction, the
+`documents_file_key_matches_owner` / `fileKeyMatchesOwner()` arrangement again.
+
+`enforce_quote_version()` now also **pins who a group is about**, which a CHECK
+cannot express (it is a fact about a row's siblings). Reachable without it: the
+RPC takes a group id and an owner as separate arguments, so a rep passing their
+own group id with a different — also their own — record would add a "version 2"
+about another business. Nothing leaks, but the print route filters by owner, so
+one page would read "version 2 of 1" and the other "version 1 of 1".
+
+**`create_quote_version()`'s 7-argument signature is DROPPED, not left beside
+the new one.** `create or replace function` with a different parameter count
+creates a *second* function, so a default on `merchant_id_input` would leave a
+7-argument call with two candidates — an ambiguity Postgres reports at call
+time, from the browser, as a failed save. The `dashboard_counts()` trap, same
+answer, same assertion that the name resolves exactly once.
+
+### The store, and what hides an archived product
+
+`products` gained `brand`, `kind` (`device` | `addon`) and `billing`
+(`one_time` | `monthly`), plus `product_compatibility (addon_product_id,
+device_product_id)` — the **third** client-readable table with no `agent_id`,
+which it inherits from its parents rather than choosing: a fact about two
+catalog rows cannot be owned by a rep. The checklist therefore applies with
+step 1 struck out, and **step 4's sequence grant refers to nothing** — the
+pair is the primary key, so there is no `_id_seq`. A test asserts that absence,
+so a future surrogate key cannot arrive without the missing grant being noticed.
+
+`brand` is free text like `category`; `kind` and `billing` are **closed
+vocabularies**, and the difference is who reads them. Those are labels a person
+reads; these are read by *code* — the compatibility trigger, the store's device
+list, the proposal's two totals — so an invented value is not a new label but a
+row all three silently skip. **The store's "device type" filter is `category`**;
+a second column for it would be the same fact twice.
+
+`product_compatibility` **allows DELETE where `products` withholds it**, and
+that is the one deliberate difference: a product is archived because
+`quote_line_items` snapshots what it said, so the row is history, while a
+compatibility row is a current-state claim nothing snapshots.
+
+**WHAT HIDES AN ARCHIVED PRODUCT FROM A REP IS THE QUERY, NOT RLS.** The select
+policy stays `is_active_agent() or is_admin()` with no row filter;
+`lib/quotes-data.ts` carries `.is("archived_at", null)` plus `isQuotable`.
+Three reasons: an admin must still see everything on `/admin/products` (a
+policy would need a role branch, which is two policies wearing one name);
+archiving is a **lifecycle state, not an access boundary** — `profiles.territory`'s
+lesson, where wiring a label into a policy means changing the label changes who
+can see what; and **a quote outlives the product on it**, so a policy hiding
+archived rows would make a future join from a historical line come back empty
+while looking perfectly correct. `tests/rls/product-compatibility.test.ts`
+asserts a rep can still *read* an archived row, and greps both tables' policies
+for the word. The database still refuses one twice over, by name in the RPC and
+again in the trigger — a hidden row is a courtesy, a refused write is the
+boundary.
+
+**The cart's ORDER is the saved proposal's structure.** `cartToPayload()` emits
+device, then that device's add-ons, then the next device;
+`create_quote_version()` writes `sort_order` from the array's order; and
+`groupQuoteLines()` reads the grouping back off `(sort_order, product_kind)`
+and nothing else. Deliberately **not** a live join against
+`product_compatibility` — that would make a sent proposal re-group itself when
+an admin unlinks an accessory, a document changing shape after it was handed
+over. `quote_line_items` snapshots `product_kind` and `product_billing` for
+exactly that, and **neither carries a CHECK**: these are a record of what was
+true when the quote was sent, so a value retired from the catalog's vocabulary
+is correct history, and a constraint would turn that migration into one that
+has to rewrite documents.
+
+**`components/quote-store.tsx` is deliberately NOT on `ListTable`,** the app's
+responsive list pattern. `ListTable` renders both layouts and hides one, and
+its own header records the cost: a locator that does not consult the
+accessibility tree matches the hidden copy too, and converting the payouts
+ledger reddened nine `getByLabel` specs. The store is almost entirely form
+controls, so it follows the same discipline with **one** rendered copy —
+`flex-col sm:flex-row`, `min-w-0` on every text child, nothing in a scrolling
+container. `e2e/quote-store.spec.ts` asserts `scrollWidth <= clientWidth` at
+375/768/1440 rather than trusting the classes.
+
+**Two totals, never summed** — one-time and monthly, on screen and on paper.
+$1,497 of terminals and $29 a month are not the same unit, so a combined figure
+is a number that means nothing and reads as a price. `isMonthlyBilling()` tests
+*for* `'monthly'` rather than against `'one_time'`, so an unrecognised value
+lands in the one-time total: a figure wrongly counted once is an understatement
+a rep can see, while one wrongly counted as recurring quietly multiplies by
+twelve.
+
+### The printed Hardware Proposal is ONE component on two routes
+
+`/leads/[id]/quotes/[quoteGroupId]/print` and
+`/merchants/[id]/quotes/[quoteGroupId]/print` both render
+`QuoteProposalDocument`, fed by `loadProposal()` in `lib/quote-proposal.ts` —
+so each route is about ten lines. The loader flattens the two owner tables
+into one shape (a lead has `dba` / `merchant_legal_name` and three contact
+columns; a merchant has `dba` / `legal_business_name` and **no contact columns
+at all**), which means the document has one set of fields and cannot quietly
+omit one on one route. This is a sheet somebody is handed, so two near-copies
+is the worst place in the app for a wording drift. **That makes five printable
+routes but four documents** — the counts in `print-document.tsx` and
+`globals.css` say so.
+
+**Nothing is invented on it.** `PROPOSAL_TERMS` is one constant and is **empty
+by default**, so no terms block renders at all — not an empty heading, not
+placeholder wording. Nothing in this repo knows Tapswipe's hardware terms, and
+a wrong price is obvious where wrong terms are not. "Prepared by" prints only
+what `profiles` actually has (`full_name`, `email`, `agent_number`) — there is
+no phone column, so no phone is printed; and a merchant's contact line is
+omitted rather than filled from its originating pre-app, because a contact
+pulled from a two-year-old application is worse than none since it looks
+current. The preparer is the **quote's own** `agent_id`, so an admin printing a
+rep's proposal prints the rep's name.
+
+**404 on everything, never 403** — and it matters more on the merchant route:
+merchant ids are sequential and a rep knows their own, so "does merchant 41
+exist" is exactly the question a distinguishable response would answer. Note
+the e2e assertions are on the **rendered** not-found copy, not the status code:
+under `cacheComponents` the static shell is flushed before the Suspense
+boundary streams, so `notFound()` lands as **200** with not-found content in
+the body. That is existing behaviour of every record page here, written up in
+`e2e/print.spec.ts`.
 
 ### The dashboard's filters narrow a view the caller already had in full
 
