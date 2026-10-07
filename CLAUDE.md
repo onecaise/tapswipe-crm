@@ -67,10 +67,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (1124 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (1182 tests)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (205 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (123 tests, 5 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (131 tests, 5 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -174,7 +174,7 @@ Postgres grants `EXECUTE` to `PUBLIC` on every new function, and `PUBLIC` includ
 
 **It only ever warns, and must never become a block.** A hard block on a cross-book duplicate is unrecoverable from the UI by construction: the rep cannot see the offending record, so the only move left is to make the check miss, and the workaround reps find is typing the phone number wrong — which destroys the most reliable field the check depends on.
 
-**pg_trgm lives in the `extensions` schema** (Supabase convention), which is why everything downstream carries `set search_path = public, extensions`; without it the failure is a bare `operator does not exist: text % text` at runtime. In the hermetic suite it must additionally be handed to the **PGlite constructor** (`new PGlite({ extensions: { pg_trgm } })` in `tests/helpers/db.ts`) — `create extension` alone is not enough there, and because every suite applies every migration, forgetting it reds all 47 files at once. The `dup_digits` / `dup_email` / `dup_host` normalisers exist to be indexed: never `create or replace` one with different behaviour without reindexing, because Postgres leaves existing index entries computed by the old definition and a duplicate check that silently stops matching looks exactly like no duplicates.
+**pg_trgm lives in the `extensions` schema** (Supabase convention), which is why everything downstream carries `set search_path = public, extensions`; without it the failure is a bare `operator does not exist: text % text` at runtime. In the hermetic suite it must additionally be handed to the **PGlite constructor** (`new PGlite({ extensions: { pg_trgm } })` in `tests/helpers/db.ts`) — `create extension` alone is not enough there, and because every suite applies every migration, forgetting it reds all 53 files at once. The `dup_digits` / `dup_email` / `dup_host` normalisers exist to be indexed: never `create or replace` one with different behaviour without reindexing, because Postgres leaves existing index entries computed by the old definition and a duplicate check that silently stops matching looks exactly like no duplicates.
 
 **`migrationsBefore()`, not `migrationsExcept()`, when a test reconstructs a point in history.** `migrationsExcept` drops a file out of the middle and still applies everything after it, which is right for the grant regression tests and wrong for everything else: the moment a later migration references a column the excluded one added, the suite dies on a missing relation in a migration the test is not about. That is not hypothetical — `20261002161500` indexes `leads.website` and broke the `leads-status` backfill block exactly this way.
 
@@ -463,6 +463,75 @@ a different shape. Because no policy expresses this, **no RLS test can see it**:
 `e2e/followups.spec.ts` is the only place that promise is checked, and it checks
 both halves (the admin's dashboard omits the rep's task; `/tasks` still shows it
 to them), so a broken read cannot pass as correct scoping.
+
+### The lead timeline merges six sources and widens none of them
+
+`components/lead-timeline.tsx` on the lead detail page is one chronological
+feed over notes, tasks, documents, quote versions, marketing events and the
+audit trail. **It is a re-projection, not a sixth set of reads**: the page
+already loads five of those for its panels, so `lib/timeline.ts` is **pure** —
+it takes rows and returns entries, which is what lets
+`tests/unit/timeline.test.ts` import it with no database. `lib/timeline-data.ts`
+holds the only genuinely new query. Extending `loadAnnotations()` instead would
+have pushed a lead-only concern into a function four detail pages share, and a
+`loadLeadTimeline()` doing its own six reads would have doubled every one of
+them on the page's hot path.
+
+**`audit_log` is admin-only with NO own-row branch, and that is the whole
+scoping story.** Its single policy is `for select using (is_admin())`, so an
+**agent reads zero audit rows — on their own lead as much as anyone else's** —
+while `grant select on audit_log to authenticated` means the query *succeeds*
+and returns nothing. A rep's feed therefore simply has no audit entries, and
+the page says **nothing** about the gap: a permanent notice would be wallpaper
+on every lead (the thing `followup-reconcile.tsx` renders nothing to avoid),
+and a conditional one would announce that an admin had touched the record,
+which is exactly what the policy conceals. No definer RPC and no service-role
+client anywhere in the chain.
+
+**The query still runs for a rep rather than being skipped on role**, and that
+is deliberate: a role branch there is a copy of a policy in application code,
+and if `audit_log` ever gains an own-row branch the feed should widen by itself
+rather than keep showing nothing while nothing fails.
+
+Four decisions worth knowing before changing any of it:
+
+- **Two sources must NOT carry a byline.** `documents.agent_id` and
+  `quotes.agent_id` are the **parent record's owner**, not whoever acted — the
+  page passes `lead.agent_id` into `QuotesPanel`, and `create-upload-url` files
+  under the lead's rep so the file lands in that rep's book. So an admin's
+  upload on a rep's lead is stamped with the REP's id, and printing it would
+  attribute the act to the wrong person. The real actor is in `audit_log` and
+  is therefore admin-only, which makes **no byline the honest rendering**.
+  Notes, tasks and marketing events do carry theirs (`profile.id` is what the
+  panels write).
+- **Audit rows are matched on the `(table_name, row_id)` PAIR**, in one query
+  per table. `row_id` is `text` and lead 7, quote 7 and pre-app 7 all plausibly
+  exist, so a combined `.in("table_name", …).in("row_id", …)` would file one
+  under another — and no policy would object, because an admin may read both.
+  `leads`, `quotes` and `pre_apps` are covered; **`documents` is deliberately
+  not**, because its upload rows duplicate entries the feed already builds from
+  the table while its DELETE row — the one genuinely new fact — names a row
+  that no longer exists, so nothing available here can tie it to the lead.
+- **The ordering is a TOTAL order**, because exact ties are routine rather than
+  freak: `created_at` defaults to `now()`, frozen for a whole transaction, so a
+  quote and the audit row its own trigger writes tie to the microsecond. Rules
+  are instant (parsed, **not** string-compared — a different offset is not a
+  later time), then source rank with the audit *trace* after the act, then id
+  descending. Without the tie-break the feed reshuffles when an unrelated
+  source gains a row, since `Array.sort` is stable only against its input.
+- **A task is placed at its CREATION**, which is why `tasks.created_at` joined
+  `TASK_LIST_COLUMNS`. A due date is a plan, and dating the entry by it puts
+  next Tuesday's task above everything that has actually happened. Completion
+  is absent entirely: there is no `completed_at`, so there is no instant to
+  place it at. And **`emailed` gets its own wording** — nothing in this
+  codebase sends mail, and a row reading "Emailed" in a list of things that
+  happened is how an admin comes to believe a proposal went out.
+
+`e2e/lead-timeline.spec.ts` is where the scoping is actually checked, because
+no RLS test can: it loads **one** lead in two real sessions and cross-reads
+them, asserting the rep's five rows are *identical* to the admin's five rather
+than merely fewer. "The admin sees more" is also true of a feed showing the two
+roles unrelated things.
 
 ### Next.js / auth wiring
 
