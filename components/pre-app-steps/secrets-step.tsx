@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
 import type { PreAppOwner } from "@/lib/pre-apps";
@@ -63,6 +63,8 @@ export function SecretsStep({
   owners: PreAppOwner[];
   canEdit: boolean;
 }) {
+  // Pairs each label with its input (QA-004) — none of these had an accessible name.
+  const fieldId = useId();
   const [status, setStatus] = useState<SecretsStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -158,8 +160,11 @@ export function SecretsStep({
               );
               return (
                 <div key={owner.id} className="flex flex-col gap-2">
-                  <Label>{owner.owner_name ?? `Owner #${owner.id}`}</Label>
+                  <Label htmlFor={`${fieldId}-ssn-${owner.id}`}>
+                    {owner.owner_name ?? `Owner #${owner.id}`}
+                  </Label>
                   <MaskedInput
+                    id={`${fieldId}-ssn-${owner.id}`}
                     mask={maskSsn}
                     placeholder="123-45-6789"
                     disabled={!canEdit || saving}
@@ -188,8 +193,9 @@ export function SecretsStep({
         <legend className="font-semibold text-sm">Banking</legend>
         <div className="grid gap-6 sm:grid-cols-2">
           <div className="flex flex-col gap-2">
-            <Label>ABA routing number</Label>
+            <Label htmlFor={`${fieldId}-routing`}>ABA routing number</Label>
             <MaskedInput
+              id={`${fieldId}-routing`}
               mask={maskRouting}
               placeholder="021000021"
               disabled={!canEdit || saving}
@@ -210,8 +216,9 @@ export function SecretsStep({
             />
           </div>
           <div className="flex flex-col gap-2">
-            <Label>Account number</Label>
+            <Label htmlFor={`${fieldId}-account`}>Account number</Label>
             <MaskedInput
+              id={`${fieldId}-account`}
               mask={maskAccount}
               placeholder="000123456789"
               disabled={!canEdit || saving}
@@ -240,8 +247,9 @@ export function SecretsStep({
       <fieldset className="flex flex-col gap-4">
         <legend className="font-semibold text-sm">Terminal</legend>
         <div className="flex max-w-sm flex-col gap-2">
-          <Label>RP password</Label>
+          <Label htmlFor={`${fieldId}-rp-password`}>RP password</Label>
           <Input
+            id={`${fieldId}-rp-password`}
             type="password"
             // NOT autoComplete="off": Chrome deliberately ignores that on
             // password inputs so password managers keep working, and would offer

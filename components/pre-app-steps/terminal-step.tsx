@@ -1,5 +1,6 @@
 "use client";
 
+import { cloneElement, isValidElement, useId } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 
@@ -171,10 +172,21 @@ function Field({
   error?: string;
   children: React.ReactNode;
 }) {
+  // The label has to name its control: a bare <Label> beside the input gave
+  // no input on this step an accessible name (QA-004). The id goes onto the
+  // single child unless it already carries one.
+  const generatedId = useId();
+  const childId = isValidElement<{ id?: string }>(children)
+    ? (children.props.id ?? generatedId)
+    : undefined;
+  const control =
+    isValidElement<{ id?: string }>(children) && children.props.id === undefined
+      ? cloneElement(children, { id: generatedId })
+      : children;
   return (
     <div className="flex flex-col gap-2">
-      <Label>{label}</Label>
-      {children}
+      <Label htmlFor={childId}>{label}</Label>
+      {control}
       {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );

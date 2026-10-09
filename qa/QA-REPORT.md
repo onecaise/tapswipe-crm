@@ -33,8 +33,9 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | QA-001 | High | Auth | `/auth/confirm` redirects to any `next=` URL after a valid OTP (open redirect) | NEEDS OWEN (repro 20e065a) |
 | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 | QA-003 | Medium | Products | List price `0x10` saved as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
+| QA-004 | High | Pre-apps / a11y | No pre-app wizard field had an accessible name — incl. SSN, routing, account, RP password (axe `label`/`select-name` critical) | __HASH__ |
 6.00, `1e3` as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
-,000.00 (Number() reads JS literals) | __HASH__ |
+,000.00 (Number() reads JS literals) | 917f5ad |
 
 ## Details
 
@@ -51,6 +52,17 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 ### QA-003 — list price parsed as a JavaScript literal (Medium, products)
 - **Repro:** `/admin/products/<brand>` → Add product → List price `0x10` → saved and shown as
   `
+### QA-004 — pre-app wizard labels not associated with inputs (High, accessibility)
+- **Repro:** `/pre-apps/<id>/edit?step=business` (and owners/terminal/profile/secrets) → axe
+  reports `label` (critical) on every input and `select-name` on Billing type. A screen reader
+  announces "edit text" for DBA name, SSN, routing and account number alike; clicking a label
+  focuses nothing. Spec `e2e/qa/pre-app-labels.spec.ts`.
+- **Root cause:** the four per-step `Field` helpers render `<Label>` as a sibling of the control
+  with no `htmlFor`/`id`; `secrets-step.tsx` hand-writes the same shape.
+- **Fix:** each `Field` generates an id (`useId`) and puts it on its single child unless the child
+  already has one, with `htmlFor` on the label (plus an explicit `htmlFor` for the datalist-backed
+  Entity type). Secrets step: explicit id/htmlFor pairs. Markup only — no data or validation path touched.
+
 ## NEEDS OWEN6.00`; `1e3` → `
 ## NEEDS OWEN,000.00`. A mistyped price became a different, plausible price that
   then flows onto proposals. Spec `e2e/qa/product-price-parse.spec.ts`.
