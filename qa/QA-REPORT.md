@@ -34,7 +34,8 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 | QA-003 | Medium | Products | List price `0x10` saved as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 | QA-004 | High | Pre-apps / a11y | No pre-app wizard field had an accessible name — incl. SSN, routing, account, RP password (axe `label`/`select-name` critical) | 0ebb211 |
-| QA-005 | Medium | Payouts / Users / a11y | File inputs on `/payouts/import` and `/admin/users/import` have no accessible name (axe `label` critical) | __HASH__ |
+| QA-005 | Medium | Payouts / Users / a11y | File inputs on `/payouts/import` and `/admin/users/import` have no accessible name (axe `label` critical) | cd48eec |
+| QA-006 | Low | Proposals / a11y | Cart totals `<dl>` contains a bare `<p>` (axe `definition-list` serious) | __HASH__ |
 6.00, `1e3` as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 ,000.00 (Number() reads JS literals) | 917f5ad |
 
@@ -70,6 +71,15 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 - **Root cause:** the heading above each input is a `<p>`, and the `<Input type="file">` has no
   label or `aria-label` (the documents and marketing uploads do label theirs).
 - **Fix:** `aria-label` on both inputs ("Residual report (XLSX)", "Rep list (CSV)"). No visual change.
+
+### QA-006 — invalid definition list in the proposal cart (Low, accessibility)
+- **Repro:** axe on `/proposals/new` (agent or admin) → `definition-list` (serious). Spec
+  `e2e/qa/proposal-totals-markup.spec.ts`.
+- **Root cause:** `components/quote-store.tsx` put the "Prices are taken from the catalog…" `<p>`
+  inside the totals `<dl>`.
+- **Fix:** the flex row is now a `<div>`; the two dt/dd pairs sit in a `<dl className="contents">`
+  and the note is its sibling. Layout unchanged (`display: contents`); quote-store e2e (incl.
+  the 375/768/1440 overflow checks) green.
 
 ## NEEDS OWEN6.00`; `1e3` → `
 ## NEEDS OWEN,000.00`. A mistyped price became a different, plausible price that

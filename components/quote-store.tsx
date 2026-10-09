@@ -412,19 +412,24 @@ export function QuoteStore({
       {/* ---------------------------------------------------------------
           Totals — TWO of them, never summed.
           --------------------------------------------------------------- */}
-      <dl className="flex flex-col gap-1 border-t pt-3 text-sm sm:flex-row sm:gap-6">
-        <div className="flex items-baseline gap-2">
-          <dt className="text-muted-foreground">One-time</dt>
-          <dd className="font-medium tabular-nums">
-            {formatMoney(totals.oneTime)}
-          </dd>
-        </div>
-        <div className="flex items-baseline gap-2">
-          <dt className="text-muted-foreground">Monthly</dt>
-          <dd className="font-medium tabular-nums">
-            {formatMoney(totals.monthly)}
-          </dd>
-        </div>
+      {/* The <dl> holds only the two pairs; the note below is a sibling, not a
+          child — a <p> inside a <dl> is invalid list markup (QA-006).
+          `contents` keeps the pairs laid out by the row exactly as before. */}
+      <div className="flex flex-col gap-1 border-t pt-3 text-sm sm:flex-row sm:gap-6">
+        <dl className="contents">
+          <div className="flex items-baseline gap-2">
+            <dt className="text-muted-foreground">One-time</dt>
+            <dd className="font-medium tabular-nums">
+              {formatMoney(totals.oneTime)}
+            </dd>
+          </div>
+          <div className="flex items-baseline gap-2">
+            <dt className="text-muted-foreground">Monthly</dt>
+            <dd className="font-medium tabular-nums">
+              {formatMoney(totals.monthly)}
+            </dd>
+          </div>
+        </dl>
         {/* No combined figure, here or on the printed sheet. $1,497 of
             terminals and $29 a month are not the same unit, so a single
             "total" summing them would be a number that means nothing and
@@ -432,7 +437,7 @@ export function QuoteStore({
         <p className="text-xs text-muted-foreground sm:ml-auto sm:self-center">
           Prices are taken from the catalog when the proposal is saved.
         </p>
-      </dl>
+      </div>
     </div>
   );
 }
