@@ -141,6 +141,8 @@ async function seedCatalog(): Promise<void> {
 function createQuoteSql(args: {
   leadId?: number | null;
   merchantId?: number | null;
+  /** Required by the RPC only when neither link is given. */
+  customerName?: string | null;
   agentId: string;
   groupId: string | null;
   status?: string;
@@ -150,12 +152,14 @@ function createQuoteSql(args: {
 }): string {
   const lead = args.leadId == null ? "null" : String(args.leadId);
   const merchant = args.merchantId == null ? "null" : String(args.merchantId);
+  const customer =
+    args.customerName == null ? "null" : `'${args.customerName.replace(/'/g, "''")}'`;
   const group = args.groupId === null ? "null" : `'${args.groupId}'`;
   const title = args.title == null ? "null" : `'${args.title}'`;
   const notes = args.notes == null ? "null" : `'${args.notes}'`;
   const lines = JSON.stringify(args.lines).replace(/'/g, "''");
   return `select create_quote_version(
-    ${lead}, ${merchant}, '${args.agentId}', ${group},
+    ${lead}, ${merchant}, ${customer}, '${args.agentId}', ${group},
     '${args.status ?? "draft"}', ${title}, ${notes}, '${lines}'::jsonb
   ) as id`;
 }
@@ -507,8 +511,8 @@ describe("versions are assigned by the database", () => {
     try {
       await expect(
         db.exec(
-          `insert into quotes (quote_group_id, version, lead_id, agent_id)
-           values ('${groupId}', 1, ${agentLeadId}, '${AGENT_ID}')`,
+          `insert into quotes (quote_group_id, version, lead_id, customer_name, agent_id)
+           values ('${groupId}', 1, ${agentLeadId}, 'Dup', '${AGENT_ID}')`,
         ),
       ).rejects.toThrow(/unique|duplicate key/i);
     } finally {

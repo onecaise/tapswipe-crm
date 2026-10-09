@@ -96,10 +96,11 @@ function quote(over: Partial<Quote> = {}): Quote {
     quote_group_id: "group-a",
     version: 1,
     lead_id: LEAD_ID,
-    // Null, because quotes_exactly_one_owner permits exactly one owner and
-    // the timeline is a LEAD feature — a merchant quote never reaches it.
+    // Null, because quotes_at_most_one_link permits one link and the
+    // timeline is a LEAD feature — a merchant proposal never reaches it.
     merchant_id: null,
-    // The owning rep, because the page passes lead.agent_id into the builder.
+    customer_name: "Lead Seven Cafe",
+    // The rep the proposal is for.
     agent_id: "agent-uuid",
     status: "draft",
     title: "Countertop package",

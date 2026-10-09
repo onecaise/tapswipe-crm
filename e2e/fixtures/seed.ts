@@ -947,11 +947,11 @@ async function ensureMerchantProposal(
     .eq("title", STORE_FIXTURE.merchantProposalTitle);
 
   const { data: quoteId, error } = await db.rpc("create_quote_version", {
-    // merchant_id, lead_id null — exactly one owner, which is what
-    // quotes_exactly_one_owner requires and what this fixture exists to
-    // exercise from the browser.
+    // Linked to the merchant, so the trigger copies its name and
+    // customer_name_input is ignored.
     lead_id_input: null,
     merchant_id_input: merchantId,
+    customer_name_input: null,
     agent_id_input: agentId,
     quote_group_id_input: null,
     status_input: "sent",
@@ -1276,6 +1276,8 @@ async function ensureTimelineLead(
       // signature makes a caller say which record a proposal is about rather
       // than letting them pass neither and get a constraint violation.
       merchant_id_input: null,
+      // Linked, so the trigger copies the lead's name over this.
+      customer_name_input: null,
       agent_id_input: ids.agent,
       quote_group_id_input: null,
       status_input: "sent",
@@ -1539,6 +1541,7 @@ async function ensureQuote(
     const { data, error } = await db.rpc("create_quote_version", {
       lead_id_input: leadId,
       merchant_id_input: null,
+      customer_name_input: null,
       agent_id_input: agentId,
       quote_group_id_input: groupId,
       status_input: "sent",

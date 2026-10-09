@@ -62,9 +62,14 @@ export type Quote = {
   id: number;
   quote_group_id: string;
   version: number;
-  /** Exactly one of these two is set — quotes_exactly_one_owner. */
+  /** At most one of these two is set — quotes_at_most_one_link. */
   lead_id: number | null;
   merchant_id: number | null;
+  /**
+   * Who the proposal is for, snapshotted per version: the linked record's
+   * name (copied by enforce_quote_version()) or the name the rep typed.
+   */
+  customer_name: string;
   agent_id: string;
   status: string;
   title: string | null;
@@ -73,7 +78,7 @@ export type Quote = {
 };
 
 export const QUOTE_COLUMNS =
-  "id, quote_group_id, version, lead_id, merchant_id, agent_id, status, title, notes, created_at";
+  "id, quote_group_id, version, lead_id, merchant_id, customer_name, agent_id, status, title, notes, created_at";
 
 /**
  * Which kind of record a quote hangs off.

@@ -19,8 +19,8 @@ import {
  * the one-column append-only grant. This file is the two things 20261007150000
  * added, and they fail in different directions:
  *
- *   1. **EXACTLY ONE OWNER, with the merchant branch mirroring merchants'
- *      own scoping.** The insert policy's second `exists` is the
+ *   1. **AT MOST ONE LINK (exactly one until 20261009150000), with each link
+ *      checked against what the caller can see.** The insert policy's second `exists` is the
  *      documents.file_key lesson in its fourth form: merchant_id is
  *      client-supplied and nothing else in the policy reads it. The failure is
  *      not a disclosure — it is a rep filing a document the merchant never saw
@@ -111,16 +111,20 @@ async function seedCatalog(): Promise<void> {
 function createQuoteSql(args: {
   leadId?: number | null;
   merchantId?: number | null;
+  /** Required by the RPC only when neither link is given. */
+  customerName?: string | null;
   agentId: string;
   groupId?: string | null;
   lines: { product_id: number; quantity: number }[];
 }): string {
   const lead = args.leadId == null ? "null" : String(args.leadId);
   const merchant = args.merchantId == null ? "null" : String(args.merchantId);
+  const customer =
+    args.customerName == null ? "null" : `'${args.customerName.replace(/'/g, "''")}'`;
   const group = args.groupId == null ? "null" : `'${args.groupId}'`;
   const lines = JSON.stringify(args.lines).replace(/'/g, "''");
   return `select create_quote_version(
-    ${lead}, ${merchant}, '${args.agentId}', ${group},
+    ${lead}, ${merchant}, ${customer}, '${args.agentId}', ${group},
     'draft', 'TEST proposal', null, '${lines}'::jsonb
   ) as id`;
 }
@@ -130,35 +134,36 @@ beforeEach(async () => {
   await seedCatalog();
 });
 
-describe("exactly one owner, enforced by the constraint", () => {
-  it("accepts a lead quote and a merchant quote", async () => {
+describe("at most one link, enforced by the constraint", () => {
+  it("accepts a lead proposal, a merchant proposal and an unlinked one", async () => {
     await asUser(db, AGENT_ID);
-    await db.exec(
-      createQuoteSql({
-        leadId: agentLeadId,
-        agentId: AGENT_ID,
-        lines: [{ product_id: flexId, quantity: 1 }],
-      }),
-    );
-    await db.exec(
-      createQuoteSql({
-        merchantId: agentMerchantId,
-        agentId: AGENT_ID,
-        lines: [{ product_id: flexId, quantity: 1 }],
-      }),
-    );
+    for (const args of [
+      { leadId: agentLeadId },
+      { merchantId: agentMerchantId },
+      { customerName: "Walk-in Coffee" },
+    ]) {
+      await db.exec(
+        createQuoteSql({
+          ...args,
+          agentId: AGENT_ID,
+          lines: [{ product_id: flexId, quantity: 1 }],
+        }),
+      );
+    }
 
-    const found = await rows<{ lead_id: number | null; merchant_id: number | null }>(
-      db,
-      `select lead_id, merchant_id from quotes order by id`,
-    );
+    const found = await rows<{
+      lead_id: number | null;
+      merchant_id: number | null;
+      customer_name: string;
+    }>(db, `select lead_id, merchant_id, customer_name from quotes order by id`);
     expect(found).toEqual([
-      { lead_id: agentLeadId, merchant_id: null },
-      { lead_id: null, merchant_id: agentMerchantId },
+      { lead_id: agentLeadId, merchant_id: null, customer_name: "Agent Lead A" },
+      { lead_id: null, merchant_id: agentMerchantId, customer_name: "Agent Active Co" },
+      { lead_id: null, merchant_id: null, customer_name: "Walk-in Coffee" },
     ]);
   });
 
-  it("refuses BOTH owners, at the RPC with a message that says what to do", async () => {
+  it("refuses BOTH links, at the RPC with a message that says what to do", async () => {
     await asUser(db, AGENT_ID);
     await expect(
       db.exec(
@@ -169,75 +174,67 @@ describe("exactly one owner, enforced by the constraint", () => {
           lines: [{ product_id: flexId, quantity: 1 }],
         }),
       ),
-    ).rejects.toThrow(/exactly one of a lead or a merchant/);
+    ).rejects.toThrow(/at most one of a lead or a merchant/);
   });
 
-  it("refuses NEITHER owner", async () => {
+  it("refuses an unlinked proposal with no customer name, at the RPC", async () => {
+    await asUser(db, AGENT_ID);
+    for (const customerName of [null, "   "]) {
+      await expect(
+        db.exec(
+          createQuoteSql({
+            customerName,
+            agentId: AGENT_ID,
+            lines: [{ product_id: flexId, quantity: 1 }],
+          }),
+        ),
+      ).rejects.toThrow(/needs a customer name/);
+    }
+  });
+
+  it("refuses both links at the CONSTRAINT too, past the RPC", async () => {
+    // A direct insert. Both records are the rep's, so the policy admits the
+    // row; the constraint is what rejects it. The policy's job is visibility,
+    // not arity.
     await asUser(db, AGENT_ID);
     await expect(
       db.exec(
-        createQuoteSql({
-          agentId: AGENT_ID,
-          lines: [{ product_id: flexId, quantity: 1 }],
-        }),
+        `insert into quotes (lead_id, merchant_id, customer_name, agent_id)
+         values (${agentLeadId}, ${agentMerchantId}, 'x', '${AGENT_ID}')`,
       ),
-    ).rejects.toThrow(/exactly one of a lead or a merchant/);
+    ).rejects.toThrow(/quotes_at_most_one_link/);
   });
 
-  it("refuses both owners at the CONSTRAINT too, past the RPC", async () => {
-    // The RPC's check produces the readable message; the constraint is the
-    // layer a direct insert cannot skip. Both exist and both are asserted,
-    // because a reader of the RPC would otherwise have no way to know which
-    // one is load-bearing.
-    //
-    // With BOTH set the policy admits the row — the lead branch's `exists`
-    // succeeds — so the constraint is what rejects it. Which is the point: the
-    // policy's job is ownership, not arity.
+  it("refuses a blank or missing customer name at the CONSTRAINT, past the RPC", async () => {
     await asUser(db, AGENT_ID);
     await expect(
       db.exec(
-        `insert into quotes (lead_id, merchant_id, agent_id)
-         values (${agentLeadId}, ${agentMerchantId}, '${AGENT_ID}')`,
+        `insert into quotes (customer_name, agent_id) values ('  ', '${AGENT_ID}')`,
       ),
-    ).rejects.toThrow(/quotes_exactly_one_owner/);
-  });
-
-  it("refuses NEITHER owner at the policy for a rep, the constraint for an admin", async () => {
-    // Measured, and not what the first draft of this test expected. For a rep
-    // an ownerless quote never reaches the constraint: both of the insert
-    // policy's owner branches are guarded by `is not null`, so with neither
-    // column set the policy itself denies the row. Two layers refusing the
-    // same thing in a particular ORDER, and the order is worth pinning —
-    // otherwise someone removing the `is not null` guards would see this test
-    // still pass on the constraint and conclude the guards were decoration.
-    await asUser(db, AGENT_ID);
+    ).rejects.toThrow(/quotes_customer_name_not_blank/);
     await expect(
       db.exec(`insert into quotes (agent_id) values ('${AGENT_ID}')`),
-    ).rejects.toThrow(/row-level security/);
-
-    // An admin's branch short-circuits the owner check, so for them the
-    // constraint is the only thing standing between an ownerless quote and the
-    // table. This is the assertion that proves the constraint is real rather
-    // than shadowed everywhere.
-    await asUser(db, ADMIN_ID);
-    await expect(
-      db.exec(`insert into quotes (agent_id) values ('${AGENT_ID}')`),
-    ).rejects.toThrow(/quotes_exactly_one_owner/);
+    ).rejects.toThrow(/customer_name/);
   });
 
-  it("is an ORDINARY constraint, not NOT VALID", async () => {
-    // The whole reason it could be added without NOT VALID: lead_id was
-    // `not null` until the migration, and merchant_id was added by it, so
-    // num_nonnulls was 1 for every existing row by construction. A NOT VALID
-    // constraint looks identical in the schema and enforces nothing on the
-    // rows that were there first, so the difference has to be asserted.
+  it("is ORDINARY, not NOT VALID, and the old exactly-one constraint is gone", async () => {
+    // `<= 1` admits every row `= 1` did, so there was nothing to exempt. A
+    // NOT VALID constraint looks identical in the schema and enforces
+    // nothing on the rows that were there first.
     await asPlatform(db);
-    const [row] = await rows<{ convalidated: boolean }>(
+    const found = await rows<{ conname: string; convalidated: boolean }>(
       db,
-      `select convalidated from pg_constraint
-        where conname = 'quotes_exactly_one_owner'`,
+      `select conname, convalidated from pg_constraint
+        where conrelid = 'quotes'::regclass
+          and conname in ('quotes_at_most_one_link',
+                          'quotes_customer_name_not_blank',
+                          'quotes_exactly_one_owner')
+        order by conname`,
     );
-    expect(row.convalidated).toBe(true);
+    expect(found).toEqual([
+      { conname: "quotes_at_most_one_link", convalidated: true },
+      { conname: "quotes_customer_name_not_blank", convalidated: true },
+    ]);
   });
 });
 
@@ -666,7 +663,7 @@ describe("the RPC's signature", () => {
     // `create or replace function` with a different number of parameters
     // creates a SECOND function rather than replacing the first, and Postgres
     // reports the resulting ambiguity at CALL time — from the browser, as a
-    // failed save. The migration drops the 7-argument version; this is what
+    // failed save. 20261009150000 drops the 8-argument version; this is what
     // notices if a future change leaves two behind. dashboard_counts() carries
     // the same assertion for the same reason.
     await asPlatform(db);
@@ -675,7 +672,7 @@ describe("the RPC's signature", () => {
       `select pronargs as nargs from pg_proc where proname = 'create_quote_version'`,
     );
     expect(found).toHaveLength(1);
-    expect(found[0].nargs).toBe(8);
+    expect(found[0].nargs).toBe(9);
   });
 
   it("is still security INVOKER, so the caller's policies scope every write", async () => {

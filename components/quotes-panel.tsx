@@ -269,6 +269,8 @@ export function QuotesPanel({
       // so this call has to say which.
       lead_id_input: ownerType === "lead" ? ownerId : null,
       merchant_id_input: ownerType === "merchant" ? ownerId : null,
+      // Linked, so the trigger copies the record's name; nothing to type.
+      customer_name_input: null,
       agent_id_input: agentId,
       quote_group_id_input: draft.groupId,
       status_input: "draft",

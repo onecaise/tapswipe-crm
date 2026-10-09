@@ -3015,7 +3015,7 @@ create table product_compatibility (
   device_product_id int references products(id) not null,
 
   -- Ordinary, not NOT VALID: the table is new, so it has no rows that
-  -- could fail it. See quotes_exactly_one_owner for the opposite case
+  -- could fail it. See quotes_at_most_one_link for the opposite case
   -- handled the same way -- NOT VALID is for constraints added over data
   -- that predates them, and reaching for it when the rows can be proven
   -- clean buys nothing and gives up the guarantee.
@@ -3210,10 +3210,20 @@ create table quotes (
   -- rep's ordinary second edit into an error they cannot act on.
   version int not null default 1 check (version >= 1),
 
-  -- A quote belongs to a LEAD or to a MERCHANT -- exactly one of the two.
+  -- A quote is LINKED to a lead, to a merchant, or to NEITHER -- at most
+  -- one of the two (quotes_at_most_one_link below).
+  --
+  -- As of 20261009150000 a proposal is its own record (/proposals), owned
+  -- by a rep, and the link is optional. Until then it was EXACTLY one, and
+  -- a quote could only be made from a lead or merchant page. The unlinked
+  -- case is a rep pricing hardware for a business that is not in the CRM
+  -- yet -- a walk-in, a phone enquiry -- and forcing a lead into existence
+  -- first would mean inventing one to hold a price sheet. Who the document
+  -- is FOR is then customer_name, below, which every version carries
+  -- whether or not it is linked.
   --
   -- Both nullable with a CHECK rather than NOT NULL on either, because
-  -- the two cases are the same document at different points in a
+  -- the linked cases are the same document at different points in a
   -- relationship: a rep quotes hardware to win a deal, and quotes more
   -- hardware to the same business two years later when it is a merchant
   -- on the books. One table, one append-only version history, one
@@ -3235,7 +3245,27 @@ create table quotes (
   lead_id     int references leads(id)     on delete cascade,
   merchant_id int references merchants(id) on delete cascade,
 
-  -- The owning rep, and one more column referencing profiles(id) -- ON DELETE
+  -- WHO THE DOCUMENT IS FOR, snapshotted onto every version.
+  --
+  -- Linked: COPIED from the lead's or merchant's name by
+  -- enforce_quote_version(), whatever the caller sent -- the same
+  -- overwrite-don't-trust shape as the price lock, because a name on a
+  -- linked proposal that differs from its record is a document addressed
+  -- to somebody the CRM does not say it is. (dba, then the legal name,
+  -- then "Lead #<id>" / "Merchant #<id>", since leads.dba is nullable.)
+  -- Unlinked: TYPED by the rep, and required.
+  --
+  -- A snapshot rather than a live join for quote_line_items' reason: a
+  -- proposal records what a merchant was shown, and "Prepared for" is part
+  -- of that. Renaming a lead later does not readdress last month's sheet;
+  -- the next version picks up the new name.
+  --
+  -- NOT NULL and non-blank in BOTH cases. The list page and the printed
+  -- sheet both lead with it, and a blank there is a proposal for nobody.
+  customer_name text not null
+    constraint quotes_customer_name_not_blank check (btrim(customer_name) <> ''),
+
+  -- The REP THE PROPOSAL IS FOR, and one more column referencing profiles(id) -- ON DELETE
   -- NO ACTION, like every one of them but profiles.manager_id, so all four
   -- teardown lists need an entry for it.
   --
@@ -3247,6 +3277,16 @@ create table quotes (
   -- takes their lines with it and quote_line_items needs no entry at all. A
   -- line cannot belong to anyone but its quote's owner, which is exactly what
   -- was not true of a marketing event.
+  --
+  -- WHAT agent_id MEANS CHANGED in 20261009150000, and the data did not
+  -- have to. It used to be "the owner of the parent lead or merchant" --
+  -- the lead page passed lead.agent_id -- because a quote could only be
+  -- made from one. Now it is "the rep this proposal is for": a rep makes
+  -- proposals for themselves, an admin for any rep. Every existing row was
+  -- written with the parent's rep, which IS the rep it was for, so no
+  -- backfill. The consequence worth knowing: a proposal's rep and its
+  -- linked record's rep can now differ (an admin may file rep A's proposal
+  -- against rep B's lead). The proposal is A's; B sees it nowhere.
   agent_id uuid references profiles(id) not null,
 
   -- A vocabulary, unlike every other `category`-shaped text column here,
@@ -3277,24 +3317,15 @@ create table quotes (
   -- that each think they are current.
   unique (quote_group_id, version),
 
-  -- EXACTLY ONE OWNER. num_nonnulls() rather than a spelled-out
-  -- `(a is null) <> (b is null)`: it says the rule in the words the rule
-  -- is in, and it stays right if a third owner kind is ever added.
-  --
-  -- ORDINARY, NOT `not valid`, and that is a decision rather than a
-  -- default. NOT VALID is for a constraint added over data that predates
-  -- it -- documents_file_key_matches_owner and
-  -- merchants_split_totals_100 both carry it because hand-rolled rows
-  -- already violated them. Here the existing rows can be PROVEN clean:
-  -- lead_id was `not null` until the migration that added this, and
-  -- merchant_id is brand new and therefore null on every row, so
-  -- num_nonnulls is exactly 1 for every row in the table by
-  -- construction. Reaching for NOT VALID anyway would give up a
-  -- guarantee for nothing -- and silently, because a NOT VALID
-  -- constraint looks identical in the schema and enforces nothing on the
-  -- rows that were there first.
-  constraint quotes_exactly_one_owner
-    check (num_nonnulls(lead_id, merchant_id) = 1)
+  -- AT MOST ONE LINK. num_nonnulls() says the rule in the words the rule
+  -- is in, and stays right if a third link kind is ever added. Replaced
+  -- quotes_exactly_one_owner (`= 1`) in 20261009150000; loosening `= 1`
+  -- to `<= 1` admits a superset of the rows the old one did, so every
+  -- existing row passes and the constraint is ORDINARY, not NOT VALID --
+  -- NOT VALID is for a constraint added over data that may violate it,
+  -- and reaching for it here would give up the guarantee for nothing.
+  constraint quotes_at_most_one_link
+    check (num_nonnulls(lead_id, merchant_id) <= 1)
 );
 
 -- "Every version of this quote, newest first" is served by the unique
@@ -3321,57 +3352,58 @@ alter table quotes enable row level security;
 create policy "select own or admin" on quotes
   for select using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
 
--- The owner `exists` clauses are the documents.file_key lesson in its
--- third form, and they are here for exactly the reason the marketing
--- events policy carries one. lead_id and merchant_id are both
--- client-supplied and no other clause in this policy reads either -- the
--- shape that made documents.file_key a live cross-agent read. Without
--- them a rep could file quotes against another rep's lead or merchant:
--- not reading anything, but putting a document the merchant never saw in
--- front of the admin reviewing somebody else's deal.
+-- WHO MAY CREATE A PROPOSAL, AND FOR WHOM. Rewritten in 20261009150000,
+-- when a proposal stopped being a child of a lead or merchant page.
 --
--- The subqueries state `agent_id = auth.uid()` rather than leaning on
--- RLS to filter them, matching the pre_apps child tables: same effect, and
--- a reader does not have to know policies nest to see the check is real.
--- TWO owner branches now, and the merchant one is not optional. With
--- lead_id nullable, the old single `exists (… leads.id = lead_id …)`
--- returns no rows for a merchant quote -- so without the second branch a
--- rep could not quote a merchant at all, while an admin silently could.
+--   1. FOR WHOM: `(agent_id = auth.uid() and is_active_agent()) or
+--      is_admin()`. Unchanged in text, changed in meaning -- agent_id is
+--      now the rep the proposal is FOR (see the column), so this says a
+--      rep creates proposals for themselves only and an admin for anyone.
 --
--- The merchant branch MIRRORS the merchants select policy
--- (`agent_id = auth.uid() and is_active_agent()`) rather than inventing a
--- rule: a rep may quote exactly the merchants they could already see, so
--- there is no new reachable surface here at all. Spelled out rather than
--- leaning on RLS to filter the subquery, matching the leads branch and
--- the pre_apps children.
+--   2. WHAT IT MAY BE LINKED TO: each link must be a record the CALLER CAN
+--      SEE. The `exists` subqueries are deliberately left to RLS this
+--      time, where the old policy spelled out `leads.agent_id =
+--      auth.uid()`. The rule IS "visible to the caller", so the honest way
+--      to write it is to ask the leads and merchants select policies --
+--      and if those ever widen (a manager seeing a team's leads), linking
+--      widens with them instead of silently disagreeing. A policy subquery
+--      runs under the caller's own RLS, so this cannot see a row the
+--      caller cannot.
 --
--- The `is not null` guards are what keep the two branches honest. Without
--- them a merchant quote (lead_id null) would evaluate the leads `exists`
--- against null and a lead quote the merchants one -- both harmlessly
--- false today, but it would read as if either subquery could admit the
--- other kind of row.
-create policy "insert own via own lead or merchant" on quotes
+--   3. NOT LINKED AT ALL is now allowed, with customer_name required by
+--      its own constraint.
+--
+-- WHAT CHANGED, concretely, from "insert own via own lead or merchant":
+--   * an unlinked proposal is admitted (was refused by the policy for a
+--     rep and by quotes_exactly_one_owner for an admin);
+--   * an ADMIN'S link is now checked too, where the old `is_admin() or
+--     ...` skipped it -- a no-op today, since an admin sees every lead and
+--     merchant, but it means the rule has no role branch;
+--   * nothing a rep could do before is refused now, and nothing a rep was
+--     refused is admitted: a rep sees exactly their own leads and
+--     merchants, which is what the spelled-out clause said.
+--
+-- The documents.file_key lesson still applies and is why the clauses
+-- exist at all: lead_id and merchant_id are client-supplied, and without
+-- an `exists` here a rep could file a proposal against another rep's
+-- lead -- not reading anything, but putting a document in front of the
+-- admin reviewing somebody else's deal.
+--
+-- The `is null or` guards keep each branch to its own column, so an
+-- unlinked proposal never evaluates an `exists` against null.
+create policy "insert own, linked only to what the caller can see" on quotes
   for insert with check (
     (
       (agent_id = auth.uid() and is_active_agent())
       or is_admin()
     )
     and (
-      is_admin()
-      or (
-        lead_id is not null
-        and exists (
-          select 1 from leads
-           where leads.id = lead_id and leads.agent_id = auth.uid()
-        )
-      )
-      or (
-        merchant_id is not null
-        and exists (
-          select 1 from merchants
-           where merchants.id = merchant_id and merchants.agent_id = auth.uid()
-        )
-      )
+      lead_id is null
+      or exists (select 1 from leads where leads.id = quotes.lead_id)
+    )
+    and (
+      merchant_id is null
+      or exists (select 1 from merchants where merchants.id = quotes.merchant_id)
     )
   );
 
@@ -3579,6 +3611,7 @@ declare
   group_lead_id     int;
   group_merchant_id int;
   max_version       int;
+  linked_name       text;
 begin
   -- One scan for every fact about the group. An empty group yields NULLs
   -- throughout, which is the brand-new-quote case.
@@ -3624,6 +3657,31 @@ begin
        or group_merchant_id is distinct from NEW.merchant_id) then
     raise exception 'quote group belongs to a different lead or merchant';
   end if;
+
+  -- THE CUSTOMER NAME SNAPSHOT (20261009150000). Linked: overwritten from
+  -- the record, whatever the caller sent -- the price lock's shape, for
+  -- the same reason: the name on a linked document must be the record's.
+  -- Definer is what lets this read the record even if the caller cannot;
+  -- that is harmless, because the insert policy's WITH CHECK runs AFTER
+  -- this BEFORE trigger and refuses the row, so a name computed for an
+  -- invisible record is never written or returned. Unlinked: the typed
+  -- name, trimmed; quotes_customer_name_not_blank refuses a blank one.
+  if NEW.lead_id is not null then
+    select coalesce(nullif(btrim(l.dba), ''),
+                    nullif(btrim(l.merchant_legal_name), ''),
+                    'Lead #' || l.id)
+      into linked_name
+      from leads l where l.id = NEW.lead_id;
+  elsif NEW.merchant_id is not null then
+    select coalesce(nullif(btrim(m.dba), ''),
+                    nullif(btrim(m.legal_business_name), ''),
+                    'Merchant #' || m.id)
+      into linked_name
+      from merchants m where m.id = NEW.merchant_id;
+  end if;
+  -- A link to a record that does not exist finds no name and keeps the
+  -- typed one; the foreign key then refuses the row.
+  NEW.customer_name := coalesce(linked_name, btrim(NEW.customer_name));
 
   NEW.version := coalesce(max_version, 0) + 1;
   return NEW;
@@ -3786,25 +3844,27 @@ create trigger quote_line_items_snapshot
 -- sheet. A rep passing anybody else's id is refused by the insert policy,
 -- not by code here.
 -- =====================================================================
--- THE SEVEN-ARGUMENT VERSION IS DROPPED, NOT LEFT BESIDE THIS ONE.
+-- EVERY PREVIOUS SIGNATURE IS DROPPED, NOT LEFT BESIDE THIS ONE -- the
+-- 7-argument one in 20261007150000 and the 8-argument one (no customer
+-- name) in 20261009150000. `create or replace function` with a different
+-- parameter list creates a SECOND function rather than replacing the
+-- first, and Postgres reports the resulting ambiguity at CALL time --
+-- from the browser, as a failed save -- not in the migration. Exactly the
+-- trap dashboard_counts() hit, and the same answer: drop the old
+-- signature in the same migration, and assert in a test that the name
+-- resolves to exactly one function.
 --
--- Giving merchant_id_input a default and relying on `create or replace`
--- does not work: `create or replace function` with a different number of
--- parameters creates a SECOND function rather than replacing the first,
--- and a 7-argument call would then have two candidates. Postgres reports
--- that ambiguity at CALL time -- from the browser, as a failed save --
--- not in the migration. Exactly the trap dashboard_counts() hit, and the
--- answer is the same: drop the old signature in the same migration, and
--- assert in a test that the name resolves to exactly one function.
+-- No argument has a default, deliberately. supabase-js calls this with
+-- named parameters so a default would cost nothing to use -- but it would
+-- let a caller forget the customer and get a constraint violation instead
+-- of a signature that made them say who the proposal is for.
 --
--- Neither owner argument has a default, deliberately. supabase-js calls
--- this with named parameters so a default would cost nothing to use --
--- but it would let a caller pass neither and get a constraint violation
--- naming quotes_exactly_one_owner instead of a signature that made them
--- say which record they meant.
+-- customer_name_input is IGNORED for a linked proposal: the trigger
+-- copies the record's name over it. It is the name for an unlinked one.
 create or replace function create_quote_version(
   lead_id_input int,
   merchant_id_input int,
+  customer_name_input text,
   agent_id_input uuid,
   quote_group_id_input uuid,
   status_input text,
@@ -3819,11 +3879,16 @@ as $$
 declare
   new_quote_id int;
 begin
-  -- Refused here as well as by quotes_exactly_one_owner, so the message
-  -- says what to do. The constraint's own error names a constraint and a
-  -- row; this names the choice the caller failed to make.
-  if (lead_id_input is null) = (merchant_id_input is null) then
-    raise exception 'a quote belongs to exactly one of a lead or a merchant';
+  -- Refused here as well as by the constraints, so the message says what
+  -- to do. A constraint's own error names a constraint and a row; these
+  -- name the choice the caller failed to make.
+  if lead_id_input is not null and merchant_id_input is not null then
+    raise exception 'a proposal is linked to at most one of a lead or a merchant';
+  end if;
+
+  if lead_id_input is null and merchant_id_input is null
+     and btrim(coalesce(customer_name_input, '')) = '' then
+    raise exception 'a proposal that is not linked to a lead or merchant needs a customer name';
   end if;
 
   -- A quote with no lines is the state this function exists to make
@@ -3879,12 +3944,14 @@ begin
   -- coalesce on the group id so a brand-new quote can pass NULL and take
   -- the column default rather than needing the caller to generate a uuid.
   insert into quotes (
-    quote_group_id, lead_id, merchant_id, agent_id, status, title, notes
+    quote_group_id, lead_id, merchant_id, customer_name, agent_id,
+    status, title, notes
   )
   values (
     coalesce(quote_group_id_input, gen_random_uuid()),
     lead_id_input,
     merchant_id_input,
+    customer_name_input,
     agent_id_input,
     coalesce(status_input, 'draft'),
     nullif(btrim(coalesce(title_input, '')), ''),
@@ -3945,9 +4012,9 @@ begin
 end;
 $$;
 
-revoke all on function create_quote_version(int, int, uuid, uuid, text, text, text, jsonb)
+revoke all on function create_quote_version(int, int, text, uuid, uuid, text, text, text, jsonb)
   from public;
-grant execute on function create_quote_version(int, int, uuid, uuid, text, text, text, jsonb)
+grant execute on function create_quote_version(int, int, text, uuid, uuid, text, text, text, jsonb)
   to authenticated, service_role;
 
 
