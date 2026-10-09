@@ -34,7 +34,7 @@ export function NavGroups({
 
         return (
           <div key={group.label} className="pb-1">
-            <p className="px-4 pb-1.5 pt-4 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <p className="px-4 pb-1.5 pt-4 text-[11px] font-semibold uppercase tracking-wider text-sidebar-muted">
               {group.label}
             </p>
             <ul>

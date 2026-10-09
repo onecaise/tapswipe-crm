@@ -102,7 +102,7 @@ async function SidebarUser() {
         <p className="truncate text-[13px] font-semibold text-sidebar-foreground-active">
           {profile.full_name}
         </p>
-        <p className="text-[11px] capitalize text-muted-foreground">
+        <p className="text-[11px] capitalize text-sidebar-muted">
           {profile.role}
         </p>
       </div>

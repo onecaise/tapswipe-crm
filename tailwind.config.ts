@@ -54,6 +54,7 @@ export default {
           foreground: "hsl(var(--sidebar-foreground))",
           "foreground-active": "hsl(var(--sidebar-foreground-active))",
           border: "hsl(var(--sidebar-border))",
+          muted: "hsl(var(--sidebar-muted))",
         },
         // Status colours. Badges only — never a button, never the nav.
         success: {

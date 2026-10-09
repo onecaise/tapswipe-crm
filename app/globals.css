@@ -47,7 +47,10 @@
     --secondary: 240 7.7% 94.9%; /* #F1F1F3 */
     --secondary-foreground: 0 0% 9%;
     --muted: 240 7.7% 94.9%; /* #F1F1F3 — search input, filter chips */
-    --muted-foreground: 240 4% 55.9%; /* #8A8A93 — labels, secondary text */
+    /* Was 55.9% (#8A8A93), which measured 3.0-3.4:1 on the app's surfaces --
+       under WCAG AA's 4.5:1 for body text (QA-007). Same hue, darkened only as
+       far as AA on the darkest surface it sits on (--muted, 4.6:1). */
+    --muted-foreground: 240 4% 44%; /* #6C6C75 — labels, secondary text */
     --accent: 240 7.7% 94.9%;
     --accent-foreground: 0 0% 9%;
 
@@ -62,13 +65,18 @@
     --sidebar-foreground: 240 6% 73.7%; /* #B8B8C0 */
     --sidebar-foreground-active: 0 0% 100%;
     --sidebar-border: 240 6.2% 15.9%; /* reads as a hairline on #0E0E10 */
+    /* Secondary text ON the sidebar (group headings, the role under the name).
+       The old --muted-foreground value, which is 5.6:1 on #0E0E10: the sidebar
+       used to borrow that token, and darkening it for the light surfaces
+       (QA-007) would have dropped these to 3.7:1. */
+    --sidebar-muted: 240 4% 55.9%; /* #8A8A93 */
 
     /* Status. Badges only. */
-    --success: 142 76.2% 36.3%; /* #16A34A */
+    --success: 142 76.2% 27%; /* #107937 — was #16A34A, 2.9:1 on success-bg (QA-007) */
     --success-bg: 137 43.8% 93.7%; /* #E8F6EC */
     --warning: 26 90.5% 37.1%; /* #B45309 */
     --warning-bg: 37 86.7% 94.1%; /* #FDF3E3 */
-    --neutral: 0 0% 46.7%; /* #777777 */
+    --neutral: 0 0% 42%; /* #6B6B6B — was #777777, 4.0:1 on neutral-bg (QA-007) */
     --neutral-bg: 240 7.7% 94.9%; /* #F1F1F3 */
 
     /* 0.5rem keeps `rounded-lg` at 8px for buttons while Tailwind's default

@@ -35,7 +35,8 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | QA-003 | Medium | Products | List price `0x10` saved as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 | QA-004 | High | Pre-apps / a11y | No pre-app wizard field had an accessible name — incl. SSN, routing, account, RP password (axe `label`/`select-name` critical) | 0ebb211 |
 | QA-005 | Medium | Payouts / Users / a11y | File inputs on `/payouts/import` and `/admin/users/import` have no accessible name (axe `label` critical) | cd48eec |
-| QA-006 | Low | Proposals / a11y | Cart totals `<dl>` contains a bare `<p>` (axe `definition-list` serious) | __HASH__ |
+| QA-006 | Low | Proposals / a11y | Cart totals `<dl>` contains a bare `<p>` (axe `definition-list` serious) | b27c9f4 |
+| QA-007 | Medium | Design tokens / a11y | `--muted-foreground` 3.0–3.4:1, `--success` 2.9:1, `--neutral` 4.0:1 on their surfaces — axe `color-contrast` on every route | __HASH__ |
 6.00, `1e3` as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 ,000.00 (Number() reads JS literals) | 917f5ad |
 
@@ -80,6 +81,20 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 - **Fix:** the flex row is now a `<div>`; the two dt/dd pairs sit in a `<dl className="contents">`
   and the note is its sibling. Layout unchanged (`display: contents`); quote-store e2e (incl.
   the 375/768/1440 overflow checks) green.
+
+### QA-007 — text tokens below WCAG AA contrast (Medium, accessibility)
+- **Repro:** axe `color-contrast` (serious) flagged every route in the crawl, signed in or not.
+  Measured: `--muted-foreground` #8A8A93 = 3.42:1 on white, 3.27:1 on #FAFAFA, 3.03:1 on the
+  #F1F1F3 chips; status `--success` #16A34A = 2.95:1 on its badge background; `--neutral`
+  #777777 = 3.96:1 on its badge. Spec `e2e/qa/color-contrast.spec.ts` (login, leads, tasks, new lead).
+- **Root cause:** token values in `app/globals.css`.
+- **Fix:** same hues, darkened only as far as AA on the darkest surface each sits on:
+  muted-foreground → `240 4% 44%` (#6C6C75, ≥4.6:1), success → `142 76.2% 27%` (#107937, 4.9:1),
+  neutral → `0 0% 42%` (#6B6B6B, 4.7:1). The dark sidebar had been borrowing `text-muted-foreground`
+  (fine there at 5.6:1, but it would have dropped to 3.7:1), so it gets its own `--sidebar-muted`
+  token at the **old** value — the sidebar looks exactly as before.
+- **Owen:** these hexes were annotated as matching a design spec. If the spec values are wanted
+  back, revert this one commit; the spec will then go red, which is the point.
 
 ## NEEDS OWEN6.00`; `1e3` → `
 ## NEEDS OWEN,000.00`. A mistyped price became a different, plausible price that
