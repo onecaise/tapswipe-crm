@@ -1,6 +1,39 @@
 # QA sweep report — TapSwipe CRM
 
-_Summary is written at the end of the sweep (see FINISH in qa/QA-LOG.md)._
+## Summary
+
+Unattended sweep, 2026-10-09, branch **`qa-sweep`** (13 commits on top of `responsive-shell` @ b85d064,
+**not pushed, not merged**). Local stack only — no hosted project, Vercel, migration, RLS policy, grant,
+definer function, auth flow or price-lock trigger was touched.
+
+**11 findings — 9 fixed, 2 NEEDS OWEN**, plus **9 DECISIONS** (D-01…D-09) and **1 observation** (OBS-1)
+left unchanged. No Critical findings: no data leak, wrong saved money figure or crash on a core path.
+
+| Severity | Fixed | NEEDS OWEN |
+| --- | --- | --- |
+| High (2) | 1 — QA-004 pre-app fields had no accessible names, incl. SSN/bank | 1 — QA-001 open redirect on `/auth/confirm` |
+| Medium (5) | 5 — QA-003 price `0x10` saved as $16 · QA-005 unlabeled import inputs · QA-007 AA contrast tokens · QA-008 raw "non-2xx" text when a function is down · QA-010 payout column clipped on phones | — |
+| Low (4) | 3 — QA-002 cart quantity → raw Postgres error · QA-006 invalid `<dl>` · QA-009 print toolbar overflow | 1 — QA-011 login tab order |
+
+**Read first:** QA-001 (open redirect — fix suggested, auth code not changed) and QA-007 (it changes three
+colour tokens away from the hexes annotated as the design spec; one-commit revert if unwanted).
+
+**Final verification (after all commits):** `npm run build` ✓ · `npm run lint` ✓ · `npx tsc --noEmit` ✓ ·
+`npm test` **1374/1374** (baseline 1365; +9 new unit tests) · `npm run test:live` **209/209** ·
+`npm run test:e2e` **180/180** (baseline 164; +16 new specs in `e2e/qa/`, two of which are `test.fail()`
+repros for the NEEDS OWEN items and will turn red once those are fixed — then delete the annotation).
+A re-crawl of every route at 1440px after the fixes shows zero axe serious/critical violations, zero console
+errors and no horizontal overflow; the 390/768 crawl's only overflows were QA-009/QA-010.
+
+**How to review:** `git log --oneline responsive-shell..qa-sweep` — one commit per finding, subject
+`qa(<area>): …`, each containing its failing-first spec, the fix and its report entry. `git show <hash>`
+per row of the table below. Exploratory scripts (not part of the suites) are in `qa/explore/`; run with
+`npx playwright test -c qa/playwright.qa.config.ts qa/explore/<name>.explore.ts`. Screenshots/JSON from
+the crawls are in `qa/screens/` (git-excluded, local only). The progress journal is `qa/QA-LOG.md`.
+
+**Housekeeping:** added devDependency `@axe-core/playwright@4.12.1` (exact pin; no transitive change).
+QA data created during exploration was removed by `qa/explore/cleanup.explore.ts`. No dev server left
+running; the `supabase functions serve` that was already running when the sweep started was left alone.
 
 ## Baseline (2026-10-09, before any change, `qa-sweep` @ b85d064)
 
@@ -32,7 +65,7 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | --- | --- | --- | --- | --- |
 | QA-001 | High | Auth | `/auth/confirm` redirects to any `next=` URL after a valid OTP (open redirect) | NEEDS OWEN (repro 20e065a) |
 | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
-| QA-003 | Medium | Products | List price `0x10` saved as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
+| QA-003 | Medium | Products | List price `0x10` saved as $16.00, `1e3` as $1,000.00 (Number() reads JS literals) | 917f5ad |
 | QA-004 | High | Pre-apps / a11y | No pre-app wizard field had an accessible name — incl. SSN, routing, account, RP password (axe `label`/`select-name` critical) | 0ebb211 |
 | QA-005 | Medium | Payouts / Users / a11y | File inputs on `/payouts/import` and `/admin/users/import` have no accessible name (axe `label` critical) | cd48eec |
 | QA-006 | Low | Proposals / a11y | Cart totals `<dl>` contains a bare `<p>` (axe `definition-list` serious) | b27c9f4 |
@@ -40,7 +73,7 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | QA-008 | Medium | Error states | A down/unreachable Edge Function shows supabase-js's raw "Edge Function returned a non-2xx status code" / "Failed to send a request…" | 0603e8d |
 | QA-009 | Low | Print pages / layout | At 390px the blank application's control row overflows 32px (Print button off-screen); merchant print uses the same row | 12d9af3 |
 | QA-010 | Medium | Payouts / layout | At 390px the payout summary table pushes the page wide and clips the Payout column at the card edge | 9678877 |
-| QA-011 | Low | Auth / keyboard | On `/auth/login`, Tab from Email lands on "Forgot your password?" instead of Password; a keyboard login ends on /auth/forgot-password | NEEDS OWEN (repro __HASH__) |
+| QA-011 | Low | Auth / keyboard | On `/auth/login`, Tab from Email lands on "Forgot your password?" instead of Password; a keyboard login ends on /auth/forgot-password | NEEDS OWEN (repro 3a16ee3) |
 6.00, `1e3` as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 ,000.00 (Number() reads JS literals) | 917f5ad |
 
@@ -58,7 +91,13 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 
 ### QA-003 — list price parsed as a JavaScript literal (Medium, products)
 - **Repro:** `/admin/products/<brand>` → Add product → List price `0x10` → saved and shown as
-  `
+  `$16.00`; `1e3` → `$1,000.00`. A mistyped price became a different, plausible price that
+  then flows onto proposals. Spec `e2e/qa/product-price-parse.spec.ts`.
+- **Root cause:** `parsePriceInput()` (lib/products.ts) stripped `$ , space` and handed the
+  rest to `Number()`, which accepts hex/binary/octal/exponent literals.
+- **Fix:** a plain-decimal regex before `Number()` (the same approach `parseFigureInput()` in
+  lib/payouts.ts already takes). Unit tests in `tests/unit/product-price-input.test.ts`.
+
 ### QA-004 — pre-app wizard labels not associated with inputs (High, accessibility)
 - **Repro:** `/pre-apps/<id>/edit?step=business` (and owners/terminal/profile/secrets) → axe
   reports `label` (critical) on every input and `select-name` on Billing type. A screen reader
@@ -173,3 +212,34 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 - **D-03 (auth).** A signed-in user who opens `/auth/login` gets the login form rather than a
   redirect to `/dashboard`; and a signed-out user sent to `/auth/login` from a deep link is
   always taken to `/dashboard` after signing in (no return-to). Both are workflow choices.
+- **D-04 (notifications).** A rep's bell lists "New ghost sheet" / "New support ticket" for records
+  the rep created themselves. Useful for an admin; arguably noise for the creator.
+- **D-05 (error copy).** About 30 client components still show a PostgREST/RPC `error.message`
+  verbatim (`grep -rn "error.message" components app`). Many RPCs raise deliberate human-readable
+  messages, so this is mostly fine, but a constraint violation there reads as Postgres text. Only
+  the concrete cases I could reach as a user were fixed (QA-002, QA-008); a sweep would be a refactor.
+- **D-06 (tap targets).** The complete-task checkboxes on `/tasks` are 16×16px. They meet
+  WCAG 2.2 AA 2.5.8 via its spacing exception, so not a defect, but small on a phone.
+- **D-07 (forms).** Refreshing a half-filled form loses the input; Back after creating a lead returns
+  to a still-filled `/leads/new` (a second Create is caught by the duplicate warning, not prevented).
+- **D-08 (residuals).** Uploading a non-spreadsheet or empty `.xlsx` gives a clear "missing columns"
+  message but leaves a 0-row batch in **Review** on the import list until an admin discards it.
+- **D-09 (proposals).** `/proposals?rep=<other rep>` as an agent silently shows the agent's own list
+  (RLS-correct; the rep filter is admin-only UI). `/leads` has no `?q=` search (global search covers it).
+
+## Observations (not reproducible / not defects)
+
+- **OBS-1 (hydration warning, dev).** Once per long scripted flow (create leads → convert ghost sheet →
+  open `/merchants/new` at 390px), the dev console logged React's "A tree hydrated but some attributes
+  of the server rendered HTML didn't match". Direct and sequenced visits to the same pages (both roles,
+  both widths) never reproduced it, and React truncated the diff. Three attempts, then moved on.
+  Likely dev-server/HMR transient; worth a glance if it shows up in production logs.
+- Areas checked with no defect found: role/route matrix for 66 routes × admin/agent/anon; cross-rep
+  direct ids for leads, merchants, pre-apps, tickets, ghost sheets, proposals (incl. `?quote=` and old
+  print URLs) → not-found; admin pages redirect agents; inactive / banned / no-profile / must-change-password
+  / garbage-cookie sessions; double-click save on proposals and leads (one row each); brand duplicate
+  name/case, rename-to-existing, duplicate SKU, delete hidden while products exist; pre-app wizard end to
+  end with fake SSN/routing/account (encrypted, only last-4 shown, survives reload); ticket replies;
+  ghost-sheet convert; dashboard counts equal to direct DB counts for agent and admin; global search with
+  quotes/`%`/HTML/300-char input; create user / taken agent # / duplicate email / reset / deactivate;
+  empty states for a brand-new rep; residual export as agent.

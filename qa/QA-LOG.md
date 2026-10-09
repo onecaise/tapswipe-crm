@@ -17,8 +17,8 @@ Resume rule: read this file, continue at the first unchecked item.
 - [x] 2. Money (proposals, products/brands, residuals)
 - [x] 3. Data capture (leads, ghost sheets, merchants, pre-apps, docs, marketing, tickets, tasks, timeline, dashboard, search)
 - [x] 4. Admin (create user, deactivate, reset password, import)
-- [ ] 5. Cross-cutting (viewports, console, axe, keyboard, edge input)
-- [ ] FINISH: full suites, report summary
+- [x] 5. Cross-cutting (viewports, console, axe, keyboard, edge input)
+- [x] FINISH: full suites, report summary
 
 ## Journal
 - 2026-10-09T22:21 Setup done; branch qa-sweep, axe pinned.
@@ -28,3 +28,6 @@ Resume rule: read this file, continue at the first unchecked item.
 - 2026-10-09T22:23 Area 2 done. Residual import: non-xlsx/empty files get a friendly 'missing columns' message (batch left in Review — by design). Agent export downloads residuals-2027-04.xlsx. QA exploration batches cleaned up.
 - 2026-10-09T22:49 Area 3 done. Pre-app wizard walked end-to-end with fake data (autosave, sales volume, encrypt&save shows last4 only). Leads: dup warning, lost-reason required, double-submit safe. Ghost convert, ticket+reply OK with quotes/emoji/SQL/long text. Dashboard counts == DB for agent & admin. QA-004 fixed. Intermittent hydration warning on /merchants/new after a long flow - not reproducible (3 tries), logged as OBS.
 - 2026-10-09T22:54 Area 4 done. Create user: taken agent# and dup email (case-insensitive) give friendly 409 messages; reset shows one-time temp password; deactivate flips is_active; own row's destructive controls disabled. User import covered by e2e/user-import.spec.ts.
+- 2026-10-09T23:26 Area 5: QA-005..QA-011 done. Viewport crawl 390/768: only blank-form + payout summary overflowed (fixed). Keyboard: shell tab order + focus rings fine, drawer opens/Escape returns focus; login tab order -> QA-011 (NEEDS OWEN). Empty states fine for a new rep. Full suites after 7 fixes: unit 1374, live 209, e2e 177 pass (+2 intentionally red new specs, then fixed).
+- 2026-10-09T23:49 Area 5 done. 1440 re-crawl after fixes: 0 axe serious/critical, 0 console errors, no overflow. QA data cleaned up.
+- 2026-10-09T23:49 FINISH: build ok, lint ok, tsc ok, unit 1374/1374, live 209/209, e2e 180/180. 11 findings: 9 fixed, 2 NEEDS OWEN; 9 decisions; 1 observation. Not pushed.
