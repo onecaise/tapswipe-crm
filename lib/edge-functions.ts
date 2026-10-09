@@ -34,6 +34,14 @@ export async function edgeFunctionErrorMessage(
     }
   }
 
+  // supabase-js's own errors carry fixed transport strings ("Edge Function
+  // returned a non-2xx status code", "Failed to send a request to the Edge
+  // Function") that say nothing a person can act on — the very string this
+  // module exists to keep off the screen. With no `{ error }` body to read,
+  // the caller's fallback is the honest message (QA-008).
+  const name = (error as { name?: unknown } | null)?.name;
+  if (typeof name === "string" && name.startsWith("Functions")) return fallback;
+
   const message = (error as { message?: unknown } | null)?.message;
   return typeof message === "string" && message.length > 0 ? message : fallback;
 }

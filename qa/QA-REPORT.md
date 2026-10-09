@@ -36,7 +36,8 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | QA-004 | High | Pre-apps / a11y | No pre-app wizard field had an accessible name — incl. SSN, routing, account, RP password (axe `label`/`select-name` critical) | 0ebb211 |
 | QA-005 | Medium | Payouts / Users / a11y | File inputs on `/payouts/import` and `/admin/users/import` have no accessible name (axe `label` critical) | cd48eec |
 | QA-006 | Low | Proposals / a11y | Cart totals `<dl>` contains a bare `<p>` (axe `definition-list` serious) | b27c9f4 |
-| QA-007 | Medium | Design tokens / a11y | `--muted-foreground` 3.0–3.4:1, `--success` 2.9:1, `--neutral` 4.0:1 on their surfaces — axe `color-contrast` on every route | __HASH__ |
+| QA-007 | Medium | Design tokens / a11y | `--muted-foreground` 3.0–3.4:1, `--success` 2.9:1, `--neutral` 4.0:1 on their surfaces — axe `color-contrast` on every route | 3f14ab1 |
+| QA-008 | Medium | Error states | A down/unreachable Edge Function shows supabase-js's raw "Edge Function returned a non-2xx status code" / "Failed to send a request…" | __HASH__ |
 6.00, `1e3` as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 ,000.00 (Number() reads JS literals) | 917f5ad |
 
@@ -95,6 +96,18 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
   token at the **old** value — the sidebar looks exactly as before.
 - **Owen:** these hexes were annotated as matching a design spec. If the spec values are wanted
   back, revert this one commit; the spec will then go red, which is the point.
+
+### QA-008 — raw supabase-js text when a function is down (Medium, error states)
+- **Repro:** agent on a lead with a document; make `create-download-url` answer `503 text/plain`
+  (or refuse the connection) → under Download: "Edge Function returned a non-2xx status code"
+  (or "Failed to send a request to the Edge Function"). Spec `e2e/qa/function-down-message.spec.ts`
+  (uses `page.route`, so the real functions stay up).
+- **Root cause:** `edgeFunctionErrorMessage()` (lib/edge-functions.ts) correctly reads a JSON
+  `{ error }` body, but when there is none it returned `error.message` — supabase-js's fixed
+  transport string — instead of the readable `fallback` every caller passes.
+- **Fix:** for supabase-js `Functions*Error`s with no body message, return the caller's fallback.
+  Affects every function caller (documents, marketing, secrets, admin users, residuals, imports).
+  Unit tests `tests/unit/edge-function-errors.test.ts`; documents-panel e2e still green.
 
 ## NEEDS OWEN6.00`; `1e3` → `
 ## NEEDS OWEN,000.00`. A mistyped price became a different, plausible price that
