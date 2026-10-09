@@ -8,12 +8,12 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 
 **Current state matters when reading the code**, and it is a mix — real CRM pages alongside untouched starter scaffolding:
 
-- **Built:** every CRM route lives under the `app/(app)/` route group so it renders inside the shell — `app/(app)/{dashboard,merchants,leads,ghost-sheets,pre-apps,support-tickets,documents,notes,tasks,payouts,marketing,marketing/manage,admin/users,admin/users/import,admin/products}`. Route groups don't affect URLs, so the paths are still `/dashboard`, `/merchants/7` and so on. Data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,annotations-data,documents,payouts,user-imports,products,quotes,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks are **written** through panels (`components/{notes,tasks}-panel.tsx`) on the four owner records; `/notes` and `/tasks` are the cross-record view of the same rows, and are read-only (notes) or read plus the complete toggle (tasks). Creation stays on the record, because `owner_id` has no FK and the panels take the pair from a parent row already loaded under RLS. `components/documents-panel.tsx` hangs off **all four** `documents.owner_type` values — merchants, leads, pre-apps and support tickets — and `/documents` is the cross-record Document Center over the same rows. Quotes have no page of their own: `components/quotes-panel.tsx` is the builder and the version history, and it lives on **both the lead and the merchant** — `quotes_exactly_one_owner` means a proposal hangs off exactly one of them, and a rep sells hardware to win a deal and again to the same business once it is on the books. The two printable routes (`/{leads,merchants}/[id]/quotes/[quoteGroupId]/print`) share one document component.
+- **Built:** every CRM route lives under the `app/(app)/` route group so it renders inside the shell — `app/(app)/{dashboard,merchants,leads,ghost-sheets,pre-apps,support-tickets,documents,notes,tasks,payouts,marketing,marketing/manage,admin/users,admin/users/import,admin/products,admin/products/[brandId],admin/products/unbranded}`. Route groups don't affect URLs, so the paths are still `/dashboard`, `/merchants/7` and so on. Data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,annotations-data,documents,payouts,user-imports,products,brands,quotes,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks are **written** through panels (`components/{notes,tasks}-panel.tsx`) on the four owner records; `/notes` and `/tasks` are the cross-record view of the same rows, and are read-only (notes) or read plus the complete toggle (tasks). Creation stays on the record, because `owner_id` has no FK and the panels take the pair from a parent row already loaded under RLS. `components/documents-panel.tsx` hangs off **all four** `documents.owner_type` values — merchants, leads, pre-apps and support tickets — and `/documents` is the cross-record Document Center over the same rows. Quotes have no page of their own: `components/quotes-panel.tsx` is the builder and the version history, and it lives on **both the lead and the merchant** — `quotes_exactly_one_owner` means a proposal hangs off exactly one of them, and a rep sells hardware to win a deal and again to the same business once it is on the books. The two printable routes (`/{leads,merchants}/[id]/quotes/[quoteGroupId]/print`) share one document component.
 - **Not built yet:** My Submissions.
 - **Still [starter-kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase) template, not product code:** `README.md`, and that is now the whole list. The scaffold's UI was deleted on 14 Sep 2026 — `app/protected/*`, `components/tutorial/*`, `components/{hero,deploy-button,next-logo,supabase-logo,env-var-warning,auth-button,theme-switcher}.tsx`, the `hasEnvVars` export, and the two `app/{opengraph,twitter}-image.png` banners that served a "Next.js Starter Kit" social preview from an internal tool. `app/page.tsx` is product code now: it renders nothing and redirects (see below). Don't reintroduce a greyed-out template page for the same reason `lib/nav.ts` shouldn't carry a permanently-disabled row.
 - **Edge Functions:** all fourteen are implemented — `create-upload-url`, `create-download-url`, `delete-document`, `submit-pre-app-secrets`, `read-pre-app-secrets`, `create-user`, `deactivate-user`, `admin-reset-password`, `residual-import-file-url`, `parse-residual-import`, `export-residuals`, `stage-user-import`, `provision-user-batch`, `marketing-material-file-url` (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env,admin-users,provision-user,residuals,residual-imports,user-imports,marketing-materials}.ts`).
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Forty-one migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Forty-two migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi` — and note **which** project that is: `tapswipe-crm-dev`. The second project `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) is **not linked, but it is deployed and real**: `PRE_APP_SECRETS_KEY` is set and both private buckets exist. Treat it as live production, not as a spare project.
 
@@ -67,10 +67,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (1316 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (1345 tests)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (205 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (146 tests, 5 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (157 tests, 5 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -336,7 +336,7 @@ Note what this means for a grants test: `has_table_privilege(…, 'UPDATE')` ret
 
 **The audit trigger is on `quotes` and deliberately not on `quote_line_items`.** `quotes` carries `agent_id` and the ordinary writer is the owning rep, so `log_cross_agent_change()` is quiet by default and speaks only when an admin acts on somebody else's deal — this is *not* the `rep_payout_rows` case, where no rep can write at all and the trigger would fire on every row of a forty-row import. The child table is excluded twice over: it has no `agent_id` (the `support_ticket_replies` trap), and even a working sibling function would write N+1 rows for one admin edit, N of them naming a table nobody looks up by id. The `documents` hole does not apply either — there is no UPDATE or DELETE on line items to go unrecorded.
 
-**The catalog is loaded by a SCRIPT, and the staging-table pipeline this file once deferred is now cancelled rather than pending.** `data/hardware-catalog.csv` is the real lineup — 43 rows, 25 devices and 18 add-ons across five brands — and `scripts/load-hardware-catalog.mjs` loads it into `products` and `product_compatibility`. A column-mapping and blocker pipeline of the `rep_payout_import_rows` / `user_import_rows` kind exists so a non-engineer can load a file nobody has seen before, repeatedly, and inspect the damage before committing. This file is 43 curated rows in version control that change a few times a year, and an admin maintains them on `/admin/products` afterwards — so the review screen is the script's **dry run** (the default; `--write` is opt-in), the staging table is the CSV's git history, and there is nothing to build. Don't build it later either: the thing that would justify it is an unseen file, and this one is in the repo.
+**The catalog is loaded by a SCRIPT, and the staging-table pipeline this file once deferred is now cancelled rather than pending.** `data/hardware-catalog.csv` is the real lineup — 43 rows, 25 devices and 18 add-ons across five brands — and `scripts/load-hardware-catalog.mjs` loads it into `brands`, `products` and `product_compatibility` — brands first, because `products.brand` is a foreign key to `brands(name)`; it creates any brand the file names that is missing, never deletes one, and refuses a brand spelled differently only by case. A column-mapping and blocker pipeline of the `rep_payout_import_rows` / `user_import_rows` kind exists so a non-engineer can load a file nobody has seen before, repeatedly, and inspect the damage before committing. This file is 43 curated rows in version control that change a few times a year, and an admin maintains them on `/admin/products` afterwards — so the review screen is the script's **dry run** (the default; `--write` is opt-in), the staging table is the CSV's git history, and there is nothing to build. Don't build it later either: the thing that would justify it is an unseen file, and this one is in the repo.
 
 Five things the script decides that are worth knowing before changing it:
 
@@ -483,6 +483,38 @@ is a number that means nothing and reads as a price. `isMonthlyBilling()` tests
 lands in the one-time total: a figure wrongly counted once is an understatement
 a rep can see, while one wrongly counted as recurring quietly multiplies by
 twelve.
+
+### Brands: a table so a box can exist before its products
+
+`/admin/products` is a grid of brand boxes, and each opens
+`/admin/products/<brand id>` — a compact list (devices first) with an Add
+product form and a per-row Edit. Unbranded products have
+`/admin/products/unbranded`, shown on the grid only while any exist.
+
+`brands` (`20261009120000`) is the **fourth** client-readable table with no
+`agent_id`, same policies as `products` plus an admin DELETE. **The FK is on the
+NAME:** `products.brand` stays text and references `brands(name)` `ON UPDATE
+CASCADE ON DELETE RESTRICT`. That was the smallest design that changed no
+reader — the store, `lib/quotes-data.ts` and the loader read the same text, and
+no quote snapshots the brand — where a `brand_id` would have rewritten all of
+them to join for a label they already held. Rename cascades in one statement;
+delete is refused while **any** product names the brand, archived included
+(`set null` would silently move them to the store's "Other" bucket). The
+surrogate `id` exists only so the page URL survives a rename.
+`idx_brands_name_lower` refuses "Square" beside "square". `tests/rls/brands.test.ts`
+pins all of it, each assertion checked by reverting what it guards.
+
+**Any fixture that writes `products.brand` must create the brand first** — the
+two RLS catalog seeders and `ensureStoreCatalog()` in `e2e/fixtures/seed.ts`
+now do. `brands` has no profiles reference, so like `products` it survives
+`resetData()`; insert with `on conflict (name) do nothing`.
+
+The add-on picker (`components/device-multi-select.tsx`) offers only the brand's
+**live** devices and saves with the form; chips still show a link to a device
+outside that set, so a stale link stays visible and removable.
+
+**Not on any hosted project yet.** Applied to the local stack only
+(`migration up --local`); dev and prod need a deliberate push.
 
 ### The printed Hardware Proposal is ONE component on two routes
 
