@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 
 import { createClient } from "@/lib/supabase/server";
+import { isUuid } from "@/lib/quotes-data";
 import {
   QUOTE_COLUMNS,
   QUOTE_LINE_COLUMNS,
@@ -11,12 +12,12 @@ import {
 } from "@/lib/quotes";
 
 /**
- * Everything one printable proposal needs, for either owner kind.
+ * Everything one printable proposal needs, linked or not.
  *
- * The lead route and the merchant route share this AND the document component
- * it feeds, so there is one implementation of each. Two copies of a document a
- * merchant reads is how the lead version comes to say something the merchant
- * version does not.
+ * /proposals/[quoteGroupId]/print is the one print route; the old
+ * /leads/.../print and /merchants/.../print routes redirect to it. One loader
+ * and one document component, so there is one implementation of a sheet a
+ * merchant reads.
  *
  * ## Terms text comes from here, and it is EMPTY
  *
@@ -58,9 +59,13 @@ import {
 export const PROPOSAL_TERMS = "";
 
 export type ProposalOwner = {
-  type: QuoteOwnerType;
-  id: number;
-  /** The business name, as the document's "Prepared for". */
+  /** The linked record, or null for an unlinked proposal. */
+  link: { type: QuoteOwnerType; id: number } | null;
+  /**
+   * "Prepared for": the PRINTED VERSION'S customer_name snapshot, not the
+   * record's current name. A lead renamed after v1 was sent must not
+   * readdress v1's sheet.
+   */
   name: string;
   /** Shown only when it differs from `name` — see the component. */
   legalName: string | null;
@@ -89,53 +94,29 @@ export type Proposal = {
   preparer: ProposalPreparer;
 };
 
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /**
  * Loads one version of one proposal, or 404s.
  *
- * Calls notFound() itself rather than returning null, because every single
- * failure here has the same answer and threading a discriminated result
- * through two routes would be two chances to get one of them wrong. The cases:
- * a malformed id, a malformed group uuid, an owner the caller cannot see, a
- * group that is not on that owner, and a `?quote=` naming a row outside the
- * group.
+ * Calls notFound() itself rather than returning null, because every failure
+ * here has the same answer. The cases: a malformed group uuid, a group the
+ * caller can see no row of (another rep's, or none at all — RLS makes those
+ * the same zero rows), and a `?quote=` naming a row outside the group.
  */
 export async function loadProposal(
-  ownerType: QuoteOwnerType,
-  ownerIdParam: string,
   quoteGroupId: string,
   quoteParam: string | undefined,
 ): Promise<Proposal> {
-  const ownerId = Number(ownerIdParam);
-  if (!Number.isInteger(ownerId)) notFound();
-
-  // Guarded before the query rather than trusting the segment, the way the
-  // payout summary guards its agentId: a malformed uuid is a 22P02 from
-  // PostgREST, which surfaces as an error page rather than as the 404 every
-  // other unreachable record here gives.
-  if (!UUID.test(quoteGroupId)) notFound();
+  if (!isUuid(quoteGroupId)) notFound();
 
   const supabase = await createClient();
-  const owner = await loadOwner(supabase, ownerType, ownerId);
 
   // Every version of the group, because "version 2 of 3" cannot be said from
   // one row — and the whole group is what tells a reader whether the sheet in
   // their hand is the current offer.
-  //
-  // Filtered on the OWNER column as well as the group id, and it is not
-  // redundant: the path asserts this proposal belongs to this record, so the
-  // query should enforce it rather than let a group from another record render
-  // under this one's name and contact. RLS would happily return it — the rep
-  // may own both. (enforce_quote_version() makes a group's owner constant, so
-  // this filter can never split one group across two pages.)
-  const ownerColumn = ownerType === "lead" ? "lead_id" : "merchant_id";
   const { data: quoteRows, error } = await supabase
     .from("quotes")
     .select(QUOTE_COLUMNS)
     .eq("quote_group_id", quoteGroupId)
-    .eq(ownerColumn, ownerId)
     .order("version", { ascending: false });
 
   if (error) notFound();
@@ -149,9 +130,9 @@ export async function loadProposal(
   if (quoteParam !== undefined) {
     const wanted = Number(quoteParam);
     // A row id that is not in this group is a 404 like any other unreachable
-    // record — including, deliberately, a real quote row belonging to a
-    // different group the caller can see. The path says which document this
-    // is; the param only chooses among its versions.
+    // record — including a real quote row of a different group the caller can
+    // see. The path says which document this is; the param only chooses among
+    // its versions.
     const found = Number.isInteger(wanted)
       ? versions.find((version) => version.id === wanted)
       : undefined;
@@ -167,7 +148,7 @@ export async function loadProposal(
     .order("id", { ascending: true });
 
   return {
-    owner,
+    owner: await loadOwner(supabase, quote),
     quote,
     versions,
     current,
@@ -180,59 +161,67 @@ export async function loadProposal(
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 
 /**
- * The lead or merchant the proposal is for, normalised to one shape.
+ * Who the proposal is for: the snapshot name, plus whatever the linked record
+ * adds that the caller can read.
+ *
+ * The NAME is always the printed version's customer_name. The legal name and
+ * contact line come from the linked record, read under the caller's RLS — and
+ * a record the caller cannot read (an admin may have filed a rep's proposal
+ * against a different rep's lead) simply contributes nothing. That is a quiet
+ * omission, not a 404: the proposal is the caller's even when the record is
+ * not.
  *
  * The two tables name these fields differently — a lead has `dba`,
- * `merchant_legal_name` and three contact columns; a merchant has `dba` and
- * `legal_business_name` and NO contact columns at all. Flattening here rather
- * than branching in the component means the document has one set of fields to
- * render and cannot quietly omit one of them on one route.
+ * `merchant_legal_name` and three contact columns; a merchant has `dba`,
+ * `legal_business_name` and NO contact columns at all. Flattened here, so the
+ * document has one set of fields and cannot omit one on one kind of link.
  */
 async function loadOwner(
   supabase: SupabaseServerClient,
-  ownerType: QuoteOwnerType,
-  ownerId: number,
+  quote: Quote,
 ): Promise<ProposalOwner> {
-  if (ownerType === "lead") {
-    const { data, error } = await supabase
-      .from("leads")
-      .select("id, dba, merchant_legal_name, contact_name, contact_phone, contact_email")
-      .eq("id", ownerId)
-      .maybeSingle();
-    if (error || !data) notFound();
-
-    return {
-      type: "lead",
-      id: data.id as number,
-      name: (data.dba as string | null) ?? "",
-      legalName: (data.merchant_legal_name as string | null) ?? null,
-      contactName: (data.contact_name as string | null) ?? null,
-      contactPhone: (data.contact_phone as string | null) ?? null,
-      contactEmail: (data.contact_email as string | null) ?? null,
-    };
-  }
-
-  const { data, error } = await supabase
-    .from("merchants")
-    .select("id, dba, legal_business_name")
-    .eq("id", ownerId)
-    .maybeSingle();
-  if (error || !data) notFound();
-
-  return {
-    type: "merchant",
-    id: data.id as number,
-    name: (data.dba as string | null) ?? "",
-    legalName: (data.legal_business_name as string | null) ?? null,
-    // `merchants` HAS NO CONTACT COLUMNS. Nulls, not invented values — the
-    // document omits the contact line entirely rather than printing a blank
-    // one, and nothing here reaches into the merchant's originating pre-app or
-    // lead to fill it in. A contact pulled from a two-year-old application is
-    // worse than no contact: it looks current.
+  const base: ProposalOwner = {
+    link: null,
+    name: quote.customer_name,
+    legalName: null,
     contactName: null,
     contactPhone: null,
     contactEmail: null,
   };
+
+  if (quote.lead_id !== null) {
+    const { data } = await supabase
+      .from("leads")
+      .select("merchant_legal_name, contact_name, contact_phone, contact_email")
+      .eq("id", quote.lead_id)
+      .maybeSingle();
+    return {
+      ...base,
+      link: { type: "lead", id: quote.lead_id },
+      legalName: (data?.merchant_legal_name as string | null) ?? null,
+      contactName: (data?.contact_name as string | null) ?? null,
+      contactPhone: (data?.contact_phone as string | null) ?? null,
+      contactEmail: (data?.contact_email as string | null) ?? null,
+    };
+  }
+
+  if (quote.merchant_id !== null) {
+    const { data } = await supabase
+      .from("merchants")
+      .select("legal_business_name")
+      .eq("id", quote.merchant_id)
+      .maybeSingle();
+    // `merchants` HAS NO CONTACT COLUMNS. Nulls, not invented values — and
+    // nothing reaches into the merchant's originating pre-app to fill them in:
+    // a contact pulled from a two-year-old application looks current.
+    return {
+      ...base,
+      link: { type: "merchant", id: quote.merchant_id },
+      legalName: (data?.legal_business_name as string | null) ?? null,
+    };
+  }
+
+  return base;
 }
 
 /**

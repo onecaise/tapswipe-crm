@@ -4,6 +4,7 @@ import {
   BugIcon,
   MegaphoneIcon,
   ClipboardListIcon,
+  FileTextIcon,
   FolderIcon,
   GhostIcon,
   LifeBuoyIcon,
@@ -54,6 +55,10 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       // all. /marketing/manage is the admin half and needs no entry of its own
       // — isNavItemActive is a prefix match, so it keeps this item lit.
       { label: "Marketing", href: "/marketing", icon: MegaphoneIcon },
+      // Every active user, like Marketing: RLS scopes the list to the rep's
+      // own proposals and an admin's to everyone's, so there is no role to
+      // branch on. /proposals/new and /proposals/<group> stay lit by prefix.
+      { label: "Proposals", href: "/proposals", icon: FileTextIcon },
     ],
   },
   {

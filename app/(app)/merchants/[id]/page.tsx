@@ -9,13 +9,12 @@ import { type Merchant, statusIntent } from "@/lib/merchants";
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { loadAnnotations } from "@/lib/annotations-data";
-import { groupQuotes } from "@/lib/quotes";
-import { loadQuoteContext } from "@/lib/quotes-data";
+import { loadRecordProposals } from "@/lib/quotes-data";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { DocumentsPanel } from "@/components/documents-panel";
 import { NotesPanel } from "@/components/notes-panel";
-import { QuotesPanel } from "@/components/quotes-panel";
+import { RecordProposals } from "@/components/record-proposals";
 import { TasksPanel } from "@/components/tasks-panel";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -89,13 +88,9 @@ async function MerchantDetail({
   // key, so a mismatched pair is not something the database would catch.
   const { notes, tasks } = await loadAnnotations("merchant", merchant.id);
 
-  // The same loader the lead page uses. `quotes.merchant_id` DOES carry a
-  // foreign key, unlike notes and tasks above — so a forged id here would be
-  // refused by the database rather than merely unvalidated — but the literal
-  // is passed for the same reason anyway: the page's correctness should not
-  // depend on a policy clause somebody could decide looks redundant.
-  const { quotes, linesByQuote, devices, addons, addonsByDevice } =
-    await loadQuoteContext("merchant", merchant.id);
+  // Proposals linked to this merchant that the caller can see. The builder
+  // lives on /proposals now; this page lists them and links there.
+  const proposals = await loadRecordProposals("merchant", merchant.id);
 
   return (
     <>
@@ -181,24 +176,14 @@ async function MerchantDetail({
         documents={documents}
       />
 
-      {/* The same panel the lead page mounts, with ownerType a LITERAL here
-          too — never from the URL. A quote belongs to a lead OR a merchant
-          (quotes_exactly_one_owner), and the merchant case is the one that
-          made the column nullable: a rep sells hardware to win a deal, and
-          sells more to the same business two years later when it is on the
-          books. One table, one version history, one printable document.
-
-          agent_id is the MERCHANT's owner rather than the viewer, so an admin
-          building on a rep's behalf leaves the proposal in the rep's book. */}
-      <QuotesPanel
+      {/* ownerType is a LITERAL here, never from the URL. A rep sells
+          hardware to win a deal, and sells more to the same business once it
+          is on the books, so a proposal may be linked to a merchant as well as
+          to a lead. */}
+      <RecordProposals
         ownerType="merchant"
         ownerId={merchant.id}
-        agentId={merchant.agent_id}
-        groups={groupQuotes(quotes)}
-        linesByQuote={linesByQuote}
-        devices={devices}
-        addons={addons}
-        addonsByDevice={addonsByDevice}
+        proposals={proposals}
       />
     </>
   );

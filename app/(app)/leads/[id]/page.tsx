@@ -25,8 +25,7 @@ import {
   type MarketingMaterial,
   hasFile,
 } from "@/lib/marketing-materials";
-import { groupQuotes } from "@/lib/quotes";
-import { loadQuoteContext } from "@/lib/quotes-data";
+import { loadRecordProposals } from "@/lib/quotes-data";
 import { earliestOpenTaskDue } from "@/lib/annotations";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { buildLeadTimeline } from "@/lib/timeline";
@@ -38,7 +37,7 @@ import { FollowupReconcile } from "@/components/followup-reconcile";
 import { LeadTimeline } from "@/components/lead-timeline";
 import { MarketingPanel } from "@/components/marketing-panel";
 import { NotesPanel } from "@/components/notes-panel";
-import { QuotesPanel } from "@/components/quotes-panel";
+import { RecordProposals } from "@/components/record-proposals";
 import { TasksPanel } from "@/components/tasks-panel";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -180,16 +179,11 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
     allMaterials.map((material) => [material.id, material.title]),
   );
 
-  // Every proposal on this lead, every version of each, plus the catalog the
-  // store browses and which add-ons fit which devices.
-  //
-  // One loader shared with the merchant page, because the reads differ only in
-  // which owner column is filtered and the catalog half does not depend on the
-  // owner at all. See lib/quotes-data.ts for what each of the five policies
-  // decides, and for why an archived product is hidden by this query rather
-  // than by RLS.
-  const { quotes, linesByQuote, devices, addons, addonsByDevice } =
-    await loadQuoteContext("lead", lead.id);
+  // Every proposal linked to this lead the caller can see, every version of
+  // each. The builder lives on /proposals now; this page lists them, and the
+  // timeline below re-sorts the same rows rather than reading them again.
+  const proposals = await loadRecordProposals("lead", lead.id);
+  const quotes = proposals.flatMap((proposal) => proposal.group.versions);
 
   // The timeline, which re-sorts rows this function has ALREADY read rather
   // than reading them again: notes, tasks, documents, quotes and marketing
@@ -358,16 +352,7 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
         documents={documents}
       />
 
-      <QuotesPanel
-        ownerType="lead"
-        ownerId={lead.id}
-        agentId={lead.agent_id}
-        groups={groupQuotes(quotes)}
-        linesByQuote={linesByQuote}
-        devices={devices}
-        addons={addons}
-        addonsByDevice={addonsByDevice}
-      />
+      <RecordProposals ownerType="lead" ownerId={lead.id} proposals={proposals} />
 
       <MarketingPanel
         materials={materials}

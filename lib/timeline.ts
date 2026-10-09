@@ -56,8 +56,8 @@
  *   marketing events  agent_id IS the acting rep, per the column's own comment
  *   audit_log         actor_id IS the actor, and is null for a service-role write
  *   documents         agent_id is the PARENT RECORD's owner, not the uploader
- *   quotes            agent_id is the owning rep — the page passes
- *                     lead.agent_id into QuotesPanel, not profile.id
+ *   quotes            agent_id is the rep the proposal is FOR — an admin
+ *                     may make one on a rep's behalf, so it is not the actor
  *
  * So an admin uploading a document or writing a quote on a rep's lead lands a
  * row stamped with the REP's id, which is what puts it in the rep's book and
@@ -74,7 +74,7 @@ import {
 } from "@/lib/marketing-materials";
 import type { DocumentRow } from "@/lib/documents";
 import type { Note, Task, WithAuthor } from "@/lib/annotations";
-import { quotePrintHref, type Quote } from "@/lib/quotes";
+import { proposalPrintHref, type Quote } from "@/lib/quotes";
 
 /**
  * The feed's row cap.
@@ -323,19 +323,14 @@ export function documentEntries(
  * pointing at it would show v3's figures under v1's date — the one thing the
  * version history exists to prevent.
  *
- * No byline, for the same reason documents have none: the page passes
- * `lead.agent_id` into the builder, so `quotes.agent_id` is the owning rep.
+ * Linked to /proposals/<group>/print, the proposal's own route, now that a
+ * proposal is its own record rather than a child of the lead page.
  *
- * `leadId` is taken as an argument rather than read off `quote.lead_id`, and
- * that is still right now the column is nullable: the timeline is a LEAD
- * feature, the page already has the lead it is rendering, and a quote reaching
- * here with a null lead_id would be a merchant quote that does not belong on
- * this feed at all. Trusting the column would print a link to `/leads/null`.
+ * No byline, for the same reason documents have none: `quotes.agent_id` is
+ * the rep the proposal is FOR, not whoever acted — an admin can make one on a
+ * rep's behalf, and printing the rep's name would attribute the act wrongly.
  */
-export function quoteEntries(
-  quotes: readonly Quote[],
-  leadId: number,
-): TimelineEntry[] {
+export function quoteEntries(quotes: readonly Quote[]): TimelineEntry[] {
   return quotes.map((quote) => ({
     key: `quote:${quote.id}`,
     source: "quote" as const,
@@ -343,14 +338,14 @@ export function quoteEntries(
     at: quote.created_at,
     title:
       quote.version === 1
-        ? "Quote created"
-        : `Quote revised to v${quote.version}`,
+        ? "Proposal created"
+        : `Proposal revised to v${quote.version}`,
     detail:
       quote.title === null || quote.title === ""
         ? `Version ${quote.version}`
         : `${quote.title} — version ${quote.version}`,
     actorName: null,
-    href: quotePrintHref("lead", leadId, quote.quote_group_id, quote.id),
+    href: proposalPrintHref(quote.quote_group_id, quote.id),
   }));
 }
 
@@ -431,8 +426,8 @@ export function auditEntries(
     } else if (row.table_name === "quotes") {
       const quote = context.quoteVersions.get(rowId);
       if (quote === undefined) continue;
-      detail = `Quote version ${quote.version}`;
-      href = `/leads/${context.leadId}/quotes/${quote.groupId}/print?quote=${rowId}`;
+      detail = `Proposal version ${quote.version}`;
+      href = proposalPrintHref(quote.groupId, rowId);
     } else if (row.table_name === "pre_apps") {
       if (context.preAppId === null || rowId !== context.preAppId) continue;
       detail = `Pre-app #${rowId}`;
@@ -567,7 +562,7 @@ export function buildLeadTimeline(input: {
     noteEntries(input.notes),
     taskEntries(input.tasks),
     documentEntries(input.documents),
-    quoteEntries(input.quotes, input.leadId),
+    quoteEntries(input.quotes),
     marketingEntries(
       input.marketingEvents,
       input.materialTitles,

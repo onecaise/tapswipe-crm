@@ -8,6 +8,7 @@ import {
   groupQuoteLines,
   isQuoteStatus,
   lineTotals,
+  proposalHref,
 } from "@/lib/quotes";
 import { PROPOSAL_TERMS, type Proposal } from "@/lib/quote-proposal";
 import { PrintButton } from "@/components/print-button";
@@ -15,16 +16,18 @@ import { PrintDocument } from "@/components/print-document";
 import { Button } from "@/components/ui/button";
 
 /**
- * The Hardware Proposal — ONE document component, two routes.
+ * The Hardware Proposal — ONE document component, on ONE route.
  *
- * `/leads/[id]/quotes/[quoteGroupId]/print` and
- * `/merchants/[id]/quotes/[quoteGroupId]/print` both render this, and
- * `loadProposal()` in lib/quote-proposal.ts flattens the two owner tables into
- * one shape first. So the two routes are each about ten lines: await the
- * loader, render this. Two copies of a document a merchant reads is how the
- * lead version comes to say something the merchant version does not — and this
- * is the sheet somebody is handed, so "slightly different" is the whole
- * problem.
+ * `/proposals/[quoteGroupId]/print` renders this for every proposal, linked
+ * to a lead, to a merchant or to nothing; `loadProposal()` in
+ * lib/quote-proposal.ts flattens the two record tables into one shape first.
+ * The old `/leads/[id]/quotes/[quoteGroupId]/print` and
+ * `/merchants/[id]/quotes/[quoteGroupId]/print` only redirect here. One
+ * document, because this is the sheet somebody is handed, and two near-copies
+ * of it is how one comes to say something the other does not.
+ *
+ * "Prepared for" is the printed VERSION'S customer_name snapshot, so a lead
+ * renamed after v1 was sent does not readdress v1's sheet.
  *
  * ## The grouping comes from the SNAPSHOT
  *
@@ -58,7 +61,7 @@ export function QuoteProposalDocument({ proposal }: { proposal: Proposal }) {
 
   const totals = lineTotals(lines);
   const groups = groupQuoteLines(lines);
-  const backHref = owner.type === "lead" ? `/leads/${owner.id}` : `/merchants/${owner.id}`;
+  const backHref = proposalHref(quote.quote_group_id);
 
   // Only the parts the record actually has. A merchant carries no contact
   // columns at all, so this is empty on that route and the line is omitted
@@ -81,7 +84,7 @@ export function QuoteProposalDocument({ proposal }: { proposal: Proposal }) {
         <Button asChild variant="ghost" size="sm">
           <Link href={backHref}>
             <ArrowLeftIcon size={16} />
-            Back to {formatText(owner.name)}
+            Back to proposal
           </Link>
         </Button>
         <PrintButton />

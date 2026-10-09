@@ -207,7 +207,7 @@ test.describe("a quote, laid out to hand to a merchant", () => {
     page,
   }) => {
     const { quote } = await seedE2E();
-    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+    await page.goto(`/proposals/${quote.groupId}/print`);
 
     // The HEADING is the document type, not the rep's title. That is the
     // sheet saying what it is to the person holding it; "Countertop package"
@@ -239,7 +239,7 @@ test.describe("a quote, laid out to hand to a merchant", () => {
 
   test("prints the current version by default", async ({ page }) => {
     const { quote } = await seedE2E();
-    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+    await page.goto(`/proposals/${quote.groupId}/print`);
 
     // v2 by currentVersion(), with no ?quote= in the URL at all.
     await expect(page.getByText("Version 2 of 2")).toBeVisible();
@@ -257,7 +257,7 @@ test.describe("a quote, laid out to hand to a merchant", () => {
   test("prints a past version when the URL names one", async ({ page }) => {
     const { quote } = await seedE2E();
     await page.goto(
-      `/leads/${quote.leadId}/quotes/${quote.groupId}/print?quote=${quote.firstId}`,
+      `/proposals/${quote.groupId}/print?quote=${quote.firstId}`,
     );
 
     await expect(page.getByText("Version 1 of 2")).toBeVisible();
@@ -278,7 +278,7 @@ test.describe("a quote, laid out to hand to a merchant", () => {
   }) => {
     const { quote } = await seedE2E();
     await page.goto(
-      `/leads/${quote.leadId}/quotes/${quote.groupId}/print?quote=${quote.firstId}`,
+      `/proposals/${quote.groupId}/print?quote=${quote.firstId}`,
     );
 
     // Under print media, not just on screen: a superseded version handed to a
@@ -293,7 +293,7 @@ test.describe("a quote, laid out to hand to a merchant", () => {
 
   test("totals the line items it shows", async ({ page }) => {
     const { quote } = await seedE2E();
-    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+    await page.goto(`/proposals/${quote.groupId}/print`);
 
     const table = lineItems(page);
     await expect(table.locator("tbody tr")).toHaveCount(QUOTE_FIXTURE.v2.length);
@@ -335,7 +335,7 @@ test.describe("a quote, laid out to hand to a merchant", () => {
     page,
   }) => {
     const { quote } = await seedE2E();
-    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+    await page.goto(`/proposals/${quote.groupId}/print`);
 
     const body = await page.locator("article").innerText();
 
@@ -363,7 +363,7 @@ test.describe("another agent's quote", () => {
   test("refuses rather than admitting the quote exists", async ({ page }) => {
     const { quote } = await seedE2E();
 
-    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+    await page.goto(`/proposals/${quote.groupId}/print`);
 
     // Asserted on what renders rather than on the HTTP status, for the reason
     // written up on the merchant case above: under `cacheComponents` the
@@ -458,7 +458,7 @@ test.describe("the printed letterhead", () => {
 
   test("heads a quote", async ({ page }) => {
     const { quote } = await seedE2E();
-    await page.goto(`/leads/${quote.leadId}/quotes/${quote.groupId}/print`);
+    await page.goto(`/proposals/${quote.groupId}/print`);
     await expect(
       page.getByRole("heading", { name: "Hardware Proposal" }),
     ).toBeVisible();
@@ -467,16 +467,16 @@ test.describe("the printed letterhead", () => {
     await expectLetterheadPrinted(page);
   });
 
-  test("heads a merchant's proposal, on the route that shares the document", async ({
+  test("heads a merchant-linked proposal, on the same one route", async ({
     page,
   }) => {
-    // The fifth printable route. Worth its own letterhead check rather than
-    // trusting the shared component: PrintDocument's running head is the one
-    // element on these pages that must SURVIVE print media, and a route that
-    // forgot to wrap its document in it would look identical on screen.
+    // The same route as the lead-linked proposal above, kept as its own check
+    // because the document reads a different record table for a merchant
+    // link — and PrintDocument's running head is the one element on these
+    // pages that must SURVIVE print media.
     const { merchantProposal } = await seedE2E();
     await page.goto(
-      `/merchants/${merchantProposal.merchantId}/quotes/${merchantProposal.groupId}/print`,
+      `/proposals/${merchantProposal.groupId}/print`,
     );
     await expect(
       page.getByRole("heading", { name: "Hardware Proposal" }),

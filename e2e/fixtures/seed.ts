@@ -922,7 +922,7 @@ async function ensureStoreCatalog(db: SupabaseClient): Promise<StoreFixture> {
 /**
  * One saved proposal on the agent's MERCHANT — a device with its add-on.
  *
- * Exists so /merchants/[id]/quotes/[quoteGroupId]/print has something real to
+ * Exists so a merchant-linked proposal's print sheet has something real to
  * render without a spec having to build one first. Written through
  * `create_quote_version()` rather than by inserting the rows, for the reason
  * ensureQuote does it that way: the RPC assigns the version, takes the price
@@ -1805,6 +1805,110 @@ export async function catalogRows(brand: string): Promise<{
     >["products"],
     links: links ?? [],
   };
+}
+
+/**
+ * Removes every proposal for a customer name, for specs that create their own.
+ *
+ * By customer_name rather than title because the proposals specs make
+ * UNLINKED proposals, whose customer name is the thing they type. Service
+ * role, because there is no client DELETE on quotes; lines go with the quote
+ * (quote_id is ON DELETE CASCADE). Run before a spec as well as after, so a
+ * run that died halfway cannot leave a row the next run's assertions trip on.
+ */
+export async function clearProposalsForCustomer(name: string): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { error } = await db.from("quotes").delete().eq("customer_name", name);
+  if (error) throw new Error(`clear proposals: ${error.message}`);
+}
+
+/**
+ * An UNLINKED proposal for one persona, written as service role through the
+ * RPC (so it takes the snapshot and version path a real one does). Returns its
+ * group id.
+ */
+export async function seedStandaloneProposal(
+  agentId: string,
+  customerName: string,
+): Promise<string> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data: device, error: deviceError } = await db
+    .from("products")
+    .select("id")
+    .eq("sku", STORE_FIXTURE.device.sku)
+    .single();
+  if (deviceError || !device) {
+    throw new Error(`standalone proposal device: ${deviceError?.message}`);
+  }
+  const { data: quoteId, error } = await db.rpc("create_quote_version", {
+    lead_id_input: null,
+    merchant_id_input: null,
+    customer_name_input: customerName,
+    agent_id_input: agentId,
+    quote_group_id_input: null,
+    status_input: "draft",
+    title_input: null,
+    notes_input: null,
+    line_items_input: [{ product_id: device.id as number, quantity: 1 }],
+  });
+  if (error || typeof quoteId !== "number") {
+    throw new Error(`standalone proposal: ${error?.message ?? "no id"}`);
+  }
+  const { data: row, error: rowError } = await db
+    .from("quotes")
+    .select("quote_group_id")
+    .eq("id", quoteId)
+    .single();
+  if (rowError || !row) throw new Error(`standalone group: ${rowError?.message}`);
+  return row.quote_group_id as string;
+}
+
+/** Every version of every proposal for a customer name, oldest first. */
+export async function proposalRows(customerName: string): Promise<
+  {
+    id: number;
+    quote_group_id: string;
+    version: number;
+    lead_id: number | null;
+    merchant_id: number | null;
+    agent_id: string;
+    customer_name: string;
+  }[]
+> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await db
+    .from("quotes")
+    .select("id, quote_group_id, version, lead_id, merchant_id, agent_id, customer_name")
+    .eq("customer_name", customerName)
+    .order("id", { ascending: true });
+  if (error) throw new Error(`proposal rows: ${error.message}`);
+  return (data ?? []) as Awaited<ReturnType<typeof proposalRows>>;
+}
+
+/** The proposals linked to one lead, oldest first. */
+export async function proposalsForLead(leadId: number): Promise<
+  { id: number; customer_name: string; title: string | null; agent_id: string }[]
+> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await db
+    .from("quotes")
+    .select("id, customer_name, title, agent_id")
+    .eq("lead_id", leadId)
+    .order("id", { ascending: true });
+  if (error) throw new Error(`lead proposals: ${error.message}`);
+  return (data ?? []) as Awaited<ReturnType<typeof proposalsForLead>>;
 }
 
 /**

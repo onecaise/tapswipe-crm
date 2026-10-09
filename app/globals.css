@@ -122,12 +122,13 @@
 }
 
 /*
- * Print rules, for the five pages in this app meant to leave the screen: the
+ * Print rules, for the four pages in this app meant to leave the screen: the
  * payout summary at /payouts/[period]/summary/[agentId], the blank application
  * at /pre-apps/blank-form, a merchant's record at /merchants/[id]/print, and a
- * hardware proposal on either owner kind — /leads/[id]/quotes/[quoteGroupId]/print
- * and /merchants/[id]/quotes/[quoteGroupId]/print, which render one shared
- * document component rather than two copies of it.
+ * hardware proposal at /proposals/[quoteGroupId]/print — the one proposal print
+ * route, linked to a lead, a merchant or nothing. The old per-record
+ * /leads/…/quotes/…/print and /merchants/…/quotes/…/print URLs only redirect
+ * there (next.config.ts).
  *
  * This block deliberately no longer hides the app chrome by element name. It
  * used to say `aside, header, nav { display: none }`, and that was wrong in a

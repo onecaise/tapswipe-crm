@@ -5,18 +5,18 @@ import { type ReactNode } from "react";
  * The scaffold every printable document sits in, and the Tapswipe mark that
  * heads each of its sheets.
  *
- * Used by the FIVE printable routes — /pre-apps/blank-form,
- * /merchants/[id]/print, /payouts/[period]/summary/[agentId], and the two
- * hardware-proposal routes /leads/[id]/quotes/[quoteGroupId]/print and
- * /merchants/[id]/quotes/[quoteGroupId]/print — so the five cannot drift, and
- * rendering `public/logo-icon.png`, the same file the sidebar uses. There is
- * no second copy of the asset and no print-specific export of it: one file
- * means the printed mark changes when the app's does.
+ * Used by the FOUR printable routes — /pre-apps/blank-form,
+ * /merchants/[id]/print, /payouts/[period]/summary/[agentId], and
+ * /proposals/[quoteGroupId]/print — so the four cannot drift, and rendering
+ * `public/logo-icon.png`, the same file the sidebar uses. There is no second
+ * copy of the asset and no print-specific export of it: one file means the
+ * printed mark changes when the app's does.
  *
- * The last two are five routes but FOUR documents: both proposal routes render
- * one shared `QuoteProposalDocument`, differing only in which owner table they
- * read. A proposal is a sheet somebody is handed, so two near-copies of it
- * would be the worst place in the app for a wording drift.
+ * Four routes, four documents. Proposals used to print from two routes
+ * (/leads/[id]/quotes/[quoteGroupId]/print and
+ * /merchants/[id]/quotes/[quoteGroupId]/print) sharing one
+ * `QuoteProposalDocument`; both now redirect to /proposals/[quoteGroupId]/print,
+ * so the shared document has exactly one route, linked or not.
  *
  * ## Why this is a real <table>, which is not a decision taken lightly
  *

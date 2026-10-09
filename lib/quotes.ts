@@ -81,7 +81,7 @@ export const QUOTE_COLUMNS =
   "id, quote_group_id, version, lead_id, merchant_id, customer_name, agent_id, status, title, notes, created_at";
 
 /**
- * Which kind of record a quote hangs off.
+ * Which kind of record a proposal may be linked to — at most one, or none.
  *
  * Two real foreign keys rather than the polymorphic `owner_type` + `owner_id`
  * that notes, tasks and documents use — see the schema doc. This type exists
@@ -92,17 +92,16 @@ export const QUOTE_COLUMNS =
 export const QUOTE_OWNER_TYPES = ["lead", "merchant"] as const;
 export type QuoteOwnerType = (typeof QUOTE_OWNER_TYPES)[number];
 
-/** Where a quote's print route lives, per owner kind. */
-export const QUOTE_OWNER_PATHS: Record<QuoteOwnerType, string> = {
-  lead: "/leads",
-  merchant: "/merchants",
-};
+/** A proposal's own page: the builder and its version history. */
+export function proposalHref(quoteGroupId: string): string {
+  return `/proposals/${quoteGroupId}`;
+}
 
 /**
- * The print URL for one version of a quote.
+ * The print URL for a proposal, or for one version of it.
  *
- * One implementation, for the reason currentVersion() is one: the panel, the
- * timeline and the print page's own "current version" link all build this, and
+ * One implementation, for the reason currentVersion() is one: the proposal
+ * page, the lead timeline and the print page's own links all build this, and
  * three spellings of a path with a search param is how one of them ends up
  * pointing at the wrong version.
  *
@@ -112,14 +111,28 @@ export const QUOTE_OWNER_PATHS: Record<QuoteOwnerType, string> = {
  * list row pinned to today's row id would keep printing this version after the
  * next revision.
  */
-export function quotePrintHref(
-  ownerType: QuoteOwnerType,
-  ownerId: number,
+export function proposalPrintHref(
   quoteGroupId: string,
   quoteId?: number,
 ): string {
-  const base = `${QUOTE_OWNER_PATHS[ownerType]}/${ownerId}/quotes/${quoteGroupId}/print`;
+  const base = `${proposalHref(quoteGroupId)}/print`;
   return quoteId === undefined ? base : `${base}?quote=${quoteId}`;
+}
+
+/**
+ * /proposals/new, optionally prefilled with the record it is for.
+ *
+ * The params name the record, never its name: the new-proposal page loads the
+ * record under the caller's RLS and takes the name from there, so a forged
+ * param can at most name a record the caller can already see.
+ */
+export function newProposalHref(link?: {
+  type: QuoteOwnerType;
+  id: number;
+}): string {
+  return link === undefined
+    ? "/proposals/new"
+    : `/proposals/new?${link.type}=${link.id}`;
 }
 
 export type QuoteLineItem = {

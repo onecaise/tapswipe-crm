@@ -151,7 +151,7 @@ test.describe("as the owning rep", () => {
       row(feed, "Quote", TIMELINE_FIXTURE.quoteTitle).getByRole("link"),
     ).toHaveAttribute(
       "href",
-      `/leads/${timeline.leadId}/quotes/${timeline.quoteGroupId}/print?quote=${timeline.quoteId}`,
+      `/proposals/${timeline.quoteGroupId}/print?quote=${timeline.quoteId}`,
     );
   });
 
@@ -208,14 +208,14 @@ test.describe("as an admin on the same lead", () => {
     // what identifies a row. Two admin-trail entries, each naming the record
     // it is actually about.
     await expect(row(feed, "Admin trail", "This lead")).toBeVisible();
-    await expect(row(feed, "Admin trail", "Quote version 1")).toBeVisible();
+    await expect(row(feed, "Admin trail", "Proposal version 1")).toBeVisible();
 
     // The quote one links to the version it is about, like the quote entry.
     await expect(
-      row(feed, "Admin trail", "Quote version 1").getByRole("link"),
+      row(feed, "Admin trail", "Proposal version 1").getByRole("link"),
     ).toHaveAttribute(
       "href",
-      `/leads/${timeline.leadId}/quotes/${timeline.quoteGroupId}/print?quote=${timeline.quoteId}`,
+      `/proposals/${timeline.quoteGroupId}/print?quote=${timeline.quoteId}`,
     );
   });
 
@@ -228,7 +228,7 @@ test.describe("as an admin on the same lead", () => {
     const adminRows = feed.locator("li").filter({ hasText: "Admin trail" });
     await expect(adminRows).toHaveCount(2);
 
-    for (const text of ["This lead", "Quote version 1"]) {
+    for (const text of ["This lead", "Proposal version 1"]) {
       const entry = row(feed, "Admin trail", text);
       // The byline carries WHO. An admin resolves every name, because the
       // profiles select policy is own-row plus admin.

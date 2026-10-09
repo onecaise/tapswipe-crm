@@ -12,13 +12,14 @@ import {
 } from "./fixtures/seed";
 
 /**
- * A NON-ADMIN REP builds a hardware proposal, on a lead and on a merchant.
+ * A NON-ADMIN REP builds a hardware proposal linked to a lead and to a
+ * merchant — on /proposals/new, reached with the record prefilled.
  *
  * ## Why these are in e2e and not in one of the other three suites
  *
  * The cart arithmetic and the device/add-on grouping are pure and are tested
  * in tests/unit/quote-cart.test.ts, where ties and unpriced products can be
- * constructed exactly. The scoping, the exactly-one-owner constraint and the
+ * constructed exactly. The scoping, the at-most-one-link constraint and the
  * price lock are in tests/rls/quote-owners-and-price-lock.test.ts, against
  * real policies — including a DIRECT insert with a forged unit_price, which is
  * the path the grant actually allows.
@@ -61,19 +62,19 @@ test.beforeAll(async () => {
   merchant = seeded.merchantProposal;
 });
 
-/** The proposals panel's own <section>, located by its heading. */
+/** The builder on /proposals/new or a proposal's page. */
 function panelOf(page: Page): Locator {
-  return page
-    .getByRole("heading", { name: "Hardware proposals", exact: true })
-    .locator("xpath=ancestor::section[1]");
+  return page.getByTestId("proposal-builder");
 }
 
-/** Opens the builder and returns the panel it lives in. */
+/** A saved proposal's own page: /proposals/<group uuid>. */
+const PROPOSAL_URL = /\/proposals\/[0-9a-f-]{36}$/;
+
+/** Opens /proposals/new (prefilled by the path's param) and returns the builder. */
 async function openBuilder(page: Page, path: string): Promise<Locator> {
   await page.goto(path);
   const panel = panelOf(page);
   await expect(panel).toBeVisible();
-  await panel.getByRole("button", { name: "New proposal" }).click();
   // The search box only exists once the store is rendered, so waiting for it
   // is waiting for the builder rather than for a timeout.
   await expect(panel.getByLabel("Search the catalog")).toBeVisible();
@@ -100,7 +101,7 @@ test.describe("a rep builds a proposal on a lead", () => {
   test("browses by brand and type, and never offers an archived product", async ({
     page,
   }) => {
-    const panel = await openBuilder(page, `/leads/${agentLeadId}`);
+    const panel = await openBuilder(page, `/proposals/new?lead=${agentLeadId}`);
 
     // Both devices are there before any filtering.
     await expect(
@@ -149,7 +150,7 @@ test.describe("a rep builds a proposal on a lead", () => {
   });
 
   test("searches by name, model and brand", async ({ page }) => {
-    const panel = await openBuilder(page, `/leads/${agentLeadId}`);
+    const panel = await openBuilder(page, `/proposals/new?lead=${agentLeadId}`);
     const search = panel.getByLabel("Search the catalog");
 
     // By sku, which is what a rep reads off a price sheet.
@@ -176,7 +177,7 @@ test.describe("a rep builds a proposal on a lead", () => {
     // are priced, and only one is linked to this device — so a store that
     // ignored product_compatibility entirely would offer both and pass any
     // test that only checked the fitting one appeared.
-    const panel = await openBuilder(page, `/leads/${agentLeadId}`);
+    const panel = await openBuilder(page, `/proposals/new?lead=${agentLeadId}`);
 
     await panel
       .getByRole("button", { name: `Add ${STORE_FIXTURE.device.name}` })
@@ -213,7 +214,7 @@ test.describe("a rep builds a proposal on a lead", () => {
   test("totals one-time and monthly separately, and never sums them", async ({
     page,
   }) => {
-    const panel = await openBuilder(page, `/leads/${agentLeadId}`);
+    const panel = await openBuilder(page, `/proposals/new?lead=${agentLeadId}`);
 
     await panel
       .getByRole("button", { name: `Add ${STORE_FIXTURE.device.name}` })
@@ -249,7 +250,7 @@ test.describe("a rep builds a proposal on a lead", () => {
   }) => {
     await clearProposalsTitled(STORE_FIXTURE.proposalTitle);
 
-    const panel = await openBuilder(page, `/leads/${agentLeadId}`);
+    const panel = await openBuilder(page, `/proposals/new?lead=${agentLeadId}`);
     await panel.getByLabel("Title").fill(STORE_FIXTURE.proposalTitle);
     await panel
       .getByRole("button", { name: `Add ${STORE_FIXTURE.device.name}` })
@@ -267,13 +268,12 @@ test.describe("a rep builds a proposal on a lead", () => {
 
     await panel.getByRole("button", { name: "Save proposal" }).click();
 
-    // The row appearing is the whole RPC having worked through a rep's own
-    // session: the insert policy's lead branch, enforce_quote_version
-    // assigning v1, and the snapshot.
-    await expect(
-      panel.getByText(STORE_FIXTURE.proposalTitle).first(),
-    ).toBeVisible();
-    await expect(panel.getByText(/Version 1 of 1/)).toBeVisible();
+    // Landing on the proposal's own page is the whole RPC having worked
+    // through a rep's own session: the insert policy's link check,
+    // enforce_quote_version assigning v1, and the snapshot.
+    await page.waitForURL(PROPOSAL_URL);
+    await expect(page.getByText(STORE_FIXTURE.proposalTitle).first()).toBeVisible();
+    await expect(page.getByText(/Version 1 of 1/)).toBeVisible();
 
     // And the rows, not just the page. A store that displayed the right figure
     // while saving a different one would look identical.
@@ -296,7 +296,7 @@ test.describe("a rep builds a proposal on a lead", () => {
   test("prints what it saved, as a Hardware Proposal", async ({ page }) => {
     await clearProposalsTitled(STORE_FIXTURE.proposalTitle);
 
-    const panel = await openBuilder(page, `/leads/${agentLeadId}`);
+    const panel = await openBuilder(page, `/proposals/new?lead=${agentLeadId}`);
     await panel.getByLabel("Title").fill(STORE_FIXTURE.proposalTitle);
     await panel
       .getByRole("button", { name: `Add ${STORE_FIXTURE.device.name}` })
@@ -307,28 +307,19 @@ test.describe("a rep builds a proposal on a lead", () => {
       })
       .click();
     await panel.getByRole("button", { name: "Save proposal" }).click();
-    await expect(
-      panel.getByText(STORE_FIXTURE.proposalTitle).first(),
-    ).toBeVisible();
+    await page.waitForURL(PROPOSAL_URL);
 
-    // Through the panel's own Print link rather than a hand-built URL — the
-    // link is what a rep clicks, and the bare group URL is deliberately what
-    // it points at so it keeps printing whatever is current.
-    const row = panel
-      .locator("> ul > li")
-      .filter({ hasText: STORE_FIXTURE.proposalTitle });
-    await row.getByRole("link", { name: "Print", exact: true }).click();
+    // Through the proposal page's own Print link rather than a hand-built
+    // URL — the link is what a rep clicks, and the bare group URL is
+    // deliberately what it points at so it keeps printing whatever is current.
+    await page.getByRole("link", { name: "Print", exact: true }).click();
 
-    // Waited for explicitly. Without it the assertions below race the
-    // navigation, and every one of them has a false match back on the lead
-    // page — which has both a "Hardware proposals" heading and the title in
-    // two places (the panel row and the timeline entry).
-    await page.waitForURL(/\/quotes\/.*\/print$/);
+    // Waited for explicitly, or the assertions below race the navigation and
+    // match the proposal page, which also shows the title.
+    await page.waitForURL(/\/proposals\/[0-9a-f-]{36}\/print$/);
 
-    // `exact` matters here: getByRole's name matching is a case-insensitive
-    // SUBSTRING by default, so "Hardware Proposal" also matches the panel's
-    // own "Hardware proposals" heading. That is what made the first draft of
-    // this spec pass while still on the lead page.
+    // `exact` matters: getByRole's name matching is a case-insensitive
+    // SUBSTRING by default.
     const sheet = page.getByRole("article");
     await expect(
       page.getByRole("heading", { name: "Hardware Proposal", exact: true }),
@@ -355,7 +346,7 @@ test.describe("a rep builds a proposal on a lead", () => {
 test.describe("a rep builds a proposal on a merchant", () => {
   test.use({ storageState: storageStateFor("agent") });
 
-  test("has the same panel on a merchant, and saves against it", async ({
+  test("builds one linked to a merchant, and saves against it", async ({
     page,
   }) => {
     // The whole point of quotes.merchant_id. A rep sells hardware to win a
@@ -364,7 +355,7 @@ test.describe("a rep builds a proposal on a merchant", () => {
     const title = `${STORE_FIXTURE.proposalTitle} (merchant)`;
     await clearProposalsTitled(title);
 
-    const panel = await openBuilder(page, `/merchants/${merchant.merchantId}`);
+    const panel = await openBuilder(page, `/proposals/new?merchant=${merchant.merchantId}`);
     await panel.getByLabel("Title").fill(title);
     await panel
       .getByRole("button", { name: `Add ${STORE_FIXTURE.device.name}` })
@@ -376,7 +367,8 @@ test.describe("a rep builds a proposal on a merchant", () => {
       .click();
     await panel.getByRole("button", { name: "Save proposal" }).click();
 
-    await expect(panel.getByText(title).first()).toBeVisible();
+    await page.waitForURL(PROPOSAL_URL);
+    await expect(page.getByText(title).first()).toBeVisible();
 
     const lines = await proposalLines(title);
     expect(lines.map((line) => line.product_name)).toEqual([
@@ -387,11 +379,11 @@ test.describe("a rep builds a proposal on a merchant", () => {
     await clearProposalsTitled(title);
   });
 
-  test("prints the merchant proposal through the second route", async ({
+  test("prints the merchant-linked proposal on the one print route", async ({
     page,
   }) => {
     await page.goto(
-      `/merchants/${merchant.merchantId}/quotes/${merchant.groupId}/print`,
+      `/proposals/${merchant.groupId}/print`,
     );
 
     const sheet = page.getByRole("article");
@@ -433,7 +425,7 @@ test.describe("another rep's merchant proposal", () => {
 
   test("refuses rather than admitting the proposal exists", async ({ page }) => {
     await page.goto(
-      `/merchants/${merchant.merchantId}/quotes/${merchant.groupId}/print`,
+      `/proposals/${merchant.groupId}/print`,
     );
 
     /**
@@ -477,11 +469,10 @@ test.describe("another rep's merchant proposal", () => {
   }) => {
     await page.goto(`/merchants/${merchant.merchantId}`);
     await expect(page.getByText(/We couldn.t find that/)).toBeVisible();
-    // No panel, so no builder. The database would refuse the write anyway —
-    // the insert policy's merchant branch mirrors the merchants select policy
-    // — but the page never offers it.
+    // No proposals list, so no "New proposal" for this merchant. The database
+    // would refuse the link anyway — it must be a record the caller can see.
     await expect(
-      page.getByRole("heading", { name: "Hardware proposals", exact: true }),
+      page.getByRole("heading", { name: "Proposals", exact: true }),
     ).toHaveCount(0);
   });
 });
@@ -495,7 +486,7 @@ test.describe("the store at every width a rep uses", () => {
   for (const width of [375, 768, 1440]) {
     test(`does not overflow horizontally at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
-      const panel = await openBuilder(page, `/leads/${agentLeadId}`);
+      const panel = await openBuilder(page, `/proposals/new?lead=${agentLeadId}`);
 
       // A cart with a device and an add-on, which is the widest the component
       // gets: two rows of controls plus a money column.

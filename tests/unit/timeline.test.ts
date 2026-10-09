@@ -378,9 +378,9 @@ describe("buildLeadTimeline — audit rows are matched on the PAIR", () => {
     );
 
     const row = entries.find((e) => e.source === "audit");
-    expect(row?.detail).toBe("Quote version 2");
+    expect(row?.detail).toBe("Proposal version 2");
     expect(row?.href).toBe(
-      `/leads/${LEAD_ID}/quotes/group-z/print?quote=31`,
+      `/proposals/group-z/print?quote=31`,
     );
   });
 
@@ -541,8 +541,8 @@ describe("buildLeadTimeline — bylines and wording", () => {
 
     const rows = entries.filter((e) => e.source === "quote");
     expect(rows.map((e) => e.title)).toEqual([
-      "Quote revised to v2",
-      "Quote created",
+      "Proposal revised to v2",
+      "Proposal created",
     ]);
     // Explicit ?quote=, never the bare group URL — that prints whatever is
     // current now, so a v1 row would show v2's figures under v1's date.

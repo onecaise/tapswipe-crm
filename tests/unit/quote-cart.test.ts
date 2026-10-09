@@ -11,7 +11,9 @@ import {
   groupQuoteLines,
   isMonthlyBilling,
   lineTotals,
-  quotePrintHref,
+  newProposalHref,
+  proposalHref,
+  proposalPrintHref,
 } from "@/lib/quotes";
 
 /**
@@ -275,7 +277,7 @@ describe("groupQuoteLines — rebuilding the structure from the snapshot", () =>
   });
 
   it("treats an unrecognised kind as a standalone item", () => {
-    // Same direction loadQuoteContext takes when it splits the catalog: a
+    // Same direction loadQuoteCatalog takes when it splits the catalog: a
     // widened `kind` should read as its own line rather than disappear under
     // the previous device.
     const groups = groupQuoteLines([
@@ -379,22 +381,12 @@ describe("cartProblem — why Save is disabled", () => {
   });
 });
 
-describe("quotePrintHref — one definition of the print URL", () => {
-  it("routes both owner kinds to a page that exists", () => {
-    expect(quotePrintHref("lead", 7, "group-a")).toBe(
-      "/leads/7/quotes/group-a/print",
-    );
-    expect(quotePrintHref("merchant", 7, "group-a")).toBe(
-      "/merchants/7/quotes/group-a/print",
-    );
-  });
-
-  it("keeps the two distinct — same id, different owner, different route", () => {
-    // Lead 7 and merchant 7 both exist. Anything keying on the id alone sends
-    // a rep to the wrong business's proposal.
-    expect(quotePrintHref("lead", 7, "g")).not.toBe(
-      quotePrintHref("merchant", 7, "g"),
-    );
+describe("proposal hrefs — one definition of each URL", () => {
+  it("routes a proposal and its print sheet by group, whatever it is linked to", () => {
+    // A proposal is its own record now, so the link (lead, merchant or none)
+    // plays no part in its address.
+    expect(proposalHref("group-a")).toBe("/proposals/group-a");
+    expect(proposalPrintHref("group-a")).toBe("/proposals/group-a/print");
   });
 
   it("omits ?quote= without a version, and pins it with one", () => {
@@ -402,9 +394,16 @@ describe("quotePrintHref — one definition of the print URL", () => {
     // wants; an explicit ?quote= pins one version, which is what a history row
     // wants. A list row pinned to today's row id would keep printing this
     // version after the next revision.
-    expect(quotePrintHref("lead", 1, "g")).not.toContain("?");
-    expect(quotePrintHref("lead", 1, "g", 42)).toBe(
-      "/leads/1/quotes/g/print?quote=42",
+    expect(proposalPrintHref("g")).not.toContain("?");
+    expect(proposalPrintHref("g", 42)).toBe("/proposals/g/print?quote=42");
+  });
+
+  it("prefills a new proposal with the record kind AND id", () => {
+    // Lead 7 and merchant 7 both exist; the kind is part of the address.
+    expect(newProposalHref()).toBe("/proposals/new");
+    expect(newProposalHref({ type: "lead", id: 7 })).toBe("/proposals/new?lead=7");
+    expect(newProposalHref({ type: "merchant", id: 7 })).toBe(
+      "/proposals/new?merchant=7",
     );
   });
 });
