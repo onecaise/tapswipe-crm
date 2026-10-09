@@ -6337,10 +6337,10 @@ end;
 $$;
 
 -- =====================================================================
--- NOTE ON SUPABASE STORAGE (not SQL — set up in the dashboard/CLI)
--- Create THREE private buckets: `documents`, `residual-imports` and
+-- SUPABASE STORAGE — three private buckets, created by a migration
+-- (20261009170000) as of 9 Oct 2026: `documents`, `residual-imports` and
 -- `marketing`. None of them
--- gets public storage policies referencing these tables — all
+-- gets storage policies referencing these tables — all
 -- upload/download access goes through Edge Functions that authorize the
 -- caller first and only then mint a short-lived signed URL with the
 -- service-role client.
@@ -6374,10 +6374,49 @@ $$;
 -- record at all, so there is nothing for the documents key shape to
 -- resolve.
 --
--- NO bucket is in any migration, so a freshly started local stack has none
--- of them and every signing call 404s until they exist -- and `npx supabase
--- db reset` drops all three, which is the version that actually bites.
--- tests/live/helpers/stack.ts creates all three as part of provisioning.
+-- WHY A MIGRATION, after a month of creating them out-of-band. Until
+-- 20261009170000 no bucket was in any migration: the hosted ones were made
+-- by hand in the dashboard and the local ones by test helpers and seed
+-- scripts. `marketing` was added after the hosted buckets were made, nobody
+-- made it on dev, and nothing noticed -- every upload there failed with
+-- "Could not create upload URL: The related resource does not exist" (the
+-- message a missing bucket produces), while the test helpers, which created
+-- the bucket themselves, stayed green. A bucket the code depends on is
+-- schema, so it is created where the schema is.
+--
+-- `on conflict (id) do nothing`, NOT do update: a hosted bucket that
+-- already exists keeps whatever it was configured with, so pushing this can
+-- never change a live bucket's privacy or limit. It only fills in a missing
+-- one.
+--
+-- THE GUARD IS FOR THE HERMETIC SUITE ONLY. `npm test` applies every
+-- migration to PGlite over a minimal auth shim with no `storage` schema, so
+-- an unguarded insert would fail all of it. On a real Supabase stack the
+-- storage schema exists before migrations run (verified locally: after a
+-- `supabase db reset` the three buckets exist), so the early return is
+-- never taken there.
+--
+-- NO POLICY ON storage.objects, deliberately: every access is a signed URL
+-- minted by a service-role Edge Function after it has authorized the
+-- caller. A "reps read, admins write" storage policy would let a client skip
+-- that function -- its audit row, its archived-material check, and the
+-- marketing bucket's inline-type allow-list.
+--
+do $$
+begin
+  if to_regclass('storage.buckets') is null then
+    return;
+  end if;
+
+  insert into storage.buckets (id, name, public, file_size_limit)
+  values
+    ('documents',        'documents',        false, 52428800),
+    ('residual-imports', 'residual-imports', false, 52428800),
+    ('marketing',        'marketing',        false, 52428800)
+  on conflict (id) do nothing;
+end
+$$;
+
 --
 -- SET A PER-BUCKET file_size_limit ON ALL THREE. This is not optional and it is
 -- not what config.toml's `[storage] file_size_limit` does. Measured on the
@@ -6387,11 +6426,11 @@ $$;
 -- file_size_limit = null, which is what was actually in force -- no
 -- ceiling at all, at any layer, so one rep with a video file could fill
 -- the project's storage quota. `documents` is provisioned at
--- MAX_DOCUMENT_BYTES (lib/documents.ts, 50 MiB) by
--- tests/live/helpers/stack.ts, e2e/fixtures/seed.ts and
--- seed-dev-local.mjs; `marketing` is provisioned at the same ceiling by
--- the first two. The hosted buckets need the same set from the dashboard,
--- or via storage.updateBucket, because no migration can carry it. lib/documents.ts also refuses an over-size file client-side, which
+-- MAX_DOCUMENT_BYTES (lib/documents.ts, 50 MiB = 52428800 bytes), which the
+-- migration above sets on any bucket it creates. Because it never updates an
+-- EXISTING bucket, a hosted bucket made by hand before the limit existed
+-- still needs it set from the dashboard or via storage.updateBucket; the test
+-- helpers and seed-dev-local.mjs re-assert it locally on every run. lib/documents.ts also refuses an over-size file client-side, which
 -- is what produces a readable message instead of a 413 from Storage --
 -- but a client-side check is a courtesy, not the boundary.
 -- =====================================================================
