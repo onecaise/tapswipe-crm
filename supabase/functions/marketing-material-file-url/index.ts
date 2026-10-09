@@ -317,6 +317,16 @@ export default {
       .createSignedUploadUrl(fileKey);
 
     if (error || !data) {
+      // Archived, like the two failure paths above. By this point the row
+      // HAS a file_key, so left live it would look like a finished material
+      // in every rep's library and fail with "Object not found" when opened —
+      // which is exactly what a missing bucket on dev produced, one dead row
+      // per attempted upload.
+      await ctx.supabaseAdmin
+        .from("marketing_materials")
+        .update({ archived_at: new Date().toISOString() })
+        .eq("id", materialId);
+
       return json(
         { error: `Could not create upload URL: ${error?.message ?? "unknown"}` },
         500,

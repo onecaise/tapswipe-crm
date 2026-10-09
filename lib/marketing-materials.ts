@@ -12,6 +12,21 @@
  * the thing that rejects a bad event_type, and it would reject it whichever
  * copy drifted.
  */
+
+/**
+ * The marketing bucket's name — ONE definition, re-exported from the Edge
+ * Function side rather than copied.
+ *
+ * The direction is forced: Next can import a dependency-free module under
+ * supabase/functions/_shared (lib/user-imports.ts records the same fact), but a
+ * Deno function cannot import from lib/ without betting on how
+ * `functions deploy` bundles. _shared/marketing-materials.ts imports nothing,
+ * so pulling it into the browser bundle drags nothing else with it. Unlike
+ * MARKETING_EVENT_TYPES above, a drifted bucket name is not a mismatched
+ * label: the function would sign into one bucket and the browser upload into
+ * another.
+ */
+export { MARKETING_BUCKET } from "@/supabase/functions/_shared/marketing-materials";
 export const MARKETING_EVENT_TYPES = [
   "viewed",
   "downloaded",

@@ -7,6 +7,7 @@ import { UploadIcon } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { invokeEdgeFunction } from "@/lib/edge-functions";
 import {
+  MARKETING_BUCKET,
   MAX_MATERIAL_BYTES,
   SUGGESTED_CATEGORIES,
   formatBytes,
@@ -15,7 +16,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-const MARKETING_BUCKET = "marketing";
 
 type SignedUpload = {
   material_id: number;
@@ -35,11 +35,21 @@ type SignedUpload = {
  *
  * So the failure modes are mirrored too. There, a dead upload leaves an orphan
  * OBJECT that no row names, which the panel cleans up by asking delete-document
- * to remove it. Here, a dead upload leaves an orphan ROW with a null file_key
- * and no object — which is visible, harmless, and recoverable: the admin list
- * shows it as "No file" and offers a retry. Nothing to clean up, because there
- * is no table this app can delete from (marketing_materials has no delete path
- * at all) and nothing in the bucket to orphan.
+ * to remove it. Here the row is the thing that can be orphaned, and it already
+ * HAS a file_key by the time anything can fail — the function builds the key
+ * from the new row's id and writes it before signing. So a dead upload can
+ * leave a row whose file_key names no object, which reps would see as a real
+ * material and get "Object not found" from.
+ *
+ * Two different cases, two different answers:
+ *   * Signing fails (the function's last step, e.g. a missing bucket): the
+ *     function ARCHIVES the row before returning the error, as it does when
+ *     the key or audit write fails. Nothing reaches a rep.
+ *   * Signing succeeds but the browser's PUT then fails (network, size limit):
+ *     the row stays live with a file_key and no object. The function cannot
+ *     see that happen; this component reports the error so the admin can
+ *     archive it on the manage page. Nothing can be deleted —
+ *     marketing_materials has no delete path at all.
  */
 export function MarketingMaterialUpload() {
   const [category, setCategory] = useState<string>(SUGGESTED_CATEGORIES[0]);
