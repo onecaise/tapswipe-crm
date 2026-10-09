@@ -15,7 +15,7 @@ export default defineConfig({
   retries: 0,
   timeout: 600_000,
   reporter: [["line"]],
-  use: { baseURL: "http://localhost:3000", trace: "off", screenshot: "off" },
+  use: { baseURL: "http://localhost:3000", trace: "off", screenshot: "off", actionTimeout: 10_000, navigationTimeout: 60_000 },
   projects: [
     { name: "setup", testMatch: /e2e[\/]auth\.setup\.ts/ },
     {

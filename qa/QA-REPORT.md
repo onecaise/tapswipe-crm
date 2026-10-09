@@ -31,7 +31,10 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | ID | Sev | Area | Finding | Status |
 | --- | --- | --- | --- | --- |
 | QA-001 | High | Auth | `/auth/confirm` redirects to any `next=` URL after a valid OTP (open redirect) | NEEDS OWEN (repro 20e065a) |
-| QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | fixed (see Details) |
+| QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
+| QA-003 | Medium | Products | List price `0x10` saved as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
+6.00, `1e3` as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
+,000.00 (Number() reads JS literals) | __HASH__ |
 
 ## Details
 
@@ -44,6 +47,17 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 - **Fix:** `MAX_LINE_QUANTITY` (int4 max) checked in `cartProblem()`; unit case added in
   `tests/unit/quote-cart.test.ts`. The RPC/DB remain the boundary — this only stops the raw
   error reaching the rep. The cap is the column's own limit, not a business rule.
+
+### QA-003 — list price parsed as a JavaScript literal (Medium, products)
+- **Repro:** `/admin/products/<brand>` → Add product → List price `0x10` → saved and shown as
+  `
+## NEEDS OWEN6.00`; `1e3` → `
+## NEEDS OWEN,000.00`. A mistyped price became a different, plausible price that
+  then flows onto proposals. Spec `e2e/qa/product-price-parse.spec.ts`.
+- **Root cause:** `parsePriceInput()` (lib/products.ts) stripped `$ , space` and handed the
+  rest to `Number()`, which accepts hex/binary/octal/exponent literals.
+- **Fix:** a plain-decimal regex before `Number()` (the same approach `parseFigureInput()` in
+  lib/payouts.ts already takes). Unit tests in `tests/unit/product-price-input.test.ts`.
 
 ## NEEDS OWEN
 

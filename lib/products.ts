@@ -255,6 +255,12 @@ export function parsePriceInput(
 
   // Tolerate what an admin copying from a price sheet actually types.
   const cleaned = trimmed.replace(/[$,\s]/g, "");
+  // Plain decimals only. Number() alone reads JavaScript literals, so "0x10"
+  // became 16 and "1e3" became 1000 — a different price than the one typed.
+  // The leading minus is let through so the negative case below can say so.
+  if (!/^-?(\d+(\.\d*)?|\.\d+)$/.test(cleaned)) {
+    return { error: "That is not a number." };
+  }
   const parsed = Number(cleaned);
   if (!Number.isFinite(parsed)) return { error: "That is not a number." };
   if (parsed < 0) {
