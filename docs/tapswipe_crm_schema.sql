@@ -2683,6 +2683,95 @@ create index idx_marketing_materials_category
 -- looked at what. The trail is not improved by being kept twice.
 
 -- =====================================================================
+-- BRANDS — the manufacturers the catalog is organised by.
+--
+-- /admin/products is a grid of brand boxes, and an admin adds a brand
+-- BEFORE it has any products ("we are about to carry Material POS"). A
+-- brand derived from `select distinct products.brand` cannot exist with
+-- zero products, so it needs a table of its own.
+--
+-- THE FK IS ON THE NAME, NOT ON AN ID, and that is the smallest design
+-- that changes no reader. products.brand stays the text column it already
+-- was, now `references brands(name) on update cascade on delete
+-- restrict`. Everything that reads it -- the store's browse-by-brand
+-- filter and search, lib/quotes-data.ts's ordering, the loader's diff --
+-- reads the same text it read yesterday, and nothing on a quote snapshots
+-- the brand at all, so the printed proposal is untouched. A `brand_id`
+-- FK would have been the textbook shape and would have rewritten every
+-- one of those readers to join for a label they already hold.
+--
+--   * RENAME CASCADES. `on update cascade` rewrites products.brand in the
+--     same statement, so a rename can never leave products pointing at a
+--     name that no longer exists. The referential action runs below RLS,
+--     which is right: only an admin can rename a brand in the first place,
+--     and an admin may update every product anyway.
+--   * DELETE IS REFUSED WHILE ANY PRODUCT NAMES IT, archived ones
+--     included. `restrict`, not `set null`: nulling would silently move a
+--     brand's products into the store's unbranded "Other" bucket, which is
+--     a change to what a rep sees made as a side effect of a click on a
+--     different page. An archived product still counts, because it is
+--     history a quote line may name.
+--
+-- A SURROGATE `id` ANYWAY, for the URL and nothing else. The admin page
+-- for a brand is /admin/products/<id>, so renaming a brand does not
+-- change the address of the page the admin is standing on. Nothing joins
+-- on it.
+--
+-- products.brand STAYS NULLABLE. The reason it was nullable has not
+-- changed -- the catalog holds things no manufacturer makes -- and an FK
+-- column accepts null. Unbranded products are reached on the admin side
+-- through an "Other" box that appears only while such products exist.
+--
+-- The FOURTH client-readable table with no agent_id, after
+-- marketing_materials, products and product_compatibility, and for the
+-- same reason: company reference data. The checklist applies with step 1
+-- struck out. Unlike products, it HAS a DELETE policy and grant, because
+-- a brand nothing references is not history -- the FK is what decides
+-- when deleting one would destroy something.
+-- =====================================================================
+create table brands (
+  id serial primary key,
+
+  -- `unique` because a foreign key can only target a unique column.
+  -- Trimmed and non-blank for products_brand_not_blank's reason one step
+  -- earlier: a padded name is a second box on the grid that looks
+  -- identical to the first, and a blank one is a box with no label.
+  name text not null unique
+    constraint brands_name_trimmed check (name = btrim(name) and name <> ''),
+
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+-- Case-insensitive uniqueness on top of the exact `unique` above (which
+-- the FK needs). "Square" and "square" would otherwise be two boxes, and
+-- products filed under each would be split across two store headings
+-- that look like a typo.
+create unique index idx_brands_name_lower on brands (lower(name));
+
+alter table brands enable row level security;
+
+-- is_active_agent() is the load-bearing half, exactly as on products: a
+-- deactivated rep's JWT keeps working until it expires.
+create policy "select active or admin" on brands
+  for select using (is_active_agent() or is_admin());
+create policy "admin inserts" on brands
+  for insert with check (is_admin());
+create policy "admin updates" on brands
+  for update using (is_admin()) with check (is_admin());
+-- DELETE exists, unlike on products: whether a delete would destroy
+-- anything is the FK's question, and it answers by refusing.
+create policy "admin deletes" on brands
+  for delete using (is_admin());
+
+create trigger brands_set_updated_at
+  before update on brands
+  for each row execute function set_updated_at();
+
+-- No cross-agent audit trigger: no agent_id, so log_cross_agent_change()
+-- would read NULL and log every write -- the same answer products gives.
+
+-- =====================================================================
 -- PRODUCT CATALOG — the hardware and POS lineup a quote is built from.
 --
 -- The SECOND client-readable table with no agent_id, and it is the same
@@ -2763,7 +2852,12 @@ create table products (
   -- empty brand is not a uniqueness collision here, it is a blank heading
   -- in the store's browse list. Both write paths normalise it to null --
   -- normalizeBrand() in lib/products.ts, beside normalizeSku().
-  brand text,
+  --
+  -- A FOREIGN KEY TO brands(name) as of 20261009120000 -- see BRANDS
+  -- above for why the name and not an id. A product can only name a brand
+  -- that exists, a rename cascades here, and a brand cannot be deleted
+  -- while any product (archived included) still names it.
+  brand text references brands(name) on update cascade on delete restrict,
 
   -- Whether this is a thing a rep puts in the cart on its own, or a thing
   -- that hangs off one.
@@ -5706,6 +5800,13 @@ grant select, insert on marketing_material_events to authenticated;
 -- a product is archived so the quote lines that name it stay whole.
 grant select, insert, update on products to authenticated;
 
+-- brands: all four verbs, admitted for nobody but an admin except SELECT. The
+-- DELETE that products withholds is granted here because the FK, not the
+-- grant, is what decides whether a delete would destroy anything: a brand no
+-- product names is not history, and one that is named is refused by
+-- `on delete restrict`.
+grant select, insert, update, delete on brands to authenticated;
+
 -- product_compatibility: products' three verbs plus DELETE, which products
 -- deliberately withholds. The difference is not an inconsistency -- see the
 -- policy's own note. A product is archived because quote lines name it; a
@@ -5799,6 +5900,9 @@ grant usage on
   -- grant produces `permission denied for sequence` from inside a function
   -- whose own EXECUTE grant looks correct.
   products_id_seq,
+  -- An admin adding a brand is an ordinary PostgREST insert as
+  -- `authenticated`, so nextval() is reached on the ordinary path.
+  brands_id_seq,
   quotes_id_seq,
   quote_line_items_id_seq
 to authenticated;

@@ -787,6 +787,17 @@ export async function seedE2E(): Promise<SeedResult> {
  * current-state correction, and the two add-ons here own no other links.
  */
 async function ensureStoreCatalog(db: SupabaseClient): Promise<StoreFixture> {
+  // products.brand is a foreign key to brands(name), so both brands must
+  // exist before a product can name them. Upserted on the name, which is the
+  // FK target and the unique column.
+  const { error: brandError } = await db
+    .from("brands")
+    .upsert(
+      [{ name: STORE_FIXTURE.brand }, { name: STORE_FIXTURE.otherBrand }],
+      { onConflict: "name", ignoreDuplicates: true },
+    );
+  if (brandError) throw new Error(`store brands: ${brandError.message}`);
+
   const upsert = async (spec: {
     sku: string;
     name: string;

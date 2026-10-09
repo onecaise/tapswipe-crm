@@ -14,6 +14,7 @@ import {
   parseActiveCell,
   parseCatalog,
   parsePriceCell,
+  planBrands,
   planLoad,
   splitCsvRows,
   toProductRow,
@@ -461,6 +462,69 @@ describe("planLoad", () => {
     expect(plan.inserts).toEqual([]);
     expect(plan.updates).toEqual([]);
     expect(plan.linkInserts).toEqual([]);
+  });
+});
+
+/**
+ * products.brand is a foreign key to brands(name), so the loader has to
+ * create every brand the file names before inserting a product that names it.
+ */
+describe("planBrands", () => {
+  const items = parseCatalog(
+    csv(
+      row({ id: "a", brand: "Acme" }),
+      row({ id: "b", brand: "Acme" }),
+      row({ id: "c", brand: "Zeta" }),
+      row({ id: "d", brand: "" }),
+    ),
+  ).items;
+
+  it("plans each missing brand once, and none for an unbranded row", () => {
+    expect(planBrands(items, [])).toEqual({
+      inserts: ["Acme", "Zeta"],
+      conflicts: [],
+    });
+  });
+
+  it("plans nothing on a second run -- the idempotence claim", () => {
+    expect(planBrands(items, [{ name: "Acme" }, { name: "Zeta" }])).toEqual({
+      inserts: [],
+      conflicts: [],
+    });
+  });
+
+  it("leaves a brand alone that the file does not name", () => {
+    // An admin may add a brand ahead of its first product -- that is why the
+    // table exists -- so the loader must not treat one as an orphan to remove.
+    const plan = planBrands(items, [
+      { name: "Acme" },
+      { name: "Zeta" },
+      { name: "Material POS" },
+    ]);
+    expect(plan).toEqual({ inserts: [], conflicts: [] });
+  });
+
+  it("refuses a brand that differs from an existing one only in case", () => {
+    // idx_brands_name_lower would refuse the insert halfway through a write.
+    expect(planBrands(items, [{ name: "ACME" }])).toEqual({
+      inserts: ["Zeta"],
+      conflicts: [{ csv: "Acme", existing: "ACME" }],
+    });
+  });
+});
+
+describe("parseCatalog brand spelling", () => {
+  it("refuses two spellings of one brand within the file", () => {
+    const { problems } = parseCatalog(
+      csv(row({ id: "a", brand: "Acme" }), row({ id: "b", brand: "acme" })),
+    );
+    expect(problems).toEqual([
+      {
+        line: 3,
+        id: "b",
+        message: 'brand "acme" differs only in case from "Acme" on line 2',
+      },
+    ]);
   });
 });
 

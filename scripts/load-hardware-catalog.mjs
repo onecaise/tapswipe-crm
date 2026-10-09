@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 /**
- * Loads data/hardware-catalog.csv into `products` and `product_compatibility`.
+ * Loads data/hardware-catalog.csv into `brands`, `products` and
+ * `product_compatibility`, in that order -- products.brand is a foreign key to
+ * brands(name), so any brand the file names that the table lacks is created
+ * first. A brand the file does not name is left alone, like everything else.
  *
  *   node scripts/load-hardware-catalog.mjs                 # dry run, local stack
  *   node scripts/load-hardware-catalog.mjs --write         # apply, local stack
@@ -339,6 +342,25 @@ export function parseCatalog(text) {
     });
   }
 
+  // One spelling per brand. products.brand is a foreign key to brands(name)
+  // and idx_brands_name_lower refuses a second brand that differs only in
+  // case, so "Square" on one row and "square" on another would fail halfway
+  // through a write. Caught here, in the dry run, where it is a sentence.
+  const spellingByLower = new Map();
+  for (const item of items) {
+    if (item.brand === null) continue;
+    const first = spellingByLower.get(item.brand.toLowerCase());
+    if (first === undefined) {
+      spellingByLower.set(item.brand.toLowerCase(), item);
+    } else if (first.brand !== item.brand) {
+      fail(
+        item.line,
+        item.id,
+        `brand "${item.brand}" differs only in case from "${first.brand}" on line ${first.line}`,
+      );
+    }
+  }
+
   // Cross-row rules, once every id is known. Checked after the per-row pass so
   // a forward reference -- an add-on listed above the device it fits -- is
   // legal, which keeps the file groupable by brand.
@@ -387,6 +409,44 @@ export function toProductRow(item) {
     description: item.description,
     specs,
   };
+}
+
+/**
+ * Which brands a load has to create before its products can name them.
+ *
+ * products.brand is a foreign key to brands(name) as of 20261009120000, so a
+ * product naming a brand that is not in the table is refused. Pure, like
+ * planLoad(), so the dry run and the write compute the same thing.
+ *
+ * Returns `{ inserts, conflicts }`. A CSV brand that matches an existing one
+ * only up to case ("square" against "Square") is a CONFLICT, not an insert:
+ * idx_brands_name_lower would refuse the insert, and silently adopting the
+ * database's spelling would leave the CSV and the table disagreeing about a
+ * name forever. The load stops on one, before anything is written.
+ *
+ * Never deletes a brand, for the reason it never deletes a product: a brand
+ * the file does not name may be one an admin added on /admin/products ahead
+ * of its first product, which is the whole reason the table exists.
+ */
+export function planBrands(items, existingBrands) {
+  const exact = new Set(existingBrands.map((b) => b.name));
+  const byLower = new Map(existingBrands.map((b) => [b.name.toLowerCase(), b.name]));
+
+  const inserts = [];
+  const conflicts = [];
+  const seen = new Set();
+  for (const item of items) {
+    if (item.brand === null || seen.has(item.brand)) continue;
+    seen.add(item.brand);
+    if (exact.has(item.brand)) continue;
+    const existing = byLower.get(item.brand.toLowerCase());
+    if (existing !== undefined) {
+      conflicts.push({ csv: item.brand, existing });
+    } else {
+      inserts.push(item.brand);
+    }
+  }
+  return { inserts: inserts.sort((a, b) => a.localeCompare(b)), conflicts };
 }
 
 /** The `specs` keys this loader owns. Any other key is an admin's, and is kept. */
@@ -647,7 +707,7 @@ function show(value) {
   return String(value);
 }
 
-function report(plan, items, write) {
+function report(plan, brandPlan, items, write) {
   const devices = items.filter((i) => i.kind === "device").length;
   const addons = items.length - devices;
   const links = items.reduce((n, i) => n + i.fits.length, 0);
@@ -657,6 +717,9 @@ function report(plan, items, write) {
     `catalog: ${items.length} items (${devices} devices, ${addons} add-ons), ` +
       `${links} compatibility links`,
   );
+
+  console.log(`\nbrands    ${brandPlan.inserts.length} new`);
+  for (const name of brandPlan.inserts) console.log(`  + ${name}`);
 
   console.log(
     `\nproducts  ${plan.inserts.length} new, ${plan.updates.length} changed, ` +
@@ -773,13 +836,44 @@ export async function main(argv) {
     throw new Error(`reading product_compatibility: ${links.error.message}`);
   }
 
+  const brands = await db.from("brands").select("name");
+  if (brands.error) throw new Error(`reading brands: ${brands.error.message}`);
+
+  const brandPlan = planBrands(items, brands.data);
+  if (brandPlan.conflicts.length > 0) {
+    // Stops the dry run as well as the write: the file needs editing either
+    // way, and a dry run that printed a plan it could never apply would be
+    // the one thing a dry run must not do.
+    console.error(
+      `${brandPlan.conflicts.length} brand(s) differ only in case from one already in the database -- nothing loaded:`,
+    );
+    for (const c of brandPlan.conflicts) {
+      console.error(`  CSV "${c.csv}"  vs  database "${c.existing}"`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+
   const now = new Date().toISOString();
   let plan = planLoad(items, existing.data, links.data, now);
-  report(plan, items, write);
+  report(plan, brandPlan, items, write);
 
   if (!write) return;
 
   console.log("\nwriting...");
+
+  // Brands FIRST: products.brand is a foreign key to brands(name), so a
+  // product naming a brand that is not there yet is refused.
+  if (brandPlan.inserts.length > 0) {
+    const insertedBrands = await db
+      .from("brands")
+      .insert(brandPlan.inserts.map((name) => ({ name })))
+      .select("name");
+    if (insertedBrands.error) {
+      throw new Error(`inserting brands: ${insertedBrands.error.message}`);
+    }
+    console.log(`  inserted ${insertedBrands.data.length} brand(s)`);
+  }
 
   if (plan.inserts.length > 0) {
     const inserted = await db
@@ -818,6 +912,14 @@ export async function main(argv) {
     .select("addon_product_id, device_product_id");
   if (afterLinks.error) {
     throw new Error(`re-reading links: ${afterLinks.error.message}`);
+  }
+
+  const afterBrands = await db.from("brands").select("name");
+  if (afterBrands.error) {
+    throw new Error(`re-reading brands: ${afterBrands.error.message}`);
+  }
+  if (planBrands(items, afterBrands.data).inserts.length > 0) {
+    throw new Error("brands did not settle");
   }
 
   plan = planLoad(items, after.data, afterLinks.data, now);

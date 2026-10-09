@@ -241,6 +241,17 @@ describe("grant surface after all migrations", () => {
       await tablePrivileges(db, "authenticated", "product_compatibility"),
     ).toEqual(["DELETE", "INSERT", "SELECT", "UPDATE"]);
 
+    // brands: all four, like product_compatibility and unlike products. A
+    // brand nothing names is not history; one that is named is refused by
+    // products_brand_fkey's `on delete restrict`, which is the layer that
+    // decides whether a delete would destroy anything.
+    expect(await tablePrivileges(db, "authenticated", "brands")).toEqual([
+      "DELETE",
+      "INSERT",
+      "SELECT",
+      "UPDATE",
+    ]);
+
     // quotes reports NO table-level UPDATE, which is the correct and
     // slightly surprising answer: has_table_privilege is false when the
     // privilege is held only on a column, so a column-level grant is
@@ -333,6 +344,7 @@ describe("grant surface after all migrations", () => {
       "marketing_material_events",
       "products",
       "product_compatibility",
+      "brands",
       "quotes",
       "quote_line_items",
     ]) {
@@ -368,6 +380,7 @@ describe("grant surface after all migrations", () => {
       "marketing_materials_id_seq",
       "marketing_material_events_id_seq",
       "products_id_seq",
+      "brands_id_seq",
       // Both quote sequences. create_quote_version() is security INVOKER, so
       // it consumes nextval() as the CALLER -- an invoker RPC is exactly the
       // case where a forgotten sequence grant produces "permission denied for

@@ -62,6 +62,12 @@ afterAll(async () => {
 async function seedCatalog(): Promise<void> {
   await asPlatform(db);
   await db.exec(`truncate products restart identity cascade`);
+  // products.brand is a foreign key to brands(name), so the brand has to
+  // exist first. brands survives resetData() for products' reason, hence
+  // `on conflict`.
+  await db.exec(
+    `insert into brands (name) values ('Testco') on conflict (name) do nothing`,
+  );
 
   const created = await rows<{ id: number; name: string }>(
     db,
