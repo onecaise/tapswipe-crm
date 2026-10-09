@@ -87,6 +87,8 @@ export function UserImportUpload() {
         <Input
           ref={fileRef}
           type="file"
+          // The heading above is a <p>, so the input needs its own name (QA-005).
+          aria-label="Rep list (CSV)"
           // Advisory only, and the reason the staging step reports its own error:
           // an accept attribute filters a file picker, it does not stop a
           // spreadsheet renamed to .csv from being chosen.

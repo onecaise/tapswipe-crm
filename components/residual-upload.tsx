@@ -117,6 +117,8 @@ export function ResidualUpload() {
         <Input
           ref={fileRef}
           type="file"
+          // The heading above is a <p>, so the input needs its own name (QA-005).
+          aria-label="Residual report (XLSX)"
           // Advisory only, and the reason the parse step reports its own error:
           // an accept attribute filters a file picker, it does not stop a .csv
           // renamed to .xlsx from being chosen.

@@ -15,8 +15,8 @@ Resume rule: read this file, continue at the first unchecked item.
 - [x] 0. Baseline: build, lint, tsc, npm test, test:live, test:e2e
 - [x] 1. Auth & roles (route matrix, cross-rep direct ids, admin-only pages)
 - [x] 2. Money (proposals, products/brands, residuals)
-- [ ] 3. Data capture (leads, ghost sheets, merchants, pre-apps, docs, marketing, tickets, tasks, timeline, dashboard, search)
-- [ ] 4. Admin (create user, deactivate, reset password, import)
+- [x] 3. Data capture (leads, ghost sheets, merchants, pre-apps, docs, marketing, tickets, tasks, timeline, dashboard, search)
+- [x] 4. Admin (create user, deactivate, reset password, import)
 - [ ] 5. Cross-cutting (viewports, console, axe, keyboard, edge input)
 - [ ] FINISH: full suites, report summary
 
@@ -26,3 +26,5 @@ Resume rule: read this file, continue at the first unchecked item.
 - 2026-10-09T22:21 Area 1 done. Route matrix (crawl, 66 routes x admin/agent/anon) correct: agents get not-found on other reps' records, redirected off admin pages; anon -> /auth/login. QA-001 open redirect (NEEDS OWEN). D-01..D-03.
 - 2026-10-09T22:21 Area 2 in progress: QA-002 (cart qty ceiling) and QA-003 (price parse) fixed. Brands: dup name/case, rename-to-existing, dup SKU all give friendly messages; delete hidden while products exist. Next: residual import/export.
 - 2026-10-09T22:23 Area 2 done. Residual import: non-xlsx/empty files get a friendly 'missing columns' message (batch left in Review — by design). Agent export downloads residuals-2027-04.xlsx. QA exploration batches cleaned up.
+- 2026-10-09T22:49 Area 3 done. Pre-app wizard walked end-to-end with fake data (autosave, sales volume, encrypt&save shows last4 only). Leads: dup warning, lost-reason required, double-submit safe. Ghost convert, ticket+reply OK with quotes/emoji/SQL/long text. Dashboard counts == DB for agent & admin. QA-004 fixed. Intermittent hydration warning on /merchants/new after a long flow - not reproducible (3 tries), logged as OBS.
+- 2026-10-09T22:54 Area 4 done. Create user: taken agent# and dup email (case-insensitive) give friendly 409 messages; reset shows one-time temp password; deactivate flips is_active; own row's destructive controls disabled. User import covered by e2e/user-import.spec.ts.

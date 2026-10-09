@@ -33,7 +33,8 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | QA-001 | High | Auth | `/auth/confirm` redirects to any `next=` URL after a valid OTP (open redirect) | NEEDS OWEN (repro 20e065a) |
 | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 | QA-003 | Medium | Products | List price `0x10` saved as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
-| QA-004 | High | Pre-apps / a11y | No pre-app wizard field had an accessible name — incl. SSN, routing, account, RP password (axe `label`/`select-name` critical) | __HASH__ |
+| QA-004 | High | Pre-apps / a11y | No pre-app wizard field had an accessible name — incl. SSN, routing, account, RP password (axe `label`/`select-name` critical) | 0ebb211 |
+| QA-005 | Medium | Payouts / Users / a11y | File inputs on `/payouts/import` and `/admin/users/import` have no accessible name (axe `label` critical) | __HASH__ |
 6.00, `1e3` as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 ,000.00 (Number() reads JS literals) | 917f5ad |
 
@@ -62,6 +63,13 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 - **Fix:** each `Field` generates an id (`useId`) and puts it on its single child unless the child
   already has one, with `htmlFor` on the label (plus an explicit `htmlFor` for the datalist-backed
   Entity type). Secrets step: explicit id/htmlFor pairs. Markup only — no data or validation path touched.
+
+### QA-005 — unlabeled import file inputs (Medium, accessibility)
+- **Repro:** axe on `/payouts/import` or `/admin/users/import` as admin → `label` (critical) on
+  `.border-input`; a screen reader hears only "Choose File". Spec `e2e/qa/upload-labels.spec.ts`.
+- **Root cause:** the heading above each input is a `<p>`, and the `<Input type="file">` has no
+  label or `aria-label` (the documents and marketing uploads do label theirs).
+- **Fix:** `aria-label` on both inputs ("Residual report (XLSX)", "Rep list (CSV)"). No visual change.
 
 ## NEEDS OWEN6.00`; `1e3` → `
 ## NEEDS OWEN,000.00`. A mistyped price became a different, plausible price that
