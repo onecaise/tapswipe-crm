@@ -125,48 +125,53 @@ async function Summary({
             )}
           </header>
 
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-                <th className="pb-2 font-medium">MID</th>
-                <th className="pb-2 font-medium">Merchant</th>
-                <th className="pb-2 text-right font-medium">Volume</th>
-                <th className="pb-2 text-right font-medium">Residual</th>
-                <th className="pb-2 text-right font-medium">Split</th>
-                <th className="pb-2 text-right font-medium">Payout</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.id} className="border-b last:border-0">
-                  <td className="py-1.5 font-mono text-xs">{row.mid}</td>
-                  <td className="py-1.5">{formatText(row.merchant_name)}</td>
-                  <td className="py-1.5 text-right tabular-nums">
-                    {formatMoney(row.volume)}
+          {/* Scrolls sideways on a phone instead of painting the Payout column
+              past the card edge (QA-010). Visible overflow on paper, where the
+              sheet is wide enough and a scrollbar would mean nothing. */}
+          <div className="overflow-x-auto print:overflow-visible">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
+                  <th className="pb-2 font-medium">MID</th>
+                  <th className="pb-2 font-medium">Merchant</th>
+                  <th className="pb-2 text-right font-medium">Volume</th>
+                  <th className="pb-2 text-right font-medium">Residual</th>
+                  <th className="pb-2 text-right font-medium">Split</th>
+                  <th className="pb-2 text-right font-medium">Payout</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.id} className="border-b last:border-0">
+                    <td className="py-1.5 font-mono text-xs">{row.mid}</td>
+                    <td className="py-1.5">{formatText(row.merchant_name)}</td>
+                    <td className="py-1.5 text-right tabular-nums">
+                      {formatMoney(row.volume)}
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums">
+                      {formatMoney(row.residual_income)}
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums">
+                      {formatPct(row.rep_split_pct)}
+                    </td>
+                    <td className="py-1.5 text-right font-medium tabular-nums">
+                      {formatMoney(row.rep_payout)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2">
+                  <td className="pt-2 text-xs uppercase tracking-wide text-muted-foreground" colSpan={5}>
+                    Total payout
                   </td>
-                  <td className="py-1.5 text-right tabular-nums">
-                    {formatMoney(row.residual_income)}
-                  </td>
-                  <td className="py-1.5 text-right tabular-nums">
-                    {formatPct(row.rep_split_pct)}
-                  </td>
-                  <td className="py-1.5 text-right font-medium tabular-nums">
-                    {formatMoney(row.rep_payout)}
+                  <td className="pt-2 text-right text-base font-bold tabular-nums">
+                    {formatMoney(totals.repPayout)}
                   </td>
                 </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr className="border-t-2">
-                <td className="pt-2 text-xs uppercase tracking-wide text-muted-foreground" colSpan={5}>
-                  Total payout
-                </td>
-                <td className="pt-2 text-right text-base font-bold tabular-nums">
-                  {formatMoney(totals.repPayout)}
-                </td>
-              </tr>
-            </tfoot>
-          </table>
+              </tfoot>
+            </table>
+          </div>
 
           <footer className="border-t pt-3 text-xs text-muted-foreground">
             {/* No generation timestamp. It would change on every render, so two

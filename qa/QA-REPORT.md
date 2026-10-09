@@ -38,7 +38,8 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | QA-006 | Low | Proposals / a11y | Cart totals `<dl>` contains a bare `<p>` (axe `definition-list` serious) | b27c9f4 |
 | QA-007 | Medium | Design tokens / a11y | `--muted-foreground` 3.0–3.4:1, `--success` 2.9:1, `--neutral` 4.0:1 on their surfaces — axe `color-contrast` on every route | 3f14ab1 |
 | QA-008 | Medium | Error states | A down/unreachable Edge Function shows supabase-js's raw "Edge Function returned a non-2xx status code" / "Failed to send a request…" | 0603e8d |
-| QA-009 | Low | Print pages / layout | At 390px the blank application's control row overflows 32px (Print button off-screen); merchant print uses the same row | __HASH__ |
+| QA-009 | Low | Print pages / layout | At 390px the blank application's control row overflows 32px (Print button off-screen); merchant print uses the same row | 12d9af3 |
+| QA-010 | Medium | Payouts / layout | At 390px the payout summary table pushes the page wide and clips the Payout column at the card edge | __HASH__ |
 6.00, `1e3` as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 ,000.00 (Number() reads JS literals) | 917f5ad |
 
@@ -118,6 +119,14 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
   has the identical row (it fits today only because the fixture DBA is short).
 - **Fix:** `flex-wrap` on both rows — on a phone the controls drop below the title. Print output
   is untouched (`print:hidden`); print.spec.ts green.
+
+### QA-010 — payout summary clips the Payout column on a phone (Medium, layout / money)
+- **Repro:** agent → `/payouts/2027-04/summary/<own id>` at 390×844 → page scrollWidth 422; the
+  Payout figures render as "$247.5" with the rest off the card. A rep checking their statement on
+  a phone cannot read the one number it exists for. Spec `e2e/qa/print-pages-phone-width.spec.ts`.
+- **Root cause:** six-column `<table className="w-full">` with no horizontal scroll container.
+- **Fix:** wrapped in `overflow-x-auto print:overflow-visible` — scrolls sideways on screen, prints
+  exactly as before. print.spec.ts and payouts-rendering.spec.ts green.
 
 ## NEEDS OWEN6.00`; `1e3` → `
 ## NEEDS OWEN,000.00`. A mistyped price became a different, plausible price that
