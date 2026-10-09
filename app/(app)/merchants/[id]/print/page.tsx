@@ -104,7 +104,9 @@ async function MerchantPrint({
 
   return (
     <>
-      <div className="flex items-start justify-between gap-4 print:hidden">
+      {/* flex-wrap: on a phone the controls drop under the title instead of
+          running off the right edge (QA-009). */}
+      <div className="flex flex-wrap items-start justify-between gap-4 print:hidden">
         <div>
           <h1 className="text-[22px] font-bold leading-tight tracking-tight">
             {merchant.dba}

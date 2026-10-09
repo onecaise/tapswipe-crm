@@ -37,7 +37,8 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | QA-005 | Medium | Payouts / Users / a11y | File inputs on `/payouts/import` and `/admin/users/import` have no accessible name (axe `label` critical) | cd48eec |
 | QA-006 | Low | Proposals / a11y | Cart totals `<dl>` contains a bare `<p>` (axe `definition-list` serious) | b27c9f4 |
 | QA-007 | Medium | Design tokens / a11y | `--muted-foreground` 3.0–3.4:1, `--success` 2.9:1, `--neutral` 4.0:1 on their surfaces — axe `color-contrast` on every route | 3f14ab1 |
-| QA-008 | Medium | Error states | A down/unreachable Edge Function shows supabase-js's raw "Edge Function returned a non-2xx status code" / "Failed to send a request…" | __HASH__ |
+| QA-008 | Medium | Error states | A down/unreachable Edge Function shows supabase-js's raw "Edge Function returned a non-2xx status code" / "Failed to send a request…" | 0603e8d |
+| QA-009 | Low | Print pages / layout | At 390px the blank application's control row overflows 32px (Print button off-screen); merchant print uses the same row | __HASH__ |
 6.00, `1e3` as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 ,000.00 (Number() reads JS literals) | 917f5ad |
 
@@ -108,6 +109,15 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 - **Fix:** for supabase-js `Functions*Error`s with no body message, return the caller's fallback.
   Affects every function caller (documents, marketing, secrets, admin users, residuals, imports).
   Unit tests `tests/unit/edge-function-errors.test.ts`; documents-panel e2e still green.
+
+### QA-009 — print control row overflows on a phone (Low, layout)
+- **Repro:** `/pre-apps/blank-form` at 390×844 → page scrollWidth 422; the Print button ends at
+  x=422. Found by the viewport crawl. Spec `e2e/qa/print-pages-phone-width.spec.ts` (QA-009 case).
+- **Root cause:** the screen-only row is `flex justify-between` with a `shrink-0` pair of controls
+  and no wrap, so title + controls cannot be narrower than their sum. `/merchants/[id]/print`
+  has the identical row (it fits today only because the fixture DBA is short).
+- **Fix:** `flex-wrap` on both rows — on a phone the controls drop below the title. Print output
+  is untouched (`print:hidden`); print.spec.ts green.
 
 ## NEEDS OWEN6.00`; `1e3` → `
 ## NEEDS OWEN,000.00`. A mistyped price became a different, plausible price that
