@@ -452,6 +452,9 @@ export function quoteTotal(lines: QuoteLineItem[]): number {
  * Save and reads "every line item must name a product that has a list price"
  * with no indication of which line.
  */
+/** The largest value quote_line_items.quantity (a Postgres `int`) holds. */
+export const MAX_LINE_QUANTITY = 2_147_483_647;
+
 export function cartProblem(
   cart: readonly CartDevice[],
   unpriceable?: (productId: number) => boolean,
@@ -465,6 +468,13 @@ export function cartProblem(
     lines.some((line) => !Number.isInteger(line.quantity) || line.quantity < 1)
   ) {
     return "Every line needs a whole quantity of at least 1.";
+  }
+
+  // quote_line_items.quantity is an `int`. Without this a rep could type a
+  // ten-digit quantity, see it priced, press Save and read Postgres's
+  // `value ... is out of range for type integer`.
+  if (lines.some((line) => line.quantity > MAX_LINE_QUANTITY)) {
+    return "That quantity is too large to save. Check the number on each line.";
   }
 
   if (unpriceable !== undefined) {

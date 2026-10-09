@@ -6,6 +6,7 @@ import {
   cartFromLines,
   cartLines,
   cartProblem,
+  MAX_LINE_QUANTITY,
   cartToPayload,
   cartTotals,
   groupQuoteLines,
@@ -357,6 +358,15 @@ describe("cartProblem — why Save is disabled", () => {
       /quantity/i,
     );
     expect(cartProblem([device(1, 1.5)])).toMatch(/quantity/i);
+  });
+
+  it("refuses a quantity the int column cannot hold, and accepts its maximum", () => {
+    // QA-002: above this, Postgres refused the save with its own wording.
+    expect(cartProblem([device(1, MAX_LINE_QUANTITY + 1)])).toMatch(/quantity/i);
+    expect(
+      cartProblem([device(1, 1, [{ productId: 3, quantity: 3_000_000_000 }])]),
+    ).toMatch(/quantity/i);
+    expect(cartProblem([device(1, MAX_LINE_QUANTITY)])).toBeNull();
   });
 
   it("refuses an unpriced product when told which ones those are", () => {
