@@ -1957,37 +1957,31 @@ export async function proposalLines(title: string): Promise<
 }
 
 /**
- * The private `documents` and `marketing` buckets, with the size ceiling the
- * app promises.
+ * The size ceiling on the private `documents` and `marketing` buckets.
  *
- * NOT `residual-imports`: this file has never created it, and a passing e2e run
- * still leaves residual imports broken on a freshly reset stack. That gap is
- * recorded in CLAUDE.md rather than quietly closed here, because closing it
- * would make this helper provision a bucket no e2e spec uses.
+ * The buckets themselves come from a MIGRATION (20261009170000) and are NOT
+ * created here any more: a helper that created its own bucket is how one
+ * missing on dev stayed invisible to every suite. updateBucket errors on a
+ * bucket that does not exist, so a missing one fails the seed loudly.
  *
- * The bucket is created out-of-band in production — it is in no migration — so a
- * freshly reset local stack has none and every signing call 404s. The size limit
- * is re-asserted on every run rather than only at creation, because a bucket
- * created before the limit existed keeps accepting unbounded uploads and nothing
- * says so: config.toml's `[storage] file_size_limit` is NOT what constrains a
+ * Not `residual-imports`, which no e2e spec uses (the migration creates it).
+ *
+ * The size limit is re-asserted on every run rather than only at creation,
+ * because a bucket created before the limit existed keeps accepting unbounded
+ * uploads and nothing says so: config.toml's `[storage] file_size_limit` is NOT what constrains a
  * signed upload (measured — a 120 MiB PUT was accepted with it set to 50MiB).
  * The per-bucket limit is.
  */
 async function ensureDocumentsBucket(db: SupabaseClient): Promise<void> {
   for (const bucket of ["documents", "marketing"]) {
-    const { error: createError } = await db.storage.createBucket(bucket, {
-      public: false,
-      fileSizeLimit: MAX_DOCUMENT_BYTES,
-    });
-    if (createError && !/exists/i.test(createError.message)) {
-      throw new Error(`${bucket} bucket: ${createError.message}`);
-    }
     const { error: updateError } = await db.storage.updateBucket(bucket, {
       public: false,
       fileSizeLimit: MAX_DOCUMENT_BYTES,
     });
     if (updateError) {
-      throw new Error(`${bucket} bucket limit: ${updateError.message}`);
+      throw new Error(
+        `${bucket} bucket is missing or could not be limited (it should come from migration 20261009170000): ${updateError.message}`,
+      );
     }
   }
 }

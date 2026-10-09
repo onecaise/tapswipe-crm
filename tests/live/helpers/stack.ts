@@ -296,29 +296,27 @@ export async function provisionFixtures(): Promise<Fixtures> {
 
   await teardownFixtures();
 
-  // All three buckets are created out-of-band in production (none is in any
-  // migration), so they have to be created here too or every signing call 404s.
+  // The three buckets are created by a MIGRATION (20261009170000) and are
+  // deliberately NOT created here. This helper used to create them, which is
+  // how a bucket missing on dev went unnoticed: every suite provisioned its own
+  // and stayed green. updateBucket below errors on a bucket that does not
+  // exist, so a missing one now fails provisioning loudly, naming the bucket.
   //
-  // fileSizeLimit is applied on every run, not only at creation: a bucket that
-  // predates the limit keeps accepting unbounded uploads and nothing says so.
+  // fileSizeLimit is still re-applied on every run: a bucket that predates the
+  // limit keeps accepting unbounded uploads and nothing says so.
   // It is also the ONLY thing that limits an upload — config.toml's
   // `[storage] file_size_limit` does not apply to a signed PUT (measured: 120 MiB
   // accepted with it set to 50MiB), and the buckets came back from listBuckets()
   // with file_size_limit = null.
   for (const bucket of [BUCKET, RESIDUAL_BUCKET, MARKETING_BUCKET]) {
-    const { error: bucketError } = await admin.storage.createBucket(bucket, {
-      public: false,
-      fileSizeLimit: MAX_DOCUMENT_BYTES,
-    });
-    if (bucketError && !/exists/i.test(bucketError.message)) {
-      throw new Error(`Could not create bucket ${bucket}: ${bucketError.message}`);
-    }
     const { error: limitError } = await admin.storage.updateBucket(bucket, {
       public: false,
       fileSizeLimit: MAX_DOCUMENT_BYTES,
     });
     if (limitError) {
-      throw new Error(`Could not limit bucket ${bucket}: ${limitError.message}`);
+      throw new Error(
+        `Bucket ${bucket} is missing or could not be limited (it should come from migration 20261009170000): ${limitError.message}`,
+      );
     }
   }
 
