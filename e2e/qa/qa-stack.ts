@@ -53,3 +53,37 @@ export async function idsFor(email: string, persona: string): Promise<Ids> {
     proposalGroup: pg as string | null,
   };
 }
+
+export const QA_PASSWORD = "qa-test-password-123";
+
+/**
+ * A throwaway QA account, created or reset to a known state. `profile: null`
+ * removes the profiles row (the ghost-user state); otherwise the row is
+ * upserted with the overrides given. Owns no records, so it can be deleted
+ * with a bare deleteUser.
+ */
+export async function ensureQaUser(
+  email: string,
+  profile: Record<string, unknown> | null,
+): Promise<string> {
+  const db = service();
+  const { data } = await db.auth.admin.listUsers({ perPage: 1000 });
+  let user = data.users.find((u) => u.email === email);
+  if (!user) {
+    const created = await db.auth.admin.createUser({ email, password: QA_PASSWORD, email_confirm: true });
+    if (created.error || !created.data.user) throw new Error(`${email}: ${created.error?.message}`);
+    user = created.data.user;
+  }
+  const reset = await db.auth.admin.updateUserById(user.id, { password: QA_PASSWORD, ban_duration: "none" });
+  if (reset.error) throw new Error(`${email} reset: ${reset.error.message}`);
+  if (profile === null) {
+    await db.from("profiles").delete().eq("id", user.id);
+  } else {
+    const { error } = await db.from("profiles").upsert({
+      id: user.id, email, full_name: `QA ${email.split("@")[0]}`, role: "agent",
+      is_active: true, must_change_password: false, ...profile,
+    });
+    if (error) throw new Error(`${email} profile: ${error.message}`);
+  }
+  return user.id;
+}
