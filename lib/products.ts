@@ -7,8 +7,6 @@
  * so these are display and input-normalisation helpers.
  */
 
-import type { StatusIntent } from "@/components/status-badge";
-
 /**
  * Whether a product stands on its own in a cart, or hangs off one that does.
  *
@@ -271,71 +269,3 @@ export function parsePriceInput(
   return { value: parsed };
 }
 
-/**
- * Parses the specs box into the object the column must hold.
- *
- * The CHECK is `jsonb_typeof(specs) = 'object'`, so `4`, `null` and `[1,2]`
- * are all valid JSON and all rejected by the database. Catching that here
- * turns a constraint violation into a sentence saying what shape is wanted.
- */
-export function parseSpecsInput(
-  input: string,
-): { value: Record<string, unknown>; error?: undefined } | { value?: undefined; error: string } {
-  const trimmed = input.trim();
-  if (trimmed === "") return { value: {} };
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    return { error: "Specs must be valid JSON." };
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return {
-      error: 'Specs must be a JSON object, like {"connectivity": "wifi"}.',
-    };
-  }
-  return { value: parsed as Record<string, unknown> };
-}
-
-/** Pretty-prints specs for the edit box. `{}` renders empty, not as "{}". */
-export function formatSpecs(specs: Record<string, unknown>): string {
-  if (specs === null || Object.keys(specs).length === 0) return "";
-  return JSON.stringify(specs, null, 2);
-}
-
-/**
- * Archived or live — the only two states, so the only two intents.
- *
- * Neutral for archived rather than destructive: archiving is reversible and
- * takes nothing away, and destructive red is reserved for the irreversible.
- * There is nothing irreversible on this table by design.
- */
-export function productIntent(product: Product): StatusIntent {
-  return product.archived_at === null ? "success" : "neutral";
-}
-
-/**
- * Groups products into categories, in display order.
- *
- * Mirrors groupByCategory() in lib/marketing-materials.ts: categories sorted
- * alphabetically, products by name within each, so the catalog has a stable
- * order rather than whatever the id sequence produced.
- */
-export function groupByCategory(
-  products: Product[],
-): { category: string; products: Product[] }[] {
-  const byCategory = new Map<string, Product[]>();
-  for (const product of products) {
-    const list = byCategory.get(product.category);
-    if (list) list.push(product);
-    else byCategory.set(product.category, [product]);
-  }
-
-  return [...byCategory.entries()]
-    .map(([category, list]) => ({
-      category,
-      products: [...list].sort((a, b) => a.name.localeCompare(b.name)),
-    }))
-    .sort((a, b) => a.category.localeCompare(b.category));
-}

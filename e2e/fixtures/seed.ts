@@ -1712,6 +1712,99 @@ export async function clearProposalsTitled(title: string): Promise<void> {
 }
 
 /**
+ * Removes a brand a spec created, with its products and their links.
+ *
+ * Service role, because no client can: products has no DELETE grant (a quote
+ * line may name one). Safe here only because a spec's own brand has never been
+ * put on a quote — this deletes products outright, which production never
+ * does. Links first (they reference products), then products (they reference
+ * the brand through products_brand_fkey), then the brand.
+ *
+ * Run BEFORE a spec as well as after: a run that died halfway leaves the brand
+ * behind, and the next run's "Add brand" would then hit the name's unique
+ * index and fail for a reason unrelated to the code under test.
+ */
+export async function clearCatalogBrand(name: string): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data: products, error: readError } = await db
+    .from("products")
+    .select("id")
+    .eq("brand", name);
+  if (readError) throw new Error(`clear brand read: ${readError.message}`);
+  const ids = (products ?? []).map((p) => p.id as number);
+  if (ids.length > 0) {
+    for (const column of ["addon_product_id", "device_product_id"]) {
+      const { error } = await db
+        .from("product_compatibility")
+        .delete()
+        .in(column, ids);
+      if (error) throw new Error(`clear brand links: ${error.message}`);
+    }
+    const { error } = await db.from("products").delete().in("id", ids);
+    if (error) throw new Error(`clear brand products: ${error.message}`);
+  }
+  const { error } = await db.from("brands").delete().eq("name", name);
+  if (error) throw new Error(`clear brand: ${error.message}`);
+}
+
+/** A brand's id by name, so a spec can address a brand page that exists. */
+export async function brandIdByName(name: string): Promise<number> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await db
+    .from("brands")
+    .select("id")
+    .eq("name", name)
+    .single();
+  if (error || !data) throw new Error(`brand ${name}: ${error?.message}`);
+  return data.id as number;
+}
+
+/**
+ * A brand's products and links straight from the tables, for asserting what
+ * the admin page WROTE rather than what it rendered.
+ */
+export async function catalogRows(brand: string): Promise<{
+  products: {
+    id: number;
+    name: string;
+    kind: string;
+    list_price: string | null;
+    archived_at: string | null;
+    specs: Record<string, unknown>;
+  }[];
+  links: { addon_product_id: number; device_product_id: number }[];
+}> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data: products, error } = await db
+    .from("products")
+    .select("id, name, kind, list_price, archived_at, specs")
+    .eq("brand", brand)
+    .order("name");
+  if (error) throw new Error(`catalog rows: ${error.message}`);
+  const ids = (products ?? []).map((p) => p.id as number);
+  const { data: links, error: linkError } = await db
+    .from("product_compatibility")
+    .select("addon_product_id, device_product_id")
+    .in("addon_product_id", ids.length > 0 ? ids : [-1]);
+  if (linkError) throw new Error(`catalog links: ${linkError.message}`);
+  return {
+    products: (products ?? []) as Awaited<
+      ReturnType<typeof catalogRows>
+    >["products"],
+    links: links ?? [],
+  };
+}
+
+/**
  * One saved proposal's lines, straight from the table.
  *
  * The price lock's claim is that the SNAPSHOT comes from the catalog, and the
