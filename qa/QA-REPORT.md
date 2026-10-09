@@ -39,7 +39,8 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | QA-007 | Medium | Design tokens / a11y | `--muted-foreground` 3.0–3.4:1, `--success` 2.9:1, `--neutral` 4.0:1 on their surfaces — axe `color-contrast` on every route | 3f14ab1 |
 | QA-008 | Medium | Error states | A down/unreachable Edge Function shows supabase-js's raw "Edge Function returned a non-2xx status code" / "Failed to send a request…" | 0603e8d |
 | QA-009 | Low | Print pages / layout | At 390px the blank application's control row overflows 32px (Print button off-screen); merchant print uses the same row | 12d9af3 |
-| QA-010 | Medium | Payouts / layout | At 390px the payout summary table pushes the page wide and clips the Payout column at the card edge | __HASH__ |
+| QA-010 | Medium | Payouts / layout | At 390px the payout summary table pushes the page wide and clips the Payout column at the card edge | 9678877 |
+| QA-011 | Low | Auth / keyboard | On `/auth/login`, Tab from Email lands on "Forgot your password?" instead of Password; a keyboard login ends on /auth/forgot-password | NEEDS OWEN (repro __HASH__) |
 6.00, `1e3` as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 ,000.00 (Number() reads JS literals) | 917f5ad |
 
@@ -148,6 +149,16 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
   into the query string without `encodeURIComponent`.
 - **Suggested fix (not applied — auth flow):** accept `next` only when it starts with a single
   `/` and not `//` or `/\`; otherwise fall back to `/dashboard`. Encode the error message.
+
+### QA-011 — login tab order skips the password box (Low, auth / keyboard)
+- **Repro:** `/auth/login`, focus Email, type, press Tab → focus is on the "Forgot your password?"
+  link. Type the password, press Enter → `/auth/forgot-password`. Spec
+  `e2e/qa/login-tab-order.spec.ts` (`test.fail()`).
+- **Root cause:** `components/login-form.tsx` (starter-kit layout) renders the link inside the
+  Password label row, before the `<input id="password">` in DOM order.
+- **Suggested fix (not applied — login form):** move the link after the password input in the
+  DOM (it can stay visually beside the label with `order`/grid), or give it `tabIndex={-1}`
+  and repeat it below the button.
 
 ## DECISIONS (observed, deliberately not changed)
 
