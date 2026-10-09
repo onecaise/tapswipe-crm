@@ -8,12 +8,12 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 
 **Current state matters when reading the code**, and it is a mix — real CRM pages alongside untouched starter scaffolding:
 
-- **Built:** every CRM route lives under the `app/(app)/` route group so it renders inside the shell — `app/(app)/{dashboard,merchants,leads,ghost-sheets,pre-apps,support-tickets,documents,notes,tasks,payouts,marketing,marketing/manage,admin/users,admin/users/import,admin/products,admin/products/[brandId],admin/products/unbranded}`. Route groups don't affect URLs, so the paths are still `/dashboard`, `/merchants/7` and so on. Data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,annotations-data,documents,payouts,user-imports,products,brands,quotes,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks are **written** through panels (`components/{notes,tasks}-panel.tsx`) on the four owner records; `/notes` and `/tasks` are the cross-record view of the same rows, and are read-only (notes) or read plus the complete toggle (tasks). Creation stays on the record, because `owner_id` has no FK and the panels take the pair from a parent row already loaded under RLS. `components/documents-panel.tsx` hangs off **all four** `documents.owner_type` values — merchants, leads, pre-apps and support tickets — and `/documents` is the cross-record Document Center over the same rows. Quotes have no page of their own: `components/quotes-panel.tsx` is the builder and the version history, and it lives on **both the lead and the merchant** — `quotes_exactly_one_owner` means a proposal hangs off exactly one of them, and a rep sells hardware to win a deal and again to the same business once it is on the books. The two printable routes (`/{leads,merchants}/[id]/quotes/[quoteGroupId]/print`) share one document component.
+- **Built:** every CRM route lives under the `app/(app)/` route group so it renders inside the shell — `app/(app)/{dashboard,merchants,leads,ghost-sheets,pre-apps,support-tickets,documents,notes,tasks,payouts,marketing,marketing/manage,admin/users,admin/users/import,admin/products,admin/products/[brandId],admin/products/unbranded,proposals,proposals/new,proposals/[quoteGroupId],proposals/[quoteGroupId]/print}`. Route groups don't affect URLs, so the paths are still `/dashboard`, `/merchants/7` and so on. Data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,annotations-data,documents,payouts,user-imports,products,brands,quotes,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks are **written** through panels (`components/{notes,tasks}-panel.tsx`) on the four owner records; `/notes` and `/tasks` are the cross-record view of the same rows, and are read-only (notes) or read plus the complete toggle (tasks). Creation stays on the record, because `owner_id` has no FK and the panels take the pair from a parent row already loaded under RLS. `components/documents-panel.tsx` hangs off **all four** `documents.owner_type` values — merchants, leads, pre-apps and support tickets — and `/documents` is the cross-record Document Center over the same rows. Proposals (the `quotes` tables — the UI says "Proposals", the database was deliberately not renamed) are their own record at `/proposals`: a rep's own, linked to at most one lead or merchant or to neither. The builder (`components/proposal-builder.tsx`) and version history (`components/proposal-view.tsx`) live there; lead and merchant pages carry only a compact list and a prefilled "New proposal" button (`components/record-proposals.tsx`). `/proposals/[quoteGroupId]/print` is the one print route; the old `/{leads,merchants}/[id]/quotes/[quoteGroupId]/print` URLs redirect to it from `next.config.ts`.
 - **Not built yet:** My Submissions.
 - **Still [starter-kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase) template, not product code:** `README.md`, and that is now the whole list. The scaffold's UI was deleted on 14 Sep 2026 — `app/protected/*`, `components/tutorial/*`, `components/{hero,deploy-button,next-logo,supabase-logo,env-var-warning,auth-button,theme-switcher}.tsx`, the `hasEnvVars` export, and the two `app/{opengraph,twitter}-image.png` banners that served a "Next.js Starter Kit" social preview from an internal tool. `app/page.tsx` is product code now: it renders nothing and redirects (see below). Don't reintroduce a greyed-out template page for the same reason `lib/nav.ts` shouldn't carry a permanently-disabled row.
 - **Edge Functions:** all fourteen are implemented — `create-upload-url`, `create-download-url`, `delete-document`, `submit-pre-app-secrets`, `read-pre-app-secrets`, `create-user`, `deactivate-user`, `admin-reset-password`, `residual-import-file-url`, `parse-residual-import`, `export-residuals`, `stage-user-import`, `provision-user-batch`, `marketing-material-file-url` (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env,admin-users,provision-user,residuals,residual-imports,user-imports,marketing-materials}.ts`).
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Forty-two migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Forty-three migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi` — and note **which** project that is: `tapswipe-crm-dev`. The second project `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) is **not linked, but it is deployed and real**: `PRE_APP_SECRETS_KEY` is set and both private buckets exist. Treat it as live production, not as a spare project.
 
@@ -67,10 +67,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (1345 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (1359 tests)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (205 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (157 tests, 5 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (164 tests, 5 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -348,14 +348,41 @@ Five things the script decides that are worth knowing before changing it:
 
 **Targets are `local` and `dev`, and there is no prod path in the file at all.** The client is built from the thing that was *checked*: `--target dev` spawns `scripts/check-linked-project.mjs` and then derives the URL from the same `supabase/.temp/linked-project.json` the guard read, so the `npm run db:push -- --db-url <prod>` shape — guard prints "dev, ok" while the command underneath goes elsewhere — is unreachable. It refuses the prod ref outright and does not honour `ALLOW_PROD_SUPABASE`. The guard also runs before a **local** write, because a relink is global CLI state and "I was only working locally" is the belief the 2 Sep incident was held under. The dev service-role key comes from the logged-in CLI (`projects api-keys --reveal`) or `$SUPABASE_SERVICE_ROLE_KEY`, is never printed and never written to a file — `.env.deployed.local` stays publishable-keys-only.
 
-### A proposal belongs to a lead OR a merchant, and a rep cannot price one
+### A proposal belongs to a REP, links to at most one lead or merchant, and a rep cannot price one
 
-As of `20261007150000`, `quotes` carries **both** `lead_id` and `merchant_id`,
-both nullable, with `quotes_exactly_one_owner`
-(`check (num_nonnulls(lead_id, merchant_id) = 1)`). A rep quotes hardware to
-win a deal, and quotes more to the same business two years later when it is a
-merchant on the books — one table, one append-only version history, one
-printable document.
+As of `20261009150000` a proposal is its own record. `quotes` carries `lead_id`
+and `merchant_id`, both nullable, with `quotes_at_most_one_link`
+(`check (num_nonnulls(lead_id, merchant_id) <= 1)`, which replaced
+`quotes_exactly_one_owner`'s `= 1`). Linked to a lead to win a deal, to a
+merchant to sell more to a business on the books, or to nothing for a business
+not in the CRM yet — one table, one append-only version history, one printable
+document.
+
+**`agent_id` is the rep the proposal is FOR**, not "the owner of the parent
+record" as it was while a quote could only be made from a lead or merchant
+page. Same values for every existing row; a different rule for new ones. The
+insert policy (`insert own, linked only to what the caller can see`) says a rep
+creates for themselves and an admin for anyone, and that each link must be a
+record **the caller can see** — its `exists` subqueries deliberately lean on
+the leads/merchants select policies rather than spelling `agent_id` out, because
+"visible to the caller" IS the rule. Consequence: an admin may file rep A's
+proposal against rep B's lead; it is A's, and B sees it nowhere. A missing lead
+and another rep's lead are refused with the **identical** message — the BEFORE
+trigger runs first, so it must never raise on a missing record (measured: a
+trigger that did turned the insert into an id oracle).
+
+**`customer_name` is a per-version snapshot, NOT NULL and non-blank.** Linked:
+`enforce_quote_version()` copies the record's name over whatever was sent (the
+price lock's overwrite-don't-trust shape). Unlinked: the typed name, trimmed.
+"Prepared for" on the sheet is the printed version's snapshot, so renaming a
+lead does not readdress last month's proposal. The migration's backfill
+**disables `quotes_audit_cross_agent`** around its UPDATE — a migration has no
+`auth.uid()`, so the trigger would otherwise log a `cross_agent_update` for
+every quote in the table.
+
+**Not on any hosted project yet**, like `brands`: applied to the local stack
+only. The app code depends on it, so dev and prod need the migration pushed
+before this code is deployed there.
 
 **Two real foreign keys, NOT the polymorphic `owner_type` + `owner_id`** that
 `notes`, `tasks` and `documents` use. Those three point at four tables and
@@ -408,8 +435,9 @@ own group id with a different — also their own — record would add a "version
 about another business. Nothing leaks, but the print route filters by owner, so
 one page would read "version 2 of 1" and the other "version 1 of 1".
 
-**`create_quote_version()`'s 7-argument signature is DROPPED, not left beside
-the new one.** `create or replace function` with a different parameter count
+**`create_quote_version()`'s old signatures are DROPPED, not left beside the
+new one** — the 7-argument one in `20261007150000`, the 8-argument one (no
+`customer_name_input`) in `20261009150000`; it now takes nine. `create or replace function` with a different parameter count
 creates a *second* function, so a default on `merchant_id_input` would leave a
 7-argument call with two candidates — an ambiguity Postgres reports at call
 time, from the browser, as a failed save. The `dashboard_counts()` trap, same
@@ -516,19 +544,20 @@ outside that set, so a stale link stays visible and removable.
 **Not on any hosted project yet.** Applied to the local stack only
 (`migration up --local`); dev and prod need a deliberate push.
 
-### The printed Hardware Proposal is ONE component on two routes
+### The printed Hardware Proposal is ONE component on ONE route
 
+`/proposals/[quoteGroupId]/print` renders `QuoteProposalDocument`, fed by
+`loadProposal()` in `lib/quote-proposal.ts`. The old
 `/leads/[id]/quotes/[quoteGroupId]/print` and
-`/merchants/[id]/quotes/[quoteGroupId]/print` both render
-`QuoteProposalDocument`, fed by `loadProposal()` in `lib/quote-proposal.ts` —
-so each route is about ten lines. The loader flattens the two owner tables
-into one shape (a lead has `dba` / `merchant_legal_name` and three contact
+`/merchants/[id]/quotes/[quoteGroupId]/print` are `redirects()` in
+`next.config.ts` (query string kept, so `?quote=` still pins a version) rather
+than page files: under `cacheComponents` a page that calls `redirect()` paints
+its shell first. The loader flattens the two record tables into one shape (a lead has `dba` / `merchant_legal_name` and three contact
 columns; a merchant has `dba` / `legal_business_name` and **no contact columns
 at all**), which means the document has one set of fields and cannot quietly
 omit one on one route. This is a sheet somebody is handed, so two near-copies
-is the worst place in the app for a wording drift. **That makes five printable
-routes but four documents** — the counts in `print-document.tsx` and
-`globals.css` say so.
+is the worst place in the app for a wording drift. **Four printable routes,
+four documents** — the counts in `print-document.tsx` and `globals.css` say so.
 
 **Nothing is invented on it.** `PROPOSAL_TERMS` is one constant and is **empty
 by default**, so no terms block renders at all — not an empty heading, not
@@ -708,8 +737,8 @@ rather than keep showing nothing while nothing fails.
 Four decisions worth knowing before changing any of it:
 
 - **Two sources must NOT carry a byline.** `documents.agent_id` and
-  `quotes.agent_id` are the **parent record's owner**, not whoever acted — the
-  page passes `lead.agent_id` into `QuotesPanel`, and `create-upload-url` files
+  `quotes.agent_id` are not whoever acted — the latter is the rep the proposal
+  is FOR (an admin may make one on a rep's behalf), and `create-upload-url` files
   under the lead's rep so the file lands in that rep's book. So an admin's
   upload on a rep's lead is stamped with the REP's id, and printing it would
   attribute the act to the wrong person. The real actor is in `audit_log` and
