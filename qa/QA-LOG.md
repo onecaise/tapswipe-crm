@@ -44,10 +44,10 @@ Resume rule: continue at the first unchecked item. Local only; no push/deploy/db
 - [x] B4 D-08 bad residual import leaves no batch
 - [x] B5 D-04 notifications self-filter (only if actor recorded)
 - [x] Group B suites
-- [ ] C1 D-03 return-to after login + signed-in /auth/login redirect
-- [ ] C2 D-05 db error-code helper on busiest forms
-- [ ] C3 D-07 unsaved-changes warning + router.replace after create
-- [ ] C4 D-09 record as by design
+- [x] C1 D-03 return-to after login + signed-in /auth/login redirect
+- [x] C2 D-05 db error-code helper on busiest forms
+- [x] C3 D-07 unsaved-changes warning + router.replace after create
+- [x] C4 D-09 record as by design
 - [ ] Group C suites + final summary
 - 2026-10-13 A1 done (e3c4041). Docker Desktop died mid-item; restarted it (docker desktop restart). The user's functions serve died with it; started my own (bg), to be stopped at the end.
 - A2 done (56ac323).
@@ -59,3 +59,9 @@ Resume rule: continue at the first unchecked item. Local only; no push/deploy/db
 - B4 done (e6da0f2). No redeploy needed.
 - B5: no change (no actor column; agent_id is owner). Recorded.
 - Group B suites: build ok, lint ok, tsc ok, unit 1406/1406, live 209/209, e2e 210/210.
+- C1a done (0159ac6).
+- C1b done (2f4eb4b); logout.spec assertion tightened to ?next= (separate commit).
+- C2 done (39d0a47). Found tax_rate 100 vs numeric(5,3) -> D-12.
+- C3b done (397ac0d).
+- C3a done (1a32f18).
+- C4 recorded (no change, by design). D-10..D-12 written.

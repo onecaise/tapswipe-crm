@@ -456,3 +456,21 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   assertion red ("sessionStorage holds 021000021").
 - **Limit:** like every `beforeunload` prompt, Chromium only shows it after the user has interacted
   with the page, and the wording is the browser's own.
+
+### C4 (D-09) — **no change, by design**
+- `/proposals?rep=<other rep>` as an agent shows the agent's own list: RLS-correct, and the rep filter is
+  admin-only UI. `/leads` has no `?q=` search because the global search box covers leads. Recorded at
+  Owen's instruction; nothing changed.
+
+## New decisions from run 2 (D-10 onward)
+
+- **D-10 (money parsing, same class as A1).** `parseFigureInput()` (payout cells) and the residual import's
+  cell coercion (`supabase/functions/_shared/residuals.ts`) both strip commas anywhere, so `12,99` → 1299.
+  Not changed: payouts/residuals were out of bounds for this run. `maskMoney()`/`maskPercent()` (pre-app)
+  drop commas at keystroke time — visible while typing, so lower risk. A1's two regexes would drop in.
+- **D-11 (GoTrue leaks banned-ness).** GoTrue answers `user_banned` for a banned account even with a
+  wrong password (measured locally), so the response confirms the address exists. B1 cannot change
+  that from the app; it would need a GoTrue-side change.
+- **D-12 (tax rate range).** The pre-app tax-rate validator allows 0–100 but `pre_app_terminal.tax_rate`
+  is `numeric(5,3)` (max 99.999), so 100 fails at the database. C2 makes the message plain; aligning the
+  validator to `< 100` (or widening the column, which is a migration) is Owen's call.
