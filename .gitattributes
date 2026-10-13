@@ -1,0 +1,20 @@
+# Narrow on purpose: only file types whose LINE ENDINGS CHANGE BEHAVIOUR are
+# pinned here, so this file causes no repo-wide renormalisation. Everything
+# else keeps following each machine's core.autocrlf.
+#
+# *.mjs -- scripts/{check-linked-project,load-hardware-catalog,
+#          purge-legacy-documents}.mjs start with `#!/usr/bin/env node`. On a
+#          Windows checkout with autocrlf the shebang line ended in \r, and
+#          vitest's transform rejected the file outright ("SyntaxError:
+#          Invalid or unexpected token", naming no test), so both
+#          purge-legacy-documents test files failed to LOAD.
+# *.sql -- migrations are applied byte-for-byte and compared by hash (the
+#          13 Oct 2026 accidental dev push was audited that way); CRLF in a
+#          dollar-quoted function body is stored into the function.
+# *.sh  -- a CRLF shell script fails on its first line under bash.
+#
+# The index already held all of these as LF, so adding this changed no
+# committed content -- only what a Windows working copy looks like.
+*.mjs text eol=lf
+*.sql text eol=lf
+*.sh  text eol=lf
