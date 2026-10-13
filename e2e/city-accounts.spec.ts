@@ -188,7 +188,7 @@ test.describe("as an agent", () => {
   });
 
   test("sees no missing-location count, and cannot open the admin list", async ({ page }) => {
-    await expect(page.getByText("Merchants missing a location")).toHaveCount(0);
+    await expect(page.getByTestId("missing-location-count")).toHaveCount(0);
     await page.goto("/admin/merchants/missing-location");
     await expect(page).toHaveURL(/\/dashboard$/);
   });
@@ -268,25 +268,42 @@ test.describe("as an admin", () => {
   });
 
   test("the missing-location count matches the list it links to", async ({ page }) => {
-    const card = page.locator('[data-slot="stat-card"]', {
-      hasText: "Merchants missing a location",
-    });
-    await expect(card).toBeVisible();
-    const figure = Number(
-      (await card.locator("p").last().textContent())?.trim(),
-    );
-    expect(Number.isInteger(figure)).toBe(true);
+    // Cross-read rather than a constant: the local stack's legacy merchants
+    // are whatever predated the migration there. The notice renders nothing
+    // at zero, so its absence must mean the list is empty too.
+    const notice = page.getByTestId("missing-location-count");
+    const figure =
+      (await notice.count()) > 0
+        ? Number((await notice.locator("strong").textContent())?.trim())
+        : 0;
 
-    await card.click();
-    await expect(page).toHaveURL(/\/admin\/merchants\/missing-location$/);
+    if (figure > 0) {
+      await notice
+        .getByRole("link", { name: "Review merchants missing a location" })
+        .click();
+      await expect(page).toHaveURL(/\/admin\/merchants\/missing-location$/);
+    } else {
+      await page.goto("/admin/merchants/missing-location");
+    }
     await expect(
       page.getByRole("heading", { name: "Merchants missing a location" }),
     ).toBeVisible();
-    const rows = page.getByRole("list", { name: "Merchants missing a location" }).getByRole("listitem");
+    const rows = page
+      .getByRole("list", { name: "Merchants missing a location" })
+      .getByRole("listitem");
     if (figure === 0) {
       await expect(page.getByText("Every merchant has a city and state.")).toBeVisible();
     } else {
       await expect(rows).toHaveCount(figure);
     }
+  });
+
+  test("the missing-location count is not one of the filtered figures", async ({ page }) => {
+    // Every stat card on this page is a filtered figure, and the count
+    // ignores the filters; e2e/dashboard-filters.spec.ts cross-reads the
+    // cards as a set and went red when this was one.
+    await expect(
+      page.locator('[data-slot="stat-card"]', { hasText: /missing a location/i }),
+    ).toHaveCount(0);
   });
 });

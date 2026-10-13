@@ -29,6 +29,7 @@ import {
 } from "@/components/dashboard-filters";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
+import { Callout } from "@/components/callout";
 import { CityAccountsSearch } from "@/components/city-accounts-search";
 import { StatCard } from "@/components/stat-card";
 import { Badge } from "@/components/ui/badge";
@@ -373,10 +374,17 @@ function TaskGroup({
  * Admins only: how many merchants still have no city or state.
  *
  * merchants_location_required ships NOT VALID, so the rows that predate it are
- * still here; this is where an admin finds out how many, and the card links to
- * the read-only list that names them. Renders nothing for a rep — the page is
+ * still here; this is where an admin finds out how many, and it links to the
+ * read-only list that names them. Renders nothing for a rep — the page is
  * admin-only, and RLS would give a rep only their own count anyway, which is a
  * number with nowhere to go.
+ *
+ * A Callout and NOT a StatCard, deliberately. Every StatCard on this page is
+ * one of the filtered figures — e2e/dashboard-filters.spec.ts cross-reads them
+ * as a set, and "a date range in the past empties every figure" is the page's
+ * contract. This count ignores the filters, so as a card it was a figure that
+ * broke that promise; it went red in four specs and was moved. It also renders
+ * nothing at zero: a permanent "0 merchants" line is wallpaper.
  */
 async function MissingLocationCount() {
   const profile = await requireUser();
@@ -388,14 +396,28 @@ async function MissingLocationCount() {
     .select("id", { count: "exact", head: true })
     .or(MISSING_LOCATION_FILTER);
 
+  if (error) {
+    return (
+      <p className="text-sm text-destructive">
+        Could not count merchants missing a location: {error.message}
+      </p>
+    );
+  }
+  if (!count) return null;
+
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-      <StatCard
-        label="Merchants missing a location"
-        value={error ? "—" : (count ?? 0)}
-        href="/admin/merchants/missing-location"
-      />
-    </div>
+    <Callout tone="warning">
+      <p data-testid="missing-location-count">
+        <strong>{count}</strong>{" "}
+        {count === 1 ? "merchant has" : "merchants have"} no city or state.{" "}
+        <Link
+          href="/admin/merchants/missing-location"
+          className="underline underline-offset-4"
+        >
+          Review merchants missing a location
+        </Link>
+      </p>
+    </Callout>
   );
 }
 
