@@ -782,6 +782,22 @@ create table merchants (
   -- merchants are also created by hand, and every row that predates this
   -- column has no pre-app to point at.
   pre_app_id int,
+  -- Where the business is (20261013130000). City and state are REQUIRED for
+  -- every row written from here on -- merchants_location_required below --
+  -- and street and zip are optional. Nullable at the column level only
+  -- because the constraint ships `not valid`: every merchant that predates
+  -- these columns has no location and nothing to backfill it from.
+  --
+  -- `street` rather than `address` (the leads/pre_apps spelling) because the
+  -- merchant form asks for exactly that and nothing more -- no suite line, no
+  -- country. approve_pre_app() copies pre_apps.physical_address into it.
+  street text,
+  city text,
+  -- Two upper-case letters, enforced by the constraint. The UI offers the
+  -- US_STATES list from lib/masks.ts; the database checks only the shape,
+  -- the way isState and the wizard split the same job for pre-apps.
+  state text,
+  zip text,
   date_added date default current_date,
   created_at timestamptz default now(),
   updated_at timestamptz default now(),
@@ -808,6 +824,78 @@ create table merchants (
     or coalesce(split_agent_pct, 0) + coalesce(split_company_pct, 0) = 100
   ) not valid
 );
+
+-- MERCHANT LOCATION (20261013130000).
+--
+-- norm_city() is the one definition of "the same city", in the dup_digits
+-- family below and for the same reason: it exists to be indexed, and an
+-- expression index is only used when the query spells the expression exactly
+-- as the index does. Lower-case, punctuation turned into a space, whitespace
+-- collapsed, trimmed; '' becomes NULL. So "St. Louis", "st louis", "ST.LOUIS"
+-- and "  St   Louis " are one key, and "Winston-Salem" meets "Winston Salem".
+--
+-- Punctuation becomes a SPACE rather than vanishing. That is the deliberate
+-- choice: deleting it would make "St.Louis" ("stlouis") miss "St. Louis"
+-- ("st louis"), which is the commonest way people type the same city twice.
+-- The cost is that "O'Fallon" keys as "o fallon" and would miss a hand-typed
+-- "OFallon" -- the rarer error of the two.
+--
+-- NO abbreviation expansion: "St" is not "Saint", "Ft" is not "Fort". That is
+-- a vocabulary somebody has to own, and a rule that is wrong for one city is
+-- wrong silently. Equality on a mechanical key is something a rep can predict.
+--
+-- %, _ and * are punctuation to this function, NOT wildcards: nothing that
+-- consumes a key uses LIKE, so they become spaces like any other mark.
+--
+-- Defined here, ahead of dup_digits, because the constraint below calls it.
+-- No `set search_path`, same reasoning as the dup_* family (pg_catalog only,
+-- and a SET clause blocks inlining). DO NOT `create or replace` it with
+-- different behaviour without `reindex index idx_merchants_norm_city` AND
+-- re-checking merchants_location_required: Postgres keeps index entries
+-- computed by the old definition, and a city search that silently stops
+-- matching looks exactly like a city with no accounts.
+create or replace function norm_city(input text)
+returns text language sql immutable strict parallel safe as $$
+  select nullif(
+    btrim(regexp_replace(regexp_replace(lower(input), '[[:punct:]]', ' ', 'g'),
+                         '\s+', ' ', 'g')),
+    '')
+$$;
+
+revoke all on function norm_city(text) from public;
+grant execute on function norm_city(text) to authenticated, service_role;
+
+-- Required from here on, NOT VALID for what came before: the
+-- leads_status_vocabulary arrangement. Every insert and every update is
+-- checked; the rows that predate these columns are not, because there is no
+-- source to fill them from that a human has not got to confirm -- a city
+-- guessed from a processor statement and printed on a proposal is worse than
+-- a blank one an admin can see is blank. Admins get the list at
+-- /admin/merchants/missing-location and a count on the dashboard; fix the rows
+-- THROUGH THE APP (so merchants_audit_cross_agent records who supplied each
+-- location), then `alter table merchants validate constraint
+-- merchants_location_required;` in a follow-up migration. Review query:
+--   select id, agent_id, dba, status from merchants
+--    where city is null or state is null order by id;
+--
+-- Consequence worth knowing before it surprises someone: because an UPDATE is
+-- checked, a legacy merchant cannot be edited AT ALL -- not even its status --
+-- until it is given a city and state. The merchant form requires both, so
+-- the save that fixes it is the same save.
+--
+-- Every clause is coalesce'd to false. A CHECK that evaluates to NULL PASSES,
+-- so `state ~ '^[A-Z]{2}$'` alone would admit a NULL state.
+--
+-- The city must normalise to 2..60 characters (measured on the trimmed input
+-- for the upper bound, which is never shorter than the key): exactly the range
+-- accounts_in_city() accepts, so every stored city is findable and no stored
+-- city is one the search would refuse to look for.
+alter table merchants
+  add constraint merchants_location_required check (
+    coalesce(char_length(norm_city(city)) >= 2, false)
+    and coalesce(char_length(btrim(city)) <= 60, false)
+    and coalesce(state ~ '^[A-Z]{2}$', false)
+  ) not valid;
 
 alter table merchants enable row level security;
 
@@ -4288,6 +4376,10 @@ create index idx_merchants_dba_trgm
 create index idx_merchants_legal_name_trgm
   on merchants using gin (legal_business_name extensions.gin_trgm_ops);
 
+-- accounts_in_city() looks up by exactly this expression and nothing else, so
+-- it is a plain btree over the key: equality only, by design (see norm_city).
+create index idx_merchants_norm_city on merchants (norm_city(city));
+
 -- The polymorphic owner pair. documents, notes and tasks are all read the same
 -- way -- `where owner_type = $1 and owner_id = $2` -- by the panels on every
 -- lead / pre-app / merchant / ghost-sheet detail page, which is three such
@@ -5050,10 +5142,29 @@ begin
   -- the application and not the merchant. That is deliberate -- the merchant is
   -- the record of what was agreed -- and the pointer exists so the divergence
   -- is at least visible from both ends rather than silent.
+  --
+  -- LOCATION (20261013130000). The business address is carried across --
+  -- physical_address into street, city, state upper-cased, zip -- because
+  -- merchants_location_required binds this insert like any other. A pre-app
+  -- may legitimately reach 'submitted' without a city or state (the wizard
+  -- has never required them), and such a pre-app CANNOT be approved: it is
+  -- refused here by name, before any write, rather than left to fail on the
+  -- constraint with a message that names a constraint instead of a fix. The
+  -- fix is to reopen it and have the rep fill the address in.
+  if coalesce(char_length(norm_city(pa.city)) < 2, true)
+     or char_length(btrim(pa.city)) > 60
+     or coalesce(upper(btrim(pa.state)) !~ '^[A-Z]{2}$', true) then
+    raise exception 'pre-app % needs a city and a two-letter state before it can be approved',
+      pre_app_id_input using errcode = 'PT409';
+  end if;
+
   insert into merchants (agent_id, dba, legal_business_name, status,
-                         split_agent_pct, split_company_pct, pre_app_id)
+                         split_agent_pct, split_company_pct, pre_app_id,
+                         street, city, state, zip)
   values (pa.agent_id, pa.dba_name, pa.legal_business_name, 'active',
-          pa.split_agent_pct, pa.split_company_pct, pa.id)
+          pa.split_agent_pct, pa.split_company_pct, pa.id,
+          nullif(btrim(pa.physical_address), ''), btrim(pa.city),
+          upper(btrim(pa.state)), nullif(btrim(pa.zip), ''))
   returning id into new_merchant_id;
 
   perform set_config('tapswipe.pre_app_transition', 'on', true);
@@ -5861,6 +5972,142 @@ revoke all on function check_duplicates(
 grant execute on function check_duplicates(
   text, text, text, text, text, text, text, text, text, text, text, int, real
 ) to authenticated, service_role;
+
+-- =====================================================================
+-- accounts_in_city(city, state) -- "do we already have accounts in this
+-- city?" (20261013131000)
+--
+-- check_duplicates()'s design, applied to a different question. The answer
+-- that matters is the one RLS hides -- the accounts in OTHER reps' books --
+-- so this is `security definer` and reaches across every book on purpose, and
+-- it pays for that reach the same two ways:
+--
+--   1. a hand-written guard, is_active_agent(), which covers admins too and
+--      refuses a deactivated account whose JWT is still inside its hour; and
+--   2. a deliberately narrow return shape. A non-admin gets FOUR fields per
+--      account -- dba, legal_business_name, city, state -- and nothing else:
+--      no id, no owning rep, no status, no street, no zip, no contact detail.
+--      Built with jsonb_build_object per row, so "nothing else" means the keys
+--      are ABSENT, not present-and-null; a fixed `returns table` would have to
+--      carry the admin columns as nulls, which is the column list announcing
+--      what exists. Applied to the caller's OWN merchants as well: the rep has
+--      /merchants for those, and one shape for every non-admin row means no
+--      row's shape says whose it is.
+--   An admin, who can already read every merchant, also gets merchant_id (for
+--   the link), agent_id and agent_name, status, street and zip.
+--
+-- MATCHING IS EQUALITY ON norm_city() AND NOTHING ELSE: no LIKE, no ILIKE, no
+-- trigram, no prefix. That is the boundary, not a simplification. A fuzzy or
+-- prefix match turns "find accounts in a city" into "list every account whose
+-- city starts with S", which is a cross-book enumeration with extra steps. %,
+-- _ and * reach norm_city() as punctuation and become spaces. There is also no
+-- "list the cities" function and there must not be one for non-admins: the
+-- caller has to already know the city they are asking about.
+--
+-- INPUT RULES, each a 22023 (invalid_parameter_value, a 400 through
+-- PostgREST) with a message the UI can show as-is:
+--   city   required; at most 60 characters trimmed; at least 2 characters
+--          once normalised. The same range merchants_location_required puts on
+--          stored cities, so nothing stored is unfindable.
+--   state  optional exact filter; trimmed and upper-cased, then must be two
+--          letters. Blank means no filter.
+-- A city with no accounts is NOT an error: {"results": [], "has_more": false}.
+--
+-- STATUS RULE. merchants.status is 'active' | 'inactive' | 'other' -- there is
+-- no 'closed' or 'cancelled'. 'inactive' is the closed state here (an account
+-- that no longer processes), so it is the one excluded; 'active' and 'other'
+-- are returned. Written as an exclusion rather than an allow-list on purpose:
+-- the question is "is this city already covered", and an unknown future
+-- status should show up in the answer rather than silently vanish from it.
+--
+-- CAP: 100 accounts, ordered by state, dba, id, plus `has_more` when there
+-- were more. Fetches 101 to know, and never says how many more.
+--
+-- NOT AUDITED. Neither precedent writes an audit row per call --
+-- check_duplicates() and pre_app_secrets_presence() both log nothing -- so
+-- there is no existing mechanism to follow, and this function does not invent
+-- one. audit_log has no detail column to record the city asked about anyway.
+--
+-- The parameters are named `city` and `state` because that is the RPC's
+-- public argument list; they collide with the merchants columns, so every
+-- column reference below is qualified with `m.` and every parameter reference
+-- with the function name.
+-- =====================================================================
+create or replace function accounts_in_city(city text, state text default null)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  raw_city  text := btrim(coalesce(accounts_in_city.city, ''));
+  state_key text := nullif(upper(btrim(coalesce(accounts_in_city.state, ''))), '');
+  city_key  text;
+  caller_is_admin boolean;
+  result_rows jsonb;
+  more boolean;
+begin
+  if not is_active_agent() then
+    raise exception 'not authorised' using errcode = 'PT403';
+  end if;
+
+  if raw_city = '' then
+    raise exception 'Enter a city.' using errcode = '22023';
+  end if;
+  if char_length(raw_city) > 60 then
+    raise exception 'A city name is at most 60 characters.' using errcode = '22023';
+  end if;
+  city_key := norm_city(raw_city);
+  if city_key is null or char_length(city_key) < 2 then
+    raise exception 'Enter at least 2 letters of the city name.' using errcode = '22023';
+  end if;
+  if state_key is not null and state_key !~ '^[A-Z]{2}$' then
+    raise exception 'State must be a two-letter code.' using errcode = '22023';
+  end if;
+
+  caller_is_admin := is_admin();
+
+  select coalesce(jsonb_agg(r.row_json order by r.rn) filter (where r.rn <= 100),
+                  '[]'::jsonb),
+         count(*) > 100
+    into result_rows, more
+    from (
+      select row_number() over (order by m.state, lower(m.dba), m.id) as rn,
+             case when caller_is_admin then
+               jsonb_build_object(
+                 'merchant_id', m.id,
+                 'dba', m.dba,
+                 'legal_business_name', m.legal_business_name,
+                 'city', m.city,
+                 'state', m.state,
+                 'street', m.street,
+                 'zip', m.zip,
+                 'status', m.status,
+                 'agent_id', m.agent_id,
+                 'agent_name', p.full_name)
+             else
+               jsonb_build_object(
+                 'dba', m.dba,
+                 'legal_business_name', m.legal_business_name,
+                 'city', m.city,
+                 'state', m.state)
+             end as row_json
+        from merchants m
+        left join profiles p on p.id = m.agent_id
+       where norm_city(m.city) = city_key
+         and (state_key is null or m.state = state_key)
+         and m.status <> 'inactive'
+       order by rn
+       limit 101
+    ) r;
+
+  return jsonb_build_object('results', result_rows, 'has_more', more);
+end;
+$$;
+
+revoke all on function accounts_in_city(text, text) from public;
+grant execute on function accounts_in_city(text, text) to authenticated, service_role;
 
 
 -- =====================================================================

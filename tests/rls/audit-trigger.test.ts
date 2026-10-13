@@ -92,8 +92,8 @@ describe("a rep's own edits are not logged", () => {
   it("stays silent across a rep's whole own-row lifecycle", async () => {
     await asUser(db, AGENT_ID);
     await db.exec(`
-      insert into merchants (agent_id, dba, status)
-      values ('${AGENT_ID}', 'Rep Own Co', 'active');
+      insert into merchants (agent_id, dba, status, city, state)
+      values ('${AGENT_ID}', 'Rep Own Co', 'active', 'Nashville', 'TN');
     `);
     await asPlatform(db);
     const id = await merchantId(db, "Rep Own Co");
@@ -162,8 +162,8 @@ describe("cross-agent mutations are logged", () => {
     // the owner has no auth.uid().
     await asUser(db, ADMIN_ID);
     await db.exec(`
-      insert into merchants (agent_id, dba, status)
-      values ('${ADMIN_ID}', 'Admin Own Co', 'active');
+      insert into merchants (agent_id, dba, status, city, state)
+      values ('${ADMIN_ID}', 'Admin Own Co', 'active', 'Nashville', 'TN');
     `);
     const id = await merchantId(db, "Admin Own Co");
 
@@ -205,8 +205,8 @@ describe("INSERT is covered too", () => {
     // existed that left no trace anywhere.
     await asUser(db, ADMIN_ID);
     await db.exec(`
-      insert into merchants (agent_id, dba, status)
-      values ('${AGENT_ID}', 'Admin Made This', 'active');
+      insert into merchants (agent_id, dba, status, city, state)
+      values ('${AGENT_ID}', 'Admin Made This', 'active', 'Nashville', 'TN');
     `);
 
     const id = await merchantId(db, "Admin Made This");
@@ -265,7 +265,7 @@ describe("all seven admin-insertable tables are covered", () => {
   const CASES: { table: string; insert: string }[] = [
     {
       table: "merchants",
-      insert: `insert into merchants (agent_id, dba, status) values ('${AGENT_ID}', 'T Merchant', 'active')`,
+      insert: `insert into merchants (agent_id, dba, status, city, state) values ('${AGENT_ID}', 'T Merchant', 'active', 'Nashville', 'TN')`,
     },
     {
       table: "leads",

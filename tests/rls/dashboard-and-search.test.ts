@@ -276,9 +276,9 @@ describe("search_crm is scoped by the caller's own RLS", () => {
         ('${AGENT_ID}', 'Limit Lead 1'),
         ('${AGENT_ID}', 'Limit Lead 2'),
         ('${AGENT_ID}', 'Limit Lead 3');
-      insert into merchants (agent_id, dba, status) values
-        ('${AGENT_ID}', 'Limit Merchant 1', 'active'),
-        ('${AGENT_ID}', 'Limit Merchant 2', 'active');
+      insert into merchants (agent_id, dba, status, city, state) values
+        ('${AGENT_ID}', 'Limit Merchant 1', 'active', 'Nashville', 'TN'),
+        ('${AGENT_ID}', 'Limit Merchant 2', 'active', 'Nashville', 'TN');
     `);
 
     const hits = await search(db, AGENT_ID, "Limit", 1);

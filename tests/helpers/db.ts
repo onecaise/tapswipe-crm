@@ -109,6 +109,24 @@ export async function migrationsBefore(file: string): Promise<string[]> {
   return files.slice(0, index);
 }
 
+/**
+ * The named migration and every one AFTER it, in apply order: the other half of
+ * migrationsBefore. Together they let a test seed rows that predate a
+ * migration -- legacy merchants with no location, which merchants_location_
+ * required now refuses to insert -- and then bring the schema up to date
+ * around them, the way a real project got there.
+ */
+export async function migrationsFrom(file: string): Promise<string[]> {
+  const files = (await readdir(MIGRATIONS_DIR))
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+  const index = files.indexOf(file);
+  if (index === -1) {
+    throw new Error(`No such migration: ${file}`);
+  }
+  return files.slice(index);
+}
+
 /** Raw SQL of one migration, for tests that apply it mid-scenario. */
 export async function readMigration(file: string): Promise<string> {
   return readFile(path.join(MIGRATIONS_DIR, file), "utf8");
@@ -224,6 +242,22 @@ export const OTHER_AGENT_ID = "33333333-3333-3333-3333-333333333333";
  */
 export async function seed(db: TestDb): Promise<void> {
   await asPlatform(db);
+  // merchants_location_required (20261013130000) refuses a new merchant with
+  // no city or state, but seed() also runs against migration prefixes that
+  // predate the columns -- so it asks the catalog which schema it is seeding.
+  // Against a prefix the merchants are legacy-shaped (no location), which is
+  // also exactly the shape the missing-location tests need.
+  const hasLocation =
+    (
+      await rows(
+        db,
+        `select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'merchants'
+            and column_name = 'city'`,
+      )
+    ).length > 0;
+  const loc = (city: string, state: string) =>
+    hasLocation ? `, '${city}', '${state}'` : "";
   await db.exec(`
     insert into auth.users (id, email) values
       ('${ADMIN_ID}', 'admin@tapswipe.test'),
@@ -266,12 +300,12 @@ export async function seed(db: TestDb): Promise<void> {
                                  'Agent Sheet Converted', 'Cal Convert', '555-0103', 'Already promoted.', 'converted'),
       ('${OTHER_AGENT_ID}', null, 'Other Sheet Open',     'Oli Other',  '555-0201', 'Other agent notes.', 'open');
 
-    insert into merchants (agent_id, mid, dba, legal_business_name, status, processor, split_agent_pct, split_company_pct)
+    insert into merchants (agent_id, mid, dba, legal_business_name, status, processor, split_agent_pct, split_company_pct${hasLocation ? ", city, state" : ""})
     values
-      ('${AGENT_ID}',       'MID-AGENT-1', 'Agent Active Co',   'Agent Active Co LLC',   'active',   'TSYS',  60.00, 40.00),
-      ('${AGENT_ID}',       'MID-AGENT-2', 'Agent Inactive Co', 'Agent Inactive Co LLC', 'inactive', 'FDMS',  55.00, 45.00),
-      ('${OTHER_AGENT_ID}', 'MID-OTHER-1', 'Other Active Co',   'Other Active Co LLC',   'active',   'TSYS',  50.00, 50.00),
-      ('${OTHER_AGENT_ID}', 'MID-OTHER-2', 'Other Other Co',    'Other Other Co LLC',    'other',    'Elavon', 70.00, 30.00);
+      ('${AGENT_ID}',       'MID-AGENT-1', 'Agent Active Co',   'Agent Active Co LLC',   'active',   'TSYS',  60.00, 40.00${loc("Nashville", "TN")}),
+      ('${AGENT_ID}',       'MID-AGENT-2', 'Agent Inactive Co', 'Agent Inactive Co LLC', 'inactive', 'FDMS',  55.00, 45.00${loc("Nashville", "TN")}),
+      ('${OTHER_AGENT_ID}', 'MID-OTHER-1', 'Other Active Co',   'Other Active Co LLC',   'active',   'TSYS',  50.00, 50.00${loc("Nashville", "TN")}),
+      ('${OTHER_AGENT_ID}', 'MID-OTHER-2', 'Other Other Co',    'Other Other Co LLC',    'other',    'Elavon', 70.00, 30.00${loc("Memphis", "TN")});
 
     -- Documents. owner_id is resolved by lookup rather than a hardcoded serial.
     -- One per agent against a merchant, plus one against a lead, so the
@@ -340,11 +374,16 @@ export async function seed(db: TestDb): Promise<void> {
     -- core Postgres and a GUC nobody reads is inert.
     select set_config('tapswipe.pre_app_transition', 'on', true);
 
-    insert into pre_apps (agent_id, status, dba_name, legal_business_name)
+    -- A business address on each, because approve_pre_app() carries it onto
+    -- the merchant and refuses a pre-app without a city and state
+    -- (20261013130000). The columns are in the initial schema, so this is safe
+    -- against every migration prefix.
+    insert into pre_apps (agent_id, status, dba_name, legal_business_name,
+                          physical_address, city, state, zip)
     values
-      ('${AGENT_ID}',       'draft',     'Agent Draft App',     'Agent Draft App LLC'),
-      ('${AGENT_ID}',       'submitted', 'Agent Submitted App', 'Agent Submitted App LLC'),
-      ('${OTHER_AGENT_ID}', 'draft',     'Other Draft App',     'Other Draft App LLC');
+      ('${AGENT_ID}',       'draft',     'Agent Draft App',     'Agent Draft App LLC',     '100 Main St',  'Nashville', 'TN', '37201'),
+      ('${AGENT_ID}',       'submitted', 'Agent Submitted App', 'Agent Submitted App LLC', '200 Broadway', 'Nashville', 'TN', '37203'),
+      ('${OTHER_AGENT_ID}', 'draft',     'Other Draft App',     'Other Draft App LLC',     '9 Beale St',   'Memphis',   'TN', '38103');
 
     select set_config('tapswipe.pre_app_transition', '', true);
 

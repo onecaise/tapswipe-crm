@@ -172,7 +172,7 @@ describe("merchants write scoping", () => {
 
     await expect(
       db.exec(
-        `insert into merchants (agent_id, dba) values ('${OTHER_AGENT_ID}', 'Planted Co');`,
+        `insert into merchants (agent_id, dba, city, state) values ('${OTHER_AGENT_ID}', 'Planted Co', 'Nashville', 'TN');`,
       ),
     ).rejects.toThrow(/row-level security/i);
   });
@@ -181,7 +181,7 @@ describe("merchants write scoping", () => {
     await asUser(db, AGENT_ID);
 
     await db.exec(
-      `insert into merchants (agent_id, dba) values ('${AGENT_ID}', 'My New Co');`,
+      `insert into merchants (agent_id, dba, city, state) values ('${AGENT_ID}', 'My New Co', 'Nashville', 'TN');`,
     );
 
     const result = await rows<MerchantRow>(db, listQuery());
@@ -371,8 +371,8 @@ describe("merchants detail lookup", () => {
  */
 describe("merchant split must total 100", () => {
   const insertSplit = (agent: string, company: string) => `
-    insert into merchants (agent_id, dba, split_agent_pct, split_company_pct)
-    values ('${AGENT_ID}', 'Split Test', ${agent}, ${company})
+    insert into merchants (agent_id, dba, split_agent_pct, split_company_pct, city, state)
+    values ('${AGENT_ID}', 'Split Test', ${agent}, ${company}, 'Nashville', 'TN')
   `;
 
   it("accepts a pair totalling 100", async () => {

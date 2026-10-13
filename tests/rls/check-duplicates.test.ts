@@ -128,8 +128,8 @@ async function seedDuplicates(db: TestDb): Promise<void> {
     -- and a redaction assertion over the whole result set fails on a row that
     -- is correctly NOT redacted. Distinctive names keep this test about
     -- redaction rather than about trigram scores.
-    insert into merchants (agent_id, dba, legal_business_name, status)
-    values ('${OTHER_AGENT_ID}', 'Zephyr Hardware Supply', 'Zephyr Hardware Supply LLC', 'active');
+    insert into merchants (agent_id, dba, legal_business_name, status, city, state)
+    values ('${OTHER_AGENT_ID}', 'Zephyr Hardware Supply', 'Zephyr Hardware Supply LLC', 'active', 'Memphis', 'TN');
 
     insert into ghost_sheets (agent_id, dba, contact_name)
     values ('${OTHER_AGENT_ID}', 'Zephyr Hardware Supply', 'Zed Zephyr');
@@ -592,8 +592,8 @@ describe("all three tables are checked", () => {
     await db.exec(`
       insert into leads (agent_id, dba) values ('${AGENT_ID}', 'Crossover Co');
       insert into ghost_sheets (agent_id, dba) values ('${AGENT_ID}', 'Crossover Co');
-      insert into merchants (agent_id, dba, status)
-        values ('${AGENT_ID}', 'Crossover Co', 'active');
+      insert into merchants (agent_id, dba, status, city, state)
+        values ('${AGENT_ID}', 'Crossover Co', 'active', 'Nashville', 'TN');
     `);
 
     const result = await check(db, AGENT_ID, { dba_input: "Crossover Co" });

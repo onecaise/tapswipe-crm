@@ -176,10 +176,10 @@ async function seedFilters(db: TestDb): Promise<void> {
      where id = '${OTHER_AGENT_ID}';
 
     insert into merchants
-      (agent_id, mid, dba, legal_business_name, status, processor)
+      (agent_id, mid, dba, legal_business_name, status, processor, city, state)
     values
-      ('${MANAGER_ID}', 'MID-MGR-1', 'Manager Co One', 'Manager Co One LLC', 'active', 'TSYS'),
-      ('${MANAGER_ID}', 'MID-MGR-2', 'Manager Co Two', 'Manager Co Two LLC', 'active', 'TSYS');
+      ('${MANAGER_ID}', 'MID-MGR-1', 'Manager Co One', 'Manager Co One LLC', 'active', 'TSYS', 'Nashville', 'TN'),
+      ('${MANAGER_ID}', 'MID-MGR-2', 'Manager Co Two', 'Manager Co Two LLC', 'active', 'TSYS', 'Nashville', 'TN');
 
     insert into leads (agent_id, dba, status)
       values ('${MANAGER_ID}', 'Manager Lead', 'new');
