@@ -783,10 +783,9 @@ create table merchants (
   -- column has no pre-app to point at.
   pre_app_id int,
   -- Where the business is (20261013130000). City and state are REQUIRED for
-  -- every row written from here on -- merchants_location_required below --
-  -- and street and zip are optional. Nullable at the column level only
-  -- because the constraint ships `not valid`: every merchant that predates
-  -- these columns has no location and nothing to backfill it from.
+  -- every NEW merchant -- merchants_location_guard below -- and street and
+  -- zip are optional. Nullable because every merchant that predates these
+  -- columns has no location, and those must stay editable.
   --
   -- `street` rather than `address` (the leads/pre_apps spelling) because the
   -- merchant form asks for exactly that and nothing more -- no suite line, no
@@ -851,7 +850,7 @@ create table merchants (
 -- No `set search_path`, same reasoning as the dup_* family (pg_catalog only,
 -- and a SET clause blocks inlining). DO NOT `create or replace` it with
 -- different behaviour without `reindex index idx_merchants_norm_city` AND
--- re-checking merchants_location_required: Postgres keeps index entries
+-- re-checking merchants_location_format: Postgres keeps index entries
 -- computed by the old definition, and a city search that silently stops
 -- matching looks exactly like a city with no accounts.
 create or replace function norm_city(input text)
@@ -865,37 +864,86 @@ $$;
 revoke all on function norm_city(text) from public;
 grant execute on function norm_city(text) to authenticated, service_role;
 
--- Required from here on, NOT VALID for what came before: the
--- leads_status_vocabulary arrangement. Every insert and every update is
--- checked; the rows that predate these columns are not, because there is no
--- source to fill them from that a human has not got to confirm -- a city
--- guessed from a processor statement and printed on a proposal is worse than
--- a blank one an admin can see is blank. Admins get the list at
--- /admin/merchants/missing-location and a count on the dashboard; fix the rows
--- THROUGH THE APP (so merchants_audit_cross_agent records who supplied each
--- location), then `alter table merchants validate constraint
--- merchants_location_required;` in a follow-up migration. Review query:
+-- REQUIRED FOR NEW MERCHANTS ONLY -- and this is the second design, for a
+-- reason worth keeping in view.
+--
+-- The first version of 20261013130000 added a table-wide
+-- `check (city and state present) NOT VALID`. NOT VALID only skips the rows
+-- that exist when the constraint is added; Postgres still enforces it on
+-- EVERY LATER UPDATE of those rows. So on a project full of merchants that
+-- predate the columns, an admin could not change a merchant's status or MID
+-- without also typing a location -- every existing merchant became
+-- read-only. tests/rls/merchant-location.test.ts pins the edits that design
+-- refused ("an existing merchant with no location stays editable"); they ran
+-- red against it before this replaced it. The test fixtures had hidden it:
+-- seed() was taught to give every merchant a location, so no existing test
+-- ever updated a location-less row.
+--
+-- So the rule is split by what it applies to:
+--
+--   merchants_location_format   (a CHECK, validated, NULL-tolerant)
+--       binds every row on every write, and only says what a location
+--       looks like WHEN ONE IS PRESENT: a city that normalises to 2+
+--       characters and is at most 60 trimmed (the range accounts_in_city()
+--       searches, so nothing stored is unfindable), and a state of two
+--       upper-case letters. A legacy row with neither passes. Plain, not
+--       NOT VALID: every existing row is NULL/NULL, which it accepts.
+--
+--   merchants_location_guard    (a BEFORE INSERT OR UPDATE trigger)
+--       INSERT: a new merchant must have both. This is "required for new
+--       data" -- a CHECK cannot tell an insert from an update, which is the
+--       whole reason this is a trigger.
+--       UPDATE: a merchant that HAS a complete location cannot have it
+--       removed. A legacy merchant with none is untouched by this branch, so
+--       it stays fully editable; once a location is supplied it sticks.
+--       Changing a location to another valid one is always allowed.
+--
+-- Raised as PT422 with a sentence, which lib/db-errors.ts passes through
+-- verbatim, rather than 23514 naming a constraint a rep has never heard of.
+--
+-- No backfill in a migration: scripts/backfill-merchant-location.sql fills
+-- what a linked pre-app can supply, reviewed and run by hand. Admins see the
+-- rest at /admin/merchants/missing-location. Review query:
 --   select id, agent_id, dba, status from merchants
 --    where city is null or state is null order by id;
---
--- Consequence worth knowing before it surprises someone: because an UPDATE is
--- checked, a legacy merchant cannot be edited AT ALL -- not even its status --
--- until it is given a city and state. The merchant form requires both, so
--- the save that fixes it is the same save.
---
--- Every clause is coalesce'd to false. A CHECK that evaluates to NULL PASSES,
--- so `state ~ '^[A-Z]{2}$'` alone would admit a NULL state.
---
--- The city must normalise to 2..60 characters (measured on the trimmed input
--- for the upper bound, which is never shorter than the key): exactly the range
--- accounts_in_city() accepts, so every stored city is findable and no stored
--- city is one the search would refuse to look for.
 alter table merchants
-  add constraint merchants_location_required check (
-    coalesce(char_length(norm_city(city)) >= 2, false)
-    and coalesce(char_length(btrim(city)) <= 60, false)
-    and coalesce(state ~ '^[A-Z]{2}$', false)
-  ) not valid;
+  add constraint merchants_location_format check (
+    (city is null
+      or (char_length(btrim(city)) <= 60
+          and coalesce(char_length(norm_city(city)), 0) >= 2))
+    and (state is null or state ~ '^[A-Z]{2}$')
+  );
+
+create or replace function enforce_merchant_location()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if tg_op = 'INSERT' then
+    if NEW.city is null or NEW.state is null then
+      raise exception 'A new merchant needs a city and a two-letter state.'
+        using errcode = 'PT422';
+    end if;
+  elsif OLD.city is not null and OLD.state is not null
+        and (NEW.city is null or NEW.state is null) then
+    raise exception 'A merchant''s city and state can be changed but not removed.'
+      using errcode = 'PT422';
+  end if;
+  -- Shape (2..60 characters, a two-letter code) is merchants_location_format's
+  -- job, on every row. This trigger only decides WHETHER one is required.
+  return NEW;
+end;
+$$;
+
+-- A trigger function needs no EXECUTE grant to fire, so nobody gets one; the
+-- enforce_quote_version() convention.
+revoke all on function enforce_merchant_location() from public;
+revoke all on function enforce_merchant_location() from anon, authenticated;
+
+create trigger merchants_location_guard
+  before insert or update of city, state on merchants
+  for each row execute function enforce_merchant_location();
 
 alter table merchants enable row level security;
 
@@ -5145,7 +5193,7 @@ begin
   --
   -- LOCATION (20261013130000). The business address is carried across --
   -- physical_address into street, city, state upper-cased, zip -- because
-  -- merchants_location_required binds this insert like any other. A pre-app
+  -- merchants_location_guard refuses a new merchant without one. A pre-app
   -- may legitimately reach 'submitted' without a city or state (the wizard
   -- has never required them), and such a pre-app CANNOT be approved: it is
   -- refused here by name, before any write, rather than left to fail on the
@@ -6007,7 +6055,7 @@ grant execute on function check_duplicates(
 -- INPUT RULES, each a 22023 (invalid_parameter_value, a 400 through
 -- PostgREST) with a message the UI can show as-is:
 --   city   required; at most 60 characters trimmed; at least 2 characters
---          once normalised. The same range merchants_location_required puts on
+--          once normalised. The same range merchants_location_format puts on
 --          stored cities, so nothing stored is unfindable.
 --   state  optional exact filter; trimmed and upper-cased, then must be two
 --          letters. Blank means no filter.

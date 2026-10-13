@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import fs from "node:fs";
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
@@ -758,6 +759,7 @@ export async function seedE2E(): Promise<SeedResult> {
     store,
   );
   await ensureCityAccounts(db, ids);
+  ensureLegacyMerchant(ids.agent);
 
   return {
     ids,
@@ -799,6 +801,47 @@ export const CITY_FIXTURE = {
   /** One more than accounts_in_city() returns, for the "more results" state. */
   many: { city: "Manyford", state: "KS", count: 101 },
 } as const;
+
+/**
+ * A merchant with NO location, in the agent's book, for the edit-form specs.
+ *
+ * Nothing in the app can create one any more — merchants_location_guard
+ * refuses a location-less INSERT from every role, the service role included —
+ * yet every hosted project is full of them, because they predate the columns.
+ * So this fixture does what history did: it writes the row underneath the
+ * trigger, as the database superuser over `docker exec psql`, with
+ * `session_replication_role = replica` (which skips user triggers) for one
+ * transaction. LOCAL STACK ONLY: localStackConfig() has already refused a
+ * non-local host by the time this runs, and the container name is the local
+ * stack's. Converges by MID, and puts the row back to bare every run.
+ */
+export const LEGACY_MERCHANT = {
+  mid: "E2E-LEGACY-NOLOC",
+  dba: "E2E Legacy No Location",
+} as const;
+
+function ensureLegacyMerchant(agentId: string): void {
+  localStackConfig(); // the non-local guard, before touching anything
+  const projectId = /^project_id\s*=\s*"([^"]+)"/m.exec(
+    fs.readFileSync("supabase/config.toml", "utf8"),
+  )?.[1];
+  if (!projectId) throw new Error("no project_id in supabase/config.toml");
+  const sql = `
+    begin;
+    set local session_replication_role = replica;
+    insert into public.merchants (agent_id, mid, dba, legal_business_name, status)
+    values ('${agentId}', '${LEGACY_MERCHANT.mid}', '${LEGACY_MERCHANT.dba}',
+            '${LEGACY_MERCHANT.dba} LLC', 'active')
+    on conflict (mid) do update
+      set agent_id = excluded.agent_id, dba = excluded.dba, status = 'active',
+          processor = null, street = null, city = null, state = null, zip = null;
+    commit;
+  `;
+  execSync(
+    `docker exec -i supabase_db_${projectId} psql -U postgres -v ON_ERROR_STOP=1 -q`,
+    { input: sql, stdio: ["pipe", "ignore", "inherit"] },
+  );
+}
 
 async function ensureCityAccounts(
   db: SupabaseClient,
@@ -2520,4 +2563,27 @@ export async function importedProfiles(
     role: string;
     must_change_password: boolean;
   }[];
+}
+
+/**
+ * A merchant's id and location by MID, read as the service role. For specs
+ * that open a seeded merchant's page and then check what was saved.
+ */
+export async function merchantByMid(mid: string): Promise<{
+  id: number;
+  status: string;
+  city: string | null;
+  state: string | null;
+}> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await db
+    .from("merchants")
+    .select("id, status, city, state")
+    .eq("mid", mid)
+    .single();
+  if (error || !data) throw new Error(`merchant ${mid}: ${error?.message}`);
+  return data;
 }

@@ -52,20 +52,78 @@ async function insertAs(
   );
 }
 
-describe("merchants_location_required", () => {
-  it("ships NOT VALID, so the legacy rows survive the migration untouched", async () => {
+/**
+ * THE PRODUCTION PROBLEM the first design had, pinned. A NOT VALID CHECK skips
+ * the rows that exist when it is added, but it is enforced on EVERY later
+ * UPDATE of those rows — so with a table-wide "city and state required" CHECK,
+ * an admin could not change a legacy merchant's status or MID without also
+ * inventing a location. These ran red against that design (the as-pushed
+ * 20261013130000) before the redesign, and are the proof it is gone.
+ *
+ * Each runs against a merchant seed() wrote BEFORE the migration (no city,
+ * no state), and first asserts that is still true, so none can pass by
+ * touching a row that happens to have a location.
+ */
+describe("an existing merchant with no location stays editable", () => {
+  async function legacy(dba: string): Promise<{ city: string | null; state: string | null }> {
     await asPlatform(db);
-    const [c] = await rows<{ convalidated: boolean }>(
+    const [m] = await rows<{ city: string | null; state: string | null }>(
       db,
-      `select convalidated from pg_constraint
-        where conname = 'merchants_location_required'`,
+      `select city, state from merchants where dba = '${dba}'`,
     );
-    expect(c.convalidated).toBe(false);
+    return m;
+  }
 
-    // Non-vacuity: the four seed() merchants are really there, really legacy.
+  it("lets an admin change its status", async () => {
+    expect(await legacy("Other Other Co")).toEqual({ city: null, state: null });
+    await asUser(db, ADMIN_ID);
+    await db.exec(`update merchants set status = 'inactive' where dba = 'Other Other Co'`);
+    await asPlatform(db);
+    const [m] = await rows<{ status: string }>(
+      db,
+      `select status from merchants where dba = 'Other Other Co'`,
+    );
+    expect(m.status).toBe("inactive");
+    await db.exec(`update merchants set status = 'other' where dba = 'Other Other Co'`);
+  });
+
+  it("lets an admin change its MID", async () => {
+    expect(await legacy("Other Active Co")).toEqual({ city: null, state: null });
+    await asUser(db, ADMIN_ID);
+    await db.exec(`update merchants set mid = 'MID-OTHER-1B' where dba = 'Other Active Co'`);
+    await asPlatform(db);
+    const [m] = await rows<{ mid: string }>(
+      db,
+      `select mid from merchants where dba = 'Other Active Co'`,
+    );
+    expect(m.mid).toBe("MID-OTHER-1B");
+    await db.exec(`update merchants set mid = 'MID-OTHER-1' where dba = 'Other Active Co'`);
+  });
+
+  it("lets the owning rep edit it too", async () => {
+    expect(await legacy("Agent Active Co")).toEqual({ city: null, state: null });
+    await asUser(db, AGENT_ID);
+    await db.exec(`update merchants set processor = 'Elavon' where dba = 'Agent Active Co'`);
+    await asPlatform(db);
+    await db.exec(`update merchants set processor = 'TSYS' where dba = 'Agent Active Co'`);
+  });
+});
+
+describe("a NEW merchant must have a location (merchants_location_guard)", () => {
+  it("has no table-wide required CHECK left — only the NULL-tolerant format one", async () => {
+    await asPlatform(db);
+    const c = await rows<{ conname: string; convalidated: boolean }>(
+      db,
+      `select conname, convalidated from pg_constraint
+        where conrelid = 'merchants'::regclass and conname like 'merchants_location%'
+        order by conname`,
+    );
+    expect(c).toEqual([{ conname: "merchants_location_format", convalidated: true }]);
+
+    // Non-vacuity: the legacy seed() merchants are really there, really bare.
     const legacy = await rows<{ n: number }>(
       db,
-      `select count(*)::int as n from merchants where city is null or state is null`,
+      `select count(*)::int as n from merchants where city is null and state is null`,
     );
     expect(legacy[0].n).toBe(4);
   });
@@ -78,35 +136,68 @@ describe("merchants_location_required", () => {
 
   it.each([
     ["no city", null, "TN"],
+    ["no state", "Nashville", null],
+    ["neither", null, null],
+  ])("refuses a new merchant with %s, by name", async (_label, city, state) => {
+    await expect(insertAs(AGENT_ID, { city, state })).rejects.toThrow(
+      /A new merchant needs a city and a two-letter state/,
+    );
+  });
+
+  it("refuses an admin too — it is a trigger, not a policy", async () => {
+    await expect(insertAs(ADMIN_ID, { city: null, state: "TN" })).rejects.toThrow(
+      /needs a city/,
+    );
+  });
+
+  it("refuses the platform owner too, so a fixture or a function cannot skip it", async () => {
+    await asPlatform(db);
+    await expect(
+      db.exec(`insert into merchants (agent_id, dba) values ('${AGENT_ID}', 'Owner Bare Co')`),
+    ).rejects.toThrow(/needs a city/);
+  });
+
+  it("reports PT422, which the forms show verbatim", async () => {
+    await asUser(db, AGENT_ID);
+    try {
+      await db.query(`insert into merchants (agent_id, dba) values ('${AGENT_ID}', 'Code Co')`);
+      throw new Error("expected a refusal");
+    } catch (error) {
+      expect((error as { code?: string }).code).toBe("PT422");
+    }
+  });
+});
+
+describe("merchants_location_format — shape when present, on every row", () => {
+  it.each([
     ["a blank city", "   ", "TN"],
     ["a city that is only punctuation", "...", "TN"],
     ["a one-letter city", "X", "TN"],
     ["a city over 60 characters", "A".repeat(61), "TN"],
-    // The coalesce in the CHECK exists for this one: `state ~ ...` is NULL for
-    // a NULL state, and a CHECK that evaluates to NULL passes.
-    ["no state", "Nashville", null],
     ["a lower-case state", "Nashville", "tn"],
     ["a state name instead of a code", "Nashville", "Tennessee"],
-  ])("refuses %s", async (_label, city, state) => {
+  ])("refuses %s on insert", async (_label, city, state) => {
     await expect(insertAs(AGENT_ID, { city, state })).rejects.toThrow(
-      /merchants_location_required/,
+      /merchants_location_format/,
     );
   });
 
-  it("refuses an admin too — it is a constraint, not a policy", async () => {
-    await expect(insertAs(ADMIN_ID, { city: null, state: "TN" })).rejects.toThrow(
-      /merchants_location_required/,
-    );
-  });
-
-  it("refuses an UPDATE to a legacy merchant that leaves it without a location", async () => {
-    await asUser(db, AGENT_ID);
+  it("refuses a malformed location on an UPDATE of a legacy merchant", async () => {
+    await asUser(db, ADMIN_ID);
     await expect(
-      db.exec(`update merchants set status = 'other' where dba = 'Agent Inactive Co'`),
-    ).rejects.toThrow(/merchants_location_required/);
+      db.exec(`update merchants set city = 'Nashville', state = 'Tenn' where dba = 'Other Other Co'`),
+    ).rejects.toThrow(/merchants_location_format/);
   });
 
-  it("lets the same UPDATE through once it supplies the location", async () => {
+  it("accepts exactly 60 characters", async () => {
+    await expect(
+      insertAs(AGENT_ID, { city: "B".repeat(60), state: "TN", dba: "Sixty Co" }),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe("once a merchant has a location", () => {
+  it("lets a legacy merchant be given one", async () => {
     await asUser(db, AGENT_ID);
     await db.exec(
       `update merchants set city = 'Nashville', state = 'TN', street = '1 Main St', zip = '37201'
@@ -118,6 +209,27 @@ describe("merchants_location_required", () => {
       `select city, street from merchants where dba = 'Agent Inactive Co'`,
     );
     expect(m).toEqual({ city: "Nashville", street: "1 Main St" });
+  });
+
+  it("lets it be changed to another valid one", async () => {
+    await asUser(db, ADMIN_ID);
+    await db.exec(`update merchants set city = 'Memphis' where dba = 'Agent Inactive Co'`);
+    await db.exec(`update merchants set city = 'Nashville' where dba = 'Agent Inactive Co'`);
+  });
+
+  it.each([
+    ["city", "city = null"],
+    ["state", "state = null"],
+  ])("refuses removing its %s", async (_label, set) => {
+    await asUser(db, ADMIN_ID);
+    await expect(
+      db.exec(`update merchants set ${set} where dba = 'Agent Inactive Co'`),
+    ).rejects.toThrow(/can be changed but not removed/);
+  });
+
+  it("still lets every other column be edited", async () => {
+    await asUser(db, AGENT_ID);
+    await db.exec(`update merchants set processor = 'FDMS' where dba = 'Agent Inactive Co'`);
   });
 });
 

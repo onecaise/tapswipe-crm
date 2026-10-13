@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Callout } from "@/components/callout";
 
 type FormState = {
   dba: string;
@@ -93,11 +94,12 @@ function toPayload(form: FormState) {
     split_agent_pct: company === null ? null : num(form.split_agent_pct),
     split_company_pct: company,
     date_added: text(form.date_added),
-    // City and state are required (merchants_location_required); the form
-    // refuses a blank one before it gets here, so these are never sent empty.
+    // Blank goes as NULL, never "": a legacy merchant with no location is
+    // saved with none (merchants_location_guard only requires one on INSERT),
+    // and merchants_location_format would refuse an empty string.
     street: text(form.street),
-    city: form.city.trim(),
-    state: form.state,
+    city: text(form.city),
+    state: form.state === "" ? null : form.state,
     zip: text(form.zip),
     // updated_at is deliberately absent — the set_updated_at() trigger owns it.
   };
@@ -113,6 +115,14 @@ export function MerchantForm({
   agentId: string;
 }) {
   const isEdit = merchant !== undefined;
+  // Required for a NEW merchant, and for one that already has a location
+  // (the database will not let it be removed). Optional only on an existing
+  // merchant that predates the columns — so it can still be edited — and
+  // that case is announced above the fields rather than left to look normal.
+  const hadLocation =
+    merchant !== undefined && merchant.city !== null && merchant.state !== null;
+  const locationRequired = !isEdit || hadLocation;
+  const missingLocation = isEdit && !hadLocation;
   const [form, setForm] = useState<FormState>(() => toFormState(merchant));
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -134,9 +144,10 @@ export function MerchantForm({
     setError(null);
 
     // `required` on the inputs stops an empty submit, but not one that is
-    // only spaces, and zip has a shape. The database is the boundary for the
-    // first (merchants_location_required); this says it in words first.
-    const problem = locationProblem(form);
+    // only spaces, a half-filled location, or a malformed ZIP. The database
+    // is the boundary (merchants_location_guard / _format); this says it in
+    // words first.
+    const problem = locationProblem(form, locationRequired);
     if (problem !== null) {
       setError(problem);
       return;
@@ -206,6 +217,71 @@ export function MerchantForm({
           onInput={onInput}
           className="flex flex-col gap-6"
         >
+          <fieldset className="flex flex-col gap-4 rounded-lg border p-4">
+            <legend className="px-1 text-sm font-semibold">Location</legend>
+            {missingLocation && (
+              <Callout tone="warning">
+                <p data-testid="merchant-missing-location">
+                  This merchant has no location on record. Add its city and
+                  state if you can — every new merchant needs them. You can
+                  still save other changes without one.
+                </p>
+              </Callout>
+            )}
+            <div className="grid gap-6 sm:grid-cols-2">
+              <div className="grid gap-2 sm:col-span-2">
+                <Label htmlFor="street">Street</Label>
+                <Input
+                  id="street"
+                  autoComplete="street-address"
+                  value={form.street}
+                  onChange={(e) => set("street", e.target.value)}
+                />
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="city">{locationRequired ? "City *" : "City"}</Label>
+                <Input
+                  id="city"
+                  required={locationRequired}
+                  maxLength={MAX_CITY_LENGTH}
+                  autoComplete="address-level2"
+                  value={form.city}
+                  onChange={(e) => set("city", e.target.value)}
+                />
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="state">{locationRequired ? "State *" : "State"}</Label>
+                <select
+                  id="state"
+                  required={locationRequired}
+                  className="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+                  value={form.state}
+                  onChange={(e) => set("state", e.target.value)}
+                >
+                  <option value="">Choose a state</option>
+                  {US_STATES.map((s) => (
+                    <option key={s.code} value={s.code}>
+                      {s.code} — {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="zip">ZIP</Label>
+                <Input
+                  id="zip"
+                  inputMode="numeric"
+                  autoComplete="postal-code"
+                  value={form.zip}
+                  onChange={(e) => set("zip", e.target.value)}
+                />
+              </div>
+            </div>
+          </fieldset>
+
           <div className="grid gap-6 sm:grid-cols-2">
             <div className="grid gap-2">
               <Label htmlFor="dba">DBA *</Label>
@@ -267,57 +343,6 @@ export function MerchantForm({
                 type="date"
                 value={form.date_added}
                 onChange={(e) => set("date_added", e.target.value)}
-              />
-            </div>
-
-            <div className="grid gap-2 sm:col-span-2">
-              <Label htmlFor="street">Street</Label>
-              <Input
-                id="street"
-                autoComplete="street-address"
-                value={form.street}
-                onChange={(e) => set("street", e.target.value)}
-              />
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="city">City *</Label>
-              <Input
-                id="city"
-                required
-                maxLength={MAX_CITY_LENGTH}
-                autoComplete="address-level2"
-                value={form.city}
-                onChange={(e) => set("city", e.target.value)}
-              />
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="state">State *</Label>
-              <select
-                id="state"
-                required
-                className="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-                value={form.state}
-                onChange={(e) => set("state", e.target.value)}
-              >
-                <option value="">Choose a state</option>
-                {US_STATES.map((s) => (
-                  <option key={s.code} value={s.code}>
-                    {s.code} — {s.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="zip">ZIP</Label>
-              <Input
-                id="zip"
-                inputMode="numeric"
-                autoComplete="postal-code"
-                value={form.zip}
-                onChange={(e) => set("zip", e.target.value)}
               />
             </div>
 
@@ -387,14 +412,16 @@ function describeError(err: unknown): string {
     return "That MID is already in use.";
   }
 
-  // Failed the insert/update `with check` — e.g. trying to write a row owned by
-  // someone else.
-  // The location constraint (20261013130000). Matched by name, because 23514
-  // is also what merchants_split_totals_100 raises.
-  if (code === "23514" && /merchants_location_required/.test(messageOf(err))) {
-    return "Enter the merchant's city and pick a state.";
+  // The location's SHAPE (20261013130000). Matched by name, because 23514 is
+  // also what merchants_split_totals_100 raises. Whether a location is
+  // REQUIRED comes back from merchants_location_guard as PT422 with its own
+  // sentence, which friendlyDbError passes through.
+  if (code === "23514" && /merchants_location_format/.test(messageOf(err))) {
+    return "Enter a real city name (2 to 60 characters) and pick a state.";
   }
 
+  // Failed the insert/update `with check` — e.g. trying to write a row owned by
+  // someone else.
   if (code === "42501") {
     return "You don't have access to save that merchant.";
   }
@@ -412,9 +439,21 @@ function messageOf(err: unknown): string {
  * The location rules a person can be told about before the round trip. The
  * database still decides; this exists so the answer is a sentence.
  */
-function locationProblem(form: FormState): string | null {
-  if (form.city.trim() === "") return "Enter the merchant's city.";
-  if (form.state === "") return "Pick the merchant's state.";
+function locationProblem(
+  form: FormState,
+  required: boolean,
+): string | null {
+  const hasCity = form.city.trim() !== "";
+  const hasState = form.state !== "";
+  if (required && !hasCity) return "Enter the merchant's city.";
+  if (required && !hasState) return "Pick the merchant's state.";
+  // Optional (an older merchant with none yet) means both or neither: half a
+  // location is neither findable nor fixed.
+  if (hasCity && !hasState) return "Pick the merchant's state, or clear the city.";
+  if (hasState && !hasCity) return "Enter the merchant's city, or clear the state.";
+  if (hasCity && !/[\p{L}\p{N}].*[\p{L}\p{N}]/u.test(form.city)) {
+    return "Enter a real city name.";
+  }
   if (!isZip(form.zip.trim())) return "ZIP must be 12345 or 12345-6789.";
   return null;
 }
