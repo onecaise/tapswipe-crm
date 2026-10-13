@@ -5,6 +5,10 @@ import { useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
 import { friendlyDbError } from "@/lib/db-errors";
+import {
+  useTypedInput,
+  useUnsavedChangesWarning,
+} from "@/hooks/use-unsaved-changes-warning";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -48,6 +52,10 @@ export function PreAppCreateForm({
   carryOver?: Record<string, string | null>;
 }) {
   const router = useRouter();
+  // Warn before a reload or close throws away typed input (D-07). Nothing is
+  // kept in browser storage — see hooks/use-unsaved-changes-warning.ts.
+  const { dirty, onInput } = useTypedInput();
+  useUnsavedChangesWarning(dirty);
   const [dbaName, setDbaName] = useState(prefill?.dba_name ?? "");
   const [legalName, setLegalName] = useState(
     prefill?.legal_business_name ?? "",
@@ -108,7 +116,11 @@ export function PreAppCreateForm({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={handleSubmit} className="flex flex-col gap-6">
+        <form
+          onSubmit={handleSubmit}
+          onInput={onInput}
+          className="flex flex-col gap-6"
+        >
           <div className="grid gap-6 sm:grid-cols-2">
             <div className="flex flex-col gap-2">
               <Label htmlFor="dba_name">DBA name *</Label>

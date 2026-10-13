@@ -13,6 +13,10 @@ import {
   cartToPayload,
   proposalHref,
 } from "@/lib/quotes";
+import {
+  useTypedInput,
+  useUnsavedChangesWarning,
+} from "@/hooks/use-unsaved-changes-warning";
 import { QuoteStore } from "@/components/quote-store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -79,6 +83,10 @@ export function ProposalBuilder({
   onCancel?: () => void;
 }) {
   const router = useRouter();
+  // Warn before a reload or close throws away typed input (D-07). Nothing is
+  // kept in browser storage — see hooks/use-unsaved-changes-warning.ts.
+  const { dirty, onInput } = useTypedInput();
+  useUnsavedChangesWarning(dirty);
   const [title, setTitle] = useState(initial.title);
   const [notes, setNotes] = useState(initial.notes);
   const [cart, setCart] = useState<CartDevice[]>(initial.cart);
@@ -236,6 +244,7 @@ export function ProposalBuilder({
     <div
       className="flex flex-col gap-3 rounded-md border p-3 sm:p-4"
       data-testid="proposal-builder"
+      onInput={onInput}
     >
       <div className="flex items-center justify-between gap-2">
         <h2 className="min-w-0 font-medium">{heading}</h2>

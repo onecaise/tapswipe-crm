@@ -21,6 +21,10 @@ import {
   priceNumber,
 } from "@/lib/products";
 import {
+  useTypedInput,
+  useUnsavedChangesWarning,
+} from "@/hooks/use-unsaved-changes-warning";
+import {
   DeviceMultiSelect,
   type DeviceOption,
 } from "@/components/device-multi-select";
@@ -99,6 +103,10 @@ export function ProductForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
+  // Warn before a reload or close throws away typed input (D-07). Nothing is
+  // kept in browser storage — see hooks/use-unsaved-changes-warning.ts.
+  const { dirty, onInput } = useTypedInput();
+  useUnsavedChangesWarning(dirty);
 
   const ready = name.trim() !== "" && category.trim() !== "";
 
@@ -215,6 +223,7 @@ export function ProductForm({
   return (
     <form
       className="flex flex-col gap-4"
+      onInput={onInput}
       onSubmit={(e) => {
         e.preventDefault();
         if (ready && !busy) void save();

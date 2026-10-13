@@ -12,6 +12,7 @@ import {
   maskRouting,
   maskSsn,
 } from "@/lib/masks";
+import { useUnsavedChangesWarning } from "@/hooks/use-unsaved-changes-warning";
 import { MaskedInput } from "@/components/masked-input";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -91,6 +92,18 @@ export function SecretsStep({
   const [routing, setRouting] = useState("");
   const [account, setAccount] = useState("");
   const [rpPassword, setRpPassword] = useState("");
+
+  // This step has no autosave, so typed values exist only here until Encrypt &
+  // save — warn before a reload or close discards them (D-07). The values are
+  // cleared on a successful save, which turns the warning off again. Never
+  // persisted anywhere in the browser to "restore" them: these are SSNs and
+  // bank numbers. See hooks/use-unsaved-changes-warning.ts.
+  useUnsavedChangesWarning(
+    Object.values(ssns).some((value) => value !== "") ||
+      routing !== "" ||
+      account !== "" ||
+      rpPassword !== "",
+  );
 
   const refresh = useCallback(async () => {
     setLoadError(null);

@@ -437,3 +437,22 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   the form leaves history. Edit branches unchanged.
 - **Test:** `e2e/qa/create-replaces-history.spec.ts` — `/leads` → New lead → create → `/leads/<id>` →
   Back → `/leads`; same for a support ticket. Both red before (Back landed on `/…/new`), green after.
+
+### C3a (D-07) — unsaved-changes warning, with nothing stored in the browser
+- **Now:** `hooks/use-unsaved-changes-warning.ts` — `useUnsavedChangesWarning(active)` adds a
+  `beforeunload` listener while `active`; `useTypedInput()` gives a form-level `onInput` that flips
+  `dirty` on the first keystroke. Wired into `lead-form`, `merchant-form`, `support-ticket-form`,
+  `ghost-sheet-form`, `pre-app-create-form`, `product-form` and `proposal-builder`; the pre-app secrets
+  step warns while any SSN/routing/account/RP password is typed and unsaved (cleared on save). The other
+  pre-app steps already warn while an autosave is pending (`hooks/use-autosave.ts`). **Nothing** is
+  written to localStorage, sessionStorage or cookies — a grep of `app/ components/ hooks/ lib/` finds
+  no use of either storage API. Client-side navigation (Links, `router.push/replace`) is not interrupted.
+- **Test:** `e2e/qa/unsaved-changes.spec.ts` — lead, merchant and ghost-sheet forms: no warning untouched,
+  warning once typed (cancelable `beforeunload` → `defaultPrevented`); support ticket: the real browser
+  dialog appears on `page.close({ runBeforeUnload: true })`; secrets step (seeded owner so the SSN input
+  renders): warns with values typed, none of the typed digits in localStorage, sessionStorage,
+  `document.cookie` or the context's cookies, and no warning once cleared. **Non-vacuous:** hook made a
+  no-op → all five red; a deliberate `sessionStorage.setItem` of the routing number → the storage
+  assertion red ("sessionStorage holds 021000021").
+- **Limit:** like every `beforeunload` prompt, Chromium only shows it after the user has interacted
+  with the page, and the wording is the browser's own.

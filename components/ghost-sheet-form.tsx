@@ -5,6 +5,10 @@ import { useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
 import { type GhostSheet } from "@/lib/ghost-sheets";
+import {
+  useTypedInput,
+  useUnsavedChangesWarning,
+} from "@/hooks/use-unsaved-changes-warning";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -63,6 +67,10 @@ export function GhostSheetForm({
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const router = useRouter();
+  // Warn before a reload or close throws away typed input (D-07). Nothing is
+  // kept in browser storage — see hooks/use-unsaved-changes-warning.ts.
+  const { dirty, onInput } = useTypedInput();
+  useUnsavedChangesWarning(dirty);
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -126,7 +134,11 @@ export function GhostSheetForm({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={handleSubmit} className="flex flex-col gap-6">
+        <form
+          onSubmit={handleSubmit}
+          onInput={onInput}
+          className="flex flex-col gap-6"
+        >
           <div className="grid gap-6 sm:grid-cols-2">
             <div className="grid gap-2">
               <Label htmlFor="dba">DBA</Label>

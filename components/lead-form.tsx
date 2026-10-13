@@ -20,6 +20,10 @@ import {
   redactedMessage,
   splitMatches,
 } from "@/lib/duplicates";
+import {
+  useTypedInput,
+  useUnsavedChangesWarning,
+} from "@/hooks/use-unsaved-changes-warning";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/callout";
 import {
@@ -221,6 +225,10 @@ export function LeadForm({
    */
   const [matches, setMatches] = useState<DuplicateMatch[] | null>(null);
   const router = useRouter();
+  // Warn before a reload or close throws away typed input (D-07). Nothing is
+  // kept in browser storage — see hooks/use-unsaved-changes-warning.ts.
+  const { dirty, onInput } = useTypedInput();
+  useUnsavedChangesWarning(dirty);
 
   const blockers = saveBlockers(form);
   const staleStatus = isLeadStatus(form.status) ? null : form.status;
@@ -335,7 +343,11 @@ export function LeadForm({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={handleSubmit} className="flex flex-col gap-8">
+        <form
+          onSubmit={handleSubmit}
+          onInput={onInput}
+          className="flex flex-col gap-8"
+        >
           {SECTIONS.map((section) => (
             <fieldset key={section.title} className="flex flex-col gap-4">
               <legend className="font-semibold text-sm">{section.title}</legend>
