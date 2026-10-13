@@ -242,7 +242,7 @@ export const OTHER_AGENT_ID = "33333333-3333-3333-3333-333333333333";
  */
 export async function seed(db: TestDb): Promise<void> {
   await asPlatform(db);
-  // merchants_location_required (20261013130000) refuses a new merchant with
+  // merchants_location_guard (20261013130000) refuses a new merchant with
   // no city or state, but seed() also runs against migration prefixes that
   // predate the columns -- so it asks the catalog which schema it is seeding.
   // Against a prefix the merchants are legacy-shaped (no location), which is

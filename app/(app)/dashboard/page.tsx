@@ -373,8 +373,9 @@ function TaskGroup({
 /**
  * Admins only: how many merchants still have no city or state.
  *
- * merchants_location_required ships NOT VALID, so the rows that predate it are
- * still here; this is where an admin finds out how many, and it links to the
+ * Merchants that predate the location columns (20261013130000) have none —
+ * only new merchants are required to — so this is where an admin finds out how
+ * many, and it links to the
  * read-only list that names them. Renders nothing for a rep — the page is
  * admin-only, and RLS would give a rep only their own count anyway, which is a
  * number with nowhere to go.

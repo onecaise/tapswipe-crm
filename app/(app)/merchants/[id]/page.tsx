@@ -124,7 +124,7 @@ async function MerchantDetail({
           {formatText(merchant.legal_business_name)}
         </Field>
         <Field label="MID">{formatText(merchant.mid)}</Field>
-        {/* A merchant that predates merchants_location_required has none, and
+        {/* A merchant that predates the location columns has none, and
             says so plainly rather than rendering a dash that reads as "not
             applicable" — the edit form will ask for it on the next save. */}
         <Field label="Location">

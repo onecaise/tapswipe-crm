@@ -44,10 +44,9 @@ export type Merchant = {
   pre_app_id: number | null;
   /**
    * Where the business is (20261013130000). City and state are required for
-   * every row written since — merchants_location_required — but the column
-   * types stay nullable because the constraint is NOT VALID: merchants that
-   * predate it have neither, and they are listed for admins at
-   * /admin/merchants/missing-location.
+   * every NEW merchant (merchants_location_guard), but the columns stay
+   * nullable because merchants that predate them have neither — and must stay
+   * editable. They are listed for admins at /admin/merchants/missing-location.
    */
   street: string | null;
   city: string | null;
@@ -109,9 +108,9 @@ export function formatCityState(
 }
 
 /**
- * The PostgREST filter for merchants with no location: exactly the rows that
- * predate merchants_location_required, since every write after it must supply
- * both. One definition, so the admin count on the dashboard and the list it
+ * The PostgREST filter for merchants with no (complete) location: in practice
+ * the rows that predate the columns, since every new merchant must have both
+ * and a complete location cannot be removed. One definition, so the admin count on the dashboard and the list it
  * links to cannot disagree about what "missing" means.
  */
 export const MISSING_LOCATION_FILTER = "city.is.null,state.is.null";

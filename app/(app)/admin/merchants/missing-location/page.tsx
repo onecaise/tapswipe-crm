@@ -16,15 +16,17 @@ import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 
 /**
- * Merchants with no city or state — the rows that predate
- * merchants_location_required (20261013130000), which ships NOT VALID.
+ * Merchants with no city or state — the rows that predate the location
+ * columns (20261013130000). merchants_location_guard requires a location on
+ * every NEW merchant, so this list only shrinks.
  *
  * READ-ONLY, on purpose. There is no bulk fill and no inline editor: a city
  * someone guessed is worse than a blank one somebody can see is blank, so each
  * row links to the merchant and the location is supplied through the ordinary
  * edit form — the save that the constraint now requires to carry a location
- * anyway, and one merchants_audit_cross_agent records. When this list is
- * empty, `validate constraint merchants_location_required` can ship.
+ * anyway, and one merchants_audit_cross_agent records. What a linked pre-app
+ * can supply is filled by scripts/backfill-merchant-location.sql, reviewed and
+ * run by hand; this list is what is left after it.
  *
  * Two boundaries, as on the other admin pages: requireAdmin() keeps reps off
  * the route, and RLS would scope the rows to a rep's own book regardless.
