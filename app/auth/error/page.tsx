@@ -1,4 +1,6 @@
 import { ACCOUNT_DEACTIVATED } from "@/lib/auth-copy";
+import { createClient } from "@/lib/supabase/server";
+import { LogoutTextButton } from "@/components/logout-button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Suspense } from "react";
 
@@ -48,6 +50,20 @@ const MESSAGES: Record<string, { title: string; detail: string }> = {
   },
 };
 
+/**
+ * The two states a user reaches *signed in* with nothing they can do (D-02).
+ * Without a way out the session stayed live in that browser; the next person at
+ * the desk was "signed in" as an account that sees nothing.
+ */
+const SIGN_OUT_CODES = new Set(["no-profile", "account-deactivated"]);
+
+/** Only offer to end a session that exists — a stray link reaches here too. */
+async function hasSession(): Promise<boolean> {
+  const supabase = await createClient();
+  const { data } = await supabase.auth.getClaims();
+  return Boolean(data?.claims);
+}
+
 async function ErrorContent({
   searchParams,
 }: {
@@ -72,6 +88,11 @@ async function ErrorContent({
         <p className="mt-3 text-xs text-muted-foreground">
           Code: {params.error}
         </p>
+        {SIGN_OUT_CODES.has(params.error) && (await hasSession()) && (
+          <div className="mt-4">
+            <LogoutTextButton />
+          </div>
+        )}
       </>
     );
   }

@@ -328,3 +328,12 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   no account state. Banned spec red before, green after.
 - **Limit (D-11):** GoTrue returns `user_banned` for a banned account *whatever password is sent*
   (measured), so the response already says the address exists; the UI can't change that.
+
+### B2 (D-02) — no sign-out on /auth/error's signed-in dead ends (Low, auth)
+- **Now:** `components/logout-button.tsx` keeps one sign-out (`useLogout()`: `supabase.auth.signOut()`
+  then `/auth/login`), used by the topbar icon unchanged and by a new `LogoutTextButton`. `/auth/error`
+  renders it for `no-profile` and `account-deactivated` only, and only when `getClaims()` finds a session.
+- **Test:** `e2e/qa/auth-error-signout.spec.ts` — for both codes, sign in, land on the error page,
+  Log out → `/auth/login`, then `/dashboard` redirects to login (really signed out); signed out, neither
+  page shows the control. Both sign-out specs red before; the no-session spec red with only the
+  session check reverted. `e2e/logout.spec.ts` still green.
