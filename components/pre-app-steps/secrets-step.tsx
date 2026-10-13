@@ -35,6 +35,22 @@ import { Label } from "@/components/ui/label";
  *    for the life of the page. Fetching here keeps even the last-4 out of that,
  *    and an admin's full reveal never touches the server render at all.
  */
+/**
+ * Spread onto the SSN, routing and account inputs (A2). Without them a browser
+ * may offer to remember a merchant's SSN and suggest it in some later field,
+ * and a phone keyboard autocorrects or capitalises what it takes for a word.
+ * `numeric` brings up the digit pad; the masks still allow the dashes.
+ * The RP password is NOT given these: it keeps autoComplete="new-password",
+ * for the reason in the comment on that input.
+ */
+const SENSITIVE_NUMBER_INPUT = {
+  autoComplete: "off",
+  spellCheck: false,
+  autoCorrect: "off",
+  autoCapitalize: "off",
+  inputMode: "numeric",
+} as const;
+
 type SecretsStatus = {
   tier: "full" | "last4";
   owners: {
@@ -165,6 +181,7 @@ export function SecretsStep({
                   </Label>
                   <MaskedInput
                     id={`${fieldId}-ssn-${owner.id}`}
+                    {...SENSITIVE_NUMBER_INPUT}
                     mask={maskSsn}
                     placeholder="123-45-6789"
                     disabled={!canEdit || saving}
@@ -196,6 +213,7 @@ export function SecretsStep({
             <Label htmlFor={`${fieldId}-routing`}>ABA routing number</Label>
             <MaskedInput
               id={`${fieldId}-routing`}
+              {...SENSITIVE_NUMBER_INPUT}
               mask={maskRouting}
               placeholder="021000021"
               disabled={!canEdit || saving}
@@ -219,6 +237,7 @@ export function SecretsStep({
             <Label htmlFor={`${fieldId}-account`}>Account number</Label>
             <MaskedInput
               id={`${fieldId}-account`}
+              {...SENSITIVE_NUMBER_INPUT}
               mask={maskAccount}
               placeholder="000123456789"
               disabled={!canEdit || saving}

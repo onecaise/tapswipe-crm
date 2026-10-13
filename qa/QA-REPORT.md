@@ -291,3 +291,13 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   | `lib/masks.ts` `maskPercent()` (pre-app splits/ownership/tax) | same, digits and one `.` only | as above |
   | pre-app step `Number(value)` coercions (business/owners/profile/terminal) | input already masked, so no comma reaches them | n/a |
   | `components/merchant-form.tsx` split %, `components/quote-store.tsx` quantity | `type="number"` inputs — the browser refuses a comma (value becomes empty) | n/a |
+
+### A2 — sensitive pre-app inputs offered autofill/autocorrect (Low, pre-apps)
+- **Was:** SSN, ABA routing and account inputs set no `autocomplete`, so a browser could remember a
+  merchant's SSN and offer it later; phone keyboards could autocorrect/capitalise them.
+- **Now:** one `SENSITIVE_NUMBER_INPUT` constant in `components/pre-app-steps/secrets-step.tsx`
+  (`autoComplete="off"`, `spellCheck={false}`, `autoCorrect="off"`, `autoCapitalize="off"`,
+  `inputMode="numeric"`) spread onto those three. RP password keeps `autoComplete="new-password"`.
+- **Test:** `e2e/qa/pre-app-sensitive-inputs.spec.ts` seeds an owner on the agent's fixture pre-app
+  (the SSN input does not render without one) and asserts all five attributes on all three inputs,
+  and `new-password` on RP password. Red before the change (SSN had `autocomplete=""`), green after.
