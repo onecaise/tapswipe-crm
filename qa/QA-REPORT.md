@@ -361,3 +361,11 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   its review screen with one staged row, as before. Three red before; the two abandon specs red with
   only the abandon call removed.
 - **Edge function redeploy: not needed.** Client-only change; both functions are unchanged.
+
+### B5 (D-04) — bell lists the user's own new records — **no change**
+- The brief allowed a read-side filter only if the rows record the actor. They do not: there is no
+  notifications table (the bell derives items from `support_tickets` / `ghost_sheets.created_at`), and
+  neither table has a created-by column — `agent_id` is the **owner**, and an admin can create a row
+  *for* a rep (exactly the case the rep should be told about), so filtering on `agent_id` would hide
+  the wrong items. The only record of a cross-agent author is `audit_log`, which agents cannot read.
+  `lib/notifications.ts` already says the fix is a created-by column, i.e. a migration. Left for Owen.

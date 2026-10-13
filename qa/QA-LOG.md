@@ -38,11 +38,11 @@ Resume rule: continue at the first unchecked item. Local only; no push/deploy/db
 - [x] A2 sensitive pre-app field attributes
 - [x] A3 /auth/confirm error branch encoding + generic /auth/error
 - [x] Group A suites
-- [ ] B1 D-01 banned wording on login
-- [ ] B2 D-02 sign-out on /auth/error
-- [ ] B3 D-06 /tasks checkbox hit area
-- [ ] B4 D-08 bad residual import leaves no batch
-- [ ] B5 D-04 notifications self-filter (only if actor recorded)
+- [x] B1 D-01 banned wording on login
+- [x] B2 D-02 sign-out on /auth/error
+- [x] B3 D-06 /tasks checkbox hit area
+- [x] B4 D-08 bad residual import leaves no batch
+- [x] B5 D-04 notifications self-filter (only if actor recorded)
 - [ ] Group B suites
 - [ ] C1 D-03 return-to after login + signed-in /auth/login redirect
 - [ ] C2 D-05 db error-code helper on busiest forms
@@ -53,3 +53,8 @@ Resume rule: continue at the first unchecked item. Local only; no push/deploy/db
 - A2 done (56ac323).
 - A3 done (3250ae4).
 - Group A suites: build ok, lint ok, tsc ok, unit 1404/1404, live 209/209, e2e 198/198.
+- B1 done (b7d44ea). GoTrue leaks banned-ness regardless of password -> D-11.
+- B2 done (0cc7570).
+- B3 done (5563791). First try (-14px) measured 42x42; fixed to -15px.
+- B4 done (e6da0f2). No redeploy needed.
+- B5: no change (no actor column; agent_id is owner). Recorded.
