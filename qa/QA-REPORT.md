@@ -1,5 +1,28 @@
 # QA sweep report — TapSwipe CRM
 
+## Run 3 summary (2026-10-13, Owen's D-10 and D-12)
+
+Branch **`qa-sweep`**, **not pushed**. Everything ran locally: no push, deploy, `db push` or migration, and nothing ran against dev or prod. No payout or
+residual **calculation** changed, only input parsing. `maskMoney`/`maskPercent` untouched.
+
+| Item | Result | Commit |
+| --- | --- | --- |
+| D-10 misplaced comma in payout cells and residual import read as a bigger number | fixed | b95601b |
+| D-12 tax-rate validator allowed 100, column holds 99.999 | fixed | ad549bf |
+
+**Verification (after both):** `npm run build` ✓ · `npm run lint` ✓ · `npx tsc --noEmit` ✓ · `npm test`
+**1479/1479** (68 files; was 1453) · `npm run test:live` **209/209** · `npm run test:e2e` **233/233**
+(incl. 5 setup; was 230). Every existing fixture and spreadsheet test passed unchanged.
+
+**Needs an edge function redeploy: `parse-residual-import`** (it bundles `_shared/residuals.ts`) before a
+hosted project gets the residual half of D-10. The payout-cell half and D-12 ship with a normal app deploy.
+**Needs a migration: none.**
+
+**Behaviour changes to be aware of:** a payout cell or residual text cell with a comma that is not
+thousands grouping (`12,99`, `1,29`, `12,9999`, `,100`, `1,,000`, and `50,5` for a split) is now refused.
+Before, these were silently read as 1299 and so on. A tax rate of 100 is now refused in the form, and autosave no longer
+writes it. Through the UI the largest enterable rate is 99.99, because `maskPercent` keeps two decimals.
+
 ## Run 2 summary (2026-10-13, unattended — Owen's follow-up list)
 
 Branch **`qa-sweep`**, 17 commits after `d113a06`, **not pushed**. Local stack only: no push, deploy,
@@ -513,13 +536,58 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
 
 ## New decisions from run 2 (D-10 onward)
 
-- **D-10 (money parsing, same class as A1).** `parseFigureInput()` (payout cells) and the residual import's
+- **D-10 (money parsing, same class as A1) — fixed in run 3, b95601b.** `parseFigureInput()` (payout cells) and the residual import's
   cell coercion (`supabase/functions/_shared/residuals.ts`) both strip commas anywhere, so `12,99` → 1299.
   Not changed: payouts/residuals were out of bounds for this run. `maskMoney()`/`maskPercent()` (pre-app)
   drop commas at keystroke time — visible while typing, so lower risk. A1's two regexes would drop in.
 - **D-11 (GoTrue leaks banned-ness).** GoTrue answers `user_banned` for a banned account even with a
   wrong password (measured locally), so the response confirms the address exists. B1 cannot change
   that from the app; it would need a GoTrue-side change.
-- **D-12 (tax rate range).** The pre-app tax-rate validator allows 0–100 but `pre_app_terminal.tax_rate`
+- **D-12 (tax rate range) — fixed in run 3, ad549bf.** The pre-app tax-rate validator allows 0–100 but `pre_app_terminal.tax_rate`
   is `numeric(5,3)` (max 99.999), so 100 fails at the database. C2 makes the message plain; aligning the
   validator to `< 100` (or widening the column, which is a migration) is Owen's call.
+
+## Run 3 — D-10 and D-12 (2026-10-13)
+
+### D-10 — a misplaced comma read as a bigger number (payouts, residual import)
+- **Was:** `parseFigureInput()` (`lib/payouts.ts`, payout residual/split cells and the bulk split) and
+  `parseNumberCell()` (`supabase/functions/_shared/residuals.ts`, residual import text cells) stripped
+  commas anywhere, so `12,99` → 1299.
+- **Now:** both parsers run the old path unchanged. Only when it has produced a number and the text holds a comma
+  must the digits (after the `$`, whitespace, `%`, accounting parentheses and leading `-` they
+  already tolerated) match `^\d{1,3}(,\d{3})+(\.\d+)?$`. As a result, every input without a misplaced comma parses
+  exactly as before (a lone `,` is still blank, `1,2x0` keeps its old rejection, numeric cells are
+  untouched). Payout cell: "Commas can only separate thousands, as in 1,299.00. Use a period for decimals,
+  for example 12.99." and nothing is written. Residual row: blocked as the existing `bad_number` (no new
+  blocker code, so no migration), and `parse-residual-import` puts the cell-level reason in the row's
+  `error`, which the review screen shows as `Row 2 — Total cost "12,99" has a comma that is not a
+  thousands separator — use a period for decimals, for example 12.99.`
+- **Tests:** `tests/unit/figure-comma.test.ts` (23): accepted `1,299.00`, `12,345`, `1299.5`; rejected
+  `12,99`, `1,29`, `12,9999`, `,100`, `1,,000`, for both parsers, plus the wrappers they accepted before
+  and the row-level message. `e2e/qa/payout-figure-comma.spec.ts` (types `12,99` into a residual cell →
+  message, value unchanged after reload) and `e2e/qa/residual-import-comma.spec.ts` (uploads an XLSX
+  with text `12,99` → the row's message on the review screen, staged `bad_number`, `total_cost` null,
+  the grouped `1,000.00` on the same row still read as 1000).
+- **Non-vacuous:** I reverted `lib/payouts.ts` → the payout e2e went red, and 6 unit cases failed. I reverted `residuals.ts` +
+  `parse-residual-import` → the residual e2e went red, with the page reading "All 1 rows resolved. This import is
+  ready." (the bug). After both, the files were restored and the specs went green. The payout spec's `afterEach` puts the
+  cell back if a revert let `1299` through.
+- **Not changed:** `maskMoney()`/`maskPercent()` (pre-app), as instructed.
+
+### D-12 — tax rate limit matches the column
+- **Was:** the terminal-step validator allowed 0–100, but `pre_app_terminal.tax_rate` is `numeric(5,3)` (max
+  99.999). Autosave doesn't check validity, so it wrote 100 and the database refused it (C2 made the message plain).
+- **Now:** `TAX_RATE_MAX = 99.999`, with the message "Tax rate must be between 0 and 99.999"
+  (`lib/pre-app-validation.ts`, `isTaxRate()` exported). The terminal step's payload leaves out a rate the
+  validator refuses, as it already did for an unparseable one, so no write that's bound to fail goes out and no
+  database error appears beside the form's message.
+- **Tests:** `tests/unit/tax-rate.test.ts` (3): 99.999 is accepted, 100 is rejected with the message, and the old
+  accept/reject cases are unchanged. `e2e/qa/db-error-copy.spec.ts` (C2), updated: typing 100 shows the form message,
+  and after the autosave debounce there is no "numeric field overflow" and no "A number is too large", and
+  the stored value is still null. A second spec types 99.99 and sees it saved.
+- **Limit:** `maskPercent` keeps two decimals, so 99.999 can't be typed. 99.99 is the largest UI value,
+  and 99.999 is checked at the validator in the unit test.
+- **Non-vacuous (partial reverts):** with `TAX_RATE_MAX` set back to 100, the unit test "refuses 100" went red. With
+  only the payload omission reverted, the C2 e2e went red, and the page showed both the form message and "A number is too large
+  for this field." Both were restored.
+- **C2's 22003 mapping** has no UI path now. It stays covered by `tests/unit/db-errors.test.ts`.
