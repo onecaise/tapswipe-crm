@@ -346,3 +346,18 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   is still 16×16, `elementFromPoint` lands on it at 25 points across the 44×44 square, and the square
   intersects no other reachable control (Radix's aria-hidden, pointer-events:none bubble input excluded).
   Red before (hit-area misses), green after.
+
+### B4 (D-08) — a refused residual file left a 0-row batch in Review (Low, residuals)
+- **Now (`components/residual-upload.tsx`):** an empty file is refused before any batch is created
+  ("That file is empty."). A non-empty file can only be judged by the parser (SheetJS is in the
+  function, not the browser bundle), so when `parse-residual-import` answers **400** — not a
+  spreadsheet, no sheets, missing columns — the batch is abandoned through `abandonResidualBatch()`
+  (`lib/residual-batches.ts`), now the single path also used by the Abandon button; the message ends
+  "No batch was kept in Review." Other failures (5xx, no response, upload error) still leave the batch
+  in Review for Re-parse, as before. `invokeEdgeFunction()` now also returns the HTTP `status` (additive;
+  unit-tested). No parsing or payout logic changed.
+- **Test:** `e2e/qa/residual-bad-import.spec.ts` — empty → message and no batch row at all; text file
+  named `.xlsx` and a workbook missing columns → status `abandoned`, none in `review`; a valid workbook →
+  its review screen with one staged row, as before. Three red before; the two abandon specs red with
+  only the abandon call removed.
+- **Edge function redeploy: not needed.** Client-only change; both functions are unchanged.

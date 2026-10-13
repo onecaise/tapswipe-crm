@@ -7,6 +7,7 @@ import { UploadIcon } from "lucide-react";
 import { callAdminFunction } from "@/lib/admin-users";
 import { createClient } from "@/lib/supabase/client";
 import { RESIDUAL_BUCKET } from "@/lib/payouts";
+import { abandonResidualBatch } from "@/lib/residual-batches";
 import { Callout } from "@/components/callout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,10 +35,13 @@ type ParseResult = {
  *      documents-panel.tsx uses — the bytes never pass through a function.
  *   3. parse-residual-import reads the stored file and stages its rows.
  *
- * A failure at step 2 or 3 leaves a `review` batch with row_count 0, which the
- * list on this page shows and offers to abandon. That is deliberately not cleaned
- * up automatically: a batch that failed to parse is worth seeing, and the file is
- * still there to download and look at.
+ * A file the parser REFUSES (a 400: not a spreadsheet, a missing column) is
+ * abandoned straight away — it can never parse, so a `review` row for it was
+ * only clutter an admin had to find and abandon by hand (D-08). An empty file
+ * is refused before step 1. Any other failure at step 2 or 3 (upload error,
+ * function down) still leaves a `review` batch with row_count 0, which the list
+ * shows and offers to re-parse or abandon: there the file may well be fine.
+ * Abandoned batches keep their file downloadable either way.
  *
  * Nothing here is a security boundary. Both functions verify the caller is an
  * active admin server-side; the page's requireAdmin() only keeps a rep from seeing
@@ -52,6 +56,17 @@ export function ResidualUpload() {
 
   const upload = async (file: File) => {
     setError(null);
+
+    // Refused before a batch exists (D-08): an empty file cannot be a report,
+    // and checking here costs nothing. Whether a non-empty file is a
+    // spreadsheet with the right columns only the parser can say — SheetJS
+    // lives in the function, not in this bundle — so that case is cleaned up
+    // after the parse instead (below).
+    if (file.size === 0) {
+      setError("That file is empty.");
+      return;
+    }
+
     setBusy("uploading");
 
     const { data: minted, error: mintError } =
@@ -84,13 +99,31 @@ export function ResidualUpload() {
 
     setBusy("parsing");
 
-    const { data: parsed, error: parseError } =
-      await callAdminFunction<ParseResult>("parse-residual-import", {
-        batch_id: minted.batch_id,
-      });
+    const {
+      data: parsed,
+      error: parseError,
+      status: parseStatus,
+    } = await callAdminFunction<ParseResult>("parse-residual-import", {
+      batch_id: minted.batch_id,
+    });
 
     if (parseError || !parsed) {
-      setError(parseError ?? "Could not read that file.");
+      // A 400 is the parser refusing the file itself — not a spreadsheet, no
+      // sheets, a required column missing. Re-parsing that batch can never
+      // succeed, so it is abandoned through the same path as the Abandon
+      // button rather than left in Review for an admin to find (D-08). Any
+      // other failure (function down, 5xx, no response) leaves the batch for
+      // Re-parse, as before: the file may be fine.
+      if (parseStatus === 400) {
+        const problem = await abandonResidualBatch(supabase, minted.batch_id);
+        setError(
+          problem === null
+            ? `${parseError} No batch was kept in Review.`
+            : `${parseError} The batch could not be removed from Review: ${problem}`,
+        );
+      } else {
+        setError(parseError ?? "Could not read that file.");
+      }
       setBusy(null);
       router.refresh();
       return;

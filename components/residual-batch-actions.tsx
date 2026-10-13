@@ -5,6 +5,7 @@ import { useState } from "react";
 import { DownloadIcon, RefreshCwIcon } from "lucide-react";
 
 import { callAdminFunction } from "@/lib/admin-users";
+import { abandonResidualBatch } from "@/lib/residual-batches";
 import { createClient } from "@/lib/supabase/client";
 import { ConfirmPair } from "@/components/confirm-pair";
 import { Button } from "@/components/ui/button";
@@ -76,23 +77,11 @@ export function ResidualBatchActions({
     setError(null);
     setConfirming(false);
 
-    const supabase = createClient();
-    const { error: updateError, count } = await supabase
-      .from("rep_payout_batches")
-      .update({ status: "abandoned" }, { count: "exact" })
-      .eq("id", batchId);
-
-    // RLS filters rather than errors, so a write the policy hides reports success
-    // having changed nothing. Without the count check a rep who reached this
-    // control would be told the batch was abandoned.
-    if (updateError) {
-      setError(updateError.message);
-    } else if (count === 0) {
-      setError("That batch could not be abandoned. Reload the page.");
-    }
+    const problem = await abandonResidualBatch(createClient(), batchId);
+    if (problem) setError(problem);
 
     setBusy(null);
-    if (!updateError && count !== 0) router.refresh();
+    if (!problem) router.refresh();
   };
 
   return (

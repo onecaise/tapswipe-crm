@@ -54,7 +54,7 @@ export type ResetPassword = {
 export async function callAdminFunction<T>(
   name: string,
   body: Record<string, unknown>,
-): Promise<{ data: T | null; error: string | null }> {
+): Promise<{ data: T | null; error: string | null; status?: number }> {
   return invokeEdgeFunction<T>(
     createClient(),
     name,

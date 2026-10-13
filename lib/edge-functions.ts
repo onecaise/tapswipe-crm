@@ -66,11 +66,19 @@ export async function invokeEdgeFunction<T>(
   name: string,
   body: Record<string, unknown>,
   fallback = "Something went wrong.",
-): Promise<{ data: T | null; error: string | null }> {
+): Promise<{ data: T | null; error: string | null; status?: number }> {
   const { data, error } = await supabase.functions.invoke(name, { body });
 
   if (error) {
-    return { data: null, error: await edgeFunctionErrorMessage(error, fallback) };
+    // The HTTP status, when there was a response at all, so a caller can tell
+    // "the function refused this input" (4xx) from "the function is down"
+    // (5xx, or no response) — residual-upload.tsx needs exactly that (D-08).
+    const status = (error as { context?: Response } | null)?.context?.status;
+    return {
+      data: null,
+      error: await edgeFunctionErrorMessage(error, fallback),
+      ...(typeof status === "number" ? { status } : {}),
+    };
   }
   if (data === null || data === undefined) {
     return { data: null, error: fallback };
