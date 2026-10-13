@@ -290,6 +290,27 @@ export function parseFigureInput(
     return { ok: false, message: "Enter a number, or leave it blank." };
   }
 
+  // D-10. Commas used to be stripped wherever they were, so "12,99" — a decimal
+  // comma — was saved as 1299. A comma now has to be real thousands grouping
+  // (`1,299.00`, `12,345`). Checked only after the old path has read a number,
+  // so anything without a misplaced comma behaves exactly as before. The same
+  // shape as isThousandsGrouped() in `_shared/residuals.ts`; deliberately a copy
+  // (see above), so change both together.
+  if (text.includes(",")) {
+    const body = text
+      .trim()
+      .replace(/[$\s]/g, "")
+      .replace(/%$/, "")
+      .replace(/^-/, "");
+    if (!/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(body)) {
+      return {
+        ok: false,
+        message:
+          "Commas can only separate thousands, as in 1,299.00. Use a period for decimals, for example 12.99.",
+      };
+    }
+  }
+
   if (field === "rep_split_pct" && (value < 0 || value > 100)) {
     return { ok: false, message: "A split has to be between 0 and 100." };
   }

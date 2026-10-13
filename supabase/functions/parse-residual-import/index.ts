@@ -251,10 +251,14 @@ export default {
         residual_income: row.residual_income,
         rep_split_pct: row.rep_split_pct,
         blocker,
+        // A misplaced comma names its cell (D-10), so the admin is not left
+        // hunting across five figures for the one that was refused.
         error:
           blocker === null
             ? null
-            : blockerMessage(blocker, {
+            : blocker === "bad_number" && row.number_problems.length > 0
+              ? row.number_problems.join(" ")
+              : blockerMessage(blocker, {
                 agentNumber: row.agent_number_raw ?? "",
                 mid: row.mid_raw ?? "",
                 period: row.period_raw ?? "",

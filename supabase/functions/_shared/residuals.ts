@@ -190,6 +190,8 @@ export type NumberCell = {
   value: number | null;
   /** False when there was text that could not be read as a number. */
   ok: boolean;
+  /** Set only when the reason is worth naming to an admin (MISPLACED_COMMA). */
+  problem?: string;
 };
 
 /**
@@ -234,7 +236,35 @@ export function parseNumberCell(value: unknown): NumberCell {
   const parsed = Number(cleaned);
   if (!Number.isFinite(parsed)) return { value: null, ok: false };
 
+  // D-10. The commas were stripped wherever they were, so "12,99" — a decimal
+  // comma — imported as 1299, a hundred times the figure. A comma now has to be
+  // real thousands grouping. Checked only once the old path has produced a
+  // number, so everything without a misplaced comma reads exactly as before.
+  if (text.includes(",") && !isThousandsGrouped(text)) {
+    return { value: null, ok: false, problem: MISPLACED_COMMA };
+  }
+
   return { value: round2(negative ? -parsed : parsed), ok: true };
+}
+
+/** Why a figure with a misplaced comma was refused, for the review screen. */
+export const MISPLACED_COMMA =
+  "has a comma that is not a thousands separator — use a period for decimals, for example 12.99";
+
+/**
+ * Whether every comma in a cell is a thousands separator: `1,299.00`, `12,345`.
+ * The currency sign, whitespace, percent, accounting parentheses and minus are
+ * peeled off first, matching what parseNumberCell tolerates around the digits.
+ * Shared with nothing on purpose — parseFigureInput in lib/payouts.ts carries
+ * its own copy of the same shape (see the note above that function).
+ */
+function isThousandsGrouped(text: string): boolean {
+  const body = text
+    .replace(/^\((.*)\)$/, "$1")
+    .replace(/[$\s]/g, "")
+    .replace(/%$/, "")
+    .replace(/^-/, "");
+  return /^\d{1,3}(,\d{3})+(\.\d+)?$/.test(body);
 }
 
 /** Half-away-from-zero, matching Postgres's round() on numeric. */
@@ -380,6 +410,12 @@ export type ParsedResidualRow = {
   rep_split_pct: number | null;
   /** Everything the parser found wrong, before unknown_agent is considered. */
   blockers: ResidualBlocker[];
+  /**
+   * Cell-level reasons behind a bad_number, worded for the review screen —
+   * e.g. `Total cost "12,99" has a comma that is not a thousands separator…`.
+   * Empty when a figure was simply unreadable; blockerMessage covers that.
+   */
+  number_problems: string[];
 };
 
 export type ParseResult =
@@ -436,6 +472,21 @@ export function parseResidualSheet(
     const residualIncome = parseNumberCell(cellAt(raw, "residual_income"));
     const repSplit = parseNumberCell(cellAt(raw, "rep_split"));
 
+    const numberProblems: string[] = [];
+    for (const [column, cell] of [
+      ["volume", volume],
+      ["average_ticket", averageTicket],
+      ["total_cost", totalCost],
+      ["residual_income", residualIncome],
+      ["rep_split", repSplit],
+    ] as const) {
+      if (cell.problem) {
+        numberProblems.push(
+          `${COLUMN_HEADERS[column]} "${rawText(cellAt(raw, column)) ?? ""}" ${cell.problem}.`,
+        );
+      }
+    }
+
     const blockers: ResidualBlocker[] = [];
     if (mid === null) blockers.push("missing_mid");
     if (period === null) blockers.push("unparseable_period");
@@ -482,6 +533,7 @@ export function parseResidualSheet(
       residual_income: residualIncome.value,
       rep_split_pct: repSplit.value,
       blockers,
+      number_problems: numberProblems,
     });
   }
 
