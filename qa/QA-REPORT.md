@@ -430,3 +430,10 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   admin/users/import, admin/users/import/[batchId], dashboard, documents, ghost-sheets, leads,
   marketing, marketing/manage, merchants, payouts, payouts/import, payouts/import/[batchId],
   payouts/[period], payouts/[period]/summary/[agentId], pre-apps, support-tickets).
+
+### C3b (D-07) — Back after a create returned to the filled form
+- **Now:** the create branch of `lead-form`, `merchant-form`, `support-ticket-form`, `ghost-sheet-form`,
+  `pre-app-create-form` and `proposal-builder` (new proposal) uses `router.replace` to the new record, so
+  the form leaves history. Edit branches unchanged.
+- **Test:** `e2e/qa/create-replaces-history.spec.ts` — `/leads` → New lead → create → `/leads/<id>` →
+  Back → `/leads`; same for a support ticket. Both red before (Back landed on `/…/new`), green after.

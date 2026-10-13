@@ -85,7 +85,9 @@ export function PreAppCreateForm({
 
       if (insertError) throw insertError;
 
-      router.push(`/pre-apps/${data.id}/edit?step=business`);
+      // replace, not push (D-07): the filled create form must not be in history,
+      // or Back returns to it and a second submit makes a second record.
+      router.replace(`/pre-apps/${data.id}/edit?step=business`);
       // Server components cache per-request; without this the wizard can render
       // against the pre-insert state.
       router.refresh();

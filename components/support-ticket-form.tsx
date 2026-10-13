@@ -147,7 +147,9 @@ export function SupportTicketForm({
           .single();
 
         if (insertError) throw insertError;
-        router.push(`/support-tickets/${data.id}`);
+        // replace, not push (D-07): the filled create form must not be in history,
+        // or Back returns to it and a second submit makes a second record.
+        router.replace(`/support-tickets/${data.id}`);
       }
 
       router.refresh();

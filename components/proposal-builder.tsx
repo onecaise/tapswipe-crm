@@ -222,7 +222,9 @@ export function ProposalBuilder({
     }
 
     if (target.groupId === null) {
-      router.push(proposalHref(groupId));
+      // replace, not push (D-07): the filled create form must not be in history,
+      // or Back returns to it and a second submit makes a second record.
+      router.replace(proposalHref(groupId));
     } else {
       setBusy(false);
       router.refresh();

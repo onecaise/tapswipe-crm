@@ -100,7 +100,9 @@ export function GhostSheetForm({
           .single();
 
         if (insertError) throw insertError;
-        router.push(`/ghost-sheets/${data.id}`);
+        // replace, not push (D-07): the filled create form must not be in history,
+        // or Back returns to it and a second submit makes a second record.
+        router.replace(`/ghost-sheets/${data.id}`);
       }
 
       router.refresh();

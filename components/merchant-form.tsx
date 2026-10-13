@@ -142,7 +142,9 @@ export function MerchantForm({
           .single();
 
         if (insertError) throw insertError;
-        router.push(`/merchants/${data.id}`);
+        // replace, not push (D-07): the filled create form must not be in history,
+        // or Back returns to it and a second submit makes a second record.
+        router.replace(`/merchants/${data.id}`);
       }
 
       // Server components cache per-request; without this the detail page can
