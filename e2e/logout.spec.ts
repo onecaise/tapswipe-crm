@@ -130,7 +130,9 @@ test.describe("clicking it actually ends the session", () => {
     // what proves the session is actually gone rather than merely navigated
     // away from.
     await page.goto("/merchants");
-    await expect(page).toHaveURL(/\/auth\/login$/);
+    // Turned away to the login form — carrying the page as ?next= since
+    // return-to-after-login landed (D-03 / C1a), so this is now the exact URL.
+    await expect(page).toHaveURL(/\/auth\/login\?next=%2Fmerchants$/);
     await expect(logoutButton(page)).toHaveCount(0);
   });
 });
