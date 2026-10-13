@@ -14,6 +14,7 @@ import {
 import { callAdminFunction, type CreatedUser } from "@/lib/admin-users";
 import type { Role } from "@/lib/auth";
 import { MIN_PASSWORD_LENGTH, isAcceptablePassword } from "@/lib/passwords";
+import { safeNextPath } from "@/lib/safe-redirect";
 import { Callout } from "@/components/callout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -59,10 +60,9 @@ export function NewUserForm() {
   const searchParams = useSearchParams();
 
   const returnToParam = searchParams.get("returnTo");
-  const returnTo =
-    returnToParam !== null && RETURN_TO.test(returnToParam)
-      ? returnToParam
-      : null;
+  // The shared same-origin check first, then this form's narrower allow-list.
+  const safeReturnTo = safeNextPath(returnToParam, "");
+  const returnTo = RETURN_TO.test(safeReturnTo) ? safeReturnTo : null;
 
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
