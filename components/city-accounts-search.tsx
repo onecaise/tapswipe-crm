@@ -53,6 +53,7 @@ export function CityAccountsSearch() {
   const cityId = useId();
   const stateId = useId();
   const statusId = useId();
+  const headingId = useId();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -89,62 +90,66 @@ export function CityAccountsSearch() {
     });
   };
 
+  // A named region, so a screen reader can jump to it and a test can find it
+  // by what it is called rather than by where it sits on the page.
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>
-          <h2>Find accounts in a city</h2>
-        </CardTitle>
-        <CardDescription>
-          Check whether the company already has accounts in a city, across
-          every rep&apos;s book. Type the full city name.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        <form
-          onSubmit={handleSubmit}
-          className="flex flex-col gap-3 sm:flex-row sm:items-end"
-          aria-describedby={statusId}
-          noValidate
-        >
-          <div className="grid min-w-0 flex-1 gap-2">
-            <Label htmlFor={cityId}>City</Label>
-            <Input
-              id={cityId}
-              name="city"
-              autoComplete="off"
-              maxLength={MAX_CITY_LENGTH}
-              value={city}
-              onChange={(e) => setCity(e.target.value)}
-            />
-          </div>
-          <div className="grid gap-2 sm:w-48">
-            <Label htmlFor={stateId}>State (optional)</Label>
-            <select
-              id={stateId}
-              name="state"
-              className="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-              value={state}
-              onChange={(e) => setState(e.target.value)}
-            >
-              <option value="">Any state</option>
-              {US_STATES.map((s) => (
-                <option key={s.code} value={s.code}>
-                  {s.code} — {s.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <Button type="submit" disabled={search.kind === "loading"}>
-            {search.kind === "loading" ? "Searching…" : "Search"}
-          </Button>
-        </form>
+    <section aria-labelledby={headingId}>
+      <Card>
+        <CardHeader>
+          <CardTitle>
+            <h2 id={headingId}>Find accounts in a city</h2>
+          </CardTitle>
+          <CardDescription>
+            Check whether the company already has accounts in a city, across
+            every rep&apos;s book. Type the full city name.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <form
+            onSubmit={handleSubmit}
+            className="flex flex-col gap-3 sm:flex-row sm:items-end"
+            aria-describedby={statusId}
+            noValidate
+          >
+            <div className="grid min-w-0 flex-1 gap-2">
+              <Label htmlFor={cityId}>City</Label>
+              <Input
+                id={cityId}
+                name="city"
+                autoComplete="off"
+                maxLength={MAX_CITY_LENGTH}
+                value={city}
+                onChange={(e) => setCity(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2 sm:w-48">
+              <Label htmlFor={stateId}>State (optional)</Label>
+              <select
+                id={stateId}
+                name="state"
+                className="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+                value={state}
+                onChange={(e) => setState(e.target.value)}
+              >
+                <option value="">Any state</option>
+                {US_STATES.map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.code} — {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <Button type="submit" disabled={search.kind === "loading"}>
+              {search.kind === "loading" ? "Searching…" : "Search"}
+            </Button>
+          </form>
 
-        <div id={statusId} aria-live="polite" className="flex flex-col gap-3">
-          <SearchOutcome search={search} />
-        </div>
-      </CardContent>
-    </Card>
+          <div id={statusId} aria-live="polite" className="flex flex-col gap-3">
+            <SearchOutcome search={search} />
+          </div>
+        </CardContent>
+      </Card>
+    </section>
   );
 }
 

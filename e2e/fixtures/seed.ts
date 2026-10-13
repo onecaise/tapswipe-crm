@@ -757,6 +757,7 @@ export async function seedE2E(): Promise<SeedResult> {
     docOwners.agent.merchant,
     store,
   );
+  await ensureCityAccounts(db, ids);
 
   return {
     ids,
@@ -770,6 +771,64 @@ export async function seedE2E(): Promise<SeedResult> {
     merchantProposal,
     apiUrl,
   };
+}
+
+/**
+ * The accounts behind the "Find accounts in a city" specs.
+ *
+ * A made-up city so nothing else in the stack can land in it, with the two
+ * rows that matter to the boundary: one in the agent's own book and one in
+ * agent2's — the second carries a street and ZIP precisely so a spec can show
+ * a rep never receives them. Plus an inactive one, which the search excludes.
+ * Converges by MID (unique), so a re-run rewrites rather than duplicates.
+ */
+export const CITY_FIXTURE = {
+  city: "Larkspur Hollow",
+  state: "VT",
+  own: { mid: "E2E-CITY-OWN", dba: "E2E City Agent Diner", legal: "E2E City Agent Diner LLC" },
+  other: {
+    mid: "E2E-CITY-OTHER",
+    dba: "E2E City Rival Grill",
+    // Long and unbroken on purpose: the 390px spec needs a name that WOULD
+    // overflow a card that did not wrap it.
+    legal: "E2ECityRivalGrillHoldingsInternationalLimitedLiabilityCompanyOfVermont LLC",
+    street: "77 Hidden Lane",
+    zip: "05401",
+  },
+  closed: { mid: "E2E-CITY-CLOSED", dba: "E2E City Closed Shop", legal: "E2E City Closed Shop LLC" },
+  /** One more than accounts_in_city() returns, for the "more results" state. */
+  many: { city: "Manyford", state: "KS", count: 101 },
+} as const;
+
+async function ensureCityAccounts(
+  db: SupabaseClient,
+  ids: Record<PersonaKey, string>,
+): Promise<void> {
+  const c = CITY_FIXTURE;
+  const { error } = await db.from("merchants").upsert(
+    [
+      { agent_id: ids.agent, mid: c.own.mid, dba: c.own.dba, legal_business_name: c.own.legal,
+        status: "active", city: c.city, state: c.state, street: null, zip: null },
+      { agent_id: ids.agent2, mid: c.other.mid, dba: c.other.dba, legal_business_name: c.other.legal,
+        status: "active", city: c.city, state: c.state, street: c.other.street, zip: c.other.zip },
+      { agent_id: ids.agent2, mid: c.closed.mid, dba: c.closed.dba, legal_business_name: c.closed.legal,
+        status: "inactive", city: c.city, state: c.state, street: null, zip: null },
+    ],
+    { onConflict: "mid" },
+  );
+  if (error) throw new Error(`city accounts: ${error.message}`);
+
+  const many = Array.from({ length: c.many.count }, (_, i) => {
+    const n = String(i + 1).padStart(3, "0");
+    return {
+      agent_id: ids.agent2, mid: `E2E-MANY-${n}`, dba: `E2E Manyford Shop ${n}`,
+      status: "active", city: c.many.city, state: c.many.state,
+    };
+  });
+  const { error: manyError } = await db
+    .from("merchants")
+    .upsert(many, { onConflict: "mid" });
+  if (manyError) throw new Error(`many city accounts: ${manyError.message}`);
 }
 
 /**
