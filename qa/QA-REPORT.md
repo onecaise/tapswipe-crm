@@ -6,19 +6,26 @@ Unattended sweep, 2026-10-09, branch **`qa-sweep`** (13 commits on top of `respo
 **not pushed, not merged**). Local stack only — no hosted project, Vercel, migration, RLS policy, grant,
 definer function, auth flow or price-lock trigger was touched.
 
-**11 findings — 9 fixed, 2 NEEDS OWEN**, plus **9 DECISIONS** (D-01…D-09) and **1 observation** (OBS-1)
-left unchanged. No Critical findings: no data leak, wrong saved money figure or crash on a core path.
+**11 findings — all 11 fixed** (9 in the sweep; QA-001 and QA-011 were NEEDS OWEN and were fixed on
+2026-10-13 at Owen's request, commits afc4beb and 32d48ad — see "Fixed on review" below), plus
+**9 DECISIONS** (D-01…D-09) and **1 observation** (OBS-1) left unchanged. No Critical findings: no data
+leak, wrong saved money figure or crash on a core path.
 
 | Severity | Fixed | NEEDS OWEN |
 | --- | --- | --- |
-| High (2) | 1 — QA-004 pre-app fields had no accessible names, incl. SSN/bank | 1 — QA-001 open redirect on `/auth/confirm` |
+| High (2) | 2 — QA-004 pre-app fields had no accessible names, incl. SSN/bank · QA-001 open redirect on `/auth/confirm` (2026-10-13) | — |
 | Medium (5) | 5 — QA-003 price `0x10` saved as $16 · QA-005 unlabeled import inputs · QA-007 AA contrast tokens · QA-008 raw "non-2xx" text when a function is down · QA-010 payout column clipped on phones | — |
-| Low (4) | 3 — QA-002 cart quantity → raw Postgres error · QA-006 invalid `<dl>` · QA-009 print toolbar overflow | 1 — QA-011 login tab order |
+| Low (4) | 4 — QA-002 cart quantity → raw Postgres error · QA-006 invalid `<dl>` · QA-009 print toolbar overflow · QA-011 login tab order (2026-10-13) | — |
 
-**Read first:** QA-001 (open redirect — fix suggested, auth code not changed) and QA-007 (it changes three
-colour tokens away from the hexes annotated as the design spec; one-commit revert if unwanted).
+**Read first:** QA-007 (it changes three colour tokens away from the hexes annotated as the design spec;
+one-commit revert if unwanted).
 
-**Final verification (after all commits):** `npm run build` ✓ · `npm run lint` ✓ · `npx tsc --noEmit` ✓ ·
+**Verification after the 2026-10-13 fixes:** `npm run build` ✓ · `npm run lint` ✓ · `npx tsc --noEmit` ✓ ·
+`npm test` **1401/1401** (64 files; +27 `safe-redirect` cases) · `npm run test:live` **209/209** ·
+`npm run test:e2e` **190/190** (8.3 min; incl. the 5 setup; +10: QA-001 now 8 specs, QA-011 now 4,
+neither `test.fail()` any more).
+
+**Final verification of the original sweep (2026-10-09):** `npm run build` ✓ · `npm run lint` ✓ · `npx tsc --noEmit` ✓ ·
 `npm test` **1374/1374** (baseline 1365; +9 new unit tests) · `npm run test:live` **209/209** ·
 `npm run test:e2e` **180/180** (baseline 164; +16 new specs in `e2e/qa/`, two of which are `test.fail()`
 repros for the NEEDS OWEN items and will turn red once those are fixed — then delete the annotation).
@@ -63,7 +70,7 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 
 | ID | Sev | Area | Finding | Status |
 | --- | --- | --- | --- | --- |
-| QA-001 | High | Auth | `/auth/confirm` redirects to any `next=` URL after a valid OTP (open redirect) | NEEDS OWEN (repro 20e065a) |
+| QA-001 | High | Auth | `/auth/confirm` redirects to any `next=` URL after a valid OTP (open redirect) | afc4beb (repro 20e065a) |
 | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
 | QA-003 | Medium | Products | List price `0x10` saved as $16.00, `1e3` as $1,000.00 (Number() reads JS literals) | 917f5ad |
 | QA-004 | High | Pre-apps / a11y | No pre-app wizard field had an accessible name — incl. SSN, routing, account, RP password (axe `label`/`select-name` critical) | 0ebb211 |
@@ -73,9 +80,7 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 | QA-008 | Medium | Error states | A down/unreachable Edge Function shows supabase-js's raw "Edge Function returned a non-2xx status code" / "Failed to send a request…" | 0603e8d |
 | QA-009 | Low | Print pages / layout | At 390px the blank application's control row overflows 32px (Print button off-screen); merchant print uses the same row | 12d9af3 |
 | QA-010 | Medium | Payouts / layout | At 390px the payout summary table pushes the page wide and clips the Payout column at the card edge | 9678877 |
-| QA-011 | Low | Auth / keyboard | On `/auth/login`, Tab from Email lands on "Forgot your password?" instead of Password; a keyboard login ends on /auth/forgot-password | NEEDS OWEN (repro 3a16ee3) |
-6.00, `1e3` as | QA-002 | Low | Proposals | Quantity > 2,147,483,647 is priced and Save is enabled; Save then shows raw Postgres `out of range for type integer` | dd95e78 |
-,000.00 (Number() reads JS literals) | 917f5ad |
+| QA-011 | Low | Auth / keyboard | On `/auth/login`, Tab from Email lands on "Forgot your password?" instead of Password; a keyboard login ends on /auth/forgot-password | 32d48ad (repro 3a16ee3) |
 
 ## Details
 
@@ -168,36 +173,56 @@ Severity: **Critical** (data leak / money wrong / crash on a core path) · **Hig
 - **Fix:** wrapped in `overflow-x-auto print:overflow-visible` — scrolls sideways on screen, prints
   exactly as before. print.spec.ts and payouts-rendering.spec.ts green.
 
-## NEEDS OWEN6.00`; `1e3` → `
-## NEEDS OWEN,000.00`. A mistyped price became a different, plausible price that
-  then flows onto proposals. Spec `e2e/qa/product-price-parse.spec.ts`.
-- **Root cause:** `parsePriceInput()` (lib/products.ts) stripped `$ , space` and handed the
-  rest to `Number()`, which accepts hex/binary/octal/exponent literals.
-- **Fix:** a plain-decimal regex before `Number()` (the same approach `parseFigureInput()` in
-  lib/payouts.ts already takes). Unit tests in `tests/unit/product-price-input.test.ts`.
+## Fixed on review (2026-10-13) — formerly NEEDS OWEN
 
-## NEEDS OWEN
+Both fixed at Owen's request, local only (no push, deploy or `db push`).
 
-### QA-001 — open redirect on `/auth/confirm` (High, auth)
+### QA-001 — open redirect on `/auth/confirm` (High, auth) — afc4beb
 - **Repro:** generate a magic link for any account (`auth.admin.generateLink`), then
   `GET /auth/confirm?token_hash=<hash>&type=magiclink&next=https://example.com/phish`
   → `307 Location: https://example.com/phish`, with the session cookie set.
-  Spec: `e2e/qa/auth-confirm-redirect.spec.ts` (`test.fail()` — goes red once fixed; then drop the annotation).
-- **Root cause:** `app/auth/confirm/route.ts` passes `searchParams.get("next")` straight to
-  `redirect()` (starter-kit code). The error branch also interpolates `error.message`
-  into the query string without `encodeURIComponent`.
-- **Suggested fix (not applied — auth flow):** accept `next` only when it starts with a single
-  `/` and not `//` or `/\`; otherwise fall back to `/dashboard`. Encode the error message.
+- **Root cause:** `app/auth/confirm/route.ts` passed `searchParams.get("next")` straight to
+  `redirect()` (starter-kit code).
+- **Every user-controlled return target in the app** (searched `next`, `redirect`, `redirectTo`,
+  `returnTo`, `callbackUrl`, `continue` across route handlers, server actions, the proxy, the login
+  page, `router.push`, `window.location` and `Location` headers): only two exist —
+  `/auth/confirm` `next`, and `components/new-user-form.tsx` `returnTo` (already narrowed to
+  `/payouts/import/<id>` by a regex). There are no server actions; the login form always goes to
+  `/dashboard`; the proxy's redirects are fixed paths; every `router.push` / `location.assign` is
+  built from server data or constants; `forgot-password-form` builds its `redirectTo` from
+  `window.location.origin`.
+- **Fix:** `lib/safe-redirect.ts` `safeNextPath(raw, fallback)` — returns `raw` only if it starts
+  with a single `/` (not `//`), has no backslash or control character (C0, DEL, C1) in the raw,
+  once-decoded or twice-decoded form, and resolving it against `http://x.invalid` keeps that
+  origin. Used at both sites (`returnTo` keeps its narrower regex after the shared check).
+  Fallback for `/auth/confirm` stays `/` (the proxy sends that on to `/dashboard`).
+- **Tests:** `tests/unit/safe-redirect.test.ts` (27 cases: the 17 brief cases plus double-encoded
+  and newline variants fall back; `/leads/123?tab=a`, `/ok?x=https://evil.com`, `/proposals/new`,
+  `/search?q=100%25`, `/auth/update-password` allowed). `e2e/qa/auth-confirm-redirect.spec.ts` no
+  longer `test.fail()`: four off-site shapes through the real route, plus the legitimate landings —
+  magic link with `next=/leads?status=new` and with no `next`, recovery to `/auth/update-password`
+  through to a new password that then signs in, and invite to `/auth/update-password`.
+  **Non-vacuous:** with the helper short-circuited to `return raw`, 20 unit cases and all 4
+  off-site e2e cases went red; reverted.
+- **Not changed (out of scope, noted):** the error branch still interpolates `error.message`
+  unencoded into `/auth/error?error=…`. It is a same-origin path, not a redirect target, so not
+  an open redirect. There is no post-login return-to (D-03) and no invite UI in the app — the
+  invite/recovery cases cover what an email template pointing at `/auth/confirm` would send.
+  The app's own forgot-password flow uses GoTrue's `redirectTo` (PKCE `?code=`), not `next`.
 
-### QA-011 — login tab order skips the password box (Low, auth / keyboard)
+### QA-011 — login tab order skips the password box (Low, auth / keyboard) — 32d48ad
 - **Repro:** `/auth/login`, focus Email, type, press Tab → focus is on the "Forgot your password?"
-  link. Type the password, press Enter → `/auth/forgot-password`. Spec
-  `e2e/qa/login-tab-order.spec.ts` (`test.fail()`).
-- **Root cause:** `components/login-form.tsx` (starter-kit layout) renders the link inside the
+  link. Type the password, press Enter → `/auth/forgot-password`.
+- **Root cause:** `components/login-form.tsx` (starter-kit layout) rendered the link inside the
   Password label row, before the `<input id="password">` in DOM order.
-- **Suggested fix (not applied — login form):** move the link after the password input in the
-  DOM (it can stay visually beside the label with `order`/grid), or give it `tabIndex={-1}`
-  and repeat it below the button.
+- **Fix:** the form body is one grid; DOM order is Email, Password, Login, Forgot your password?,
+  and the link is placed beside the Password label with `col-start-2 row-start-3`. No `tabIndex`.
+  Spacing unchanged. The other auth forms (forgot-password, update-password) already put their
+  link after the submit button; there is no accept-invite page and no show-password toggle.
+- **Tests:** `e2e/qa/login-tab-order.spec.ts` no longer `test.fail()`; adds the full tab sequence,
+  a keyboard-only login reaching `/dashboard`, and a geometric check that the link is on the
+  label's row. Against the old form the three order specs go red and the placement spec stays
+  green (it guards the layout, not the order).
 
 ## DECISIONS (observed, deliberately not changed)
 
