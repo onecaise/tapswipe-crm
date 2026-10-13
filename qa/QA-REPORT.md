@@ -1,6 +1,55 @@
 # QA sweep report — TapSwipe CRM
 
-## Summary
+## Run 2 summary (2026-10-13, unattended — Owen's follow-up list)
+
+Branch **`qa-sweep`**, 17 commits after `d113a06`, **not pushed**. Local stack only: no push, deploy,
+`db push`, `supabase link`, or anything against dev/prod. No migration was added or edited, and no RLS
+policy, grant, security-definer function, price-lock trigger or payout/residual calculation was changed.
+
+**Final verification (after every item):** `npm run build` ✓ · `npm run lint` ✓ · `npx tsc --noEmit` ✓ ·
+`npm test` **1453/1453** (66 files; was 1401) · `npm run test:live` **209/209** · `npm run test:e2e`
+**230/230** (incl. 5 setup; was 190). Each group was also run in full on its own: A → unit 1404, live 209,
+e2e 198; B → 1406, 209, 210; C → 1453, 209, 230. All green. Every change has a spec that was red first,
+and a non-vacuity revert (fix removed → red → restored) recorded in its entry below.
+
+| Item | Result | Commit |
+| --- | --- | --- |
+| A1 list price: decimal comma read as thousands | fixed | e3c4041 |
+| A2 SSN/routing/account autofill + autocorrect attributes | fixed | 56ac323 |
+| A3 `/auth/confirm` sends fixed codes; `/auth/error` no longer echoes `?error=` | fixed | 3250ae4 |
+| B1 (D-01) banned login shows the deactivated wording | fixed | b7d44ea |
+| B2 (D-02) sign-out on `/auth/error` no-profile / deactivated | fixed | 0cc7570 |
+| B3 (D-06) /tasks checkbox 44×44 hit area | fixed | 5563791 |
+| B4 (D-08) refused residual file leaves no batch in Review | fixed | e6da0f2 |
+| B5 (D-04) bell hides own records | **no change** — no actor column (see entry) | b75e2f4 (report) |
+| C1a (D-03) return to deep link after sign-in | fixed | 0159ac6 (+ 1bf38f1 spec follow-up) |
+| C1b (D-03) signed-in active user leaves `/auth/login` | fixed | 2f4eb4b |
+| C2 (D-05) plain DB error messages on six forms | fixed | 39d0a47 |
+| C3b (D-07) `router.replace` after create | fixed | 397ac0d |
+| C3a (D-07) unsaved-changes warning, no browser storage | fixed | 1a32f18 |
+| C4 (D-09) | **no change, by design** | a0d363b (report) |
+
+Log/report-only commits: 8d6101e, d9435bd, a0d363b.
+
+**Left, and why:** B5 needs a created-by column (a migration) to filter correctly. C4 is by design.
+C2 left the ~50 other raw `error.message` sites alone, as instructed; they're listed in its entry.
+**New decisions:** D-10 (the same comma bug in payout/residual parsing, out of bounds this run), D-11
+(GoTrue reveals banned-ness whatever the password), D-12 (tax-rate validator allows 100, column max
+99.999). Nothing failed three times, so nothing was reverted.
+
+**Behaviour changes to be aware of:** `.5` and `1 299` are no longer accepted as list prices (A1). A
+signed-out deep link now lands on `/auth/login?next=…`, and `e2e/logout.spec.ts` was tightened to
+expect that exact URL (1bf38f1). `invokeEdgeFunction()` now also returns the HTTP `status` (additive).
+
+**Needs an edge function redeploy: none.** **Needs a migration: none.** Every change is in the Next.js
+app (client components, `lib/`, the proxy, one hook) and its tests, so a normal app deploy carries it.
+
+**Environment:** Docker Desktop's WSL distro stopped during A1. I restarted it with
+`docker desktop restart`, and the local stack's containers came back on their own. The
+`supabase functions serve` that was running at the start died with it, so I started one myself for the
+rest of the run and stopped it at the end. No dev server is left running.
+
+## Summary (run 1)
 
 Unattended sweep, 2026-10-09, branch **`qa-sweep`** (13 commits on top of `responsive-shell` @ b85d064,
 **not pushed, not merged**). Local stack only — no hosted project, Vercel, migration, RLS policy, grant,

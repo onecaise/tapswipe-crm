@@ -48,7 +48,7 @@ Resume rule: continue at the first unchecked item. Local only; no push/deploy/db
 - [x] C2 D-05 db error-code helper on busiest forms
 - [x] C3 D-07 unsaved-changes warning + router.replace after create
 - [x] C4 D-09 record as by design
-- [ ] Group C suites + final summary
+- [x] Group C suites + final summary
 - 2026-10-13 A1 done (e3c4041). Docker Desktop died mid-item; restarted it (docker desktop restart). The user's functions serve died with it; started my own (bg), to be stopped at the end.
 - A2 done (56ac323).
 - A3 done (3250ae4).
@@ -65,3 +65,4 @@ Resume rule: continue at the first unchecked item. Local only; no push/deploy/db
 - C3b done (397ac0d).
 - C3a done (1a32f18).
 - C4 recorded (no change, by design). D-10..D-12 written.
+- Group C suites: build ok, lint ok, tsc ok, unit 1453/1453, live 209/209, e2e 230/230. Summary written at top of QA-REPORT. Stopped my functions serve and removed its edge-runtime container; no dev server left. Not pushed.
