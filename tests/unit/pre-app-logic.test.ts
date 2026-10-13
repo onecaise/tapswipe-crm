@@ -424,6 +424,8 @@ describe("submit blockers mirror the RPC", () => {
     preApp: {
       dba_name: "Acme Diner",
       legal_business_name: "Acme Diner LLC",
+      city: "Nashville" as string | null,
+      state: "TN" as string | null,
       split_agent_pct: 50,
       split_company_pct: 50,
     },
@@ -435,6 +437,17 @@ describe("submit blockers mirror the RPC", () => {
 
   it("reports nothing for a complete pre-app", () => {
     expect(preAppSubmitBlockers(complete)).toEqual([]);
+  });
+
+  it.each([
+    ["no city", null, "TN"],
+    ["a blank city", "   ", "TN"],
+    ["no state", "Nashville", null],
+    ["a state that is not a code", "Nashville", "Tennessee"],
+  ])("requires a business city and state — %s", (_label, city, state) => {
+    expect(
+      preAppSubmitBlockers({ ...complete, preApp: { ...complete.preApp, city, state } }),
+    ).toEqual(["A business city and state are required."]);
   });
 
   it("requires an owner at 51% or more", () => {

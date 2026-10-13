@@ -393,7 +393,12 @@ function mapped(
 export function preAppSubmitBlockers(input: {
   preApp: Pick<
     PreApp,
-    "dba_name" | "legal_business_name" | "split_agent_pct" | "split_company_pct"
+    | "dba_name"
+    | "legal_business_name"
+    | "city"
+    | "state"
+    | "split_agent_pct"
+    | "split_company_pct"
   >;
   owners: Pick<PreAppOwner, "percent_owned">[];
   profile: PreAppBusinessProfile | null;
@@ -406,6 +411,12 @@ export function preAppSubmitBlockers(input: {
   if (preApp.dba_name.trim() === "") blockers.push("A DBA name is required.");
   if (preApp.legal_business_name.trim() === "") {
     blockers.push("A legal business name is required.");
+  }
+  // submit_pre_app()'s location rule (20261013132000), in the same words a
+  // rep can act on. The RPC also checks the city's length and letters; the
+  // business step's own validation stops those before they reach here.
+  if (!preApp.city?.trim() || !/^[A-Z]{2}$/.test(preApp.state?.trim().toUpperCase() ?? "")) {
+    blockers.push("A business city and state are required.");
   }
 
   if (owners.length === 0) {

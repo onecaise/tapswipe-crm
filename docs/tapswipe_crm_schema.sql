@@ -5061,6 +5061,22 @@ begin
     raise exception 'a legal business name is required' using errcode = 'PT422';
   end if;
 
+  -- The business location (20261013132000). approve_pre_app() refuses a
+  -- pre-app without one, because a merchant cannot be created without a city
+  -- and state (merchants_location_guard) -- so the gap has to be closed HERE,
+  -- where the rep can still fix it, rather than at approval, where the only
+  -- move is to reopen. Same rule as approve_pre_app() and the merchant
+  -- format check, so a pre-app this accepts is one approval accepts.
+  -- Deliberately a submit-time rule and NOT a table constraint on pre_apps:
+  -- a draft is saved field by field as it is typed, and must be allowed to
+  -- have no address yet.
+  if coalesce(char_length(norm_city(pa.city)) < 2, true)
+     or char_length(btrim(pa.city)) > 60
+     or coalesce(upper(btrim(pa.state)) !~ '^[A-Z]{2}$', true) then
+    raise exception 'a business city and a two-letter state are required'
+      using errcode = 'PT422';
+  end if;
+
   select count(*), count(*) filter (where percent_owned >= 51)
     into owner_count, control_count
     from pre_app_owners where pre_app_id = pa.id;
@@ -5194,8 +5210,8 @@ begin
   -- LOCATION (20261013130000). The business address is carried across --
   -- physical_address into street, city, state upper-cased, zip -- because
   -- merchants_location_guard refuses a new merchant without one. A pre-app
-  -- may legitimately reach 'submitted' without a city or state (the wizard
-  -- has never required them), and such a pre-app CANNOT be approved: it is
+  -- submitted before 20261013132000 may lack a city or state (submission did
+  -- not require them until then), and such a pre-app CANNOT be approved: it is
   -- refused here by name, before any write, rather than left to fail on the
   -- constraint with a message that names a constraint instead of a fix. The
   -- fix is to reopen it and have the rep fill the address in.

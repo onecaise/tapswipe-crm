@@ -169,8 +169,8 @@ begin
   -- LOCATION (20261013130000). The business address is carried across --
   -- physical_address into street, city, state upper-cased, zip -- because
   -- merchants_location_guard refuses a new merchant without one. A pre-app
-  -- may legitimately reach 'submitted' without a city or state (the wizard
-  -- has never required them), and such a pre-app CANNOT be approved: it is
+  -- submitted before 20261013132000 may lack a city or state (submission did
+  -- not require them until then), and such a pre-app CANNOT be approved: it is
   -- refused here by name, before any write, rather than left to fail on the
   -- constraint with a message that names a constraint instead of a fix. The
   -- fix is to reopen it and have the rep fill the address in.

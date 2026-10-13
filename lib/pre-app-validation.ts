@@ -90,8 +90,25 @@ export const businessStepSchema = z.object({
     .refine(looksLikeUrl, { message: "Include http:// or https://" }),
 
   physical_address: text,
-  city: text,
-  state: masked(isState, "Pick a state from the list"),
+  // City and state are REQUIRED here (20261013132000): submit_pre_app()
+  // refuses a pre-app without them, because approval creates a merchant and a
+  // merchant needs a location. Required in the step rather than only at review
+  // so Next greys out where the field is, not three steps later. Autosave is
+  // blind to validity, so a draft with no address yet still saves.
+  // The letters rule mirrors norm_city()'s "at least 2 characters once
+  // punctuation is gone"; 60 is the merchants column's cap.
+  city: z
+    .string()
+    .trim()
+    .min(1, "A business city is required")
+    .max(60, "At most 60 characters")
+    .refine((v) => v === "" || /[\p{L}\p{N}].*[\p{L}\p{N}]/u.test(v), {
+      message: "Enter a real city name",
+    }),
+  state: z
+    .string()
+    .min(1, "Pick a state from the list")
+    .refine(isState, { message: "Pick a state from the list" }),
   country: text,
   zip: masked(isZip, "12345 or 12345-6789"),
 

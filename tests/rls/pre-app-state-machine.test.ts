@@ -455,6 +455,39 @@ describe("submit_pre_app validation", () => {
     );
   });
 
+  // 20261013132000. Approval creates a merchant and a merchant needs a
+  // location, so the requirement sits here, where the rep can still fix it.
+  // Non-vacuity: seed()'s draft HAS a location, and the success tests above
+  // submit it — so each refusal below is caused by the one field it clears.
+  it.each([
+    ["no city", "city = null"],
+    ["a blank city", "city = '   '"],
+    ["a city that is only punctuation", "city = '...'"],
+    ["a city over 60 characters", `city = '${"A".repeat(61)}'`],
+    ["no state", "state = null"],
+    ["a state that is not a code", "state = 'Tennessee'"],
+  ])("refuses a pre-app with %s", async (_label, set) => {
+    await makeSubmittable(draftId);
+    await asPlatform(db);
+    await db.exec(`update pre_apps set ${set} where id = ${draftId}`);
+
+    await asUser(db, AGENT_ID);
+    await expect(call(`submit_pre_app(${draftId})`)).rejects.toThrow(
+      /a business city and a two-letter state are required/,
+    );
+    expect(await statusOf(draftId)).toBe("draft");
+  });
+
+  it("accepts a lower-case state, as approval upper-cases it", async () => {
+    await makeSubmittable(draftId);
+    await asPlatform(db);
+    await db.exec(`update pre_apps set state = 'tn' where id = ${draftId}`);
+
+    await asUser(db, AGENT_ID);
+    await call(`submit_pre_app(${draftId})`);
+    expect(await statusOf(draftId)).toBe("submitted");
+  });
+
   it("refuses when there are no owners at all", async () => {
     await makeSubmittable(draftId);
     await asPlatform(db);
