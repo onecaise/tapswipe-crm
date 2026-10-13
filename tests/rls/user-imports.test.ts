@@ -33,8 +33,8 @@ import {
  *      profile. A foreign key there could never be satisfied, so the absence of
  *      one is a correctness requirement rather than an oversight, and it is
  *      asserted here so nobody "tidies up" by adding it.
- *   4. **imported_by is one of twenty-two references to profiles(id), and
- *      one of the twenty-one that are NO ACTION.** A leftover batch blocks
+ *   4. **imported_by is one of twenty-three references to profiles(id), and
+ *      one of the twenty-two that are NO ACTION.** A leftover batch blocks
  *      deleting a user, which is the trap the FOUR teardown lists exist to
  *      avoid. Asserted here, with profiles.manager_id named as the single
  *      `on delete set null` exception, so the count in CLAUDE.md and those
@@ -406,7 +406,7 @@ describe("the two columns with deliberately no foreign key", () => {
   });
 });
 
-describe("imported_by is one of twenty-two references to profiles", () => {
+describe("imported_by is one of twenty-three references to profiles", () => {
   it("blocks deleting the admin while their batch exists", async () => {
     // The trap scripts/seed-local-users.mjs's teardown list exists to avoid: an
     // unchecked delete fails on the FK, the user survives, and the next
@@ -418,7 +418,11 @@ describe("imported_by is one of twenty-two references to profiles", () => {
     ).rejects.toThrow(/foreign key|violates/i);
   });
 
-  it("counts twenty-two columns referencing profiles(id)", async () => {
+  it("counts twenty-three columns referencing profiles(id)", async () => {
+    // 20261013120000 added the twenty-third, business_documents.uploaded_by --
+    // NO ACTION like marketing_materials.uploaded_by, which it copies. All four
+    // teardown lists clear it.
+    //
     // Pinned so CLAUDE.md's count and the four teardown lists cannot drift
     // from the schema without something going red. 20261002181500 took this
     // from nineteen to twenty-one: marketing_materials.uploaded_by and
@@ -442,7 +446,7 @@ describe("imported_by is one of twenty-two references to profiles", () => {
          join pg_class t on t.oid = c.confrelid
         where c.contype = 'f' and t.relname = 'profiles'`,
     );
-    expect(n).toBe(22);
+    expect(n).toBe(23);
   });
 
   it("has exactly one non-NO-ACTION reference, and it is manager_id", async () => {

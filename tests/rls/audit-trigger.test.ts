@@ -249,7 +249,10 @@ describe("INSERT is covered too", () => {
   });
 });
 
-describe("all eight insert-testable tables are covered", () => {
+describe("all seven admin-insertable tables are covered", () => {
+  // documents was the eighth until 20261013121000 revoked INSERT on it from
+  // `authenticated` -- an admin cannot insert there any more -- so it has its
+  // own describe below, asserting the trigger survives for the purge.
   // One function, nine attachments — bug_reports is the ninth and is exercised
   // separately below, because a cross-agent INSERT is impossible there by
   // policy: its insert is pinned to agent_id = auth.uid(), so the event worth
@@ -287,14 +290,6 @@ describe("all eight insert-testable tables are covered", () => {
     {
       table: "tasks",
       insert: `insert into tasks (agent_id, owner_type, owner_id, title) values ('${AGENT_ID}', 'lead', 1, 'T Task')`,
-    },
-    {
-      table: "documents",
-      // The file_key has to be the real {agent}/{type}/{id}/{uuid} shape:
-      // documents_file_key_matches_owner rejects anything else, and the agent
-      // segment is the ROW's agent even though the ADMIN is inserting — which is
-      // exactly what makes this a cross-agent write.
-      insert: `insert into documents (agent_id, owner_type, owner_id, doc_type, file_key) values ('${AGENT_ID}', 'lead', 1, 'T Doc', '${AGENT_ID}/lead/1/88888888-aaaa-4aaa-8aaa-aaaaaaaaaaaa')`,
     },
   ];
 
@@ -456,46 +451,46 @@ describe("support_ticket_replies — a second function, for a table with no agen
   });
 });
 
-describe("documents — the eighth table, and the delete that nothing logged", () => {
+describe("documents — closed to clients, still audited for the purge", () => {
   /**
-   * documents was deliberately excluded from this trigger on the grounds that
-   * its access is audited inside create-upload-url and create-download-url,
-   * where the signed-URL mint is the event worth recording. That reasoning is
-   * correct for reads and still holds.
-   *
-   * It does not cover DELETE. documents is the one table whose delete policy is
-   * `(agent_id = auth.uid() and is_active_agent()) or is_admin()` rather than
-   * is_admin() alone, and a delete mints no URL — so neither function ran, no
-   * trigger fired, and the metadata row vanished with its Storage object
-   * orphaned and nothing written down anywhere.
+   * documents joined this trigger on 11 Aug because its own-row DELETE minted no
+   * URL, so nothing recorded it. 20261013121000 then closed the table to
+   * `authenticated` entirely: no INSERT or DELETE grant, admin-only SELECT. The
+   * trigger is deliberately KEPT, because the one writer left is the service
+   * role running scripts/purge-legacy-documents.mjs, and that purge is exactly
+   * the kind of bulk removal that should leave a row per document behind.
    */
-  it("records an admin deleting another agent's document", async () => {
-    // The statement, not the voided check: it is documents id 2 against lead 1,
-    // so row_id and owner_id genuinely differ. The voided check is documents
-    // id 1 against merchant 1, where the two collide and the assertion below
-    // could not tell them apart — the same id-collision-across-types hazard the
-    // notes/tasks owner_type rule exists for.
-    const id = await documentId(db, "agent-statement.pdf");
+  it("keeps the trigger attached to documents", async () => {
+    await asPlatform(db);
+    const triggers = await rows<{ tgname: string }>(
+      db,
+      `select t.tgname from pg_trigger t
+         join pg_class c on c.oid = t.tgrelid
+        where not t.tgisinternal and c.relname = 'documents'`,
+    );
+    expect(triggers.map((t) => t.tgname)).toEqual(["documents_audit_cross_agent"]);
+  });
 
-    // Captured before the delete, to prove row_id names the document itself and
-    // not the owner_id it also carries. That is the one way reusing the shared
-    // function on a polymorphic table could have gone wrong:
-    // log_cross_agent_change() reads `id` and `agent_id` out of to_jsonb(OLD)
-    // by name, so it needs no documents-specific variant — documents.id is
-    // serial like the other seven and documents.agent_id is uuid not null.
+  it("records a service-role delete, naming the row and no actor", async () => {
+    // The statement, not the voided check: it is documents id 2 against lead 1,
+    // so row_id and owner_id genuinely differ and the assertion can tell a
+    // document id from the owner id the row also carries.
+    const id = await documentId(db, "agent-statement.pdf");
     await asPlatform(db);
     const [doc] = await rows<{ owner_id: number }>(
       db,
       `select owner_id from documents where id = ${id}`,
     );
 
-    await asUser(db, ADMIN_ID);
+    // asPlatform has no auth.uid(), which is what the purge's service-role
+    // client looks like to the trigger: NULL is distinct from the row's
+    // agent_id, so the delete is logged with actor_id null.
     await db.exec(`delete from documents where id = ${id}`);
 
     const audit = await auditRows(db);
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({
-      actor_id: ADMIN_ID,
+      actor_id: null,
       action: "cross_agent_delete",
       table_name: "documents",
       row_id: String(id),
@@ -503,45 +498,15 @@ describe("documents — the eighth table, and the delete that nothing logged", (
     expect(audit[0].row_id).not.toBe(String(doc.owner_id));
   });
 
-  it("stays silent when a rep deletes their own upload", async () => {
-    // The own-row delete documents exists to allow. If this logged, every
-    // routine re-upload would land in the trail and bury the admin actions.
-    const id = await documentId(db, "agent-voided-check.pdf");
-
-    await asUser(db, AGENT_ID);
-    await db.exec(`delete from documents where id = ${id}`);
-
-    expect(await auditRows(db)).toEqual([]);
-  });
-
-  it("records an admin uploading in a rep's name", async () => {
-    // The object key is {parent's agent_id}/..., so an admin uploading for a
-    // rep files the row under that rep — meaning actor is distinct from
-    // agent_id and this is a genuine cross-agent insert. Expect it alongside
-    // the upload_document row create-upload-url writes: one event, two
-    // granularities, the same shape approve_pre_app already produces.
+  it("refuses an admin delete before the trigger can run", async () => {
+    // What used to be the admin-deletes-a-rep's-document case. The grant is
+    // gone, so the statement never reaches a row and nothing is logged.
+    const id = await documentId(db, "agent-statement.pdf");
     await asUser(db, ADMIN_ID);
-    await db.exec(`
-      insert into documents (agent_id, owner_type, owner_id, doc_type, file_key)
-      values ('${AGENT_ID}', 'merchant', 1, 'Bank letter',
-        '${AGENT_ID}/merchant/1/99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
-    `);
-
-    await asPlatform(db);
-    const [created] = await rows<{ id: number }>(
-      db,
-      `select id from documents where file_key like '%99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa'`,
-    );
-    const id = created.id;
-
-    const audit = await auditRows(db);
-    expect(audit).toHaveLength(1);
-    expect(audit[0]).toMatchObject({
-      actor_id: ADMIN_ID,
-      action: "cross_agent_insert",
-      table_name: "documents",
-      row_id: String(id),
-    });
+    await expect(
+      db.exec(`delete from documents where id = ${id}`),
+    ).rejects.toThrow(/permission denied/i);
+    expect(await auditRows(db)).toEqual([]);
   });
 });
 

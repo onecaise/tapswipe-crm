@@ -1347,10 +1347,35 @@ alter table pre_app_terminal_secrets enable row level security;
 -- intentionally zero policies for `authenticated` — service role only
 
 -- ---------------------------------------------------------------------
--- DOCUMENTS — metadata only; file bytes live in Supabase Storage.
--- Not itself highly sensitive (a doc_type label + a storage key), so
--- normal RLS applies here; the actual signed URLs are still minted only
--- by the create-upload-url / create-download-url Edge Functions.
+-- DOCUMENTS — LEGACY, CLOSED. Metadata for per-record uploads (a voided
+-- check on a merchant, a licence on a pre-app) whose bytes live in the
+-- `documents` bucket.
+--
+-- CLOSED BY 20261013121000. The CRM no longer accepts merchant paperwork,
+-- and /documents is now the company library (BUSINESS DOCUMENTS, below).
+-- What closing means, in both layers:
+--
+--   * Grants: `authenticated` keeps SELECT only. INSERT and DELETE are
+--     revoked (UPDATE never existed), and so is USAGE on documents_id_seq.
+--     A write is therefore "permission denied" before RLS is consulted --
+--     for an admin too.
+--   * Policies: the own-row select, insert and delete policies are dropped.
+--     One policy remains, `select admin`, so an admin can still see what is
+--     left until the purge runs.
+--   * Functions: create-upload-url, create-download-url and delete-document
+--     are removed from the repo. A rep's only way to reach the bucket was a
+--     URL those signed, and the bucket has no storage policies, so with the
+--     functions gone there is no client path to it at all. Removing them from
+--     the repo does NOT remove them from a hosted project; that is a
+--     deliberate `functions delete` per project.
+--
+-- The TABLE and the BUCKET are deliberately kept: rows and objects already
+-- exist, and deleting them is scripts/purge-legacy-documents.mjs's job --
+-- through the Storage API, because deleting storage.objects rows in SQL
+-- leaves the bytes behind. Everything below describes the table as it was
+-- built, and still is: the CHECK, the audit trigger and service_role's
+-- grant all remain, and the trigger records each purged row
+-- (actor_id null, cross_agent_delete).
 -- ---------------------------------------------------------------------
 create table documents (
   id serial primary key,
@@ -1422,13 +1447,16 @@ alter table documents
 
 alter table documents enable row level security;
 
-create policy "select own or admin" on documents
-  for select using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
-create policy "insert own" on documents
-  for insert with check ((agent_id = auth.uid() and is_active_agent()) or is_admin());
-create policy "delete own or admin" on documents
-  for delete using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
--- No UPDATE policy, and no UPDATE grant either (see the grants block). A
+-- Admin-only read, and nothing else, since 20261013121000. The three own-row
+-- policies this table was built with -- "select own or admin", "insert own",
+-- "delete own or admin" -- are dropped there. With no INSERT or DELETE grant
+-- left either, a policy alone could not reopen a write, and a grant alone
+-- would meet no policy; closing both is what makes the refusal hold even if
+-- one layer is later loosened by mistake.
+create policy "select admin" on documents
+  for select using (is_admin());
+-- HISTORY, kept because the rest of this block argues from it: the table had
+-- no UPDATE policy and no UPDATE grant from the start. A
 -- document is replaced by uploading a new one and deleting the old, so nothing
 -- edits this row in place. The grant is revoked as well as the policy left out
 -- because a policy-only omission fails the quiet way: the privilege check would
@@ -2681,6 +2709,128 @@ create index idx_marketing_materials_category
 -- time an admin's own browsing logged an event -- recording that an admin
 -- looked at something, in a table whose entire content is a record of who
 -- looked at what. The trail is not improved by being kept twice.
+
+-- =====================================================================
+-- BUSINESS DOCUMENTS — the company library behind /documents: the
+-- policies, agreements, forms and guides every rep needs, published by an
+-- admin. Added by 20261013120000, and it REPLACES what /documents used to
+-- be.
+--
+-- Until then /documents was the cross-record index over `documents`: reps
+-- uploading a merchant's voided check or driver's licence onto a lead,
+-- merchant, pre-app or ticket. The CRM does not accept that paperwork any
+-- more, so that path is closed (see DOCUMENTS above and 20261013121000)
+-- and the page became this library instead.
+--
+-- Modelled on marketing_materials, deliberately and closely: same
+-- no-agent_id shape, same row-before-upload sequencing (the key is
+-- {document_id}/{file_name}), same validated file_key CHECK, same
+-- admin-write policies, same "archive, never delete" retirement. Three
+-- differences, each decided rather than drifted into:
+--
+-- 1. NO EVENT TABLE. marketing_material_events exists because "which sell
+--    sheet did this rep send THIS LEAD" is a question about a deal. A
+--    business document is read for the rep's own reference and is never
+--    sent to a merchant on a lead, so there is no deal to file an event
+--    against, and a per-rep reading log would be surveillance nobody asked
+--    for. Without an event table nothing references a business document,
+--    so archiving is no longer forced by an FK -- it is kept because a
+--    signed URL already handed out, an audit_log row naming the id, and an
+--    admin's mistaken click are all better served by a row that still
+--    exists. The UI calls the action "Delete": an archived document is gone
+--    from every page.
+--
+-- 2. AN ARCHIVED DOCUMENT IS HIDDEN BY RLS, not by the query -- the
+--    opposite of products and marketing_materials, and on purpose. For
+--    those two, archiving is a lifecycle state: a quote line still names
+--    the product, a material's history is still read. Here archiving IS
+--    deletion as far as anyone outside the admin role is concerned, so a
+--    rep calling PostgREST directly must not be able to list what an admin
+--    deleted, and business-document-file-url refuses to sign one for
+--    anybody. The admin branch still sees every row, which is what the
+--    manage page and an engineer's recovery need.
+--
+-- 3. size_bytes. Shown beside each file so a rep knows a 40 MiB scan is
+--    coming before they tap it on a phone. Supplied by the uploading
+--    admin's browser and written by the function under the service role --
+--    a display hint, not a measurement, and nothing reads it for a
+--    decision. The per-bucket file_size_limit is the actual ceiling.
+-- =====================================================================
+create table business_documents (
+  id serial primary key,
+
+  -- The "folder". Free text, like marketing_materials.category and for the
+  -- same reason: an admin opening a new kind of document should not need a
+  -- migration.
+  category text not null,
+  title text not null,
+
+  -- Nullable because the row is created BEFORE the upload; see
+  -- marketing_materials.file_key, which is the identical sequencing.
+  file_key text,
+  file_name text,
+  mime_type text,
+  size_bytes bigint check (size_bytes is null or size_bytes >= 0),
+
+  -- The uploading admin. Not agent_id, for the reason
+  -- marketing_materials.uploaded_by is not. The TWENTY-THIRD column
+  -- referencing profiles(id), and NO ACTION like twenty-one of the others:
+  -- all four teardown lists need it.
+  uploaded_by uuid references profiles(id) not null,
+  uploaded_at timestamptz default now(),
+
+  -- "Deleted". See note 1 and note 2 above.
+  archived_at timestamptz
+);
+
+-- file_key must be the key for THIS row's id. Same rule, same shape and same
+-- reasoning as marketing_materials_file_key_matches_id: nothing
+-- client-supplied reaches the column (the function writes it as service
+-- role), so this pins the invariant the signing step depends on.
+-- fileKeyMatchesBusinessDocument() in
+-- supabase/functions/_shared/business-documents.ts enforces it again in front
+-- of Storage. Validated -- a new table has no legacy rows to exempt.
+alter table business_documents
+  add constraint business_documents_file_key_matches_id
+  check (
+    file_key is null
+    or (
+      starts_with(file_key, id::text || '/')
+      and split_part(file_key, '/', 2) <> ''
+      and split_part(file_key, '/', 3) = ''
+    )
+  );
+
+alter table business_documents enable row level security;
+
+-- Every active user reads every LIVE document; an admin reads all of them.
+-- is_active_agent() is load-bearing exactly as on marketing_materials: a
+-- deactivated rep holds a working JWT until it expires.
+create policy "select live to active users, all to admin" on business_documents
+  for select using ((is_active_agent() and archived_at is null) or is_admin());
+
+-- Admin-only writes. Rename, recategorise and delete (archive) are plain
+-- PostgREST updates from the manage page; only the file needs the function.
+create policy "admin inserts" on business_documents
+  for insert with check (is_admin());
+create policy "admin updates" on business_documents
+  for update using (is_admin()) with check (is_admin());
+-- No DELETE policy, and no DELETE grant below. "Delete" in the UI is
+-- archived_at.
+
+-- The rep-facing list is "live documents by category, then title", which is
+-- exactly the rows this partial index holds.
+create index idx_business_documents_category
+  on business_documents(category, title)
+  where archived_at is null;
+
+-- NO CROSS-AGENT AUDIT TRIGGER, for marketing_materials' first reason: there
+-- is no agent_id, so log_cross_agent_change() would read NULL and log every
+-- write. Uploads are audited where they happen, in business-document-file-url
+-- (upload_business_document). Renames and deletes are plain admin UPDATEs and
+-- are not audited -- the same as archiving a marketing material -- because
+-- archived_at keeps the row and its file, so nothing an admin does here is
+-- irreversible.
 
 -- =====================================================================
 -- BRANDS — the manufacturers the catalog is organised by.
@@ -5799,9 +5949,11 @@ grant select, insert, update, delete on
   tasks
 to authenticated;
 
--- documents: no UPDATE. Nothing edits a document row in place; it is replaced
--- by a new upload plus a delete.
-grant select, insert, delete on documents to authenticated;
+-- documents: SELECT only, since 20261013121000 closed the legacy upload path.
+-- It was `select, insert, delete` (never UPDATE: nothing edited a document row
+-- in place). The one remaining policy admits an admin, so a rep's SELECT
+-- returns zero rows rather than an error -- the same shape as audit_log.
+grant select on documents to authenticated;
 
 -- notes: no UPDATE either, for a different reason -- append-only by design, so
 -- that a note can be added and removed but never silently rewritten. Same
@@ -5851,6 +6003,12 @@ grant select on rep_payout_row_history to authenticated;
 -- rep_payout_rows already have). DELETE is absent from both layers: a material
 -- is archived, never removed, so the events that name it stay readable.
 grant select, insert, update on marketing_materials to authenticated;
+
+-- business_documents: the marketing_materials arrangement exactly. SELECT is
+-- every active rep's browse, INSERT and UPDATE are held by `authenticated` and
+-- admitted by policy for nobody but an admin, and DELETE is absent from both
+-- layers -- the UI's "Delete" is an UPDATE of archived_at.
+grant select, insert, update on business_documents to authenticated;
 
 -- marketing_material_events: append-only, so the same two verbs as notes and
 -- support_ticket_replies minus the delete those two allow. There is no way to
@@ -5943,7 +6101,8 @@ grant usage on
   pre_app_owners_id_seq,
   pre_app_terminal_id_seq,
   pre_app_business_profile_id_seq,
-  documents_id_seq,
+  -- documents_id_seq is NOT here any more: 20261013121000 revoked it along
+  -- with INSERT on documents, since nothing `authenticated` does consumes it.
   support_tickets_id_seq,
   support_ticket_replies_id_seq,
   notes_id_seq,
@@ -5959,6 +6118,10 @@ grant usage on
   -- consequence of those tables having no INSERT grant.
   marketing_materials_id_seq,
   marketing_material_events_id_seq,
+  -- An admin's INSERT into business_documents through PostgREST is admitted
+  -- by policy, so the sequence is granted for marketing_materials' reason.
+  -- The function's own inserts run as service_role.
+  business_documents_id_seq,
   -- All three catalog/quote sequences, for the same reason as the two above
   -- and none of the rep_payout ones: every insert to these tables is made by
   -- `authenticated` through PostgREST or through create_quote_version(), which
@@ -6337,17 +6500,28 @@ end;
 $$;
 
 -- =====================================================================
--- SUPABASE STORAGE — three private buckets, created by a migration
--- (20261009170000) as of 9 Oct 2026: `documents`, `residual-imports` and
--- `marketing`. None of them
--- gets storage policies referencing these tables — all
+-- SUPABASE STORAGE — four private buckets, all created by migrations:
+-- `documents`, `residual-imports` and `marketing` by 20261009170000 (9 Oct
+-- 2026), and `business-documents` by 20261013120500 (13 Oct 2026). None of
+-- them gets storage policies referencing these tables — all
 -- upload/download access goes through Edge Functions that authorize the
 -- caller first and only then mint a short-lived signed URL with the
 -- service-role client.
 --
---   documents         create-upload-url / create-download-url, which check
---                     the `documents` table's agent_id (or is_admin()).
---                     Keys: {agent_id}/{owner_type}/{owner_id}/{uuid}.
+--   documents         LEGACY, CLOSED. No function signs into it any more:
+--                     create-upload-url, create-download-url and
+--                     delete-document were removed with 20261013121000, so
+--                     the bucket is reachable only by the service role
+--                     (scripts/purge-legacy-documents.mjs). Kept, not
+--                     dropped, until that purge has been run deliberately.
+--                     Keys were {agent_id}/{owner_type}/{owner_id}/{uuid}.
+--
+--   business-documents business-document-file-url. Keys:
+--                     {document_id}/{file_name}. The company library behind
+--                     /documents. Same two-direction shape as `marketing`:
+--                     UPLOAD is admin-only, DOWNLOAD is open to every active
+--                     signed-in user, and an archived ("deleted") document
+--                     is signed for nobody.
 --
 --   residual-imports  residual-import-file-url, admin-only. Keys:
 --                     {batch_id}/{file_name}. Holds the raw XLSX behind
@@ -6358,9 +6532,9 @@ $$;
 --                     {material_id}/{file_name}. Holds the company's sell
 --                     sheets and rate cards. UPLOAD is admin-only;
 --                     DOWNLOAD is open to every active signed-in user,
---                     which makes it the only one of the three buckets
---                     whose two directions have different answers — a rep
---                     reads the library, an admin stocks it.
+--                     which made it the first bucket whose two directions
+--                     have different answers — a rep reads the library, an
+--                     admin stocks it. `business-documents` copies that.
 --
 -- Why a second bucket rather than a new `documents.owner_type`: that
 -- table's access model resolves a PARENT RECORD's agent_id
@@ -6417,8 +6591,26 @@ begin
 end
 $$;
 
+-- The fourth bucket, in its own migration (20261013120500) because the one
+-- above is already applied everywhere and an applied migration is never
+-- edited. Same guard, same `on conflict (id) do nothing`, same limit, same
+-- absence of storage policies -- tests/unit/storage-buckets-migration.test.ts
+-- pins each of those properties on both files.
+do $$
+begin
+  if to_regclass('storage.buckets') is null then
+    return;
+  end if;
+
+  insert into storage.buckets (id, name, public, file_size_limit)
+  values
+    ('business-documents', 'business-documents', false, 52428800)
+  on conflict (id) do nothing;
+end
+$$;
+
 --
--- SET A PER-BUCKET file_size_limit ON ALL THREE. This is not optional and it is
+-- SET A PER-BUCKET file_size_limit ON ALL FOUR. This is not optional and it is
 -- not what config.toml's `[storage] file_size_limit` does. Measured on the
 -- local stack with that set to "50MiB": a 120 MiB PUT through
 -- uploadToSignedUrl was accepted, and so was a 120 MiB service-role

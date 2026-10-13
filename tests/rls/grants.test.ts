@@ -120,15 +120,12 @@ describe("grant surface after all migrations", () => {
       ALL_TABLE_PRIVILEGES,
     );
 
-    // documents is narrower than the rest: no UPDATE. Nothing edits a document
-    // row in place — it is replaced by a new upload plus a delete — so the
-    // table has never had an UPDATE policy, and the grant that outlived that
-    // fact was revoked by 20260811173000. Left in place it would have failed
-    // the quiet way: privilege check passes, RLS filters to zero rows, and a
-    // future edit affordance reports a save that did nothing.
+    // documents is SELECT-only since 20261013121000 closed the legacy
+    // per-record upload path. It was SELECT, INSERT, DELETE (UPDATE went in
+    // 20260811173000); the one policy left is admin SELECT, so a rep reads zero
+    // rows and nobody signed in can write. tests/rls/documents.test.ts asserts
+    // the behaviour; this pins the grant itself.
     expect(await tablePrivileges(db, "authenticated", "documents")).toEqual([
-      "DELETE",
-      "INSERT",
       "SELECT",
     ]);
 
@@ -219,6 +216,13 @@ describe("grant surface after all migrations", () => {
     expect(
       await tablePrivileges(db, "authenticated", "marketing_material_events"),
     ).toEqual(["INSERT", "SELECT"]);
+
+    // business_documents: marketing_materials' three verbs, for marketing's
+    // reason. INSERT and UPDATE are admitted by policy for an admin only; the
+    // UI's "Delete" is an UPDATE of archived_at, so DELETE is in neither layer.
+    expect(
+      await tablePrivileges(db, "authenticated", "business_documents"),
+    ).toEqual(["INSERT", "SELECT", "UPDATE"]);
 
     // products: the same three verbs as marketing_materials, for the same
     // reason -- a rep holds INSERT and UPDATE and no policy admits their
@@ -342,6 +346,7 @@ describe("grant surface after all migrations", () => {
       "rep_payout_row_history",
       "marketing_materials",
       "marketing_material_events",
+      "business_documents",
       "products",
       "product_compatibility",
       "brands",
@@ -379,6 +384,8 @@ describe("grant surface after all migrations", () => {
       // copy.
       "marketing_materials_id_seq",
       "marketing_material_events_id_seq",
+      // An admin's INSERT into business_documents is admitted by policy.
+      "business_documents_id_seq",
       "products_id_seq",
       "brands_id_seq",
       // Both quote sequences. create_quote_version() is security INVOKER, so
@@ -412,6 +419,13 @@ describe("grant surface after all migrations", () => {
     // consumes them. Granting USAGE anyway would leave nextval() reachable
     // through any security invoker RPC, burning ids and putting gaps in a ledger
     // of what a processor reported.
+    // documents_id_seq holds nothing since 20261013121000: INSERT on documents
+    // went with it, so nothing authenticated does consumes it.
+    expect(
+      await sequencePrivileges(db, "authenticated", "documents_id_seq"),
+      "authenticated should hold nothing on documents_id_seq",
+    ).toEqual([]);
+
     for (const sequence of [
       "rep_payout_batches_id_seq",
       "rep_payout_import_rows_id_seq",
