@@ -564,3 +564,13 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/marketing-material-file-url/deno.json"
 entrypoint = "./functions/marketing-material-file-url/index.ts"
+
+# The company document library behind /documents, modelled on
+# marketing-material-file-url: an admin uploads (and the row is created here,
+# because the key is {document_id}/{file_name}); every active rep views and
+# downloads. An archived ("deleted") document is signed for nobody.
+[functions.business-document-file-url]
+enabled = true
+verify_jwt = false
+import_map = "./functions/business-document-file-url/deno.json"
+entrypoint = "./functions/business-document-file-url/index.ts"

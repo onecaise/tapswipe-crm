@@ -265,6 +265,14 @@ export const RESIDUAL_BUCKET = "residual-imports";
 export const MARKETING_BUCKET = "marketing";
 
 /**
+ * The fourth private bucket, holding the business document library behind
+ * /documents. Created by migration 20261013120500. Same two-direction shape as
+ * marketing: business-document-file-url requires an admin to upload and any
+ * active user to download.
+ */
+export const BUSINESS_DOCUMENTS_BUCKET = "business-documents";
+
+/**
  * Agent numbers given to the personas, so an import file can name them.
  *
  * Only the two active agents get one. The admin and the deactivated agent are
@@ -308,7 +316,12 @@ export async function provisionFixtures(): Promise<Fixtures> {
   // `[storage] file_size_limit` does not apply to a signed PUT (measured: 120 MiB
   // accepted with it set to 50MiB), and the buckets came back from listBuckets()
   // with file_size_limit = null.
-  for (const bucket of [BUCKET, RESIDUAL_BUCKET, MARKETING_BUCKET]) {
+  for (const bucket of [
+    BUCKET,
+    RESIDUAL_BUCKET,
+    MARKETING_BUCKET,
+    BUSINESS_DOCUMENTS_BUCKET,
+  ]) {
     const { error: limitError } = await admin.storage.updateBucket(bucket, {
       public: false,
       fileSizeLimit: MAX_DOCUMENT_BYTES,
@@ -650,6 +663,32 @@ async function clearMarketingMaterials(
 }
 
 /**
+ * Clears this user's business documents -- business_documents.uploaded_by, the
+ * TWENTY-THIRD reference to profiles(id), NO ACTION, able to block deleteUser.
+ *
+ * One pass, unlike clearMarketingMaterials: nothing references a business
+ * document (there is no event table), so the rows cannot be held in place by
+ * somebody else's. The objects go first, by the keys the rows name, because the
+ * bucket is private and an orphaned object is invisible.
+ */
+async function clearBusinessDocuments(
+  admin: SupabaseClient,
+  userId: string,
+): Promise<void> {
+  const { data: docs } = await admin
+    .from("business_documents")
+    .select("file_key")
+    .eq("uploaded_by", userId);
+  const keys = (docs ?? [])
+    .map((doc) => doc.file_key as string | null)
+    .filter((key): key is string => typeof key === "string" && key !== "");
+  if (keys.length > 0) {
+    await admin.storage.from(BUSINESS_DOCUMENTS_BUCKET).remove(keys);
+  }
+  await admin.from("business_documents").delete().eq("uploaded_by", userId);
+}
+
+/**
  * Clears any reporting line pointing at `userId`.
  *
  * profiles.manager_id is one of twenty-one references to profiles(id) and the only
@@ -785,6 +824,7 @@ export async function teardownFixtures(): Promise<void> {
     await clearUserImports(admin, user.id);
     await clearQuotes(admin, user.id);
     await clearMarketingMaterials(admin, user.id);
+    await clearBusinessDocuments(admin, user.id);
     await clearManagerReferences(admin, user.id);
 
     // Residual import files, removed by the {batch_id}/ prefix. Listed rather
@@ -831,6 +871,7 @@ export async function deleteUserCompletely(userId: string): Promise<void> {
   await clearUserImports(admin, userId);
   await clearQuotes(admin, userId);
   await clearMarketingMaterials(admin, userId);
+  await clearBusinessDocuments(admin, userId);
   await clearManagerReferences(admin, userId);
 
   const { error } = await admin.auth.admin.deleteUser(userId);

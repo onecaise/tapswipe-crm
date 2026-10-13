@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import { adminClient } from "./helpers/stack";
 
 /**
- * The three private buckets exist on the local stack, created by migration
- * 20261009170000 — and by nothing else.
+ * The four private buckets exist on the local stack, created by migrations
+ * 20261009170000 and 20261013120500 — and by nothing else.
  *
  * Until that migration, every suite created the buckets it needed in its own
  * helpers, so a bucket missing from a hosted project (marketing, on dev) was
@@ -20,14 +20,19 @@ import { adminClient } from "./helpers/stack";
  * says about them.
  */
 
-const EXPECTED = ["documents", "marketing", "residual-imports"] as const;
+const EXPECTED = [
+  "business-documents",
+  "documents",
+  "marketing",
+  "residual-imports",
+] as const;
 const LIMIT = 50 * 1024 * 1024;
 
 describe("storage buckets from the migration", () => {
   for (const id of EXPECTED) {
     it(`${id} exists, is private and carries the 50 MiB limit`, async () => {
       const { data, error } = await adminClient().storage.getBucket(id);
-      expect(error, `bucket ${id} is missing — migration 20261009170000 should create it`).toBeNull();
+      expect(error, `bucket ${id} is missing — migrations 20261009170000 / 20261013120500 should create it`).toBeNull();
       expect(data?.public).toBe(false);
       expect(data?.file_size_limit).toBe(LIMIT);
     });
