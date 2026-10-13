@@ -60,40 +60,58 @@ export function LoginForm({
         </CardHeader>
         <CardContent>
           <form onSubmit={handleLogin}>
-            <div className="flex flex-col gap-6">
-              <div className="grid gap-2">
-                <Label htmlFor="email">Email</Label>
-                <Input
-                  id="email"
-                  type="email"
-                  placeholder="m@example.com"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
-                <div className="flex items-center">
-                  <Label htmlFor="password">Password</Label>
-                  <Link
-                    href="/auth/forgot-password"
-                    className="ml-auto inline-block text-sm underline-offset-4 hover:underline"
-                  >
-                    Forgot your password?
-                  </Link>
-                </div>
-                <Input
-                  id="password"
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-              </div>
-              {error && <p className="text-sm text-destructive">{error}</p>}
-              <Button type="submit" className="w-full" disabled={isLoading}>
+            {/*
+              One grid, so DOM order and visual order can differ (QA-011).
+              The tab order is the DOM order — Email, Password, Login, then
+              "Forgot your password?" — while the link is PLACED beside the
+              Password label (`col-start-2 row-start-3`). It used to sit in the
+              label row before the input, so Tab from Email landed on the link
+              and a keyboard-only login ended on /auth/forgot-password. Never a
+              positive tabIndex: that reorders the whole page, not this form.
+              `mt-4` + `gap-y-2` reproduces the old gap-6 between groups.
+            */}
+            <div className="grid grid-cols-[1fr_auto] items-center gap-x-4 gap-y-2">
+              <Label htmlFor="email" className="col-span-2">
+                Email
+              </Label>
+              <Input
+                id="email"
+                type="email"
+                placeholder="m@example.com"
+                required
+                className="col-span-2"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+              />
+              <Label htmlFor="password" className="mt-4">
+                Password
+              </Label>
+              <Input
+                id="password"
+                type="password"
+                required
+                className="col-span-2"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+              {error && (
+                <p className="col-span-2 mt-4 text-sm text-destructive">
+                  {error}
+                </p>
+              )}
+              <Button
+                type="submit"
+                className="col-span-2 mt-4 w-full"
+                disabled={isLoading}
+              >
                 {isLoading ? "Logging in..." : "Login"}
               </Button>
+              <Link
+                href="/auth/forgot-password"
+                className="col-start-2 row-start-3 mt-4 justify-self-end text-sm underline-offset-4 hover:underline"
+              >
+                Forgot your password?
+              </Link>
             </div>
           </form>
         </CardContent>
