@@ -99,6 +99,10 @@ const PROFILE_REFERENCES = [
   ["support_ticket_replies", "author_id"],
   ["support_tickets", "agent_id"],
   ["documents", "agent_id"],
+  // business_documents.uploaded_by, the twenty-third reference (20261013120000),
+  // NO ACTION. No child table points at it, so one entry is enough; the
+  // objects behind the rows stay in the local bucket, invisible and harmless.
+  ["business_documents", "uploaded_by"],
   ["notes", "agent_id"],
   ["tasks", "agent_id"],
   ["bug_reports", "agent_id"],

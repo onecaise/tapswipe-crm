@@ -7,12 +7,10 @@ import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { type Merchant, statusIntent } from "@/lib/merchants";
 import { formatDate, formatPct, formatText } from "@/lib/format";
-import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { loadRecordProposals } from "@/lib/quotes-data";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
-import { DocumentsPanel } from "@/components/documents-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { RecordProposals } from "@/components/record-proposals";
 import { TasksPanel } from "@/components/tasks-panel";
@@ -74,15 +72,6 @@ async function MerchantDetail({
       .maybeSingle();
     agentName = (agent?.full_name as string | undefined) ?? null;
   }
-
-  // Tier 1 read, scoped by the documents select policy.
-  const { data: docs } = await supabase
-    .from("documents")
-    .select(DOCUMENT_LIST_COLUMNS)
-    .eq("owner_type", "merchant")
-    .eq("owner_id", merchant.id)
-    .order("uploaded_at", { ascending: false });
-  const documents = (docs ?? []) as DocumentRow[];
 
   // owner_type is a literal here, never from the URL: owner_id has no foreign
   // key, so a mismatched pair is not something the database would catch.
@@ -168,12 +157,6 @@ async function MerchantDetail({
         notes={notes}
         agentId={profile.id}
         isAdmin={profile.role === "admin"}
-      />
-
-      <DocumentsPanel
-        ownerType="merchant"
-        ownerId={merchant.id}
-        documents={documents}
       />
 
       {/* ownerType is a LITERAL here, never from the URL. A rep sells

@@ -131,7 +131,9 @@ test.describe("a merchant's printable record", () => {
 
     await expectChromeHidden(page);
     await expect(page.getByRole("heading", { name: "Notes" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Documents" })).toBeVisible();
+    // No Documents block since 13 Oct 2026: merchant paperwork is no longer
+    // held in the CRM, and the legacy rows are admin-read-only until purged.
+    await expect(page.getByRole("heading", { name: "Documents" })).toHaveCount(0);
   });
 
   test("shows nothing that looks like an SSN, routing or account number", async ({
@@ -177,9 +179,11 @@ test.describe("another agent's merchant", () => {
       "the copy should not distinguish absent from not-yours",
     ).toBeVisible();
 
-    // And none of the record leaked past the guard.
+    // And none of the record leaked past the guard. (This asserted on the
+    // Documents heading too until that block was removed; Notes stands in, as
+    // the other section the owner's page renders.)
     await expect(page.getByRole("heading", { name: "Tasks" })).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: "Documents" })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Notes" })).toHaveCount(0);
   });
 });
 

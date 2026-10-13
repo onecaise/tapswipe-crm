@@ -14,11 +14,9 @@ import {
   statusIntent,
 } from "@/lib/pre-apps";
 import { formatText } from "@/lib/format";
-import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
-import { DocumentsPanel } from "@/components/documents-panel";
 import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
 import { PreAppDecision } from "@/components/pre-app-decision";
@@ -57,7 +55,6 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
     { data: ownerRows },
     { data: profileRow },
     { data: terminalRow },
-    { data: docRows },
   ] = await Promise.all([
     supabase
       .from("pre_app_owners")
@@ -74,18 +71,11 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
       .select("*")
       .eq("pre_app_id", preApp.id)
       .maybeSingle(),
-    supabase
-      .from("documents")
-      .select(DOCUMENT_LIST_COLUMNS)
-      .eq("owner_type", "pre_app")
-      .eq("owner_id", preApp.id)
-      .order("uploaded_at", { ascending: false }),
   ]);
 
   const owners = (ownerRows ?? []) as PreAppOwner[];
   const cardMix = (profileRow ?? null) as PreAppBusinessProfile | null;
   const terminal = (terminalRow ?? null) as PreAppTerminal | null;
-  const documents = (docRows ?? []) as DocumentRow[];
 
   // The merchant this was approved into, if it has been. Looked up from the
   // merchant side because that is where the pointer lives, and read under the
@@ -238,12 +228,6 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
         notes={notes}
         agentId={profile.id}
         isAdmin={isAdmin}
-      />
-
-      <DocumentsPanel
-        ownerType="pre_app"
-        ownerId={preApp.id}
-        documents={documents}
       />
     </>
   );

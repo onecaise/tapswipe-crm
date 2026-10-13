@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import type { Note, Task, WithAuthor } from "@/lib/annotations";
-import type { DocumentRow } from "@/lib/documents";
 import type { MarketingEvent, MarketingEventType } from "@/lib/marketing-materials";
 import type { Quote } from "@/lib/quotes";
 import {
@@ -73,23 +72,6 @@ function task(over: Partial<WithAuthor<Task>> = {}): WithAuthor<Task> {
   };
 }
 
-function document(over: Partial<DocumentRow> = {}): DocumentRow {
-  return {
-    id: 1,
-    // The LEAD's owner, not the uploader — the whole reason these carry no
-    // byline. See lib/timeline.ts.
-    agent_id: "agent-uuid",
-    owner_type: "lead",
-    owner_id: LEAD_ID,
-    doc_type: "Voided check",
-    file_key: "agent-uuid/lead/7/abc",
-    file_name: "check.pdf",
-    mime_type: "application/pdf",
-    uploaded_at: "2026-10-03T12:00:00+00:00",
-    ...over,
-  };
-}
-
 function quote(over: Partial<Quote> = {}): Quote {
   return {
     id: 1,
@@ -142,13 +124,12 @@ const NAMES = new Map([
 ]);
 const TITLES = new Map([[42, "2026 rate card"]]);
 
-/** Every source, one row each, so a feed built from this has all six. */
+/** Every source, one row each, so a feed built from this has all five. */
 function fullInput(over: Partial<Parameters<typeof buildLeadTimeline>[0]> = {}) {
   return {
     leadId: LEAD_ID,
     notes: [note()],
     tasks: [task()],
-    documents: [document()],
     quotes: [quote()],
     marketingEvents: [marketing()],
     materialTitles: TITLES,
@@ -197,7 +178,6 @@ describe("compareTimelineEntries — ordering", () => {
       [entry({ source: "audit", id: 9, at: same })],
       [entry({ source: "marketing", id: 9, at: same })],
       [entry({ source: "note", id: 9, at: same })],
-      [entry({ source: "document", id: 9, at: same })],
       [entry({ source: "task", id: 9, at: same })],
       [entry({ source: "quote", id: 9, at: same })],
     );
@@ -206,7 +186,6 @@ describe("compareTimelineEntries — ordering", () => {
       "note",
       "task",
       "quote",
-      "document",
       "marketing",
       "audit",
     ]);
@@ -294,19 +273,18 @@ describe("compareTimelineEntries — ordering", () => {
 });
 
 describe("buildLeadTimeline — mixed sources", () => {
-  it("merges all six sources into one feed, newest first", () => {
+  it("merges all five sources into one feed, newest first", () => {
     const { entries, truncated } = buildLeadTimeline(fullInput());
 
     expect(entries.map((e) => e.source)).toEqual([
       "audit", // 10-06
       "marketing", // 10-05
       "quote", // 10-04
-      "document", // 10-03
       "task", // 10-02
       "note", // 10-01
     ]);
     expect(truncated).toBe(false);
-    // Every declared source really is reachable, so adding a seventh without
+    // Every declared source really is reachable, so adding a sixth without
     // wiring it up fails here rather than going quietly missing.
     expect(new Set(entries.map((e) => e.source))).toEqual(
       new Set(TIMELINE_SOURCES),
@@ -326,7 +304,7 @@ describe("buildLeadTimeline — mixed sources", () => {
     const { entries } = buildLeadTimeline(fullInput({ auditRows: [] }));
 
     expect(entries.filter((e) => e.source === "audit")).toEqual([]);
-    expect(entries).toHaveLength(5);
+    expect(entries).toHaveLength(4);
   });
 
   it("keys entries uniquely even when ids collide across sources", () => {
@@ -334,7 +312,6 @@ describe("buildLeadTimeline — mixed sources", () => {
       fullInput({
         notes: [note({ id: 1 })],
         tasks: [task({ id: 1 })],
-        documents: [document({ id: 1 })],
         quotes: [quote({ id: 1 })],
         marketingEvents: [marketing({ id: 1 })],
         auditRows: [audit({ id: 1 })],
@@ -483,19 +460,17 @@ describe("buildLeadTimeline — bylines and wording", () => {
     expect(bySource.get("marketing")).toBe("Rep One");
   });
 
-  it("refuses a byline on documents and quotes", () => {
-    // Their agent_id is the LEAD's owner, not whoever acted, so an admin's
-    // upload on a rep's lead would be attributed to the rep. A plausible wrong
-    // byline is worse than none.
+  it("refuses a byline on quotes", () => {
+    // Their agent_id is the rep the proposal is FOR, not whoever acted, so an
+    // admin's proposal on a rep's behalf would be attributed to the rep. A
+    // plausible wrong byline is worse than none.
     const { entries } = buildLeadTimeline(
       fullInput({
-        documents: [document({ agent_id: "agent-uuid" })],
         quotes: [quote({ agent_id: "agent-uuid" })],
       }),
     );
     const bySource = new Map(entries.map((e) => [e.source, e.actorName]));
 
-    expect(bySource.get("document")).toBeNull();
     expect(bySource.get("quote")).toBeNull();
   });
 
@@ -619,5 +594,14 @@ describe("auditActionLabel", () => {
     );
     expect(auditActionLabel("")).toBe("Recorded action");
     expect(auditActionLabel(":")).toBe("Recorded action");
+  });
+});
+
+describe("documents are no longer a timeline source", () => {
+  it("declares no document source at all", () => {
+    // Removed with the per-record documents panel (13 Oct 2026): a rep can no
+    // longer read `documents`, so a document source would make an admin's feed
+    // and a rep's feed disagree about the same lead.
+    expect(TIMELINE_SOURCES as readonly string[]).not.toContain("document");
   });
 });

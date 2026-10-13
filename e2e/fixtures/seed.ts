@@ -147,6 +147,8 @@ export type SeedResult = {
   ids: Record<PersonaKey, string>;
   /** The one published marketing material, for the marketing specs. */
   materialId: number;
+  /** The one published business document, for the Document Center specs. */
+  businessDocumentId: number;
   /** persona -> owner type -> record id, for the document specs. */
   /** Every persona but `logout`, which owns no records — see PERSONAS. */
   docOwners: Record<Exclude<PersonaKey, "logout">, DocOwnerIds>;
@@ -303,7 +305,7 @@ export type TimelineFixture = {
  *
  * Every string is distinctive enough to locate by, because the spec asserts on
  * what is RENDERED rather than on row counts — the lead page draws these same
- * rows into five panels as well as into the feed, so a locator scoped to the
+ * rows into four panels as well as into the feed, so a locator scoped to the
  * timeline section plus a unique string is what keeps the two apart.
  */
 export const TIMELINE_FIXTURE = {
@@ -311,8 +313,6 @@ export const TIMELINE_FIXTURE = {
   noteBody: "E2E timeline note — merchant asked about chargeback fees",
   taskTitle: "E2E timeline task — confirm bank letter",
   quoteTitle: "E2E timeline quote",
-  docType: "E2E timeline statement",
-  docFileName: "e2e-timeline-statement.pdf",
   /**
    * What the admin writes into `lead_source`, which is what makes the audit
    * row exist at all: log_cross_agent_change() fires only when the actor is
@@ -743,6 +743,7 @@ export async function seedE2E(): Promise<SeedResult> {
 
   await ensureDocumentsBucket(db);
   const materialId = await ensureMarketingMaterial(db, ids.admin);
+  const businessDocumentId = await ensureBusinessDocument(db, ids.admin);
   const quote = await ensureQuote(db, ids.agent, docOwners.agent.lead);
   const tasks = await ensureTasks(db, ids, docOwners);
   await ensureReportingLine(db, ids);
@@ -761,6 +762,7 @@ export async function seedE2E(): Promise<SeedResult> {
     ids,
     docOwners,
     materialId,
+    businessDocumentId,
     quote,
     tasks,
     timeline,
@@ -1210,33 +1212,13 @@ async function ensureTimelineLead(
   });
   if (taskError) throw new Error(`timeline task: ${taskError.message}`);
 
-  // One document, metadata AND bytes. The row alone would render the timeline
-  // entry perfectly well, but it is also the orphan state delete-document's
-  // file_key mode exists to clean up, and leaving one permanently in the
-  // fixtures is how a real orphan stops being noticeable.
-  //
-  // The key shape is not cosmetic: documents_file_key_matches_owner requires
-  // `{agent_id}/{owner_type}/{owner_id}/` and EXACTLY four segments, and the
-  // constraint is NOT VALID only for rows that already existed — a new insert
-  // is checked. Deterministic rather than a uuid, so re-running upserts the
-  // same object instead of accumulating one per run.
-  const fileKey = `${ids.agent}/lead/${leadId}/e2e-timeline-doc`;
-  await db.from("documents").delete().eq("file_key", fileKey);
-  const { error: uploadError } = await db.storage
-    .from("documents")
-    .upload(fileKey, new Blob(["E2E timeline statement"]), {
-      contentType: "application/pdf",
-      upsert: true,
-    });
-  if (uploadError) throw new Error(`timeline doc bytes: ${uploadError.message}`);
-  const { error: docError } = await db.from("documents").insert({
-    ...onLead,
-    doc_type: TIMELINE_FIXTURE.docType,
-    file_key: fileKey,
-    file_name: TIMELINE_FIXTURE.docFileName,
-    mime_type: "application/pdf",
-  });
-  if (docError) throw new Error(`timeline doc: ${docError.message}`);
+  // No document: documents stopped being a timeline source on 13 Oct 2026,
+  // when the per-record documents path was closed (20261013121000). Earlier
+  // runs left a legacy row and object on this lead; they are removed here so
+  // the fixture converges on the state a fresh stack has.
+  const legacyKey = `${ids.agent}/lead/${leadId}/e2e-timeline-doc`;
+  await db.from("documents").delete().eq("file_key", legacyKey);
+  await db.storage.from("documents").remove([legacyKey]);
 
   // One marketing event, on THIS lead. marketing.spec.ts clears events on the
   // agent's main lead, which is half of why this fixture has a lead of its own.
@@ -1957,9 +1939,12 @@ export async function proposalLines(title: string): Promise<
 }
 
 /**
- * The size ceiling on the private `documents` and `marketing` buckets.
+ * The size ceiling on the private `documents`, `marketing` and
+ * `business-documents` buckets. (`documents` is legacy and closed since
+ * 20261013121000, and no spec writes to it; it is still limited because it
+ * still exists until the purge runs.)
  *
- * The buckets themselves come from a MIGRATION (20261009170000) and are NOT
+ * The buckets themselves come from MIGRATIONS (20261009170000, 20261013120500) and are NOT
  * created here any more: a helper that created its own bucket is how one
  * missing on dev stayed invisible to every suite. updateBucket errors on a
  * bucket that does not exist, so a missing one fails the seed loudly.
@@ -1973,26 +1958,25 @@ export async function proposalLines(title: string): Promise<
  * The per-bucket limit is.
  */
 async function ensureDocumentsBucket(db: SupabaseClient): Promise<void> {
-  for (const bucket of ["documents", "marketing"]) {
+  for (const bucket of ["documents", "marketing", "business-documents"]) {
     const { error: updateError } = await db.storage.updateBucket(bucket, {
       public: false,
       fileSizeLimit: MAX_DOCUMENT_BYTES,
     });
     if (updateError) {
       throw new Error(
-        `${bucket} bucket is missing or could not be limited (it should come from migration 20261009170000): ${updateError.message}`,
+        `${bucket} bucket is missing or could not be limited (it should come from migrations 20261009170000 / 20261013120500): ${updateError.message}`,
       );
     }
   }
 }
 
 /**
- * The upload ceiling, duplicated from lib/documents.ts.
+ * The per-bucket upload ceiling (52428800), the number MAX_MATERIAL_BYTES and
+ * MAX_BUSINESS_DOCUMENT_BYTES in lib/ also carry.
  *
  * Imported rather than redeclared would be better, but this module is loaded by
  * Playwright's config-time transpile and the `@/` alias is not wired up there.
- * The two are pinned together by e2e/documents-edge-cases.spec.ts, which asserts
- * the client refuses at exactly this boundary.
  */
 const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
 
@@ -2095,75 +2079,149 @@ async function ensureDocOwners(
   };
 }
 
+/** The bytes behind the seeded business document, for a round-trip assertion. */
+export const BUSINESS_DOCUMENT_BODY = "E2E CHARGEBACK POLICY — respond within 7 days";
+
+/** The seeded business document's category, title and file, as data. */
+export const BUSINESS_DOCUMENT_FIXTURE = {
+  category: "E2E Policies",
+  title: "E2E chargeback policy",
+  fileName: "e2e-chargeback-policy.txt",
+} as const;
+
 /**
- * The metadata rows behind a file name, newest first.
- *
- * Paired with storageObjectExists(), this is what distinguishes a real delete
- * from a metadata-only one — a spec cannot see Storage itself, because the bucket
- * is private and the browser only ever holds a signed URL. Both run on the Node
- * side with the service role, deliberately not exposed to the page, for the same
- * reason publicStackConfig withholds that key.
- *
- * Capture the file_key BEFORE the action under test: once the row is gone there
- * is nothing left to look the object up by.
+ * One published business document with real bytes behind it, as the ADMIN --
+ * only an admin may write business_documents, and what the specs exercise is
+ * a REP reading it. ensureMarketingMaterial's shape exactly: row first (the
+ * key is {document_id}/{file_name}), object upserted every run, then file_key
+ * written with archived_at cleared, so a document a spec deleted last run is
+ * back for this one.
  */
-export async function documentRows(
-  fileName: string,
-): Promise<{ id: number; fileKey: string }[]> {
+async function ensureBusinessDocument(
+  db: SupabaseClient,
+  adminId: string,
+): Promise<number> {
+  const { category, title, fileName } = BUSINESS_DOCUMENT_FIXTURE;
+
+  const { data: existing } = await db
+    .from("business_documents")
+    .select("id")
+    .eq("title", title)
+    .order("id", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  let documentId = existing?.id as number | undefined;
+  if (documentId === undefined) {
+    const { data, error } = await db
+      .from("business_documents")
+      .insert({
+        category,
+        title,
+        file_name: fileName,
+        mime_type: "text/plain",
+        size_bytes: BUSINESS_DOCUMENT_BODY.length,
+        uploaded_by: adminId,
+      })
+      .select("id")
+      .single();
+    if (error || !data) {
+      throw new Error(`business document: ${error?.message ?? "no row"}`);
+    }
+    documentId = data.id as number;
+  }
+
+  const fileKey = `${documentId}/${fileName}`;
+  const { error: uploadError } = await db.storage
+    .from("business-documents")
+    .upload(fileKey, new Blob([BUSINESS_DOCUMENT_BODY]), {
+      contentType: "text/plain",
+      upsert: true,
+    });
+  if (uploadError) {
+    throw new Error(`business document object: ${uploadError.message}`);
+  }
+
+  const { error: keyError } = await db
+    .from("business_documents")
+    .update({ file_key: fileKey, archived_at: null, category, title })
+    .eq("id", documentId);
+  if (keyError) throw new Error(`business document key: ${keyError.message}`);
+
+  return documentId;
+}
+
+/**
+ * The business_documents rows with a given title, archived ones included, as
+ * the service role: what the database actually holds, which a rep's page
+ * (RLS hides archived rows from them) cannot show a spec.
+ */
+export async function businessDocumentRows(title: string): Promise<
+  {
+    id: number;
+    category: string;
+    file_key: string | null;
+    archived_at: string | null;
+    uploaded_by: string;
+  }[]
+> {
   const { apiUrl, serviceKey } = localStackConfig();
   const db = createClient(apiUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-
   const { data } = await db
-    .from("documents")
-    .select("id, file_key")
-    .eq("file_name", fileName)
+    .from("business_documents")
+    .select("id, category, file_key, archived_at, uploaded_by")
+    .eq("title", title)
     .order("id", { ascending: false });
-
-  return (data ?? []).map((r) => ({
-    id: r.id as number,
-    fileKey: r.file_key as string,
-  }));
+  return (data ?? []) as Awaited<ReturnType<typeof businessDocumentRows>>;
 }
 
-/** Whether a specific storage key is still in the bucket. */
-export async function storageObjectExists(fileKey: string): Promise<boolean> {
+/** Whether an object is in the business-documents bucket. */
+export async function businessDocumentObjectExists(
+  fileKey: string,
+): Promise<boolean> {
   const { apiUrl, serviceKey } = localStackConfig();
   const db = createClient(apiUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  const parts = fileKey.split("/");
-  const name = parts.pop() as string;
-  const { data: listed } = await db.storage
-    .from("documents")
-    .list(parts.join("/"), { limit: 1000 });
-  return (listed ?? []).some((o) => o.name === name);
+  const [prefix, name] = fileKey.split("/");
+  const { data } = await db.storage
+    .from("business-documents")
+    .list(prefix, { limit: 100 });
+  return (data ?? []).some((o) => o.name === name);
 }
 
 /**
- * Removes every documents row (and its object) a spec created, by file name.
- *
- * Specs upload real files, so without this each run leaves more rows on the
- * fixture records and the "no documents attached yet" empty state becomes
- * unreachable for whichever spec asserts on it.
+ * Removes every business document a spec published, by title -- rows,
+ * objects and their upload audit rows -- as the service role, since nobody
+ * else holds a DELETE on the table by design. Run BEFORE a spec publishes, so
+ * a count assertion never reads a previous run's leftovers.
  */
-export async function clearDocuments(fileNames: string[]): Promise<void> {
+export async function clearBusinessDocuments(titles: string[]): Promise<void> {
   const { apiUrl, serviceKey } = localStackConfig();
   const db = createClient(apiUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-
   const { data: rows } = await db
-    .from("documents")
+    .from("business_documents")
     .select("id, file_key")
-    .in("file_name", fileNames);
+    .in("title", titles);
   if (!rows || rows.length === 0) return;
-
-  const keys = rows.map((r) => r.file_key as string);
-  if (keys.length > 0) await db.storage.from("documents").remove(keys);
+  const keys = rows
+    .map((r) => r.file_key as string | null)
+    .filter((k): k is string => typeof k === "string" && k !== "");
+  if (keys.length > 0) await db.storage.from("business-documents").remove(keys);
   await db
-    .from("documents")
+    .from("audit_log")
+    .delete()
+    .eq("table_name", "business_documents")
+    .in(
+      "row_id",
+      rows.map((r) => String(r.id)),
+    );
+  await db
+    .from("business_documents")
     .delete()
     .in(
       "id",
@@ -2345,6 +2403,20 @@ export async function clearImportedUsers(
     }
     await db.from("marketing_material_events").delete().eq("agent_id", user.id);
     await db.from("marketing_materials").delete().eq("uploaded_by", user.id);
+    // business_documents.uploaded_by, the twenty-third reference to
+    // profiles(id), NO ACTION. Objects first, by the keys the rows name; no
+    // child table, so one pass.
+    const { data: ownDocuments } = await db
+      .from("business_documents")
+      .select("file_key")
+      .eq("uploaded_by", user.id);
+    const documentKeys = (ownDocuments ?? [])
+      .map((doc) => doc.file_key as string | null)
+      .filter((key): key is string => typeof key === "string" && key !== "");
+    if (documentKeys.length > 0) {
+      await db.storage.from("business-documents").remove(documentKeys);
+    }
+    await db.from("business_documents").delete().eq("uploaded_by", user.id);
     await db.auth.admin.deleteUser(user.id);
   }
 

@@ -222,26 +222,26 @@ export type Fixtures = {
   tokens: Record<PersonaKey, string>;
   /** merchants.id owned by each persona. */
   merchantIds: Record<PersonaKey, number>;
-  /** One record of every document-owning type, per persona. */
+  /** One record of each of the four owner types, per persona. */
   ownerIds: Record<PersonaKey, Record<OwnerType, number>>;
-  /** documents.id owned by each persona, each with real bytes in Storage. */
-  documentIds: Record<PersonaKey, number>;
-  /** The bytes behind the owner's document, for a round-trip comparison. */
-  ownerDocumentBody: string;
-  /** An owner_id / document_id that has never existed. */
+  /** A record id that has never existed. */
   missingId: number;
 };
 
 export const MISSING_ID = 987654;
+/**
+ * The LEGACY per-record documents bucket. No function signs into it since
+ * 20261013121000 closed that path, and no fixture writes to it any more; it is
+ * still limited and still swept by teardownFixtures(), because the bucket and
+ * any old objects in it exist until scripts/purge-legacy-documents.mjs runs.
+ */
 export const BUCKET = "documents";
 
 /**
- * The per-bucket upload ceiling, mirroring MAX_DOCUMENT_BYTES in lib/documents.ts.
- *
- * Redeclared rather than imported because this suite runs against the stack and
- * not the app, and pulling an app module in for one number would make the fixture
- * helper depend on the `@/` alias. tests/live/document-urls.test.ts asserts the
- * server actually refuses at this boundary, which is what keeps the two honest.
+ * The per-bucket upload ceiling every private bucket carries (52428800, set by
+ * the bucket migrations), re-asserted on each run by provisionFixtures().
+ * Redeclared rather than imported from lib/, which would make this helper
+ * depend on the `@/` alias.
  */
 export const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
 
@@ -289,7 +289,7 @@ export const PERSONA_AGENT_NUMBERS: Partial<Record<PersonaKey, string>> = {
 export const UNKNOWN_AGENT_NUMBER = "LIVE-0000";
 
 /**
- * Creates the bucket, four users, four merchants and four documents, and signs
+ * Creates four users, and for each one record of every owner type, and signs
  * everyone in.
  *
  * Four personas rather than two: with only an owner and an intruder, a
@@ -337,8 +337,6 @@ export async function provisionFixtures(): Promise<Fixtures> {
   const tokens = {} as Record<PersonaKey, string>;
   const merchantIds = {} as Record<PersonaKey, number>;
   const ownerIds = {} as Record<PersonaKey, Record<OwnerType, number>>;
-  const documentIds = {} as Record<PersonaKey, string | number>;
-  const ownerDocumentBody = "live round-trip payload";
 
   for (const persona of PERSONAS) {
     const { data: created, error: createError } =
@@ -456,46 +454,6 @@ export async function provisionFixtures(): Promise<Fixtures> {
       support_ticket: ticket.id,
     };
 
-    // A real object in Storage, because createSignedUrl fails on a key that
-    // isn't there — a download test against a dangling file_key would report
-    // 500 and prove nothing about authorization.
-    const fileKey = `${created.user.id}/merchant/${merchant.id}/live-fixture.txt`;
-    const body =
-      persona.key === "owner"
-        ? ownerDocumentBody
-        : `live fixture for ${persona.key}`;
-    const { error: uploadError } = await admin.storage
-      .from(BUCKET)
-      .upload(fileKey, new Blob([body], { type: "text/plain" }), {
-        upsert: true,
-        contentType: "text/plain",
-      });
-    if (uploadError) {
-      throw new Error(
-        `Could not upload fixture object for ${persona.email}: ${uploadError.message}`,
-      );
-    }
-
-    const { data: document, error: documentError } = await admin
-      .from("documents")
-      .insert({
-        agent_id: created.user.id,
-        owner_type: "merchant",
-        owner_id: merchant.id,
-        doc_type: "Voided check",
-        file_key: fileKey,
-        file_name: `live-${persona.key}.txt`,
-        mime_type: "text/plain",
-      })
-      .select("id")
-      .single();
-    if (documentError || !document) {
-      throw new Error(
-        `Could not insert document for ${persona.email}: ${documentError?.message}`,
-      );
-    }
-    documentIds[persona.key] = document.id;
-
     // Sign in as the persona. A deactivated profile is not a banned auth.users
     // row, so this succeeds for all four — which is the whole point of the
     // is_active_agent() check inside the functions: a deactivated agent walks
@@ -515,8 +473,6 @@ export async function provisionFixtures(): Promise<Fixtures> {
     tokens,
     merchantIds,
     ownerIds,
-    documentIds: documentIds as Record<PersonaKey, number>,
-    ownerDocumentBody,
     missingId: MISSING_ID,
   };
 }

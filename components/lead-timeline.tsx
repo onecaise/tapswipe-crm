@@ -71,8 +71,8 @@ function Byline({ entry }: { entry: TimelineEntry }) {
   if (entry.source === "audit") {
     return <span>Automated</span>;
   }
-  // documents and quotes reach here by design — their agent_id is the owning
-  // rep rather than whoever acted, so there is no honest name to print. See
+  // quotes reach here by design — their agent_id is the rep the proposal is
+  // for rather than whoever acted, so there is no honest name to print. See
   // lib/timeline.ts on why a plausible wrong byline is worse than none.
   return null;
 }

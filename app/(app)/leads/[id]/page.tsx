@@ -17,7 +17,6 @@ import {
   statusIntent,
 } from "@/lib/leads";
 import { formatDate, formatStatus, formatText } from "@/lib/format";
-import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import {
   EVENT_COLUMNS,
   MATERIAL_LIST_COLUMNS,
@@ -32,7 +31,6 @@ import { buildLeadTimeline } from "@/lib/timeline";
 import { loadLeadTimelineExtras } from "@/lib/timeline-data";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
-import { DocumentsPanel } from "@/components/documents-panel";
 import { FollowupReconcile } from "@/components/followup-reconcile";
 import { LeadTimeline } from "@/components/lead-timeline";
 import { MarketingPanel } from "@/components/marketing-panel";
@@ -108,15 +106,6 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
     agentName = (agent?.full_name as string | undefined) ?? null;
   }
 
-  // Tier 1 read, scoped by the documents select policy.
-  const { data: docs } = await supabase
-    .from("documents")
-    .select(DOCUMENT_LIST_COLUMNS)
-    .eq("owner_type", "lead")
-    .eq("owner_id", lead.id)
-    .order("uploaded_at", { ascending: false });
-  const documents = (docs ?? []) as DocumentRow[];
-
   // Whether an application already came off this lead. pre_apps.lead_id records
   // provenance and is deliberately not unique — a lead can legitimately be
   // applied for more than once — so this is not a constraint, it is the thing
@@ -186,16 +175,15 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
   const quotes = proposals.flatMap((proposal) => proposal.group.versions);
 
   // The timeline, which re-sorts rows this function has ALREADY read rather
-  // than reading them again: notes, tasks, documents, quotes and marketing
-  // events are all above, each under its own policy. The only new read is the
+  // than reading them again: notes, tasks, quotes and marketing events are
+  // all above, each under its own policy. The only new read is the
   // admin-only `audit_log`, and it comes back empty for a rep — see the header
   // of lib/timeline.ts for what each role ends up seeing and why no role
   // branch is written anywhere in the feed.
   //
   // Only the marketing authors need resolving here. Note and task bylines were
-  // attached by loadAnnotations() already, and documents and quotes carry no
-  // byline at all — their agent_id is the lead's owner rather than whoever
-  // acted, so printing it would attribute an admin's upload to the rep.
+  // attached by loadAnnotations() already, and quotes carry no byline at all —
+  // their agent_id is the rep the proposal is for rather than whoever acted.
   const { auditRows, actorNames } = await loadLeadTimelineExtras({
     leadId: lead.id,
     quoteIds: quotes.map((quote) => quote.id),
@@ -207,7 +195,6 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
     leadId: lead.id,
     notes,
     tasks,
-    documents,
     quotes,
     marketingEvents,
     materialTitles,
@@ -344,12 +331,6 @@ async function LeadDetail({ params }: { params: Promise<{ id: string }> }) {
         notes={notes}
         agentId={profile.id}
         isAdmin={profile.role === "admin"}
-      />
-
-      <DocumentsPanel
-        ownerType="lead"
-        ownerId={lead.id}
-        documents={documents}
       />
 
       <RecordProposals ownerType="lead" ownerId={lead.id} proposals={proposals} />

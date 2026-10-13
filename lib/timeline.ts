@@ -1,18 +1,25 @@
 /**
- * The lead timeline — one chronological feed over five sources the lead page
+ * The lead timeline — one chronological feed over four sources the lead page
  * already loads, plus the admin-only audit trail.
+ *
+ * Documents were a fifth source until 13 Oct 2026, when the per-record
+ * documents panel was removed with the legacy upload path (migration
+ * 20261013121000 leaves `documents` readable by admins only). A rep's feed
+ * could no longer have shown them, and an admin's showing rows the rep's does
+ * not would have broken the one property this feed keeps: two roles reading the
+ * same lead see the same shared rows.
  *
  * ## Why this file is pure, and where the one new query lives
  *
  * Everything here is a projection: the lead detail page already reads notes,
- * tasks, documents, quotes and marketing events, each under its own policy, to
- * render the five panels below the fold. The timeline is those same rows
+ * tasks, quotes and marketing events, each under its own policy, to render the
+ * panels below the fold. The timeline is those same rows
  * re-sorted, so it costs no extra reads — `loadLeadTimelineExtras()` in
  * lib/timeline-data.ts adds the single source nobody else reads (`audit_log`)
  * and resolves bylines, and nothing else touches the network.
  *
  * That split is deliberate rather than tidy. A `loadLeadTimeline()` that did
- * its own six reads would double every one of them on the page's hot path, and
+ * its own five reads would double every one of them on the page's hot path, and
  * extending `loadAnnotations()` would push a lead-only concern into a function
  * four detail pages share. Keeping the merge pure is also what makes it
  * testable without a database — tests/unit/timeline.test.ts imports this file
@@ -22,11 +29,10 @@
  *
  * Every row handed in arrived through the caller's own policies. There is no
  * `security definer` RPC behind the feed and no service-role client; the
- * timeline is exactly as rich as RLS already allowed, and six separate policies
+ * timeline is exactly as rich as RLS already allowed, and five separate policies
  * decide that rather than anything written here:
  *
  *   notes, tasks        own-row or admin
- *   documents           own-row or admin, where `agent_id` is the LEAD's owner
  *   quotes              own-row or admin
  *   marketing events    own-row or admin — so a rep sees their own trail only
  *   audit_log           `using (is_admin())`, with NO own-row branch at all
@@ -48,23 +54,21 @@
  *
  * ## Which sources can carry a byline, and which must not
  *
- * Four of the six name their actor; two deliberately do not, and this is the
+ * Four of the five name their actor; one deliberately does not, and this is the
  * thing most likely to get "fixed" by someone reading `agent_id` and assuming
  * it means author:
  *
  *   notes, tasks      agent_id IS the author — the panels write profile.id
  *   marketing events  agent_id IS the acting rep, per the column's own comment
  *   audit_log         actor_id IS the actor, and is null for a service-role write
- *   documents         agent_id is the PARENT RECORD's owner, not the uploader
  *   quotes            agent_id is the rep the proposal is FOR — an admin
  *                     may make one on a rep's behalf, so it is not the actor
  *
- * So an admin uploading a document or writing a quote on a rep's lead lands a
- * row stamped with the REP's id, which is what puts it in the rep's book and
- * what makes it the wrong value to print as a byline. The real actor for those
- * two is recorded in `audit_log` (`upload_document:lead`, `cross_agent_insert`)
- * and is therefore admin-only — so the honest rendering is no byline at all,
- * not a plausible wrong one.
+ * So an admin writing a quote for a rep lands a row stamped with the REP's id,
+ * which is what puts it in the rep's book and what makes it the wrong value to
+ * print as a byline. The real actor is recorded in `audit_log`
+ * (`cross_agent_insert`) and is therefore admin-only — so the honest rendering
+ * is no byline at all, not a plausible wrong one.
  */
 
 import {
@@ -72,7 +76,6 @@ import {
   type MarketingEvent,
   type MarketingEventType,
 } from "@/lib/marketing-materials";
-import type { DocumentRow } from "@/lib/documents";
 import type { Note, Task, WithAuthor } from "@/lib/annotations";
 import { proposalPrintHref, type Quote } from "@/lib/quotes";
 
@@ -81,7 +84,7 @@ import { proposalPrintHref, type Quote } from "@/lib/quotes";
  *
  * Applied after the merge, so the newest N survive whatever mix they came
  * from — capping per source would quietly drop a recent note because an old
- * lead had forty documents. The component says when it bit, for the reason
+ * lead had forty marketing events. The component says when it bit, for the reason
  * AnnotationIndexResult carries `truncated`: a list that silently ends reads
  * as a complete history.
  */
@@ -91,7 +94,6 @@ export const TIMELINE_SOURCES = [
   "note",
   "task",
   "quote",
-  "document",
   "marketing",
   "audit",
 ] as const;
@@ -109,7 +111,6 @@ export const TIMELINE_SOURCE_LABELS: Record<TimelineSource, string> = {
   note: "Note",
   task: "Task",
   quote: "Quote",
-  document: "Document",
   marketing: "Marketing",
   audit: "Admin trail",
 };
@@ -120,16 +121,15 @@ export const TIMELINE_SOURCE_LABELS: Record<TimelineSource, string> = {
  * Exact ties are normal rather than freak: `created_at` defaults to `now()`,
  * which is fixed for a whole transaction, so `create_quote_version()` writes a
  * quote and `log_cross_agent_change()` writes its audit row at a timestamp
- * equal to the microsecond. `audit` sorts last of the six because an audit row
+ * equal to the microsecond. `audit` sorts last of the five because an audit row
  * is the *trace* of an act — at one instant the act itself reads first.
  */
 const SOURCE_RANK: Record<TimelineSource, number> = {
   note: 0,
   task: 1,
   quote: 2,
-  document: 3,
-  marketing: 4,
-  audit: 5,
+  marketing: 3,
+  audit: 4,
 };
 
 export type TimelineEntry = {
@@ -168,15 +168,11 @@ export type AuditRow = {
  * off it, and an admin editing a rep's quote or approving the application that
  * came from this lead is the same story told one table over.
  *
- * `documents` is deliberately NOT here, and the reason is specific rather than
- * squeamish. Its audit rows split two ways: the upload ones duplicate the
- * `document` entries this feed already builds from the table itself, at a
- * coarser granularity; and the DELETE one — the single genuinely new fact,
- * since a delete leaves nothing behind — names a `row_id` whose row is gone, so
- * it cannot be matched to this lead by any filter available here. Including
- * `documents` would therefore add only the duplicates and still miss the one
- * event worth surfacing. Reaching the deletes needs an `owner_id` on the audit
- * row, which is a schema change, not a query.
+ * `documents` is deliberately NOT here. It was excluded while the feed still
+ * built entries from the table (its upload rows were duplicates, and its
+ * DELETE rows name a row that is gone, so they cannot be tied to a lead), and
+ * since 13 Oct 2026 the table is legacy and closed: the purge's
+ * cross_agent_delete rows are housekeeping, not part of any lead's story.
  */
 export const AUDITED_TIMELINE_TABLES = ["leads", "quotes", "pre_apps"] as const;
 
@@ -289,31 +285,6 @@ export function taskEntries(
 }
 
 /**
- * Document uploads. No byline, on purpose — see the file header.
- *
- * `documents.agent_id` is the parent record's owner so the file lands in that
- * rep's book, which makes it precisely the wrong value to print as "uploaded
- * by". The uploader is in `audit_log` and so is admin-only.
- */
-export function documentEntries(
-  documents: readonly DocumentRow[],
-): TimelineEntry[] {
-  return documents.map((doc) => ({
-    key: `document:${doc.id}`,
-    source: "document" as const,
-    id: doc.id,
-    at: doc.uploaded_at,
-    title: "Document uploaded",
-    detail:
-      doc.file_name === null || doc.file_name === ""
-        ? doc.doc_type
-        : `${doc.doc_type} — ${doc.file_name}`,
-    actorName: null,
-    href: null,
-  }));
-}
-
-/**
  * Every quote version as its own event, which is what the append-only design
  * makes possible: an edit inserts a row rather than mutating one, so "v3 was
  * written on the 14th" is a fact the table still holds.
@@ -326,7 +297,7 @@ export function documentEntries(
  * Linked to /proposals/<group>/print, the proposal's own route, now that a
  * proposal is its own record rather than a child of the lead page.
  *
- * No byline, for the same reason documents have none: `quotes.agent_id` is
+ * No byline, on purpose: `quotes.agent_id` is
  * the rep the proposal is FOR, not whoever acted — an admin can make one on a
  * rep's behalf, and printing the rep's name would attribute the act wrongly.
  */
@@ -540,7 +511,6 @@ export function buildLeadTimeline(input: {
   leadId: number;
   notes: readonly WithAuthor<Note>[];
   tasks: readonly WithAuthor<Task>[];
-  documents: readonly DocumentRow[];
   quotes: readonly Quote[];
   marketingEvents: readonly MarketingEvent[];
   materialTitles: ReadonlyMap<number, string>;
@@ -561,7 +531,6 @@ export function buildLeadTimeline(input: {
   const all = mergeTimeline(
     noteEntries(input.notes),
     taskEntries(input.tasks),
-    documentEntries(input.documents),
     quoteEntries(input.quotes),
     marketingEntries(
       input.marketingEvents,

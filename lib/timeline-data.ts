@@ -7,7 +7,7 @@ import { AUDIT_COLUMNS, type AuditRow } from "@/lib/timeline";
  * lookup the merged feed needs.
  *
  * Everything else the timeline shows is already on the lead page: notes,
- * tasks, documents, quotes and marketing events are all loaded there for the
+ * tasks, quotes and marketing events are all loaded there for the
  * panels, and lib/timeline.ts re-sorts those same rows without touching the
  * network. This file exists so that the one genuinely new query lives beside
  * the reasoning for it rather than inline in a page.

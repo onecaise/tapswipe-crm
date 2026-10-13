@@ -15,8 +15,8 @@ import {
  * The merge and the ordering are pure and are tested in
  * tests/unit/timeline.test.ts, where ties and offsets can be constructed
  * exactly. The per-table policies are tested in tests/rls. Neither of those can
- * see the thing this file is about: the feed is assembled from SIX sources read
- * under SIX different policies and then flattened into one list, and whether
+ * see the thing this file is about: the feed is assembled from FIVE sources read
+ * under FIVE different policies and then flattened into one list, and whether
  * the flattening leaks is a question about the rendered page.
  *
  * Concretely, `audit_log`'s only select policy is:
@@ -27,7 +27,7 @@ import {
  * No own-row branch, so an agent reads ZERO audit rows — on their own lead as
  * much as anyone else's — while `grant select on audit_log to authenticated`
  * means the query succeeds and simply returns nothing. An RLS test proves that
- * about the table. It cannot prove that the lead page, having merged five
+ * about the table. It cannot prove that the lead page, having merged four
  * readable sources with one unreadable one, does not reach past it: a
  * `security definer` helper, a service-role client or a `supabaseAdmin` slip
  * anywhere in the chain would make every assertion here fail and none of the
@@ -37,10 +37,16 @@ import {
  *
  * On ONE lead, loaded by two real sessions:
  *
- *   * the owning rep sees five kinds of event and no "Admin trail" row at all;
- *   * an admin sees the same five, in the same order, PLUS the admin trail,
+ *   * the owning rep sees four kinds of event and no "Admin trail" row at all;
+ *   * an admin sees the same four, in the same order, PLUS the admin trail,
  *     attributed by name;
- *   * and the five the rep sees are IDENTICAL to the five the admin sees.
+ *   * and the four the rep sees are IDENTICAL to the four the admin sees.
+ *
+ * (Documents were a fifth shared source until 13 Oct 2026. The per-record
+ * documents path was closed and `documents` became admin-read-only, so a
+ * document source could only ever have shown on the admin's side -- exactly the
+ * asymmetry this file exists to rule out. It was removed from the feed rather
+ * than left to break the cross-read.)
  *
  * That last one is why the cross-read exists rather than two independent
  * assertions. "The admin sees more" is also true of a feed that showed the two
@@ -87,13 +93,13 @@ function row(timeline: Locator, source: string, text: string): Locator {
 }
 
 /**
- * The five sources every reader of this lead can see, newest first.
+ * The four sources every reader of this lead can see, newest first.
  *
  * The order is the seed's write order read backwards, and it is asserted rather
  * than sampled because it is the one thing a merge can get wrong while every
  * individual row looks perfect.
  */
-const SHARED_SOURCES = ["Quote", "Marketing", "Document", "Task", "Note"];
+const SHARED_SOURCES = ["Quote", "Marketing", "Task", "Note"];
 
 test.describe("as the owning rep", () => {
   test.use({ storageState: storageStateFor("agent") });
@@ -106,13 +112,14 @@ test.describe("as the owning rep", () => {
 
     expect(await sourcesIn(feed)).toEqual(SHARED_SOURCES);
 
-    // And the rows are the fixture's own, not five of something else.
+    // And the rows are the fixture's own, not four of something else.
     await expect(row(feed, "Note", TIMELINE_FIXTURE.noteBody)).toBeVisible();
     await expect(row(feed, "Task", TIMELINE_FIXTURE.taskTitle)).toBeVisible();
-    await expect(
-      row(feed, "Document", TIMELINE_FIXTURE.docFileName),
-    ).toBeVisible();
     await expect(row(feed, "Quote", TIMELINE_FIXTURE.quoteTitle)).toBeVisible();
+
+    // No document entry of any kind: the source was removed with the legacy
+    // documents path, and a rep cannot read that table any more.
+    await expect(feed.locator("li").filter({ hasText: "Document" })).toHaveCount(0);
   });
 
   test("omits the admin trail entirely, and says nothing about the gap", async ({
@@ -155,7 +162,7 @@ test.describe("as the owning rep", () => {
     );
   });
 
-  test("gives a rep their own byline, and none to a document", async ({
+  test("gives a rep their own byline, and none to a quote", async ({
     page,
   }) => {
     await page.goto(`/leads/${timeline.leadId}`);
@@ -167,12 +174,12 @@ test.describe("as the owning rep", () => {
       "E2E Agent",
     );
 
-    // The document is NOT, and that is the design rather than a miss.
-    // documents.agent_id is the parent record's owner, so an admin uploading
-    // on a rep's lead lands a row stamped with the REP's id — printing it
-    // would attribute somebody else's upload to this rep.
+    // The quote is NOT, and that is the design rather than a miss.
+    // quotes.agent_id is the rep the proposal is FOR, and an admin may write
+    // one on a rep's behalf -- printing it would attribute somebody else's act
+    // to this rep.
     await expect(
-      row(feed, "Document", TIMELINE_FIXTURE.docFileName),
+      row(feed, "Quote", TIMELINE_FIXTURE.quoteTitle),
     ).not.toContainText("E2E Agent");
   });
 });
@@ -180,7 +187,7 @@ test.describe("as the owning rep", () => {
 test.describe("as an admin on the same lead", () => {
   test.use({ storageState: storageStateFor("admin") });
 
-  test("sees the rep's five sources and the admin trail as well", async ({
+  test("sees the rep's four sources and the admin trail as well", async ({
     page,
   }) => {
     await page.goto(`/leads/${timeline.leadId}`);
@@ -240,7 +247,7 @@ test.describe("as an admin on the same lead", () => {
     }
   });
 
-  test("shows the rep EXACTLY the same five rows it shows itself", async ({
+  test("shows the rep EXACTLY the same four rows it shows itself", async ({
     page,
     browser,
   }) => {
@@ -273,11 +280,10 @@ test.describe("as an admin on the same lead", () => {
       expect(adminSources.length).toBe(repSources.length + 2);
 
       // And the shared rows carry the same text in both, which a feed that
-      // merely happened to produce five chips each would not.
+      // merely happened to produce four chips each would not.
       for (const text of [
         TIMELINE_FIXTURE.noteBody,
         TIMELINE_FIXTURE.taskTitle,
-        TIMELINE_FIXTURE.docFileName,
         TIMELINE_FIXTURE.quoteTitle,
       ]) {
         await expect(repFeed.getByText(text, { exact: false })).toBeVisible();

@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
-import { reachableStorageUrl } from "@/lib/documents";
+import { reachableStorageUrl } from "@/lib/storage-url";
 import { invokeEdgeFunction } from "@/lib/edge-functions";
 import type {
   MarketingEventType,

@@ -23,7 +23,7 @@ import {
   fileKeyMatchesOwner,
   parseFileKey,
 } from "../../supabase/functions/_shared/documents";
-import { reachableStorageUrl } from "../../lib/documents";
+import { reachableStorageUrl } from "../../lib/storage-url";
 
 const AGENT = "11111111-2222-4333-8444-555555555555";
 const OTHER = "99999999-8888-4777-8666-555555555555";

@@ -8,7 +8,6 @@ import { PrintDocument } from "@/components/print-document";
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { taskIsOverdue } from "@/lib/annotations";
-import { DOCUMENT_LIST_COLUMNS, type DocumentRow } from "@/lib/documents";
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { type Merchant } from "@/lib/merchants";
@@ -17,7 +16,7 @@ import { type Merchant } from "@/lib/merchants";
  * One merchant's record, laid out to be printed or filed.
  *
  * Its own route rather than print CSS on /merchants/[id], following the payout
- * summary. The detail page's Notes, Tasks and Documents panels are interactive
+ * summary. The detail page's Notes and Tasks panels are interactive
  * components — textareas, remove buttons, confirm pairs — so printing it in
  * place would mean putting `print:` classes inside those shared panels, which
  * would quietly change printing on leads, pre-apps and support tickets too.
@@ -30,8 +29,10 @@ import { type Merchant } from "@/lib/merchants";
  * read-pre-app-secrets is deliberately not called — wiring it in would add a
  * decryption surface, and an audit_log row, to a page built to be photocopied.
  *
- * Documents are listed by NAME only. The bytes live in a private bucket behind
- * a signed URL, and a filename is metadata the rep can already see.
+ * There is no Documents block any more. Merchant paperwork is no longer
+ * accepted in the CRM (13 Oct 2026); the legacy `documents` rows are readable
+ * by admins only until they are purged, so a block here would print differently
+ * for an admin and a rep.
  */
 export default function MerchantPrintPage({
   params,
@@ -89,14 +90,6 @@ async function MerchantPrint({
       .maybeSingle();
     agentName = (agent?.full_name as string | undefined) ?? null;
   }
-
-  const { data: docs } = await supabase
-    .from("documents")
-    .select(DOCUMENT_LIST_COLUMNS)
-    .eq("owner_type", "merchant")
-    .eq("owner_id", merchant.id)
-    .order("uploaded_at", { ascending: false });
-  const documents = (docs ?? []) as DocumentRow[];
 
   // owner_type is a literal, never from the URL — owner_id has no foreign key,
   // so a mismatched pair is not something the database would catch.
@@ -188,21 +181,6 @@ async function MerchantPrint({
                 {/* whitespace-pre-wrap: a note is typed prose and its line breaks
                     are part of what someone wrote. */}
                 <span className="block whitespace-pre-wrap">{note.body}</span>
-              </li>
-            ))}
-          </Block>
-
-          <Block title="Documents" count={documents.length}>
-            {documents.map((doc) => (
-              <li key={doc.id} className="break-inside-avoid py-1.5 text-sm">
-                <span className="font-medium">
-                  {formatText(doc.file_name)}
-                </span>
-                <span className="text-muted-foreground">
-                  {" — "}
-                  {formatText(doc.doc_type)} · uploaded{" "}
-                  {formatDate(doc.uploaded_at)}
-                </span>
               </li>
             ))}
           </Block>
