@@ -5,10 +5,12 @@ import { useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
 import {
+  MAX_CITY_LENGTH,
   MERCHANT_STATUSES,
   type Merchant,
   type MerchantStatus,
 } from "@/lib/merchants";
+import { US_STATES, isZip } from "@/lib/masks";
 import { EMPTY } from "@/lib/format";
 import { friendlyDbError } from "@/lib/db-errors";
 import {
@@ -35,6 +37,10 @@ type FormState = {
   split_agent_pct: string;
   split_company_pct: string;
   date_added: string;
+  street: string;
+  city: string;
+  state: string;
+  zip: string;
 };
 
 function toFormState(merchant?: Merchant): FormState {
@@ -47,6 +53,10 @@ function toFormState(merchant?: Merchant): FormState {
     split_agent_pct: merchant?.split_agent_pct?.toString() ?? "",
     split_company_pct: merchant?.split_company_pct?.toString() ?? "",
     date_added: merchant?.date_added ?? "",
+    street: merchant?.street ?? "",
+    city: merchant?.city ?? "",
+    state: merchant?.state ?? "",
+    zip: merchant?.zip ?? "",
   };
 }
 
@@ -83,6 +93,12 @@ function toPayload(form: FormState) {
     split_agent_pct: company === null ? null : num(form.split_agent_pct),
     split_company_pct: company,
     date_added: text(form.date_added),
+    // City and state are required (merchants_location_required); the form
+    // refuses a blank one before it gets here, so these are never sent empty.
+    street: text(form.street),
+    city: form.city.trim(),
+    state: form.state,
+    zip: text(form.zip),
     // updated_at is deliberately absent — the set_updated_at() trigger owns it.
   };
 }
@@ -115,8 +131,17 @@ export function MerchantForm({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSaving(true);
     setError(null);
+
+    // `required` on the inputs stops an empty submit, but not one that is
+    // only spaces, and zip has a shape. The database is the boundary for the
+    // first (merchants_location_required); this says it in words first.
+    const problem = locationProblem(form);
+    if (problem !== null) {
+      setError(problem);
+      return;
+    }
+    setIsSaving(true);
 
     const supabase = createClient();
     const payload = toPayload(form);
@@ -245,6 +270,57 @@ export function MerchantForm({
               />
             </div>
 
+            <div className="grid gap-2 sm:col-span-2">
+              <Label htmlFor="street">Street</Label>
+              <Input
+                id="street"
+                autoComplete="street-address"
+                value={form.street}
+                onChange={(e) => set("street", e.target.value)}
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="city">City *</Label>
+              <Input
+                id="city"
+                required
+                maxLength={MAX_CITY_LENGTH}
+                autoComplete="address-level2"
+                value={form.city}
+                onChange={(e) => set("city", e.target.value)}
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="state">State *</Label>
+              <select
+                id="state"
+                required
+                className="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+                value={form.state}
+                onChange={(e) => set("state", e.target.value)}
+              >
+                <option value="">Choose a state</option>
+                {US_STATES.map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.code} — {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="zip">ZIP</Label>
+              <Input
+                id="zip"
+                inputMode="numeric"
+                autoComplete="postal-code"
+                value={form.zip}
+                onChange={(e) => set("zip", e.target.value)}
+              />
+            </div>
+
             {/* Only the agent half is an input; the company half is derived,
                 the same shape the pre-app wizard's business step uses. Both
                 being free text is what let 60/45 be saved, and the database now
@@ -313,9 +389,32 @@ function describeError(err: unknown): string {
 
   // Failed the insert/update `with check` — e.g. trying to write a row owned by
   // someone else.
+  // The location constraint (20261013130000). Matched by name, because 23514
+  // is also what merchants_split_totals_100 raises.
+  if (code === "23514" && /merchants_location_required/.test(messageOf(err))) {
+    return "Enter the merchant's city and pick a state.";
+  }
+
   if (code === "42501") {
     return "You don't have access to save that merchant.";
   }
 
   return friendlyDbError(err, "Something went wrong.");
+}
+
+function messageOf(err: unknown): string {
+  return typeof err === "object" && err !== null && "message" in err
+    ? String((err as { message: unknown }).message)
+    : "";
+}
+
+/**
+ * The location rules a person can be told about before the round trip. The
+ * database still decides; this exists so the answer is a sentence.
+ */
+function locationProblem(form: FormState): string | null {
+  if (form.city.trim() === "") return "Enter the merchant's city.";
+  if (form.state === "") return "Pick the merchant's state.";
+  if (!isZip(form.zip.trim())) return "ZIP must be 12345 or 12345-6789.";
+  return null;
 }

@@ -5,7 +5,11 @@ import { ArrowLeftIcon, PencilIcon, PrinterIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
-import { type Merchant, statusIntent } from "@/lib/merchants";
+import {
+  type Merchant,
+  formatCityState,
+  statusIntent,
+} from "@/lib/merchants";
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { loadRecordProposals } from "@/lib/quotes-data";
@@ -120,6 +124,14 @@ async function MerchantDetail({
           {formatText(merchant.legal_business_name)}
         </Field>
         <Field label="MID">{formatText(merchant.mid)}</Field>
+        {/* A merchant that predates merchants_location_required has none, and
+            says so plainly rather than rendering a dash that reads as "not
+            applicable" — the edit form will ask for it on the next save. */}
+        <Field label="Location">
+          {formatCityState(merchant) ?? "Not recorded — edit to add"}
+        </Field>
+        <Field label="Street">{formatText(merchant.street)}</Field>
+        <Field label="ZIP">{formatText(merchant.zip)}</Field>
         <Field label="Processor">{formatText(merchant.processor)}</Field>
         <Field label="Agent split">{formatPct(merchant.split_agent_pct)}</Field>
         <Field label="Company split">

@@ -1,5 +1,6 @@
 import {
   BanknoteIcon,
+  LayoutDashboardIcon,
   BoxesIcon,
   BugIcon,
   MegaphoneIcon,
@@ -47,6 +48,9 @@ export const NAV_GROUPS: readonly NavGroup[] = [
   {
     label: "Sales",
     items: [
+      // The landing page (/ redirects here) had no row of its own: the only
+      // way back was a "Back to dashboard" link on a few pages, or the URL.
+      { label: "Dashboard", href: "/dashboard", icon: LayoutDashboardIcon },
       { label: "Leads", href: "/leads", icon: TargetIcon },
       { label: "Ghost Sheets", href: "/ghost-sheets", icon: GhostIcon },
       { label: "Merchants", href: "/merchants", icon: StoreIcon },

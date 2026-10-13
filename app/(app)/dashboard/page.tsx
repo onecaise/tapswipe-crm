@@ -21,6 +21,7 @@ import {
   type DashboardSearchParams,
 } from "@/lib/dashboard";
 import { LEAD_STATUS_LABELS, isLeadStatus } from "@/lib/leads";
+import { MISSING_LOCATION_FILTER } from "@/lib/merchants";
 import { formatDate } from "@/lib/format";
 import {
   DashboardFilterBar,
@@ -28,6 +29,7 @@ import {
 } from "@/components/dashboard-filters";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
+import { CityAccountsSearch } from "@/components/city-accounts-search";
 import { StatCard } from "@/components/stat-card";
 import { Badge } from "@/components/ui/badge";
 
@@ -367,6 +369,36 @@ function TaskGroup({
   );
 }
 
+/**
+ * Admins only: how many merchants still have no city or state.
+ *
+ * merchants_location_required ships NOT VALID, so the rows that predate it are
+ * still here; this is where an admin finds out how many, and the card links to
+ * the read-only list that names them. Renders nothing for a rep — the page is
+ * admin-only, and RLS would give a rep only their own count anyway, which is a
+ * number with nowhere to go.
+ */
+async function MissingLocationCount() {
+  const profile = await requireUser();
+  if (profile.role !== "admin") return null;
+
+  const supabase = await createClient();
+  const { count, error } = await supabase
+    .from("merchants")
+    .select("id", { count: "exact", head: true })
+    .or(MISSING_LOCATION_FILTER);
+
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+      <StatCard
+        label="Merchants missing a location"
+        value={error ? "—" : (count ?? 0)}
+        href="/admin/merchants/missing-location"
+      />
+    </div>
+  );
+}
+
 async function DashboardHeader() {
   const profile = await requireUser();
 
@@ -419,6 +451,16 @@ export default function DashboardPage({
       >
         <DashboardTasks />
       </Suspense>
+
+      {/* Outside every boundary above for the same reason as the digest: it
+          is not a count and takes no part in the filters. The search is
+          client-side and needs no data to render, so it has no Suspense of its
+          own. */}
+      <Suspense fallback={null}>
+        <MissingLocationCount />
+      </Suspense>
+
+      <CityAccountsSearch />
     </PageShell>
   );
 }

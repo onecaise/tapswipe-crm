@@ -398,6 +398,8 @@ export async function provisionFixtures(): Promise<Fixtures> {
         agent_id: created.user.id,
         mid: `LIVE-MID-${persona.key.toUpperCase()}`,
         dba: `Live ${persona.fullName} Co`,
+        city: "Nashville",
+        state: "TN",
         legal_business_name: `Live ${persona.fullName} Co LLC`,
         status: "active",
         processor: "TSYS",

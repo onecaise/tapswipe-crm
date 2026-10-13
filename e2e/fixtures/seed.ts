@@ -2028,6 +2028,8 @@ async function ensureDocOwners(
     (await create("merchants", {
       mid: marker,
       dba: `E2E Docs ${persona}`,
+      city: "Nashville",
+      state: "TN",
       legal_business_name: `E2E Docs ${persona} LLC`,
       status: "active",
       processor: "TSYS",
