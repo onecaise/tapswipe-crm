@@ -15,6 +15,7 @@ import {
 } from "@/lib/pre-app-validation";
 import type { PreApp } from "@/lib/pre-apps";
 import { SALES_VOLUME_GROUP } from "@/lib/pre-app-form-fields";
+import { friendlyDbError } from "@/lib/db-errors";
 import {
   maskEin,
   maskMoney,
@@ -559,5 +560,5 @@ function describeError(error: { code?: string; message: string }): string {
   if (error.code === "42501") {
     return "You don't have access to change this pre-app.";
   }
-  return error.message;
+  return friendlyDbError(error, "Could not save changes.");
 }

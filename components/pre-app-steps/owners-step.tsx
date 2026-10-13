@@ -14,6 +14,7 @@ import {
 } from "@/lib/pre-app-validation";
 import type { PreAppOwner } from "@/lib/pre-apps";
 import { maskPercent, maskPhone, maskZip } from "@/lib/masks";
+import { friendlyDbError } from "@/lib/db-errors";
 import { useAutosave } from "@/hooks/use-autosave";
 import { useRegisterStep } from "@/components/pre-app-wizard-shell";
 import { MaskedInput } from "@/components/masked-input";
@@ -101,7 +102,7 @@ export function OwnersStep({
           .from("pre_app_owners")
           .update(payload, { count: "exact" })
           .eq("id", rowId);
-        if (error) throw new Error(error.message);
+        if (error) throw new Error(friendlyDbError(error, "Could not save changes."));
         if (count === 0) {
           throw new Error(
             "That owner could not be saved. Reload the page — it may have been removed.",
@@ -134,7 +135,7 @@ export function OwnersStep({
         .insert({ pre_app_id: preAppId })
         .select("*")
         .single();
-      if (error) throw new Error(error.message);
+      if (error) throw new Error(friendlyDbError(error, "Could not save changes."));
 
       append(toFormRow(data as PreAppOwner));
       router.refresh();
@@ -157,7 +158,7 @@ export function OwnersStep({
         .from("pre_app_owners")
         .delete({ count: "exact" })
         .eq("id", rowId);
-      if (error) throw new Error(error.message);
+      if (error) throw new Error(friendlyDbError(error, "Could not save changes."));
       if (count === 0) {
         throw new Error("That owner could not be removed.");
       }

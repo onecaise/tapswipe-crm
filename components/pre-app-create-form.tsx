@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
+import { friendlyDbError } from "@/lib/db-errors";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -163,5 +164,5 @@ function describeError(err: unknown): string {
   if (code === "23502") {
     return "Both a DBA name and a legal business name are required.";
   }
-  return err instanceof Error ? err.message : "Something went wrong.";
+  return friendlyDbError(err, "Something went wrong.");
 }

@@ -11,6 +11,7 @@ import {
 } from "@/lib/pre-app-validation";
 import type { PreAppBusinessProfile } from "@/lib/pre-apps";
 import { maskPercent } from "@/lib/masks";
+import { friendlyDbError } from "@/lib/db-errors";
 import { useAutosave } from "@/hooks/use-autosave";
 import { useRegisterStep } from "@/components/pre-app-wizard-shell";
 import { MaskedInput } from "@/components/masked-input";
@@ -61,7 +62,7 @@ export function ProfileStep({
           { onConflict: "pre_app_id", count: "exact" },
         );
 
-      if (error) throw new Error(error.message);
+      if (error) throw new Error(friendlyDbError(error, "Could not save changes."));
       if (count === 0) {
         throw new Error("That card mix could not be saved. Reload the page.");
       }

@@ -6,6 +6,7 @@ import { useState } from "react";
 import { AlertTriangleIcon } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import { friendlyDbError } from "@/lib/db-errors";
 import {
   LEAD_STATUSES,
   LEAD_STATUS_LABELS,
@@ -315,9 +316,7 @@ export function LeadForm({
 
       router.refresh();
     } catch (err: unknown) {
-      setError(
-        err instanceof Error ? err.message : "Something went wrong saving.",
-      );
+      setError(friendlyDbError(err, "Something went wrong saving."));
     } finally {
       setIsSaving(false);
     }

@@ -10,6 +10,7 @@ import {
   type MerchantStatus,
 } from "@/lib/merchants";
 import { EMPTY } from "@/lib/format";
+import { friendlyDbError } from "@/lib/db-errors";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -302,5 +303,5 @@ function describeError(err: unknown): string {
     return "You don't have access to save that merchant.";
   }
 
-  return err instanceof Error ? err.message : "Something went wrong.";
+  return friendlyDbError(err, "Something went wrong.");
 }

@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import { friendlyDbError } from "@/lib/db-errors";
 import {
   type PreApp,
   type PreAppBusinessProfile,
@@ -118,8 +119,9 @@ export function ReviewStep({
       // Every raise in submit_pre_app is written for a rep to read ("one owner
       // must hold at least 51% ownership", "banking details have not been
       // submitted"), and its 404 is deliberately identical for "not yours" and
-      // "no such row", so nothing here leaks. Shown as-is.
-      setError(rpcError.message);
+      // "no such row", so nothing here leaks. Those pass through verbatim; only
+      // a bare constraint error would be reworded (lib/db-errors.ts).
+      setError(friendlyDbError(rpcError, "The pre-app was not submitted."));
       setSubmitting(false);
       return;
     }

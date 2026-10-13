@@ -399,3 +399,34 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
 - **Note:** a ban *without* `is_active = false` and a still-valid JWT would be redirected to the app,
   as it would be for any page today; `deactivate-user` always sets both, so that state is not reachable
   through the app.
+
+### C2 (D-05) — plain words for common database errors on the busiest forms
+- **Now:** `lib/db-errors.ts` `friendlyDbError(err, fallback, overrides?)` maps 23505, 23503, 23514,
+  22003 and 22P02 to sentences. Every other code — including our own RPCs' `P0001` and `PT400/403/404/
+  409/422` (checked: those are the only `errcode`s in the migrations) — passes `message` through
+  verbatim; a form's existing specific wording wins via `overrides` or by being checked first
+  (merchant "That MID is already in use.", product SKU, pre-app draft/range/access messages).
+- **Applied to:** `lead-form`, `merchant-form`, `support-ticket-form`, `pre-app-create-form`, pre-app
+  steps (`business`, `owners`, `terminal`, `profile`, `review` submit), `product-form`, `proposal-builder`.
+- **Test:** `tests/unit/db-errors.test.ts` (13: each mapping, override precedence, P0001/PT409/PT422/PT403
+  verbatim, code-less Error, fallback, prototype key). `e2e/qa/db-error-copy.spec.ts`: typing **100** into
+  the pre-app terminal Tax rate — allowed by the 0–100 validator, but the column is `numeric(5,3)` (max
+  99.999) — used to show "numeric field overflow"; it now reads "A number is too large for this field."
+  Red with only the terminal-step change reverted (raw text confirmed in the page snapshot).
+- **No e2e for the other five forms:** none has a database constraint a person can reach from the UI —
+  inputs, selects, `type=number` bounds, `parsePriceInput` and `cartProblem()` stop each one first. The
+  mappings are pinned by the unit tests.
+- **Found on the way (not changed, D-12):** the tax-rate validator allows 100 but the column holds
+  at most 99.999. The UI now says so plainly; aligning the validator (or the column) is Owen's call.
+- **Still showing raw `error.message` (not touched, by instruction):** agent-number-cell, brand-add-box,
+  brand-catalog, brand-products, brand-settings, bug-report-bubble, bug-reports-table,
+  convert-ghost-sheet-button, documents-panel, followup-reconcile, forgot-password-form,
+  ghost-sheet-form, global-search, marketing-material-admin-row, marketing-material-upload,
+  new-proposal (search), notes-panel, notifications-bell, payout-bulk-split, payout-figure-cell,
+  payout-period-delete, pre-app-decision, proposal-view, residual-commit-button, residual-upload,
+  support-ticket-close, tasks-index-table, tasks-panel, territory-cell, ticket-replies-panel,
+  update-password-form, user-import-batch-actions, user-row-actions; and the list/detail pages'
+  load-error callouts under `app/(app)/` (admin/bug-reports, admin/products, admin/users,
+  admin/users/import, admin/users/import/[batchId], dashboard, documents, ghost-sheets, leads,
+  marketing, marketing/manage, merchants, payouts, payouts/import, payouts/import/[batchId],
+  payouts/[period], payouts/[period]/summary/[agentId], pre-apps, support-tickets).

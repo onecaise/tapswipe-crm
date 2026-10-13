@@ -24,6 +24,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import type { MerchantOption } from "@/lib/merchant-options";
+import { friendlyDbError } from "@/lib/db-errors";
 
 const SELECT_CLASS =
   "border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none";
@@ -151,9 +152,7 @@ export function SupportTicketForm({
 
       router.refresh();
     } catch (err: unknown) {
-      setError(
-        err instanceof Error ? err.message : "Something went wrong saving.",
-      );
+      setError(friendlyDbError(err, "Something went wrong saving."));
     } finally {
       setIsSaving(false);
     }

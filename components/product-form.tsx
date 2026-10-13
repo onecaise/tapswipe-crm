@@ -5,6 +5,7 @@ import { useId, useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
 import { type Brand, diffLinks } from "@/lib/brands";
+import { friendlyDbError } from "@/lib/db-errors";
 import {
   PRODUCT_BILLINGS,
   PRODUCT_BILLING_LABELS,
@@ -152,7 +153,7 @@ export function ProductForm({
         .delete()
         .eq("addon_product_id", productId)
         .in("device_product_id", remove);
-      if (unlinkError) return fail(unlinkError.message);
+      if (unlinkError) return fail(unlinkError);
     }
 
     if (productId === null) {
@@ -162,7 +163,7 @@ export function ProductForm({
         .select("id")
         .single();
       if (insertError || !data) {
-        return fail(insertError?.message ?? "The product was not created.");
+        return fail(insertError ?? new Error("The product was not created."));
       }
       productId = data.id as number;
     } else {
@@ -170,7 +171,7 @@ export function ProductForm({
         .from("products")
         .update(row)
         .eq("id", productId);
-      if (updateError) return fail(updateError.message);
+      if (updateError) return fail(updateError);
     }
 
     // Inserts last, once the row is an add-on in the database:
@@ -190,7 +191,7 @@ export function ProductForm({
         // retry the links rather than adding the product a second time.
         setBusy(false);
         setError(
-          `The product was saved, but its devices were not linked: ${linkError.message}`,
+          `The product was saved, but its devices were not linked: ${friendlyDbError(linkError, "unknown error")}`,
         );
         router.refresh();
         return;
@@ -202,12 +203,12 @@ export function ProductForm({
     onDone();
   };
 
-  const fail = (message: string) => {
+  const fail = (err: { message: string; code?: string }) => {
     setBusy(false);
     setError(
-      /idx_products_sku/.test(message)
+      /idx_products_sku/.test(err.message)
         ? "Another product already uses that model / SKU."
-        : message,
+        : friendlyDbError(err, "The product was not saved."),
     );
   };
 

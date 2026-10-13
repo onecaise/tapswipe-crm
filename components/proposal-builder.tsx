@@ -6,6 +6,7 @@ import { PlusIcon, XIcon } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
 import { priceNumber, type Product } from "@/lib/products";
+import { friendlyDbError } from "@/lib/db-errors";
 import {
   type CartDevice,
   cartProblem,
@@ -197,7 +198,7 @@ export function ProposalBuilder({
     );
 
     if (rpcError || typeof quoteId !== "number") {
-      setError(rpcError?.message ?? "The proposal was not saved.");
+      setError(friendlyDbError(rpcError, "The proposal was not saved."));
       setBusy(false);
       return;
     }
