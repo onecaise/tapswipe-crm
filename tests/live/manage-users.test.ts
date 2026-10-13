@@ -24,7 +24,7 @@ import {
   adminClient,
   anonClient,
   deleteUserCompletely,
-  functionsAreServed,
+  skipWhenFunctionsDown,
   invoke,
   provisionFixtures,
   userClient,
@@ -74,15 +74,13 @@ let fixtures: Fixtures;
 /** Ad-hoc accounts created by these tests, cleaned up in afterAll. */
 const createdUserIds: string[] = [];
 
+/** True only when functions are down and ALLOW_SKIPPED_FUNCTION_TESTS=1: every test here then skips. */
+const FUNCTIONS_DOWN = skipWhenFunctionsDown();
+
 beforeAll(async () => {
-  if (!(await functionsAreServed())) {
-    throw new Error(
-      "The local functions runtime is not answering. Run `supabase start` and " +
-        "`supabase functions serve` before this suite. (Hard error rather than " +
-        "skip: a suite that silently passes because every request failed to " +
-        "connect is the false negative these tests exist to prevent.)",
-    );
-  }
+  // The run-level gate (tests/live/helpers/global-setup.ts) has already
+  // failed the run if the functions runtime is down, unless the opt-in is set.
+  if (FUNCTIONS_DOWN) return;
   // Before any assertion about status codes — see warmFunctions. The first
   // invocation of a function makes the runtime restart, which 502s whatever is
   // in flight and would read as "the function returns 502 instead of 403".

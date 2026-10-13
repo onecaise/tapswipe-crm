@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   adminClient,
   anonClient,
-  functionsAreServed,
+  skipWhenFunctionsDown,
   getStackConfig,
   invoke,
   MISSING_ID,
@@ -94,15 +94,14 @@ async function makePreApp(agentId: string, dba: string) {
   return { preAppId: preApp.id as number, ownerRowId: ownerRow.id as number };
 }
 
+/** True only when functions are down and ALLOW_SKIPPED_FUNCTION_TESTS=1: every test here then skips. */
+const FUNCTIONS_DOWN = skipWhenFunctionsDown();
+
 beforeAll(async () => {
   // Hard error rather than skip: a silently skipped suite is worse than a red one.
-  if (!(await functionsAreServed())) {
-    throw new Error(
-      "Edge Functions are not being served. Run:\n" +
-        "  npx supabase start\n" +
-        "  npx supabase functions serve --env-file ./supabase/functions/.env",
-    );
-  }
+  // The run-level gate (tests/live/helpers/global-setup.ts) has already
+  // failed the run if the functions runtime is down, unless the opt-in is set.
+  if (FUNCTIONS_DOWN) return;
 
   // See warmFunctions: the first invocation of each function restarts the
   // runtime (the CLI writes a .npmrc, its own watcher notices), which 502s

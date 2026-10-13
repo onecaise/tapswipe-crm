@@ -17,6 +17,13 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/live/**/*.test.ts"],
+    // Fails the whole run with one message if the Edge Functions runtime is
+    // not serving every registered function, instead of letting files skip or
+    // 503 their way to a result that looks normal. ALLOW_SKIPPED_FUNCTION_TESTS=1
+    // opts into skipping the function-dependent files instead.
+    globalSetup: ["tests/live/helpers/global-setup.ts"],
+    // The default output plus one final "[live] skipped tests: N" line.
+    reporters: ["default", "./tests/live/helpers/skip-reporter.ts"],
     // One stack, one set of fixture users. Two files provisioning the same
     // personas concurrently would delete each other's rows mid-run.
     fileParallelism: false,

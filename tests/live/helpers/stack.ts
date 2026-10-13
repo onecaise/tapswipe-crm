@@ -14,6 +14,13 @@
 import { execSync } from "node:child_process";
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { beforeEach, inject } from "vitest";
+
+import {
+  FUNCTIONS_DOWN_MESSAGE,
+  functionsRuntimeHealthy,
+  isRuntimeDownResponse,
+} from "./functions-runtime";
 
 export type StackConfig = {
   apiUrl: string;
@@ -73,27 +80,35 @@ export function getStackConfig(): StackConfig {
 }
 
 /**
- * True when the functions runtime is actually answering.
+ * True when EVERY registered function answers with its own 401.
  *
- * Deliberately probes a function rather than the REST endpoint: `supabase start`
- * can be up while `functions serve` is not, and a suite that "passed" because
- * every request failed to connect is the exact false negative these tests exist
- * to avoid.
+ * It used to accept any HTTP status from one (since removed) function, so a
+ * dead runtime behind a live Kong -- 503 "name resolution failed" -- counted as
+ * served. See tests/live/helpers/functions-runtime.ts. The run-level gate is
+ * global-setup.ts; this stays for anything that wants to ask mid-run.
  */
 export async function functionsAreServed(): Promise<boolean> {
-  try {
-    const { apiUrl } = getStackConfig();
-    const response = await fetch(`${apiUrl}/functions/v1/create-upload-url`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
+  const { apiUrl } = getStackConfig();
+  return (await functionsRuntimeHealthy(apiUrl, { deadlineMs: 0 })).ok;
+}
+
+/**
+ * Call at the TOP LEVEL of a test file that needs Edge Functions.
+ *
+ * Returns true only when the runtime is down AND ALLOW_SKIPPED_FUNCTION_TESTS=1
+ * was set -- without the opt-in, global-setup.ts has already failed the run
+ * with FUNCTIONS_DOWN_MESSAGE and no file gets this far. In the opt-in case it
+ * registers a root beforeEach that skips every test in the file (counted by
+ * skip-reporter.ts), and the file's beforeAll should return early on true.
+ */
+export function skipWhenFunctionsDown(): boolean {
+  const down = inject("functionsDown") === true;
+  if (down) {
+    beforeEach((ctx) => {
+      ctx.skip(`${FUNCTIONS_DOWN_MESSAGE} (ALLOW_SKIPPED_FUNCTION_TESTS=1)`);
     });
-    // Any HTTP answer means the runtime is alive. An unauthenticated POST
-    // should be rejected, which is itself worth knowing about.
-    return response.status > 0;
-  } catch {
-    return false;
   }
+  return down;
 }
 
 /**
@@ -856,13 +871,36 @@ export async function invoke(
   };
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
 
-  const response = await fetch(`${apiUrl}/functions/v1/${name}`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-
-  const raw = await response.text();
+  // The runtime can die MID-RUN (the CLI's hot reload sometimes fails to
+  // reboot it), after global-setup.ts has already passed. Kong then answers
+  // every function with a 502 or 503 of its own, and without this each test
+  // would fail on "expected 503 to be 200", naming a function rather than the
+  // runtime. A restart also 502s, but for seconds -- so retry for a while and
+  // only then call it an outage, with one clear message.
+  const RUNTIME_GRACE_MS = 20_000;
+  const startedAt = Date.now();
+  let response: Response;
+  let raw: string;
+  for (;;) {
+    try {
+      response = await fetch(`${apiUrl}/functions/v1/${name}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      // Nothing answered at all.
+      throw new Error(`${FUNCTIONS_DOWN_MESSAGE} (calling ${name}: ${err instanceof Error ? err.message : err})`);
+    }
+    raw = await response.text();
+    if (!isRuntimeDownResponse(response.status, raw)) break;
+    if (Date.now() - startedAt > RUNTIME_GRACE_MS) {
+      throw new Error(
+        `${FUNCTIONS_DOWN_MESSAGE} (calling ${name}: ${response.status} ${raw.replace(/\s+/g, " ").slice(0, 80)})`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
   let parsed: Record<string, unknown> = {};
   try {
     parsed = JSON.parse(raw) as Record<string, unknown>;

@@ -15,7 +15,7 @@ import {
   BUSINESS_DOCUMENTS_BUCKET,
   MAX_DOCUMENT_BYTES,
   adminClient,
-  functionsAreServed,
+  skipWhenFunctionsDown,
   invoke,
   provisionFixtures,
   teardownFixtures,
@@ -27,13 +27,13 @@ const FN = "business-document-file-url";
 
 let fx: Fixtures;
 
+/** True only when functions are down and ALLOW_SKIPPED_FUNCTION_TESTS=1: every test here then skips. */
+const FUNCTIONS_DOWN = skipWhenFunctionsDown();
+
 beforeAll(async () => {
-  if (!(await functionsAreServed())) {
-    throw new Error(
-      "No Edge Function runtime answering on the local stack.\n" +
-        "Run `npx supabase start` and `npx supabase functions serve` first.",
-    );
-  }
+  // The run-level gate (tests/live/helpers/global-setup.ts) has already
+  // failed the run if the functions runtime is down, unless the opt-in is set.
+  if (FUNCTIONS_DOWN) return;
   await warmFunctions([FN]);
   fx = await provisionFixtures();
 });

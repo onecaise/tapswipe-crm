@@ -16,7 +16,7 @@ import {
   type Fixtures,
   BUCKET,
   adminClient,
-  functionsAreServed,
+  skipWhenFunctionsDown,
   invoke,
   provisionFixtures,
   teardownFixtures,
@@ -33,13 +33,13 @@ const REMOVED_FUNCTIONS = [
   "delete-document",
 ] as const;
 
+/** True only when functions are down and ALLOW_SKIPPED_FUNCTION_TESTS=1: every test here then skips. */
+const FUNCTIONS_DOWN = skipWhenFunctionsDown();
+
 beforeAll(async () => {
-  if (!(await functionsAreServed())) {
-    throw new Error(
-      "No Edge Function runtime answering on the local stack.\n" +
-        "Run `npx supabase start` and `npx supabase functions serve` first.",
-    );
-  }
+  // The run-level gate (tests/live/helpers/global-setup.ts) has already
+  // failed the run if the functions runtime is down, unless the opt-in is set.
+  if (FUNCTIONS_DOWN) return;
   fx = await provisionFixtures();
 
   // One legacy row and object filed under the owner, written the only way

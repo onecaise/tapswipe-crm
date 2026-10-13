@@ -20,7 +20,7 @@ import {
   RESIDUAL_BUCKET,
   UNKNOWN_AGENT_NUMBER,
   adminClient,
-  functionsAreServed,
+  skipWhenFunctionsDown,
   getStackConfig,
   invoke,
   provisionFixtures,
@@ -120,13 +120,13 @@ async function ledgerFor(mid: string) {
   return data;
 }
 
+/** True only when functions are down and ALLOW_SKIPPED_FUNCTION_TESTS=1: every test here then skips. */
+const FUNCTIONS_DOWN = skipWhenFunctionsDown();
+
 beforeAll(async () => {
-  if (!(await functionsAreServed())) {
-    throw new Error(
-      "The local functions runtime is not answering. Run `supabase start` and " +
-        "`supabase functions serve` before this suite.",
-    );
-  }
+  // The run-level gate (tests/live/helpers/global-setup.ts) has already
+  // failed the run if the functions runtime is down, unless the opt-in is set.
+  if (FUNCTIONS_DOWN) return;
   // Before any status assertion. The first invocation of a function makes the
   // runtime restart, which 502s whatever is in flight and would read as "the
   // function returns 502 instead of 403".
