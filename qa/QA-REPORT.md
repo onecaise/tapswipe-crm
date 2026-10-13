@@ -337,3 +337,12 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   Log out → `/auth/login`, then `/dashboard` redirects to login (really signed out); signed out, neither
   page shows the control. Both sign-out specs red before; the no-session spec red with only the
   session check reverted. `e2e/logout.spec.ts` still green.
+
+### B3 (D-06) — /tasks complete checkbox hit area (Low, tasks / touch)
+- **Now:** the checkbox in `components/tasks-index-table.tsx` gets a transparent `::after`
+  (`after:-inset-[15px]`) — a 44×44 hit area around the unchanged 16×16 box. (`-14px` measured 42×42:
+  inset is from inside the 1px border.) Scoped to /tasks; the shared `ui/checkbox` is untouched.
+- **Test:** `e2e/qa/tasks-checkbox-target.spec.ts`, agent and admin at 390×844 — every visible checkbox
+  is still 16×16, `elementFromPoint` lands on it at 25 points across the 44×44 square, and the square
+  intersects no other reachable control (Radix's aria-hidden, pointer-events:none bubble input excluded).
+  Red before (hit-area misses), green after.

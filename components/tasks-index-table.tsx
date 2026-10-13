@@ -114,6 +114,14 @@ export function TasksIndexTable({
           checked={task.completed}
           disabled={busy}
           aria-label={`Mark "${task.title}" complete`}
+          // A 44×44 hit area around the same 16×16 box (D-06): a transparent
+          // ::after 15px outside the padding box (14px past the 1px border —
+          // inset is measured from inside the border, so 14px made 42×42).
+          // Clicks on a pseudo-element land on its element, so a thumb near
+          // the box toggles it and nothing painted changes. It stays inside
+          // the card's 16px padding and overlaps no other control;
+          // e2e/qa/tasks-checkbox-target.spec.ts measures that at 390px.
+          className="relative after:absolute after:-inset-[15px] after:content-['']"
           onCheckedChange={(checked) =>
             void setCompleted(task.id, checked === true)
           }
