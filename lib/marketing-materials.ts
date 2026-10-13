@@ -27,6 +27,8 @@
  * another.
  */
 export { MARKETING_BUCKET } from "@/supabase/functions/_shared/marketing-materials";
+
+import { oversizeMessage } from "@/lib/file-size";
 export const MARKETING_EVENT_TYPES = [
   "viewed",
   "downloaded",
@@ -102,36 +104,21 @@ export const MAX_MATERIAL_BYTES = 50 * 1024 * 1024;
 /**
  * Why a file cannot be uploaded, or null if it can.
  *
- * Mirrors documentUploadProblem(), and is a courtesy rather than the boundary —
+ * Mirrors businessDocumentUploadProblem(), and is a courtesy rather than the boundary —
  * the per-bucket file_size_limit is what actually refuses an over-size PUT. What
  * this buys is a readable sentence instead of a 413 from Storage, and catching
  * the empty file, which uploads perfectly happily and produces a material that
  * looks real until somebody opens it in front of a merchant.
  */
-export function materialUploadProblem(file: File): string | null {
+export function materialUploadProblem(file: { size: number }): string | null {
   if (file.size === 0) {
     return "That file is empty.";
   }
-  if (file.size > MAX_MATERIAL_BYTES) {
-    return `That file is ${formatBytes(file.size)}. The limit is ${formatBytes(
-      MAX_MATERIAL_BYTES,
-    )}.`;
-  }
-  return null;
+  return oversizeMessage(file.size, MAX_MATERIAL_BYTES);
 }
 
-/** Human-readable byte count. Binary units, like the cap. */
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KiB", "MiB", "GiB"];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
-}
+/** The shared formatter, re-exported so this module's callers keep one import. */
+export { formatBytes } from "@/lib/file-size";
 
 /**
  * Groups materials into categories, in display order.

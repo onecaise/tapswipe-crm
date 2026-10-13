@@ -15,6 +15,8 @@
  */
 export { BUSINESS_DOCUMENTS_BUCKET } from "@/supabase/functions/_shared/business-documents";
 
+import { formatBytes, oversizeMessage } from "@/lib/file-size";
+
 export type BusinessDocument = {
   id: number;
   category: string;
@@ -52,18 +54,8 @@ export const SUGGESTED_CATEGORIES = [
  */
 export const MAX_BUSINESS_DOCUMENT_BYTES = 50 * 1024 * 1024;
 
-/** Human-readable byte count. Binary units, like the cap. */
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KiB", "MiB", "GiB"];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
-}
+/** The shared formatter, re-exported so this module's callers keep one import. */
+export { formatBytes } from "@/lib/file-size";
 
 /**
  * Why a file cannot be published, or null if it can. A courtesy, not the
@@ -77,12 +69,7 @@ export function businessDocumentUploadProblem(file: {
   if (file.size === 0) {
     return "That file is empty.";
   }
-  if (file.size > MAX_BUSINESS_DOCUMENT_BYTES) {
-    return `That file is ${formatBytes(file.size)}. The limit is ${formatBytes(
-      MAX_BUSINESS_DOCUMENT_BYTES,
-    )}.`;
-  }
-  return null;
+  return oversizeMessage(file.size, MAX_BUSINESS_DOCUMENT_BYTES);
 }
 
 /**

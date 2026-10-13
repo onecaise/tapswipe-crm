@@ -2156,6 +2156,15 @@ async function ensureBusinessDocument(
  * the service role: what the database actually holds, which a rep's page
  * (RLS hides archived rows from them) cannot show a spec.
  */
+export async function marketingMaterialIds(title: string): Promise<number[]> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data } = await db.from("marketing_materials").select("id").eq("title", title);
+  return (data ?? []).map((row) => row.id as number);
+}
+
 export async function businessDocumentRows(title: string): Promise<
   {
     id: number;

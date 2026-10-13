@@ -70,7 +70,7 @@ test("an empty file is refused in the browser, and nothing is created", async ({
   expect(await businessDocumentRows(EMPTY)).toEqual([]);
 });
 
-test("an oversized file is refused in the browser, naming the size and the limit", async ({ page }, testInfo) => {
+test("an oversized file is refused in the browser, in a sentence that does not contradict itself", async ({ page }, testInfo) => {
   // On disk, not a buffer: Playwright refuses an in-memory file over 50 MB.
   // Sparse (ftruncate), so this costs no real disk.
   const hugePath = testInfo.outputPath("huge.bin");
@@ -82,13 +82,13 @@ test("an oversized file is refused in the browser, naming the size and the limit
   await fillLabels(page, HUGE);
   await form(page).file.setInputFiles(hugePath);
 
-  // The size is NOT asserted, deliberately. formatBytes() rounds 50 MiB + 1
-  // byte to "50 MiB", so today the sentence reads "That file is 50 MiB. The
-  // limit is 50 MiB." -- reported as a wording defect, not fixed here (this
-  // change adds tests only). The refusal and the stated limit are the claim.
-  const alert = page.getByRole("alert").filter({ hasText: /^That file is .+\. The limit is 50 MiB\.$/ });
-  await expect(alert).toBeVisible();
-  console.log(`  oversized message: ${await alert.textContent()}`);
+  // 50 MiB + 1 byte rounds to "50 MiB", so quoting both numbers used to read
+  // "That file is 50 MiB. The limit is 50 MiB." oversizeMessage() says
+  // "slightly over" instead (lib/file-size.ts).
+  await expect(
+    page.getByRole("alert").filter({ hasText: "That file is slightly over the 50 MiB limit." }),
+  ).toBeVisible();
+  await expect(page.getByText("That file is 50 MiB. The limit is 50 MiB.")).toHaveCount(0);
   expect(await businessDocumentRows(HUGE)).toEqual([]);
 });
 
