@@ -546,6 +546,15 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
 - **D-12 (tax rate range) — fixed in run 3, ad549bf.** The pre-app tax-rate validator allows 0–100 but `pre_app_terminal.tax_rate`
   is `numeric(5,3)` (max 99.999), so 100 fails at the database. C2 makes the message plain; aligning the
   validator to `< 100` (or widening the column, which is a migration) is Owen's call.
+- **D-13 (marketing) — archived marketing materials stay readable to agents, by design (accepted).**
+  `marketing_materials`' select policy is `is_active_agent() or is_admin()` with no `archived_at` clause,
+  so an active agent can list archived materials through PostgREST, and `marketing-material-file-url`
+  will still sign a download for one; only the `/marketing` page's query hides them. Verified on
+  `company-documents`: the hermetic test "lets an agent read every material…" expects the archived
+  `Retail rate card 2025`, and a rolled-back local probe as `e2e-agent` returned an archived row. Accepted:
+  archiving is a lifecycle state there (a material's engagement history is still read), the CLAUDE.md
+  rule for `products`. The new `business_documents` deliberately differs: its "Delete" hides the row
+  from reps by RLS and the function signs it for nobody.
 
 ## Run 3 — D-10 and D-12 (2026-10-13)
 
