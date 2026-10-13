@@ -301,3 +301,17 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
 - **Test:** `e2e/qa/pre-app-sensitive-inputs.spec.ts` seeds an owner on the agent's fixture pre-app
   (the SSN input does not render without one) and asserts all five attributes on all three inputs,
   and `new-password` on RP password. Red before the change (SSN had `autocomplete=""`), green after.
+
+### A3 — /auth/confirm put GoTrue's message in the URL; /auth/error echoed it (Low, auth)
+- **Was:** `redirect(\`/auth/error?error=${error?.message}\`)` unencoded, and `/auth/error` printed any
+  unknown `?error=` as "Code error: …" — so a link to our own domain could carry any sentence
+  (React escaped it, so text spoofing rather than script). `?error=constructor` also matched
+  Object's prototype and was echoed under "Code:".
+- **Now:** the route sends fixed codes only — `link-invalid` (verify failed; GoTrue's message goes to
+  the server log) and `link-incomplete` (no token/type) — each with its own explanation on
+  `/auth/error`. Unknown values get a generic sentence and are never shown. Lookup uses
+  `Object.hasOwn`. Fixed codes exceed "encodeURIComponent at minimum": no message is in the URL at all.
+- **Test:** `e2e/qa/auth-error-copy.spec.ts` — a `?error=` holding quotes, `<b>`, `&` and a newline
+  is not echoed and not parsed as markup; known codes keep their words; bad token → exactly
+  `/auth/error?error=link-invalid`; missing token → `link-incomplete`; prototype key. Four red
+  before the change; the prototype spec red with only the `hasOwn` guard reverted.

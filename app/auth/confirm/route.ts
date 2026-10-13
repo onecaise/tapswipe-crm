@@ -24,11 +24,14 @@ export async function GET(request: NextRequest) {
       // redirect user to specified redirect URL or root of app
       redirect(next);
     } else {
-      // redirect the user to an error page with some instructions
-      redirect(`/auth/error?error=${error?.message}`);
+      // A fixed code, never GoTrue's message (A3): the message used to go into
+      // the URL unencoded, and /auth/error printed whatever arrived. The real
+      // reason stays in the server log, where it is useful and nobody can
+      // forge it.
+      console.error("auth/confirm: verifyOtp failed:", error.message);
+      redirect("/auth/error?error=link-invalid");
     }
   }
 
-  // redirect the user to an error page with some instructions
-  redirect(`/auth/error?error=No token hash or type`);
+  redirect("/auth/error?error=link-incomplete");
 }

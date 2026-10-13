@@ -31,6 +31,20 @@ const MESSAGES: Record<string, { title: string; detail: string }> = {
       "The sign-in worked, but the account is switched off, so it has no " +
       "access to any records. An admin can turn it back on.",
   },
+  // The two codes /auth/confirm sends (A3). It used to put GoTrue's own
+  // message in the URL instead.
+  "link-invalid": {
+    title: "This link has expired or was already used",
+    detail:
+      "Sign-in and password links work once and only for a short time. " +
+      "Ask for a new one, or sign in with your password.",
+  },
+  "link-incomplete": {
+    title: "This link is incomplete",
+    detail:
+      "Part of the link is missing — it may have been cut off when it was " +
+      "copied. Open it straight from the email, or ask for a new one.",
+  },
 };
 
 async function ErrorContent({
@@ -39,7 +53,12 @@ async function ErrorContent({
   searchParams: Promise<{ error: string }>;
 }) {
   const params = await searchParams;
-  const known = params?.error ? MESSAGES[params.error] : undefined;
+  // Own keys only: `?error=constructor` would otherwise find Object's and be
+  // treated as known, echoing the value back under "Code:".
+  const known =
+    typeof params?.error === "string" && Object.hasOwn(MESSAGES, params.error)
+      ? MESSAGES[params.error]
+      : undefined;
 
   if (known) {
     return (
@@ -56,11 +75,13 @@ async function ErrorContent({
     );
   }
 
-  return params?.error ? (
-    <p className="text-sm text-muted-foreground">Code error: {params.error}</p>
-  ) : (
+  // Never the value itself (A3). `?error=` is whatever the link says, so
+  // printing it let anyone put their own sentence on our page. Only the codes
+  // in MESSAGES are ours; for anything else the page speaks for itself.
+  return (
     <p className="text-sm text-muted-foreground">
-      An unspecified error occurred.
+      An unexpected error occurred. Try signing in again; if it keeps
+      happening, tell an admin what you were doing when it appeared.
     </p>
   );
 }
