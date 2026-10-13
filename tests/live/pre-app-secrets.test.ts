@@ -45,6 +45,8 @@ let preAppId: number;
 let ownerRowId: number;
 let intruderPreAppId: number;
 let intruderOwnerRowId: number;
+let deactivated: Persona;
+let deactivatedPreAppId: number;
 
 async function makePersona(
   email: string,
@@ -115,11 +117,22 @@ beforeAll(async () => {
   ({ preAppId, ownerRowId } = await makePreApp(owner.id, "Secrets Live Co"));
   ({ preAppId: intruderPreAppId, ownerRowId: intruderOwnerRowId } =
     await makePreApp(intruder.id, "Intruder Co"));
+
+  // Signed in FIRST, then deactivated: a deactivated rep holds a working JWT
+  // until it expires, which is exactly the caller callerIsActive() exists for.
+  // They own their own pre-app, so a refusal cannot be RLS saying "not yours".
+  deactivated = await makePersona("live-secrets-deactivated@tapswipe.test", "agent");
+  ({ preAppId: deactivatedPreAppId } = await makePreApp(deactivated.id, "Deactivated Co"));
+  const { error: deactivateError } = await adminClient()
+    .from("profiles")
+    .update({ is_active: false })
+    .eq("id", deactivated.id);
+  if (deactivateError) throw deactivateError;
 }, 120_000);
 
 afterAll(async () => {
   const service = adminClient();
-  for (const persona of [owner, intruder, admin].filter(Boolean)) {
+  for (const persona of [owner, intruder, admin, deactivated].filter(Boolean)) {
     // audit_log.actor_id references profiles(id) with no ON DELETE, and profiles
     // cascades from auth.users — so audit rows block the user delete.
     await service.from("audit_log").delete().eq("actor_id", persona.id);
@@ -222,6 +235,80 @@ describe("submit-pre-app-secrets access control", () => {
     );
     expect(status).toBe(400);
     expect(String(body.error)).toMatch(/same pre-app/i);
+  });
+});
+
+describe("a deactivated caller is refused by both functions", () => {
+  // The false branch of callerIsActive() in _shared/documents.ts, which both
+  // functions import. It was only ever exercised through the legacy document
+  // functions' tests, deleted on 13 Oct 2026.
+  it("submit-pre-app-secrets refuses them on their own pre-app, storing nothing", async () => {
+    const { status, body, raw } = await invoke(
+      "submit-pre-app-secrets",
+      {
+        secrets: [
+          { kind: "terminal", pre_app_id: deactivatedPreAppId, rp_password: PLAINTEXT.rpPassword },
+        ],
+      },
+      deactivated.token,
+    );
+    console.log(`  deactivated submit -> ${status} ${raw}`);
+    expect(status, raw).toBe(403);
+    expect(body.error).toBe("Account is not active");
+
+    const { data } = await adminClient()
+      .from("pre_app_terminal_secrets")
+      .select("pre_app_id")
+      .eq("pre_app_id", deactivatedPreAppId);
+    expect(data).toEqual([]);
+  });
+
+  it("read-pre-app-secrets refuses them on their own pre-app", async () => {
+    const { status, body, raw } = await invoke(
+      "read-pre-app-secrets",
+      { pre_app_id: deactivatedPreAppId },
+      deactivated.token,
+    );
+    console.log(`  deactivated read -> ${status} ${raw}`);
+    expect(status, raw).toBe(403);
+    expect(body.error).toBe("Account is not active");
+  });
+});
+
+describe("read-pre-app-secrets rejects a pre_app_id that is not a positive integer", () => {
+  // isPositiveInt() from _shared/documents.ts. Driven as the OWNER, whose own
+  // pre-app id would succeed, so each 400 is about the shape of the id alone.
+  // Built lazily: preAppId only exists once beforeAll has run.
+  const cases: [string, () => Record<string, unknown>][] = [
+    ["missing", () => ({})],
+    ["null", () => ({ pre_app_id: null })],
+    // The owner's REAL id, as a string: the one a lax check would let through.
+    ["a numeric string", () => ({ pre_app_id: String(preAppId) })],
+    ["a decimal", () => ({ pre_app_id: 1.5 })],
+    ["zero", () => ({ pre_app_id: 0 })],
+    ["negative", () => ({ pre_app_id: -1 })],
+    ["an injection attempt", () => ({ pre_app_id: "1; drop table pre_apps" })],
+  ];
+
+  for (const [label, payload] of cases) {
+    it(`rejects ${label} with 400`, async () => {
+      const { status, body: response, raw } = await invoke(
+        "read-pre-app-secrets",
+        payload(),
+        owner.token,
+      );
+      expect(status, raw).toBe(400);
+      expect(response.error).toBe("pre_app_id must be a positive integer");
+    });
+  }
+
+  it("accepts the same owner's real id, so the cases above are about the id", async () => {
+    const { status, raw } = await invoke(
+      "read-pre-app-secrets",
+      { pre_app_id: preAppId },
+      owner.token,
+    );
+    expect(status, raw).toBe(200);
   });
 });
 
