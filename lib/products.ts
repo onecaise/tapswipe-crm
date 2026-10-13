@@ -253,22 +253,32 @@ export function parsePriceInput(
   const trimmed = input.trim();
   if (trimmed === "") return { value: null };
 
-  // Tolerate what an admin copying from a price sheet actually types.
-  const cleaned = trimmed.replace(/[$,\s]/g, "");
-  // Plain decimals only. Number() alone reads JavaScript literals, so "0x10"
-  // became 16 and "1e3" became 1000 — a different price than the one typed.
-  // The leading minus is let through so the negative case below can say so.
-  if (!/^-?(\d+(\.\d*)?|\.\d+)$/.test(cleaned)) {
+  // An optional leading "$" and the whitespace around it, then one of exactly
+  // two shapes (A1). Commas used to be stripped wherever they were, so "12,99"
+  // — a decimal comma — was stored as 1299, a hundred times the price typed.
+  // Now a comma is only accepted as real thousands grouping. Number() is never
+  // the parser here: it reads "0x10" as 16 and "1e3" as 1000 (QA-003).
+  const body = trimmed.replace(/^\$\s*/, "");
+  const negative = body.startsWith("-");
+  const unsigned = negative ? body.slice(1) : body;
+  const plain = /^\d+(\.\d{1,2})?$/;
+  const grouped = /^\d{1,3}(,\d{3})+(\.\d{1,2})?$/;
+
+  if (!plain.test(unsigned) && !grouped.test(unsigned)) {
+    // Say why where the reason is specific; "not a number" otherwise.
+    if (/^(\d+|\d{1,3}(,\d{3})+)\.\d{3,}$/.test(unsigned)) {
+      return { error: "A list price can have at most two decimal places." };
+    }
+    if (/^[\d.,]+$/.test(unsigned) && unsigned.includes(",")) {
+      return { error: "Use a period for decimals, for example 12.99" };
+    }
     return { error: "That is not a number." };
   }
-  const parsed = Number(cleaned);
-  if (!Number.isFinite(parsed)) return { error: "That is not a number." };
-  if (parsed < 0) {
+  if (negative) {
     return { error: "A list price cannot be negative." };
   }
-  if (Math.round(parsed * 100) / 100 !== parsed) {
-    return { error: "A list price can have at most two decimal places." };
-  }
+  const cleaned = unsigned.replace(/,/g, "");
+  const parsed = Number(cleaned);
   if (parsed >= 10 ** 10) {
     return { error: "That price is too large for the column." };
   }

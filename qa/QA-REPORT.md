@@ -268,3 +268,26 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   ghost-sheet convert; dashboard counts equal to direct DB counts for agent and admin; global search with
   quotes/`%`/HTML/300-char input; create user / taken agent # / duplicate email / reset / deactivate;
   empty states for a brand-new rep; residual export as agent.
+
+## Run 2 — Owen's follow-up list (2026-10-13, unattended)
+
+### A1 — list price read a decimal comma as thousands (Medium, products)
+- **Was:** `parsePriceInput()` stripped commas anywhere, so `12,99` was saved as $1,299.00.
+- **Now:** optional `$` and surrounding whitespace, then only `^\d+(\.\d{1,2})?$` or
+  `^\d{1,3}(,\d{3})+(\.\d{1,2})?$`. A misplaced comma says "Use a period for decimals, for example
+  12.99"; three or more decimals, negatives and the column ceiling keep their own messages; anything
+  else is "That is not a number." Unit cases for every accept/reject in the brief plus `$ 12.99`,
+  `1,234,567.89`, `€12,99`, `1 299`, `$$12`, `12$`, `12.`; e2e `e2e/qa/product-price-parse.spec.ts`
+  types `12,99` and asserts the message and that nothing was saved (red on the old parser).
+- **Changed behaviour to note:** `.5` was accepted before and is now refused ("That is not a
+  number."), because the brief requires digits first. The old unit assertion was moved, not dropped.
+  An inner space (`1 299`) is also refused now; only surrounding whitespace is trimmed.
+- **Other places money/quantity text is parsed (not changed):**
+  | Where | Comma behaviour | Why not changed |
+  | --- | --- | --- |
+  | `lib/payouts.ts` `parseFigureInput()` (payout residual/split cells) | strips commas anywhere — **same bug**: `12,99` → 1299 | payouts are out of bounds for this run (hard rule); see D-10 |
+  | `supabase/functions/_shared/residuals.ts` cell coercion (residual import) | strips commas anywhere | residual import is out of bounds; cells are usually numeric, not text; see D-10 |
+  | `lib/masks.ts` `maskMoney()` (pre-app est. volume/ticket fields) | drops every non-digit at keystroke time, so typing `12,99` shows `1299` while you type | a mask, not a parser: the figure is visible as it is typed. Same fix would need caret work; listed for Owen (D-10) |
+  | `lib/masks.ts` `maskPercent()` (pre-app splits/ownership/tax) | same, digits and one `.` only | as above |
+  | pre-app step `Number(value)` coercions (business/owners/profile/terminal) | input already masked, so no comma reaches them | n/a |
+  | `components/merchant-form.tsx` split %, `components/quote-store.tsx` quantity | `type="number"` inputs — the browser refuses a comma (value becomes empty) | n/a |
