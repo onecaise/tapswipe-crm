@@ -7,6 +7,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { createClient } from "@/lib/supabase/client";
 import {
   TERMINAL_BOOLEANS,
+  isTaxRate,
   type TerminalStepValues,
   terminalStepSchema,
 } from "@/lib/pre-app-validation";
@@ -264,12 +265,14 @@ function toPayload(patch: Partial<TerminalStepValues>): Record<string, unknown> 
     const value = String(raw).trim();
     if (key === "tax_rate") {
       // numeric(5,3). Omit an unparseable entry rather than nulling it, so a
-      // transient state while typing cannot wipe a saved value.
+      // transient state while typing cannot wipe a saved value. A rate the
+      // validator refuses (over 99.999, D-12) is omitted the same way: the
+      // column cannot hold it, so writing it would only add a database error
+      // beside the validator's own message.
       if (value === "") {
         payload[key] = null;
-      } else {
-        const n = Number(value);
-        if (!Number.isNaN(n)) payload[key] = n;
+      } else if (isTaxRate(value)) {
+        payload[key] = Number(value);
       }
       continue;
     }

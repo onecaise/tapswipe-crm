@@ -225,15 +225,25 @@ export type OwnersStepValues = z.infer<typeof ownersStepSchema>;
  * Terminal
  * ------------------------------------------------------------------------- */
 
-/** numeric(5,3), so three decimals rather than the usual two. */
-const taxRate = z
-  .string()
-  .refine(
-    (v) =>
-      v === "" ||
-      (/^\d{1,3}(\.\d{1,3})?$/.test(v) && Number(v) >= 0 && Number(v) <= 100),
-    { message: "0 to 100" },
+/**
+ * numeric(5,3), so three decimals rather than the usual two — and a ceiling of
+ * 99.999, not 100 (D-12). The bound used to be 100, which the column cannot
+ * hold, so "100" passed here and failed at the database instead.
+ */
+export const TAX_RATE_MAX = 99.999;
+
+export const TAX_RATE_MESSAGE = "Tax rate must be between 0 and 99.999";
+
+export function isTaxRate(v: string): boolean {
+  return (
+    v === "" ||
+    (/^\d{1,3}(\.\d{1,3})?$/.test(v) &&
+      Number(v) >= 0 &&
+      Number(v) <= TAX_RATE_MAX)
   );
+}
+
+const taxRate = z.string().refine(isTaxRate, { message: TAX_RATE_MESSAGE });
 
 /** A native <input type="time"> emits "" or HH:MM. */
 const clockTime = z
