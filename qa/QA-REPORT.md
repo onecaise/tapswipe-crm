@@ -382,3 +382,20 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   `/auth/login?next=%2Fleads%3Fstatus%3Dnew` → sign in → back on `/leads?status=new`; plain login →
   `/dashboard`; five hostile `next` values through the real form → `/dashboard`. **Non-vacuous:** with
   the form following `next` raw, all five hostile specs went red; with the helper bypassed, 26 unit cases.
+
+### C1b (D-03) — a signed-in user opening /auth/login is sent on (auth)
+- **Now:** in `lib/supabase/proxy.ts`, after `getClaims()`, a signed-in user requesting `/auth/login`
+  whose profile reads `is_active = true` is redirected to `postLoginPath(search)` — a safe `?next=` or
+  `/dashboard` — with the refreshed cookies copied as on the `/` branch. Inactive, profile-less or
+  unreadable profiles get the form: that is the loop guard (`/dashboard` sends those users to
+  `/auth/error`, so bouncing them back would leave no way to sign in as someone else).
+- **Test:** `e2e/qa/login-signed-in-redirect.spec.ts` — active agent → `/dashboard`; `?next=%2Fleads` →
+  `/leads`; hostile `next` → `/dashboard`; inactive, no-profile, and deactivated-mid-session
+  (banned + inactive, valid JWT still in the browser) each reach their page and then get `/auth/login`
+  with a **200** (no redirect at all). Active specs red before; with the guard loosened to "any
+  signed-in user", all three must-reach-the-form specs went red.
+- **Existing spec updated (stricter):** `e2e/logout.spec.ts` now expects
+  `/auth/login?next=%2Fmerchants` exactly after sign-out (separate commit).
+- **Note:** a ban *without* `is_active = false` and a still-valid JWT would be redirected to the app,
+  as it would be for any page today; `deactivate-user` always sets both, so that state is not reachable
+  through the app.

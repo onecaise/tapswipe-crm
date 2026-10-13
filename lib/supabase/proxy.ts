@@ -1,7 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { nextFromDeepLink } from "@/lib/login-redirect";
+import { nextFromDeepLink, postLoginPath } from "@/lib/login-redirect";
 
 /**
  * The starter's `if (!hasEnvVars) return supabaseResponse;` escape hatch used to
@@ -77,6 +77,33 @@ export async function updateSession(request: NextRequest) {
       .getAll()
       .forEach((cookie) => redirectResponse.cookies.set(cookie));
     return redirectResponse;
+  }
+
+  // A signed-in user opening /auth/login (D-03 / C1b) goes where signing in
+  // would have taken them: a safe `?next=`, else /dashboard. ACTIVE profiles
+  // only, and that is the whole loop guard — /dashboard sends an inactive or
+  // profile-less user to /auth/error, so bouncing them from here would leave
+  // them no way to reach the form and sign in as someone else. A user whose
+  // profile cannot be read gets the form too: failing towards the login page
+  // is the safe direction. Cookies copied across for the reason given on the
+  // `/` branch above.
+  if (user && request.nextUrl.pathname === "/auth/login") {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("is_active")
+      .eq("id", user.sub)
+      .maybeSingle();
+    if (profile?.is_active === true) {
+      const target = new URL(
+        postLoginPath(request.nextUrl.search),
+        request.nextUrl.origin,
+      );
+      const redirectResponse = NextResponse.redirect(target);
+      supabaseResponse.cookies
+        .getAll()
+        .forEach((cookie) => redirectResponse.cookies.set(cookie));
+      return redirectResponse;
+    }
   }
 
   // The stale `/login` exemption is gone with it: auth lives under `/auth/*`
