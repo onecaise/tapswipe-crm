@@ -43,7 +43,7 @@ Resume rule: continue at the first unchecked item. Local only; no push/deploy/db
 - [x] B3 D-06 /tasks checkbox hit area
 - [x] B4 D-08 bad residual import leaves no batch
 - [x] B5 D-04 notifications self-filter (only if actor recorded)
-- [ ] Group B suites
+- [x] Group B suites
 - [ ] C1 D-03 return-to after login + signed-in /auth/login redirect
 - [ ] C2 D-05 db error-code helper on busiest forms
 - [ ] C3 D-07 unsaved-changes warning + router.replace after create
@@ -58,3 +58,4 @@ Resume rule: continue at the first unchecked item. Local only; no push/deploy/db
 - B3 done (5563791). First try (-14px) measured 42x42; fixed to -15px.
 - B4 done (e6da0f2). No redeploy needed.
 - B5: no change (no actor column; agent_id is owner). Recorded.
+- Group B suites: build ok, lint ok, tsc ok, unit 1406/1406, live 209/209, e2e 210/210.
