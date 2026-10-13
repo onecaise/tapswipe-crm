@@ -31,3 +31,25 @@ Resume rule: read this file, continue at the first unchecked item.
 - 2026-10-09T23:26 Area 5: QA-005..QA-011 done. Viewport crawl 390/768: only blank-form + payout summary overflowed (fixed). Keyboard: shell tab order + focus rings fine, drawer opens/Escape returns focus; login tab order -> QA-011 (NEEDS OWEN). Empty states fine for a new rep. Full suites after 7 fixes: unit 1374, live 209, e2e 177 pass (+2 intentionally red new specs, then fixed).
 - 2026-10-09T23:49 Area 5 done. 1440 re-crawl after fixes: 0 axe serious/critical, 0 console errors, no overflow. QA data cleaned up.
 - 2026-10-09T23:49 FINISH: build ok, lint ok, tsc ok, unit 1374/1374, live 209/209, e2e 180/180. 11 findings: 9 fixed, 2 NEEDS OWEN; 9 decisions; 1 observation. Not pushed.
+
+# Run 2 — 2026-10-13, Owen's follow-up list (unattended)
+Resume rule: continue at the first unchecked item. Local only; no push/deploy/db push/link.
+- [x] A1 price parsing (thousands grouping, misplaced comma)
+- [x] A2 sensitive pre-app field attributes
+- [x] A3 /auth/confirm error branch encoding + generic /auth/error
+- [x] Group A suites
+- [ ] B1 D-01 banned wording on login
+- [ ] B2 D-02 sign-out on /auth/error
+- [ ] B3 D-06 /tasks checkbox hit area
+- [ ] B4 D-08 bad residual import leaves no batch
+- [ ] B5 D-04 notifications self-filter (only if actor recorded)
+- [ ] Group B suites
+- [ ] C1 D-03 return-to after login + signed-in /auth/login redirect
+- [ ] C2 D-05 db error-code helper on busiest forms
+- [ ] C3 D-07 unsaved-changes warning + router.replace after create
+- [ ] C4 D-09 record as by design
+- [ ] Group C suites + final summary
+- 2026-10-13 A1 done (e3c4041). Docker Desktop died mid-item; restarted it (docker desktop restart). The user's functions serve died with it; started my own (bg), to be stopped at the end.
+- A2 done (56ac323).
+- A3 done (3250ae4).
+- Group A suites: build ok, lint ok, tsc ok, unit 1404/1404, live 209/209, e2e 198/198.
