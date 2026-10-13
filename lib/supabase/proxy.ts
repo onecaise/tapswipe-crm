@@ -1,6 +1,8 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+import { nextFromDeepLink } from "@/lib/login-redirect";
+
 /**
  * The starter's `if (!hasEnvVars) return supabaseResponse;` escape hatch used to
  * sit here, and it is deliberately gone rather than merely unused.
@@ -81,9 +83,18 @@ export async function updateSession(request: NextRequest) {
   // and there has never been a top-level `/login` route, so all it did was
   // exempt a 404 from the session check.
   if (!user && !request.nextUrl.pathname.startsWith("/auth")) {
-    // no user, potentially respond by redirecting the user to the login page
+    // no user, potentially respond by redirecting the user to the login page —
+    // carrying where they were going (D-03), so signing in lands them there
+    // rather than on /dashboard. Through safeNextPath() here as well as in the
+    // login form: see lib/login-redirect.ts.
     const url = request.nextUrl.clone();
     url.pathname = "/auth/login";
+    url.search = "";
+    const next = nextFromDeepLink(
+      request.nextUrl.pathname,
+      request.nextUrl.search,
+    );
+    if (next !== null) url.searchParams.set("next", next);
     return NextResponse.redirect(url);
   }
 

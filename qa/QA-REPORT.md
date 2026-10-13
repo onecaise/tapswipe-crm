@@ -369,3 +369,16 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   *for* a rep (exactly the case the rep should be told about), so filtering on `agent_id` would hide
   the wrong items. The only record of a cross-agent author is `audit_log`, which agents cannot read.
   `lib/notifications.ts` already says the fix is a created-by column, i.e. a migration. Left for Owen.
+
+### C1a (D-03) — return to the deep-linked page after sign-in (auth)
+- **Now:** when the proxy sends a signed-out user to `/auth/login`, it adds `?next=<path+query>`
+  (Next's `_rsc` dropped; nothing added when the target is `/dashboard`). The login form pushes
+  `postLoginPath(window.location.search)`. Both ends are `lib/login-redirect.ts`, both call
+  `safeNextPath()`, and both fall back to `/dashboard`. Read from `window.location` at submit time so
+  the form needs no Suspense boundary under `cacheComponents`.
+- **Test:** `tests/unit/login-redirect.test.ts` (34) — QA-001's bypass table (plus `/%252F/…`) against the
+  form side and, for the ones that are paths, against the proxy side (a request path can itself be
+  `//evil.com`); `_rsc` stripping. `e2e/qa/login-return-to.spec.ts` — `/leads?status=new` signed out →
+  `/auth/login?next=%2Fleads%3Fstatus%3Dnew` → sign in → back on `/leads?status=new`; plain login →
+  `/dashboard`; five hostile `next` values through the real form → `/dashboard`. **Non-vacuous:** with
+  the form following `next` raw, all five hostile specs went red; with the helper bypassed, 26 unit cases.

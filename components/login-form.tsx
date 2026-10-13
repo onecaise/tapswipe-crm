@@ -1,6 +1,7 @@
 "use client";
 
 import { ACCOUNT_DEACTIVATED } from "@/lib/auth-copy";
+import { postLoginPath } from "@/lib/login-redirect";
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -51,7 +52,11 @@ export function LoginForm({
         }
         throw error;
       }
-      router.push("/dashboard");
+      // Back to the page the proxy intercepted, if any (D-03), through
+      // safeNextPath() — lib/login-redirect.ts. Read from window.location at
+      // submit time rather than useSearchParams(), which under
+      // cacheComponents would need a Suspense boundary around the whole form.
+      router.push(postLoginPath(window.location.search));
       // Server components cache per-session; without this they can render the
       // pre-login session on the first paint after signing in.
       router.refresh();
