@@ -1,5 +1,6 @@
 "use client";
 
+import { ACCOUNT_DEACTIVATED } from "@/lib/auth-copy";
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -37,7 +38,19 @@ export function LoginForm({
         email,
         password,
       });
-      if (error) throw error;
+      if (error) {
+        // A banned account is a deactivated one (deactivate-user bans first),
+        // so it gets the deactivated page's words rather than GoTrue's raw
+        // "User is banned" (D-01). By code, with the message as a fallback for
+        // an older GoTrue that sends none. Every other error — wrong password
+        // and unknown address alike — keeps GoTrue's generic "Invalid login
+        // credentials", which does not say whether the account exists.
+        if (error.code === "user_banned" || error.message === "User is banned") {
+          setError(`${ACCOUNT_DEACTIVATED.title}. ${ACCOUNT_DEACTIVATED.remedy}`);
+          return;
+        }
+        throw error;
+      }
       router.push("/dashboard");
       // Server components cache per-session; without this they can render the
       // pre-login session on the first paint after signing in.

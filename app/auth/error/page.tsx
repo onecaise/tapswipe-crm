@@ -1,3 +1,4 @@
+import { ACCOUNT_DEACTIVATED } from "@/lib/auth-copy";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Suspense } from "react";
 
@@ -26,10 +27,10 @@ const MESSAGES: Record<string, { title: string; detail: string }> = {
       "and the database are out of step. The details are in the server log.",
   },
   "account-deactivated": {
-    title: "This account has been deactivated",
+    title: ACCOUNT_DEACTIVATED.title,
     detail:
       "The sign-in worked, but the account is switched off, so it has no " +
-      "access to any records. An admin can turn it back on.",
+      `access to any records. ${ACCOUNT_DEACTIVATED.remedy}`,
   },
   // The two codes /auth/confirm sends (A3). It used to put GoTrue's own
   // message in the URL instead.

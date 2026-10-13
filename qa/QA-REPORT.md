@@ -315,3 +315,16 @@ Both fixed at Owen's request, local only (no push, deploy or `db push`).
   is not echoed and not parsed as markup; known codes keep their words; bad token → exactly
   `/auth/error?error=link-invalid`; missing token → `link-incomplete`; prototype key. Four red
   before the change; the prototype spec red with only the `hasOwn` guard reverted.
+
+### B1 (D-01) — banned login showed GoTrue's raw "User is banned" (Low, auth)
+- **Now:** `lib/auth-copy.ts` `ACCOUNT_DEACTIVATED` (`title`, `remedy`) is the one copy; `/auth/error`'s
+  account-deactivated entry is built from it, and `components/login-form.tsx` shows
+  "This account has been deactivated. An admin can turn it back on." when GoTrue returns
+  `code === "user_banned"` (message `User is banned` as fallback). No new wording. Every other sign-in
+  error is passed through unchanged — GoTrue's generic "Invalid login credentials".
+- **Test:** `e2e/qa/login-errors.spec.ts` — banned user sees the deactivated words and not GoTrue's;
+  inactive-but-unbanned user lands on `/auth/error?error=account-deactivated` with the same title and
+  remedy; a wrong password on a real account and an unknown address render identical text that names
+  no account state. Banned spec red before, green after.
+- **Limit (D-11):** GoTrue returns `user_banned` for a banned account *whatever password is sent*
+  (measured), so the response already says the address exists; the UI can't change that.
