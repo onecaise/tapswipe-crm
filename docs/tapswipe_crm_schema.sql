@@ -7231,7 +7231,25 @@ grant select, insert, update on bug_reports to authenticated;
 -- all. UPDATE is the inline editing of the two money figures and the per-agent
 -- bulk split; DELETE is the whole-period escape hatch. Both are admin-only by
 -- policy, so a rep holds the privileges and no policy admits their write.
-grant select, update, delete on rep_payout_rows to authenticated;
+--
+-- UPDATE ON TWO COLUMNS, as of 20261014160000 (phase 3b of
+-- docs/design/residual-splits.md), the quotes.status arrangement. Those two
+-- are the only columns any client path writes: the inline cell sends one of
+-- them, the bulk split sends rep_split_pct, and the partner-rate copy trigger
+-- (security invoker, so it runs with the admin's privileges) writes
+-- rep_split_pct. Everything else -- the file-sourced columns, the share and
+-- adjustment columns, batch_id -- is written only by the definer commit, by
+-- set_shared_residual (definer), by FK actions (which run as the table
+-- owner) or by the service role, none of which this grant reaches. The share
+-- and adjustment columns were already refused by guard_shared_line(); the
+-- grant refuses them FIRST, with `permission denied`, and refuses an admin's
+-- hand edit of merchant_name, mid or volume as well, which no trigger did.
+-- RLS cannot express a column restriction; only a grant can.
+--
+-- Two statements for the same reason as quotes below: `grant select, update
+-- (a, b), delete` would read as if the column list applied to all three.
+grant select, delete on rep_payout_rows to authenticated;
+grant update (residual_income, rep_split_pct) on rep_payout_rows to authenticated;
 
 -- rep_payout_batches: SELECT to list them, UPDATE to abandon one. No INSERT (the
 -- Storage key contains the batch id, so residual-import-file-url creates the row

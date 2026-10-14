@@ -473,6 +473,24 @@ describe("committing over HTTP", () => {
     // The generated column computed in the database, not here.
     expect(row?.rep_payout).toBe(53.04);
 
+    // 2b. Those two figures are ALL an admin's session may write
+    // (20261014160000). Any other column is refused by the grant, loudly, as a
+    // 42501 through PostgREST -- not filtered to zero rows -- and nothing moves,
+    // even when an allowed column rides in the same request.
+    for (const patch of [
+      { volume: 1 },
+      { merchant_name: "Forged Co" },
+      { residual_income: 1, merchant_name: "Forged Co" },
+    ]) {
+      const { error: refused } = await asAdmin
+        .from("rep_payout_rows")
+        .update(patch)
+        .eq("mid", "LIVE-MID-MERGE")
+        .eq("period", PERIOD);
+      expect(refused?.code, JSON.stringify(patch)).toBe("42501");
+    }
+    expect(await ledgerFor("LIVE-MID-MERGE")).toEqual(row);
+
     // 3. A corrected processor file for the same period is re-imported.
     const second = await importFile([
       HEADER,

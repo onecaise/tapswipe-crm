@@ -187,8 +187,12 @@ describe("it records a change to either money figure", () => {
 
 describe("it stays quiet about everything else", () => {
   it("writes nothing when neither figure changes", async () => {
-    await editAsAdmin(
-      db,
+    // As the owner, which is what the definer commit runs as: since
+    // 20261014160000 an admin's own session cannot write merchant_name at all
+    // (UPDATE is granted on the two figures only), and a re-import is the one
+    // path that does.
+    await asPlatform(db);
+    await db.exec(
       `update rep_payout_rows set merchant_name = 'Renamed Co' where id = ${fx.rowIds.filled}`,
     );
 

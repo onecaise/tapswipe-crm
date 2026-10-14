@@ -168,12 +168,24 @@ describe("grant surface after all migrations", () => {
     // rep_payout_rows: no INSERT. Rows are created only by
     // commit-residual-import under the service role, so an INSERT grant would be
     // backed by no policy — a ledger of what a processor reported must not be
-    // writable a row at a time from a browser. UPDATE and DELETE are granted and
-    // admin-gated by policy: inline editing of the two money figures, and the
-    // whole-period escape hatch.
+    // writable a row at a time from a browser. DELETE is the whole-period
+    // escape hatch, admin-gated by policy. UPDATE is held on two COLUMNS only
+    // (20261014160000), so — the quotes case below — it is invisible to
+    // has_table_privilege, and the per-column loop is what pins it.
     expect(
       await tablePrivileges(db, "authenticated", "rep_payout_rows"),
-    ).toEqual(["DELETE", "SELECT", "UPDATE"]);
+    ).toEqual(["DELETE", "SELECT"]);
+    const payoutUpdatable = await rows<{ column_name: string }>(
+      db,
+      `select attname as column_name from pg_attribute
+        where attrelid = 'rep_payout_rows'::regclass and attnum > 0 and not attisdropped
+          and has_column_privilege('authenticated', 'rep_payout_rows', attname, 'UPDATE')
+        order by attname`,
+    );
+    expect(payoutUpdatable.map((r) => r.column_name)).toEqual([
+      "rep_split_pct",
+      "residual_income",
+    ]);
 
     // rep_payout_batches: SELECT to list them, UPDATE to abandon one. No INSERT
     // because the Storage key contains the batch id, so the row is created

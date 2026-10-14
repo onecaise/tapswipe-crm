@@ -137,6 +137,17 @@ async function attempt(userId: string | null, sql: string): Promise<DbError | nu
   }
 }
 
+/** As the table owner: every privilege, the guard still applies. */
+async function attemptAsOwner(sql: string): Promise<DbError | null> {
+  await asPlatform(db);
+  try {
+    await db.query(sql);
+    return null;
+  } catch (error) {
+    return error as DbError;
+  }
+}
+
 async function setResidual(amount: string): Promise<void> {
   await asUser(db, ADMIN_ID);
   await db.query(`select set_shared_residual(${shareId}, '${SHARED_MONTH}', ${amount})`);
@@ -306,21 +317,6 @@ describe("the guard: a pair is edited together or not at all", () => {
       `update rep_payout_rows set rep_split_pct = 60 where share_role = 'secondary'`,
       /rate always copies the signer's/,
     ],
-    [
-      "the account residual directly",
-      `update rep_payout_rows set account_residual_income = 1.00 where share_role = 'primary'`,
-      /set by their own functions/,
-    ],
-    [
-      "the share snapshot",
-      `update rep_payout_rows set primary_rep_pct = 45, secondary_rep_pct = 5 where rep_share_id is not null`,
-      /set by their own functions/,
-    ],
-    [
-      "a line's role",
-      `update rep_payout_rows set share_role = 'primary' where share_role = 'secondary'`,
-      /set by their own functions/,
-    ],
   ])("refuses an admin hand-editing %s (PT409)", async (_label, sql, message) => {
     await setResidual("100.01");
     await setSignerRate("50");
@@ -331,15 +327,50 @@ describe("the guard: a pair is edited together or not at all", () => {
     expect(await pair()).toEqual(before);
   });
 
-  it("refuses turning an ordinary line into a shared or adjustment one", async () => {
+  // The share columns themselves. Since 20261014160000 an admin's session
+  // holds UPDATE on residual_income and rep_split_pct only, so the GRANT
+  // refuses these first, with permission denied, before the guard runs. The
+  // guard still refuses them for a writer that holds every privilege (the
+  // owner, which is what the definer functions and the service role act as),
+  // so both layers are pinned.
+  it.each([
+    [
+      "the account residual directly",
+      `update rep_payout_rows set account_residual_income = 1.00 where share_role = 'primary'`,
+    ],
+    [
+      "the share snapshot",
+      `update rep_payout_rows set primary_rep_pct = 45, secondary_rep_pct = 5 where rep_share_id is not null`,
+    ],
+    [
+      "a line's role",
+      `update rep_payout_rows set share_role = 'primary' where share_role = 'secondary'`,
+    ],
+  ])("refuses %s: by grant for an admin (42501), by the guard for the owner (PT409)", async (_label, sql) => {
+    await setResidual("100.01");
+    await setSignerRate("50");
+    const before = await pair();
+
+    const asAdmin = await attempt(ADMIN_ID, sql);
+    expect(asAdmin?.code).toBe("42501");
+    expect(asAdmin?.message).toMatch(/permission denied for table rep_payout_rows/);
+
+    const asOwner = await attemptAsOwner(sql);
+    expect(asOwner?.code).toBe("PT409");
+    expect(asOwner?.message).toMatch(/set by their own functions/);
+
+    expect(await pair()).toEqual(before);
+  });
+
+  it("refuses turning an ordinary line into a shared or adjustment one, by grant and by guard", async () => {
     for (const sql of [
       `update rep_payout_rows set rep_share_id = ${shareId}, share_role = 'primary',
               primary_rep_pct = 40, secondary_rep_pct = 10 where mid = 'MID-UNMATCHED'`,
       `update rep_payout_rows set line_kind = 'adjustment', adjustment_amount = 5,
               adjusts_period = '2026-06-01' where mid = 'MID-UNMATCHED'`,
     ]) {
-      const error = await attempt(ADMIN_ID, sql);
-      expect(error?.code).toBe("PT409");
+      expect((await attempt(ADMIN_ID, sql))?.code, sql).toBe("42501");
+      expect((await attemptAsOwner(sql))?.code, sql).toBe("PT409");
     }
   });
 
