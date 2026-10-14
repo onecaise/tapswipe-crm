@@ -1,5 +1,9 @@
 -- Backfill merchant locations from their linked pre-app's business address.
 --
+-- THIS IS THE psql VERSION. For the Supabase SQL Editor (no psql, no -v
+-- variables) use scripts/backfill-merchant-location-editor.sql: same rules,
+-- one statement, one true/false switch.
+--
 -- REVIEWED BY HAND, RUN BY HAND, NEVER BY ANYTHING AUTOMATIC. Not a
 -- migration (it is in scripts/, not supabase/migrations/), so `db push` and
 -- `db reset` never run it. Requires 20261013130000 (the columns and
