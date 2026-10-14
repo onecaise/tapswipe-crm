@@ -71,7 +71,7 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (1681 tests, 77 files — every file must load)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (1763 tests, 79 files — every file must load)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (207 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
 npm run test:e2e       # Playwright, real browser against the app on the local stack (256 tests, 5 of them the shared setup)
