@@ -2498,17 +2498,35 @@ export async function clearImportedUsers(
     // ACTION (20261014130000). By merchant first: merchant_id is ON DELETE
     // RESTRICT and a share on this user's merchant can name two OTHER reps.
     // Here for the same reason as the quotes line above -- an imported rep has
-    // no share today, and this list should not be the one that forgot.
+    // no share today, and this list should not be the one that forgot. Ledger
+    // lines naming the shares go first: rep_payout_rows.rep_share_id is ON
+    // DELETE RESTRICT (20261014140000), and a shared pair includes the OTHER
+    // rep's line. Errors are thrown, not swallowed.
     const { data: ownMerchants } = await db
       .from("merchants")
       .select("id")
       .eq("agent_id", user.id);
     const merchantIds = (ownMerchants ?? []).map((merchant) => merchant.id as number);
-    if (merchantIds.length > 0) {
-      await db.from("merchant_rep_shares").delete().in("merchant_id", merchantIds);
+    const shareFilters = [`primary_agent_id.eq.${user.id}`, `secondary_agent_id.eq.${user.id}`];
+    if (merchantIds.length > 0) shareFilters.push(`merchant_id.in.(${merchantIds.join(",")})`);
+    const { data: shares, error: sharesReadError } = await db
+      .from("merchant_rep_shares")
+      .select("id")
+      .or(shareFilters.join(","));
+    if (sharesReadError) throw new Error(`Could not read shares: ${sharesReadError.message}`);
+    const shareIds = (shares ?? []).map((share) => share.id as number);
+    if (shareIds.length > 0) {
+      const { error: linesError } = await db
+        .from("rep_payout_rows")
+        .delete()
+        .in("rep_share_id", shareIds);
+      if (linesError) throw new Error(`Could not delete shared lines: ${linesError.message}`);
+      const { error: sharesError } = await db
+        .from("merchant_rep_shares")
+        .delete()
+        .in("id", shareIds);
+      if (sharesError) throw new Error(`Could not delete shares: ${sharesError.message}`);
     }
-    await db.from("merchant_rep_shares").delete().eq("primary_agent_id", user.id);
-    await db.from("merchant_rep_shares").delete().eq("secondary_agent_id", user.id);
     // marketing_materials.uploaded_by and marketing_material_events.agent_id,
     // the twentieth and twenty-first references to profiles(id) and both NO
     // ACTION. An imported rep has no reason to own either today, which is
@@ -2602,6 +2620,160 @@ export async function merchantByMid(mid: string): Promise<{
     .single();
   if (error || !data) throw new Error(`merchant ${mid}: ${error?.message}`);
   return data;
+}
+
+/**
+ * The shared-account teardown case for clearImportedUsers, planted for real:
+ * a user (as the bulk import would leave one) who owns a merchant carrying a
+ * share between two OTHER reps -- the e2e agent signs, agent2 is the partner --
+ * plus the shared pair of ledger lines naming it. Both foreign keys in the way
+ * are ON DELETE RESTRICT (merchant_rep_shares.merchant_id,
+ * rep_payout_rows.rep_share_id), and neither row names the user being torn
+ * down. Returns the ids so the spec can prove the obstacle and then that
+ * nothing is left.
+ */
+export async function plantShareTeardownCase(email: string): Promise<{
+  userId: string;
+  merchantId: number;
+  shareId: number;
+}> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const { data: reps, error: repsError } = await db
+    .from("profiles")
+    .select("id, email")
+    .in("email", [PERSONAS.agent.email, PERSONAS.agent2.email]);
+  if (repsError || (reps ?? []).length !== 2) {
+    throw new Error(`share reps: ${repsError?.message ?? "personas missing"}`);
+  }
+  const idOf = (address: string) => reps!.find((rep) => rep.email === address)!.id as string;
+
+  // A run that failed part-way leaves the merchant (its MID is unique): clear
+  // it in FK order before planting again.
+  const { data: stale } = await db
+    .from("merchants")
+    .select("id")
+    .eq("mid", "E2E-SHARE-TEARDOWN");
+  for (const old of stale ?? []) {
+    const { data: oldShares } = await db
+      .from("merchant_rep_shares")
+      .select("id")
+      .eq("merchant_id", old.id);
+    const oldShareIds = (oldShares ?? []).map((row) => row.id as number);
+    if (oldShareIds.length > 0) {
+      await db.from("rep_payout_rows").delete().in("rep_share_id", oldShareIds);
+      await db.from("merchant_rep_shares").delete().in("id", oldShareIds);
+    }
+    const { error } = await db.from("merchants").delete().eq("id", old.id);
+    if (error) throw new Error(`stale merchant: ${error.message}`);
+  }
+  // ...and then the stale user, which the merchant was what kept alive.
+  await clearImportedUsers([email], []);
+
+  const { data: created, error: createError } = await db.auth.admin.createUser({
+    email,
+    password: E2E_PASSWORD,
+    email_confirm: true,
+  });
+  if (createError || !created.user) throw new Error(`create ${email}: ${createError?.message}`);
+  const userId = created.user.id;
+
+  const { error: profileError } = await db.from("profiles").insert({
+    id: userId,
+    full_name: "E2E Share Teardown",
+    email,
+    role: "agent",
+    is_active: true,
+  });
+  if (profileError) throw new Error(`profile: ${profileError.message}`);
+
+  const { data: merchant, error: merchantError } = await db
+    .from("merchants")
+    .insert({
+      agent_id: userId,
+      mid: "E2E-SHARE-TEARDOWN",
+      dba: "E2E Share Teardown Co",
+      status: "active",
+      city: "Nashville",
+      state: "TN",
+    })
+    .select("id")
+    .single();
+  if (merchantError || !merchant) throw new Error(`merchant: ${merchantError?.message}`);
+
+  const { data: share, error: shareError } = await db
+    .from("merchant_rep_shares")
+    .insert({
+      merchant_id: merchant.id,
+      primary_agent_id: idOf(PERSONAS.agent.email),
+      secondary_agent_id: idOf(PERSONAS.agent2.email),
+      primary_rep_pct: 40,
+      secondary_rep_pct: 10,
+      effective_from: "2027-09-01",
+    })
+    .select("id")
+    .single();
+  if (shareError || !share) throw new Error(`share: ${shareError?.message}`);
+
+  const { error: linesError } = await db.from("rep_payout_rows").insert(
+    [
+      { agent_id: idOf(PERSONAS.agent.email), share_role: "primary" },
+      { agent_id: idOf(PERSONAS.agent2.email), share_role: "secondary" },
+    ].map((line) => ({
+      ...line,
+      period: "2027-09-01",
+      mid: "E2E-SHARE-TEARDOWN",
+      merchant_id: merchant.id,
+      rep_share_id: share.id,
+      primary_rep_pct: 40,
+      secondary_rep_pct: 10,
+    })),
+  );
+  if (linesError) throw new Error(`shared lines: ${linesError.message}`);
+
+  return { userId, merchantId: merchant.id as number, shareId: share.id as number };
+}
+
+/** What a share teardown left behind, read as the service role. */
+export async function shareTeardownLeftovers(ids: {
+  userId: string;
+  merchantId: number;
+  shareId: number;
+}): Promise<{ shares: number; lines: number; profiles: number }> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const count = async (table: string, column: string, value: string | number) => {
+    const { count: n } = await db
+      .from(table)
+      .select("*", { count: "exact", head: true })
+      .eq(column, value);
+    return n ?? 0;
+  };
+  return {
+    shares: await count("merchant_rep_shares", "id", ids.shareId),
+    lines: await count("rep_payout_rows", "rep_share_id", ids.shareId),
+    profiles: await count("profiles", "id", ids.userId),
+  };
+}
+
+/**
+ * Tries to delete a merchant as the service role; returns the error message,
+ * or null. The message rather than the code, because the code for an ON DELETE
+ * RESTRICT refusal depends on the server version (23503 on Postgres 17, 23001
+ * on 18) while the constraint name in the message does not.
+ */
+export async function tryDeleteMerchant(merchantId: number): Promise<string | null> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { error } = await db.from("merchants").delete().eq("id", merchantId);
+  return error?.message ?? null;
 }
 
 /** The DBA every wizard-spec draft carries, so the next run can find and clear them. */

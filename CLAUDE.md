@@ -71,10 +71,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (1763 tests, 79 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (207 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (1798 tests, 81 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (209 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (256 tests, 5 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (257 tests, 5 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -101,6 +101,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
 - **`npm test`** — vitest + `@electric-sql/pglite`, applying `supabase/migrations/` over a deliberately minimal auth shim (`tests/helpers/db.ts`: three Data API roles, `auth.users`, `auth.uid()` reading the `request.jwt.claims` GUC). Covers RLS policies (`tests/rls/*`) and the grant surface (`tests/rls/grants.test.ts`). **Run this for any schema change.** Queries must run as `authenticated`, not the owner — Postgres bypasses RLS for a table's owner, so an owner-run test passes regardless of policy.
+- **PGlite 0.5.4 is Postgres 18.3, one major version AHEAD of the local stack (17.6)** — measured 14 Oct 2026. Behaviour that changed between 17 and 18 therefore differs between `npm test` and every real server: an `ON DELETE RESTRICT` violation reports **23001** under PGlite and **23503** on the stack. Pin the constraint name in the message rather than that SQLSTATE, or a test green in PGlite goes red in `test:live`.
 - **Never write a literal `\xHH`-shaped escape inside a JS template literal**, including inside text meant to read as a SQL comment. `tests/helpers/db.ts` builds SQL in template literals, so JavaScript consumes the escape before Postgres ever sees the string: `\x00` becomes a real NUL byte, which desyncs the wire protocol and fails dozens of *unrelated* tests with a bare `invalid message format` from the pg-protocol parser, naming no statement and pointing nowhere near the cause. (It cost an hour once, in a comment that existed to warn about exactly this.) For `bytea` fixtures use `decode('0011', 'hex')` — no backslash to get wrong.
 - **`.gitattributes` pins `*.mjs`, `*.sql` and `*.sh` to LF in every working copy, and it is deliberately that narrow.** Before it, a Windows checkout with `core.autocrlf=true` gave the three shebang scripts (`scripts/{check-linked-project,load-hardware-catalog,purge-legacy-documents}.mjs`) a `\r` on their `#!` line, and vitest refused to LOAD both `purge-legacy-documents` test files — `SyntaxError: Invalid or unexpected token`, no test named, the run reporting `1 failed` file with zero failed tests. The index was already LF, so the attribute changed no committed content. Do not widen it to `* text=auto` without expecting a repo-wide diff. **A suite where a file fails to load is a failing suite**, not a passing one with a caveat.
 - **`npm run test:live`** — real HTTP with real JWTs. Covers what PGlite structurally cannot: GoTrue password sign-in, PostgREST grants, the Deno runtime, Storage signed URLs. Hard-errors rather than skipping when the stack is down. Run it when touching Edge Functions, auth, or Storage.

@@ -187,7 +187,7 @@ alter table rep_payout_rows alter column rep_payout set expression as (
 ```
 
 - **This rewrite requires Postgres 17**, because `ALTER COLUMN … SET EXPRESSION` first
-  appeared in 17. The local stack is 17 (`config.toml`) and PGlite 0.5.x is 17. **Dev's and
+  appeared in 17. The local stack is 17 (17.6, measured), and **PGlite 0.5.4 is Postgres 18.3, not 17** (measured 14 Oct 2026; this line said 17 until then). So the hermetic suite runs one major version AHEAD of the stack it stands in for, and version-dependent behaviour can differ: an ON DELETE RESTRICT violation is 23001 on 18 and 23503 on 17. Tests pin constraint names, not those codes. **Dev's and
   prod's versions are unknown until `select version();` is run (§10, Q-0).** The statement
   **rewrites the table and recomputes every stored value**. For unshared rows the branch is
   the same text, so the values must come out identical. The golden snapshot test (§12) checks
@@ -817,9 +817,10 @@ All four teardown lists clear `merchant_rep_shares` after `rep_payout_rows`.
 | 0 | Data check | Run §10 on dev and prod (read-only), record the results here. |
 | 1 | Cent function | Schema doc first. `shared_part()` with its privilege lines. Test 1. |
 | 2 | Share table | `merchant_rep_shares`, `btree_gist` (migration plus PGlite constructor), RLS, grants, the set/end/cancel RPCs with audit and lock. Tests 7, part of 8, and 9. All four teardown lists. |
-| 3 | Ledger columns | **Prerequisite: the Postgres version path is decided (§10 Q-0).** New columns, partial unique index plus the period index, `SET EXPRESSION`, column-level UPDATE grant, guard and propagation triggers, `set_shared_residual`. Golden test 2, written **before** this migration lands and kept green. Test 5. |
+| 3 | Ledger columns | **Built 14 Oct 2026, with three decisions taken by Owen that day.** The new columns (`line_kind` and the adjustment columns included, so `rep_payout` is rewritten once), `rep_payout` dropped and re-added (version-independent), the guard and rate-copy triggers, `set_shared_residual`. Golden test 2, the snapshot and catalog tests, test 5. **Deferred out of this phase:** (a) the partial unique index stays in phase 5, because today's commit's `on conflict (period, agent_id, mid)` cannot infer a partial index; (b) the column-level UPDATE grant is its own step right after phase 3, so phase 3's before/after privilege check is exact. |
+| 3b | UPDATE grant | Narrow `update on rep_payout_rows` to `(residual_income, rep_split_pct)`, with a test that `column_privileges` changes in exactly that way. |
 | 4 | Commit and preview | `commit_residual_import_v2` (§5.1) beside the old function, plus the old function's share guard. The skip record and acknowledgement (§5.4). The commit button calls v2. `parse-residual-import` preview flags (§7). Tests 3 (R-1) and 4. |
-| 5 | Correction | `post_share_correction`, adjustment rendering, `payoutTotals`, the export `Line` column and parser skip. Test 6. |
+| 5 | Correction | The partial unique index `(period, agent_id, mid) where line_kind = 'import'` plus a plain `(period, agent_id)` index, and both commit functions' `on conflict` targets gaining the predicate. `post_share_correction`, adjustment rendering, `payoutTotals`, the export `Line` column and parser skip. Test 6. |
 | 6 | Merchant page | Admin share card with the 40+10 input, `my_share_partners()`, the rep notice. e2e. |
 | 7 | Payout surfaces | Period-page markers and the account-total control, `PayoutBulkSplit` filter, statement marker and footnote, partner non-link. e2e geometry. |
 | 8 | Docs | CLAUDE.md and the RESIDUALS_SPEC addendum. Deployment stays a separate, explicit decision following §11. |

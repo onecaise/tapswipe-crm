@@ -573,6 +573,9 @@ describe("grant surface after all migrations", () => {
       "pre_apps_guard_transitions()",
       "log_cross_agent_change()",
       "log_payout_row_change()",
+      // 20261014140000: the shared-pair guard and the partner-rate copy.
+      "guard_shared_line()",
+      "copy_signer_rate_to_partner()",
     ]) {
       expect(
         await canExecute(db, "authenticated", signature),
@@ -621,6 +624,8 @@ describe("grant surface after all migrations", () => {
       "public.end_merchant_rep_share(int, date)",
       "public.cancel_merchant_rep_share(int)",
       "public.shared_part(numeric, numeric, numeric)",
+      // Writes both lines of a shared pair as the owner.
+      "public.set_shared_residual(int, date, numeric)",
     ]) {
       expect(
         await canExecute(db, "anon", signature),

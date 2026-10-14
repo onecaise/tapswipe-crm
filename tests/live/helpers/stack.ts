@@ -619,14 +619,19 @@ async function clearQuotes(
  * secondary_agent_id are the twenty-fourth and twenty-fifth references to
  * profiles(id), both NO ACTION.
  *
- * By MERCHANT first, and that is the part a flat list cannot express:
- * merchant_id is ON DELETE RESTRICT, and a share on this user's merchant can
- * name two OTHER reps -- so deleting by rep alone leaves it standing, and the
- * merchants delete then fails naming merchant_rep_shares for a row this
- * teardown never looked at. Then by either rep, for shares on somebody else's
- * merchant. Must run before the owner tables are deleted.
+ * Every share this user is part of OR that sits on their merchant, which is
+ * the part a flat by-rep list cannot express: merchant_id is ON DELETE
+ * RESTRICT, and a share on this user's merchant can name two OTHER reps -- so
+ * deleting by rep alone leaves it standing, and the merchants delete then
+ * fails naming merchant_rep_shares for a row this teardown never looked at.
+ *
+ * Ledger lines naming those shares go FIRST: rep_payout_rows.rep_share_id is
+ * ON DELETE RESTRICT too (20261014140000), and a shared pair includes the
+ * OTHER rep's line, which clearPayoutRows (by agent) never reaches. Must run
+ * before the owner tables are deleted. Errors are thrown, not swallowed: an
+ * unchecked failure here resurfaces as "user already registered" next run.
  */
-async function clearRepShares(
+export async function clearRepShares(
   admin: SupabaseClient,
   userId: string,
 ): Promise<void> {
@@ -635,11 +640,29 @@ async function clearRepShares(
     .select("id")
     .eq("agent_id", userId);
   const merchantIds = (merchants ?? []).map((merchant) => merchant.id as number);
-  if (merchantIds.length > 0) {
-    await admin.from("merchant_rep_shares").delete().in("merchant_id", merchantIds);
-  }
-  await admin.from("merchant_rep_shares").delete().eq("primary_agent_id", userId);
-  await admin.from("merchant_rep_shares").delete().eq("secondary_agent_id", userId);
+
+  const filters = [`primary_agent_id.eq.${userId}`, `secondary_agent_id.eq.${userId}`];
+  if (merchantIds.length > 0) filters.push(`merchant_id.in.(${merchantIds.join(",")})`);
+  const { data: shares, error: readError } = await admin
+    .from("merchant_rep_shares")
+    .select("id")
+    .or(filters.join(","));
+  if (readError) throw new Error(`Could not read shares for ${userId}: ${readError.message}`);
+
+  const shareIds = (shares ?? []).map((share) => share.id as number);
+  if (shareIds.length === 0) return;
+
+  const { error: linesError } = await admin
+    .from("rep_payout_rows")
+    .delete()
+    .in("rep_share_id", shareIds);
+  if (linesError) throw new Error(`Could not delete shared lines: ${linesError.message}`);
+
+  const { error: sharesError } = await admin
+    .from("merchant_rep_shares")
+    .delete()
+    .in("id", shareIds);
+  if (sharesError) throw new Error(`Could not delete shares: ${sharesError.message}`);
 }
 
 async function clearMarketingMaterials(

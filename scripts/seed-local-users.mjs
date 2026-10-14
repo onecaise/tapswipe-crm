@@ -184,20 +184,48 @@ for (const user of existing.users.filter((user) => wanted.has(user.email))) {
     .delete()
     .eq("uploaded_by", user.id);
 
-  // Shares on this user's merchants, whoever they name. merchant_id is ON
-  // DELETE RESTRICT, so a share on this rep's merchant between two OTHER reps
-  // would otherwise survive the by-rep entries in PROFILE_REFERENCES and then
-  // fail the merchants delete, naming merchant_rep_shares.
+  // merchant_rep_shares: every share this user is part of OR that sits on
+  // their merchant -- a share on this rep's merchant between two OTHER reps is
+  // the case the by-rep entries in PROFILE_REFERENCES cannot reach, and its
+  // merchant_id is ON DELETE RESTRICT. Ledger lines naming those shares go
+  // first: rep_payout_rows.rep_share_id is ON DELETE RESTRICT too
+  // (20261014140000), and a shared pair includes the OTHER rep's line. Checked,
+  // because an unchecked failure here resurfaces as email_exists next run.
   const { data: ownMerchants } = await admin
     .from("merchants")
     .select("id")
     .eq("agent_id", user.id);
   const merchantIds = (ownMerchants ?? []).map((merchant) => merchant.id);
+  const shareFilters = [
+    `primary_agent_id.eq.${user.id}`,
+    `secondary_agent_id.eq.${user.id}`,
+  ];
   if (merchantIds.length > 0) {
-    await admin
+    shareFilters.push(`merchant_id.in.(${merchantIds.join(",")})`);
+  }
+  const { data: shares, error: sharesReadError } = await admin
+    .from("merchant_rep_shares")
+    .select("id")
+    .or(shareFilters.join(","));
+  if (sharesReadError) {
+    throw new Error(`Could not read shares: ${sharesReadError.message}`);
+  }
+  const shareIds = (shares ?? []).map((share) => share.id);
+  if (shareIds.length > 0) {
+    const { error: linesError } = await admin
+      .from("rep_payout_rows")
+      .delete()
+      .in("rep_share_id", shareIds);
+    if (linesError) {
+      throw new Error(`Could not delete shared lines: ${linesError.message}`);
+    }
+    const { error: sharesError } = await admin
       .from("merchant_rep_shares")
       .delete()
-      .in("merchant_id", merchantIds);
+      .in("id", shareIds);
+    if (sharesError) {
+      throw new Error(`Could not delete shares: ${sharesError.message}`);
+    }
   }
 
   for (const [table, column] of PROFILE_REFERENCES) {
