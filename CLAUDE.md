@@ -71,10 +71,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (1672 tests, 77 files — every file must load)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (1681 tests, 77 files — every file must load)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (207 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (250 tests, 5 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (256 tests, 5 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -292,7 +292,14 @@ Admins see the remaining gap as a warning notice on `/dashboard` (only when non-
 
 `norm_city()` lower-cases, turns punctuation into a **space** (so "St.Louis" meets "St. Louis" and "Winston-Salem" meets "Winston Salem"), collapses whitespace and trims; it expands **no** abbreviations. It is indexed and called by the format CHECK, so the `dup_*` rule applies twice over: never `create or replace` it with different behaviour without reindexing and re-checking the constraint.
 
-**Three hand-run SQL files, none of them a migration:** `scripts/recon-merchant-location.sql` (read-only; runs on a project with OR without the migration — it reads the columns through `to_jsonb()` and inlines `norm_city` — and answers: merchants with no location, submitted pre-apps approval would refuse, how many the backfill could fill), `scripts/preview-merchant-location-backfill.sql` (read-only; why each location-less merchant can or cannot be filled), and `scripts/backfill-merchant-location.sql` (fills from the linked pre-app only where the merchant has no location at all and the pre-app passes approval's address rule; never overwrites a merchant's own field; one transaction; **rolls back unless psql gets `-v apply=1`**). The two read-only files wrap themselves in `begin transaction read only`. `tests/rls/merchant-location-backfill.test.ts` executes all three in PGlite; none has been run against a hosted project.
+**Four hand-run SQL files, none of them a migration:**
+
+- `scripts/recon-merchant-location.sql` — read-only, for the **production SQL Editor**. Exactly three queries, one labelled row each (`a` merchants with no location, `b` submitted pre-apps approval would refuse, `c` how many the backfill could fill; `a` and `b` carry their records as JSON), so each still answers when nothing matches and each can be run on its own if the editor shows only the last result. **It runs on a project with OR without `20261013130000`**: it reads the location columns through `to_jsonb(m) ->> 'city'` and inlines `norm_city`, and the test asserts the database it runs against really lacks both.
+- `scripts/preview-merchant-location-backfill.sql` — read-only; why each location-less merchant can or cannot be filled.
+- `scripts/backfill-merchant-location.sql` — **psql** version; rolls back unless given `-v apply=1`.
+- `scripts/backfill-merchant-location-editor.sql` — **SQL Editor** version (no psql, no `-v`): a single statement, so one transaction in any editor, whose first CTE is the only switch, `select false as apply`. Preview returns a summary row plus up to 20 merchant rows and writes nothing; `true` does the same work and reports `rows_changed`. A single statement rather than a DO block because a DO block can only report through `RAISE NOTICE`, which the browser editor does not reliably show.
+
+Both backfills fill from the linked pre-app only where the merchant has no location at all and the pre-app passes approval's address rule, and never overwrite a merchant's own field. The read-only files wrap themselves in `begin transaction read only`. `tests/rls/merchant-location-backfill.test.ts` executes all four in PGlite — the editor variant in both modes, with a full-table snapshot proving preview writes nothing; none has been run against a hosted project.
 
 **Hosted state: DEV HAS THE OLD (FIRST) VERSION OF `20261013130000` APPLIED** — the table-wide NOT VALID CHECK — from an accidental `npm run db:push` on 13 Oct 2026, **until it is reverted**. The committed file is now the second design and differs from what dev ran (dev's was sha256 `cb6626d8…`). Because dev's migration ledger already holds the `20261013130000` row, **`db push` will not re-apply the new file on its own**: the plan is to revert dev's objects, remove that ledger row deliberately, and push again. `20261013131000` (`accounts_in_city`) and `20261013132000` (`submit_pre_app` location rule) are local only; prod has none of the three. Check `npm run migration:list` before assuming otherwise.
 
