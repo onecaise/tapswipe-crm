@@ -614,6 +614,34 @@ async function clearQuotes(
   await admin.from("quotes").delete().eq("agent_id", userId);
 }
 
+/**
+ * merchant_rep_shares (20261014130000): primary_agent_id and
+ * secondary_agent_id are the twenty-fourth and twenty-fifth references to
+ * profiles(id), both NO ACTION.
+ *
+ * By MERCHANT first, and that is the part a flat list cannot express:
+ * merchant_id is ON DELETE RESTRICT, and a share on this user's merchant can
+ * name two OTHER reps -- so deleting by rep alone leaves it standing, and the
+ * merchants delete then fails naming merchant_rep_shares for a row this
+ * teardown never looked at. Then by either rep, for shares on somebody else's
+ * merchant. Must run before the owner tables are deleted.
+ */
+async function clearRepShares(
+  admin: SupabaseClient,
+  userId: string,
+): Promise<void> {
+  const { data: merchants } = await admin
+    .from("merchants")
+    .select("id")
+    .eq("agent_id", userId);
+  const merchantIds = (merchants ?? []).map((merchant) => merchant.id as number);
+  if (merchantIds.length > 0) {
+    await admin.from("merchant_rep_shares").delete().in("merchant_id", merchantIds);
+  }
+  await admin.from("merchant_rep_shares").delete().eq("primary_agent_id", userId);
+  await admin.from("merchant_rep_shares").delete().eq("secondary_agent_id", userId);
+}
+
 async function clearMarketingMaterials(
   admin: SupabaseClient,
   userId: string,
@@ -752,6 +780,9 @@ export async function teardownFixtures(): Promise<void> {
       ownerRowIds.set(table, (found ?? []).map((row) => String(row.id)));
     }
 
+    // Before the owner deletes below: a share's merchant_id is ON DELETE
+    // RESTRICT, so a leftover share fails the merchants delete.
+    await clearRepShares(admin, user.id);
     await admin.from("documents").delete().eq("agent_id", user.id);
     for (const table of ownerRowIds.keys()) {
       const { error: ownerDeleteError } = await admin
@@ -840,6 +871,7 @@ export async function deleteUserCompletely(userId: string): Promise<void> {
   const admin = adminClient();
   await admin.from("audit_log").delete().eq("actor_id", userId);
   await admin.from("audit_log").delete().eq("row_id", userId);
+  await clearRepShares(admin, userId);
   await clearPayoutRows(admin, userId);
   await clearUserImports(admin, userId);
   await clearQuotes(admin, userId);

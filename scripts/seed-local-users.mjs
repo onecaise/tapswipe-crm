@@ -126,6 +126,12 @@ const PROFILE_REFERENCES = [
   // blocked until this delete ran. tests/rls/quotes.test.ts pins the
   // cross-owner insert that makes it possible.
   ["quotes", "agent_id"],
+  // merchant_rep_shares, the twenty-fourth and twenty-fifth references
+  // (20261014130000), both NO ACTION. Before "merchants" below, because
+  // merchant_id is ON DELETE RESTRICT; and shares on this user's OWN merchants
+  // that name two other reps are cleared by merchant before this loop runs.
+  ["merchant_rep_shares", "primary_agent_id"],
+  ["merchant_rep_shares", "secondary_agent_id"],
   ["ghost_sheets", "agent_id"],
   ["pre_apps", "agent_id"],
   ["merchants", "agent_id"],
@@ -177,6 +183,22 @@ for (const user of existing.users.filter((user) => wanted.has(user.email))) {
     .from("marketing_materials")
     .delete()
     .eq("uploaded_by", user.id);
+
+  // Shares on this user's merchants, whoever they name. merchant_id is ON
+  // DELETE RESTRICT, so a share on this rep's merchant between two OTHER reps
+  // would otherwise survive the by-rep entries in PROFILE_REFERENCES and then
+  // fail the merchants delete, naming merchant_rep_shares.
+  const { data: ownMerchants } = await admin
+    .from("merchants")
+    .select("id")
+    .eq("agent_id", user.id);
+  const merchantIds = (ownMerchants ?? []).map((merchant) => merchant.id);
+  if (merchantIds.length > 0) {
+    await admin
+      .from("merchant_rep_shares")
+      .delete()
+      .in("merchant_id", merchantIds);
+  }
 
   for (const [table, column] of PROFILE_REFERENCES) {
     await admin.from(table).delete().eq(column, user.id);

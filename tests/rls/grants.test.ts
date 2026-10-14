@@ -302,6 +302,15 @@ describe("grant surface after all migrations", () => {
       await tablePrivileges(db, "authenticated", "quote_line_items"),
     ).toEqual(["INSERT", "SELECT"]);
 
+    // merchant_rep_shares: SELECT alone, backed by an admin-only policy. Every
+    // write goes through set_/end_/cancel_merchant_rep_share, which are
+    // security definer and bypass grants -- so, like profiles, the table has
+    // no client write path at all, and a direct write fails as "permission
+    // denied" for an admin as much as a rep.
+    expect(
+      await tablePrivileges(db, "authenticated", "merchant_rep_shares"),
+    ).toEqual(["SELECT"]);
+
     // Zero-policy RLS already denies these; the absent grant is the second
     // lock, so that a policy added by mistake still opens nothing.
     for (const secrets of [
@@ -352,6 +361,7 @@ describe("grant surface after all migrations", () => {
       "brands",
       "quotes",
       "quote_line_items",
+      "merchant_rep_shares",
     ]) {
       expect(
         await nonDmlPrivileges(db, "authenticated", table),
@@ -426,11 +436,14 @@ describe("grant surface after all migrations", () => {
       "authenticated should hold nothing on documents_id_seq",
     ).toEqual([]);
 
+    // merchant_rep_shares_id_seq joins them for the same reason: the table
+    // grants authenticated no INSERT, and its RPCs run as the owner.
     for (const sequence of [
       "rep_payout_batches_id_seq",
       "rep_payout_import_rows_id_seq",
       "rep_payout_rows_id_seq",
       "rep_payout_row_history_id_seq",
+      "merchant_rep_shares_id_seq",
     ]) {
       expect(
         await sequencePrivileges(db, "authenticated", sequence),
@@ -590,11 +603,29 @@ describe("grant surface after all migrations", () => {
       "rep_payout_import_rows",
       "rep_payout_rows",
       "rep_payout_row_history",
+      // Which reps share which account, and in what ratio -- payroll terms.
+      "merchant_rep_shares",
     ]) {
       expect(
         await tablePrivileges(db, "anon", table),
         `anon must hold nothing on ${table}`,
       ).toEqual([]);
+    }
+
+    // The three share RPCs write merchant_rep_shares and audit_log as the
+    // owner, so an anon EXECUTE would be an unauthenticated path into how an
+    // account's residual is divided. Each guards itself with is_admin(), but
+    // that is a second lock, not a reason to leave the first one open.
+    for (const signature of [
+      "public.set_merchant_rep_share(int, uuid, uuid, numeric, numeric, date)",
+      "public.end_merchant_rep_share(int, date)",
+      "public.cancel_merchant_rep_share(int)",
+      "public.shared_part(numeric, numeric, numeric)",
+    ]) {
+      expect(
+        await canExecute(db, "anon", signature),
+        `anon must not execute ${signature}`,
+      ).toBe(false);
     }
 
     // set_agent_number writes profiles and audit_log as the owner, so an anon

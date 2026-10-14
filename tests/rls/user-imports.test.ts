@@ -406,7 +406,7 @@ describe("the two columns with deliberately no foreign key", () => {
   });
 });
 
-describe("imported_by is one of twenty-three references to profiles", () => {
+describe("imported_by is one of twenty-five references to profiles", () => {
   it("blocks deleting the admin while their batch exists", async () => {
     // The trap scripts/seed-local-users.mjs's teardown list exists to avoid: an
     // unchecked delete fails on the FK, the user survives, and the next
@@ -418,7 +418,16 @@ describe("imported_by is one of twenty-three references to profiles", () => {
     ).rejects.toThrow(/foreign key|violates/i);
   });
 
-  it("counts twenty-three columns referencing profiles(id)", async () => {
+  it("counts twenty-five columns referencing profiles(id)", async () => {
+    // 20261014130000 added the twenty-fourth and twenty-fifth:
+    // merchant_rep_shares.primary_agent_id and .secondary_agent_id, both NO
+    // ACTION. A share is a payroll record, so it must block deleting either
+    // rep until a person decides what happens to it. There is deliberately no
+    // created_by column on that table (audit_log names the actor), which is
+    // what kept this at two rather than three. All four teardown lists clear
+    // shares -- by merchant first, because merchant_id is ON DELETE RESTRICT
+    // and a share on this rep's merchant can name two OTHER reps.
+    //
     // 20261013120000 added the twenty-third, business_documents.uploaded_by --
     // NO ACTION like marketing_materials.uploaded_by, which it copies. All four
     // teardown lists clear it.
@@ -446,7 +455,7 @@ describe("imported_by is one of twenty-three references to profiles", () => {
          join pg_class t on t.oid = c.confrelid
         where c.contype = 'f' and t.relname = 'profiles'`,
     );
-    expect(n).toBe(23);
+    expect(n).toBe(25);
   });
 
   it("has exactly one non-NO-ACTION reference, and it is manager_id", async () => {

@@ -2493,6 +2493,22 @@ export async function clearImportedUsers(
     // alternative is this being the list that forgot the next time a spec
     // builds a quote as a provisioned account.
     await db.from("quotes").delete().eq("agent_id", user.id);
+    // merchant_rep_shares.primary_agent_id and .secondary_agent_id, the
+    // twenty-fourth and twenty-fifth references to profiles(id), both NO
+    // ACTION (20261014130000). By merchant first: merchant_id is ON DELETE
+    // RESTRICT and a share on this user's merchant can name two OTHER reps.
+    // Here for the same reason as the quotes line above -- an imported rep has
+    // no share today, and this list should not be the one that forgot.
+    const { data: ownMerchants } = await db
+      .from("merchants")
+      .select("id")
+      .eq("agent_id", user.id);
+    const merchantIds = (ownMerchants ?? []).map((merchant) => merchant.id as number);
+    if (merchantIds.length > 0) {
+      await db.from("merchant_rep_shares").delete().in("merchant_id", merchantIds);
+    }
+    await db.from("merchant_rep_shares").delete().eq("primary_agent_id", user.id);
+    await db.from("merchant_rep_shares").delete().eq("secondary_agent_id", user.id);
     // marketing_materials.uploaded_by and marketing_material_events.agent_id,
     // the twentieth and twenty-first references to profiles(id) and both NO
     // ACTION. An imported rep has no reason to own either today, which is

@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { PGlite } from "@electric-sql/pglite";
+import { btree_gist } from "@electric-sql/pglite/contrib/btree_gist";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 
 const MIGRATIONS_DIR = path.join(process.cwd(), "supabase", "migrations");
@@ -169,7 +170,11 @@ export async function createTestDb(migrationFiles?: string[]): Promise<TestDb> {
   // this line 20261002161500 fails with "could not open extension control file"
   // — and because every suite applies every migration, that is not one red test
   // but all of them, pointing at a file none of them are about.
-  const db = new PGlite({ extensions: { pg_trgm } });
+  //
+  // btree_gist, for exactly the same reason: 20261014130000's exclusion
+  // constraint on merchant_rep_shares (no two shares on one merchant may
+  // overlap) needs it for the `merchant_id with =` half.
+  const db = new PGlite({ extensions: { btree_gist, pg_trgm } });
 
   await db.exec(AUTH_SHIM);
 
