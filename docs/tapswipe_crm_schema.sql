@@ -2402,6 +2402,105 @@ $$;
 revoke all on function commit_residual_import(int) from public;
 grant execute on function commit_residual_import(int) to authenticated, service_role;
 
+-- ---------------------------------------------------------------------
+-- shared_part(total, part, whole) — the cent rule for a shared account
+-- (20261014120000). Design: docs/design/residual-splits.md §4.
+--
+-- Two reps sharing an account divide the rep side's payout. The account's
+-- payout is worked out ONCE, exactly as for a rep working it alone --
+-- T = round(R * p / 100, 2), the same expression rep_payout_rows.rep_payout
+-- uses -- and this function returns the PARTNER's piece of T:
+--
+--   partner = shared_part(T, partner_rep_pct, signer_rep_pct + partner_rep_pct)
+--   signer  = T - partner
+--
+-- so signer + partner = T exactly, by construction: the signer's piece is
+-- defined as the remainder, and both are whole cents.
+--
+-- THE RULE: the partner gets the whole cent NEAREST to T * part / whole, and an
+-- exact half-cent tie goes TOWARD ZERO -- so on a tie the signer's line absorbs
+-- the cent, for a credit and a clawback alike. Each piece is then within half a
+-- cent of the exact proportion. The function is odd, shared_part(-x) =
+-- -shared_part(x), so a negative month divides as the mirror of a positive
+-- one. Zero gives zero; NULL in any argument gives NULL (STRICT), so "not
+-- worked out yet" stays not worked out.
+--
+-- WHY THE PAYOUT IS DIVIDED RATHER THAN EACH LINE RECOMPUTED. Dividing the
+-- residual first and letting each line round its own payout breaks the rule:
+-- R = $0.02 at 50% split 25+25 gives two $0.01 residual pieces, each
+-- round($0.005) = $0.01, so $0.02 paid against a solo $0.01. The same function
+-- also divides the residual itself for display (partner_res = shared_part(R,
+-- ...), signer_res = R - partner_res), where the sum is likewise exact.
+--
+-- WHY INTEGER ARITHMETIC. Everything is scaled to whole cents and whole
+-- hundredths of a percent, and the rounding is
+--   floor((2n + d - 1) / (2d))  with  n = |cents| * part_bp,  d = whole_bp
+-- computed with div(), which truncates an exact numeric quotient. That equals
+-- ceil(n/d - 1/2): the nearest integer, ties down. Ordinary numeric division
+-- would be correct to its working precision too, but "correct to the 16th
+-- digit" is an argument; div() on integers needs none. Inputs carrying a
+-- fraction of a cent or of a hundredth of a percent are refused (22023) rather
+-- than rounded, because rounding them here would be a second rounding rule
+-- hidden inside the first.
+--
+-- ONE COPY, IN SQL. There is no TypeScript twin: the browser only ever
+-- displays what Postgres stored, so there is nothing for a second copy to
+-- agree with -- the opposite arrangement to the pre-app secrets validators.
+--
+-- NEVER `create or replace` THIS WITH DIFFERENT BEHAVIOUR. From phase 3 a
+-- stored generated column calls it, and Postgres keeps every stored value the
+-- old definition computed -- the same trap as the dup_* normalisers and their
+-- indexes. A change of rule is a new function plus a deliberate, checked
+-- recompute.
+--
+-- immutable (a generated column requires it) and security INVOKER: it reads
+-- no table and needs no privilege, so there is nothing for definer to buy.
+-- Privilege lines per the house rule -- Postgres grants EXECUTE to PUBLIC,
+-- which includes anon, on every new function.
+--
+-- tests/rls/shared-part.test.ts checks every cent from -$200.00 to $200.00
+-- across eight ratios.
+-- ---------------------------------------------------------------------
+create or replace function shared_part(total numeric, part numeric, whole numeric)
+returns numeric
+language plpgsql
+immutable
+strict
+set search_path = public
+as $$
+declare
+  n numeric;  -- |total| in cents, times part in hundredths of a percent
+  d numeric;  -- whole in hundredths of a percent
+begin
+  if whole <= 0 then
+    raise exception 'shared_part: whole must be greater than zero'
+      using errcode = '22023';
+  end if;
+
+  if part < 0 or part > whole then
+    raise exception 'shared_part: part must be between 0 and whole'
+      using errcode = '22023';
+  end if;
+
+  if total <> round(total, 2) or part <> round(part, 2)
+     or whole <> round(whole, 2) then
+    raise exception 'shared_part: amounts must be whole cents and percentages whole hundredths'
+      using errcode = '22023';
+  end if;
+
+  n := abs(total) * 100 * (part * 100);
+  d := whole * 100;
+
+  -- Nearest whole cent to n/d, an exact half going toward zero. round(..., 2)
+  -- only fixes the scale of an already-exact value; it rounds nothing.
+  return round(sign(total) * div(2 * n + d - 1, 2 * d) * 0.01, 2);
+end;
+$$;
+
+revoke all on function shared_part(numeric, numeric, numeric) from public;
+grant execute on function shared_part(numeric, numeric, numeric)
+  to authenticated, service_role;
+
 -- =====================================================================
 -- USER IMPORTS — bulk rep onboarding from a CSV.
 --
