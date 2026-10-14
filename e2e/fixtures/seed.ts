@@ -2587,3 +2587,69 @@ export async function merchantByMid(mid: string): Promise<{
   if (error || !data) throw new Error(`merchant ${mid}: ${error?.message}`);
   return data;
 }
+
+/** The DBA every wizard-spec draft carries, so the next run can find and clear them. */
+export const WIZARD_DRAFT_PREFIX = "E2E Wizard Draft";
+
+/**
+ * A brand-new DRAFT pre-app in the `agent` persona's book, for the wizard specs.
+ *
+ * One per test rather than a shared fixture: these specs type into the draft
+ * and autosave writes it, so a shared row would carry one test's city into the
+ * next. Earlier drafts from this spec are deleted first (pre_apps cascades to
+ * its children; merchants.pre_app_id would set null, and none points here).
+ * The business step's two NOT NULL fields are filled so the only thing between
+ * the rep and Next is the address under test.
+ */
+export async function freshWizardDraft(location: {
+  city: string | null;
+  state: string | null;
+}): Promise<number> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data: agent, error: agentError } = await db
+    .from("profiles")
+    .select("id")
+    .eq("email", PERSONAS.agent.email)
+    .single();
+  if (agentError || !agent) throw new Error(`agent profile: ${agentError?.message}`);
+  const agentId = agent.id as string;
+  const { error: clearError } = await db
+    .from("pre_apps")
+    .delete()
+    .like("dba_name", `${WIZARD_DRAFT_PREFIX}%`);
+  if (clearError) throw new Error(`clear wizard drafts: ${clearError.message}`);
+
+  const { data, error } = await db
+    .from("pre_apps")
+    .insert({
+      agent_id: agentId,
+      dba_name: `${WIZARD_DRAFT_PREFIX} ${Date.now()}`,
+      legal_business_name: `${WIZARD_DRAFT_PREFIX} LLC`,
+      city: location.city,
+      state: location.state,
+    })
+    .select("id")
+    .single();
+  if (error || !data) throw new Error(`wizard draft: ${error?.message}`);
+  return data.id as number;
+}
+
+/** A pre-app's saved city and state, read as the service role. */
+export async function preAppLocation(
+  id: number,
+): Promise<{ city: string | null; state: string | null }> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await db
+    .from("pre_apps")
+    .select("city, state")
+    .eq("id", id)
+    .single();
+  if (error || !data) throw new Error(`pre-app ${id}: ${error?.message}`);
+  return data;
+}
