@@ -8,6 +8,7 @@ import {
   asUser,
   createTestDb,
   migrationsBefore,
+  migrationsThrough,
   readMigration,
   rows,
   seed,
@@ -46,8 +47,14 @@ async function dbBefore(): Promise<TestDb> {
   return db;
 }
 
+/**
+ * The schema exactly as this migration left it -- not every migration, because
+ * later ones change this table on purpose (20261014150000 adds a constraint,
+ * 20261014160000 narrows the UPDATE grant) and this file's claims are about
+ * 20261014140000 alone.
+ */
 async function dbAfter(): Promise<TestDb> {
-  const db = await createTestDb();
+  const db = await createTestDb(await migrationsThrough(MIGRATION));
   opened.push(db);
   return db;
 }

@@ -128,6 +128,16 @@ export async function migrationsFrom(file: string): Promise<string[]> {
   return files.slice(index);
 }
 
+/**
+ * Every migration up to AND INCLUDING the named one. For a test whose claim is
+ * about the schema as one migration left it: "nothing that existed before
+ * 20261014140000 differs after it" must not start failing because a later
+ * migration deliberately changed a privilege.
+ */
+export async function migrationsThrough(file: string): Promise<string[]> {
+  return [...(await migrationsBefore(file)), file];
+}
+
 /** Raw SQL of one migration, for tests that apply it mid-scenario. */
 export async function readMigration(file: string): Promise<string> {
   return readFile(path.join(MIGRATIONS_DIR, file), "utf8");

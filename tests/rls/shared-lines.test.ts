@@ -7,6 +7,7 @@ import {
   asPlatform,
   asUser,
   createTestDb,
+  readMigration,
   resetData,
   rows,
   seedPayouts,
@@ -402,18 +403,16 @@ describe("constraints every writer meets, the commit included", () => {
     ).toContain("rep_payout_rows_share_snapshot");
   });
 
-  it("pays an adjustment line its amount, and keeps adjustment columns off import lines", async () => {
-    expect(
-      await ownerInsert(`
-        insert into rep_payout_rows (agent_id, period, mid, line_kind,
-          adjustment_amount, adjusts_period, adjustment_note)
-        values ('${THIRD_AGENT_ID}', '2026-10-01', 'ADJ', 'adjustment', 12.34, '2026-07-01', 'test')`),
-    ).toBeNull();
-    const [row] = await rows<{ rep_payout: string }>(
-      db,
-      `select rep_payout::text from rep_payout_rows where mid = 'ADJ'`,
-    );
-    expect(row.rep_payout).toBe("12.34");
+  it("refuses any adjustment line until phase 5, even a well-formed one, and keeps adjustment columns off import lines", async () => {
+    // Every adjustment column valid; only rep_payout_rows_import_lines_only
+    // objects. Run as the owner, which holds every privilege and is what the
+    // definer commit runs as -- so no writer gets past it.
+    const error = await ownerInsert(`
+      insert into rep_payout_rows (agent_id, period, mid, line_kind,
+        adjustment_amount, adjusts_period, adjustment_note)
+      values ('${THIRD_AGENT_ID}', '2026-10-01', 'ADJ', 'adjustment', 12.34, '2026-07-01', 'test')`);
+    expect(error?.code).toBe("23514");
+    expect(error?.message).toContain("rep_payout_rows_import_lines_only");
 
     expect(
       (await ownerInsert(`
@@ -431,6 +430,120 @@ describe("constraints every writer meets, the commit included", () => {
     // Measured on both, 14 Oct 2026.
     expect(["23001", "23503"]).toContain(error?.code);
     expect(error?.message).toContain("rep_payout_rows_rep_share_id_fkey");
+  });
+});
+
+describe("the adjustment branch, against a scratch table built from the migration's text", () => {
+  /**
+   * rep_payout_rows_import_lines_only refuses every adjustment line until
+   * phase 5, so the real table cannot hold one and the branch would otherwise
+   * ship untested. This builds a temp table whose rep_payout is the expression
+   * text COPIED OUT OF 20261014140000 -- not retyped -- over columns typed
+   * exactly as the real ones, with none of the real table's CHECKs, and runs
+   * the branch there. The deparsed expression is then compared with the live
+   * column's, so the copy cannot drift from what the database actually runs.
+   */
+  const INPUT_COLUMNS = [
+    "line_kind",
+    "adjustment_amount",
+    "share_role",
+    "residual_income",
+    "rep_split_pct",
+    "account_residual_income",
+    "primary_rep_pct",
+    "secondary_rep_pct",
+    "rep_payout",
+  ];
+
+  async function expressionFromMigration(): Promise<string> {
+    const sql = await readMigration("20261014140000_shared_lines.sql");
+    const match = sql.match(
+      /add column rep_payout numeric\(14,2\) generated always as \(\n([\s\S]*?)\n {2}\) stored;/,
+    );
+    if (!match) throw new Error("rep_payout expression not found in 20261014140000");
+    return match[1];
+  }
+
+  async function createScratch(): Promise<void> {
+    await asPlatform(db);
+    const types = await rows<{ name: string; type: string }>(
+      db,
+      `select attname as name, format_type(atttypid, atttypmod) as type
+         from pg_attribute
+        where attrelid = 'rep_payout_rows'::regclass
+          and attname = any(array[${INPUT_COLUMNS.map((c) => `'${c}'`).join(", ")}])`,
+    );
+    expect(types).toHaveLength(INPUT_COLUMNS.length);
+    const typeOf = (name: string) => types.find((t) => t.name === name)!.type;
+    const inputs = INPUT_COLUMNS.filter((c) => c !== "rep_payout")
+      .map((c) => `${c} ${typeOf(c)}`)
+      .join(",\n  ");
+    await db.exec(`
+      drop table if exists adjustment_scratch;
+      create temp table adjustment_scratch (
+        label text primary key,
+        ${inputs},
+        rep_payout ${typeOf("rep_payout")} generated always as (
+${await expressionFromMigration()}
+        ) stored
+      );
+    `);
+  }
+
+  it("is the live column's expression, character for character once deparsed", async () => {
+    await createScratch();
+    const [result] = await rows<{ live: string; scratch: string }>(
+      db,
+      `select (select pg_get_expr(d.adbin, d.adrelid) from pg_attrdef d
+                 join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+                where d.adrelid = 'rep_payout_rows'::regclass and a.attname = 'rep_payout') as live,
+              (select pg_get_expr(d.adbin, d.adrelid) from pg_attrdef d
+                 join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+                where d.adrelid = 'adjustment_scratch'::regclass and a.attname = 'rep_payout') as scratch`,
+    );
+    expect(result.live).toContain("adjustment_amount");
+    expect(result.scratch).toBe(result.live);
+  });
+
+  it("pays exactly the stored amount: negative, blank, half-cent, zero", async () => {
+    await createScratch();
+    // Every adjustment row also carries a residual and a rate that the
+    // unshared branch would turn into 50.00, and one carries a share role, so
+    // a branch that fell through to either would show here.
+    await db.exec(`
+      insert into adjustment_scratch
+        (label, line_kind, adjustment_amount, share_role, residual_income, rep_split_pct,
+         account_residual_income, primary_rep_pct, secondary_rep_pct)
+      values
+        ('negative',          'adjustment', -12.34,  null, 100.00, 50.00, null, null, null),
+        ('blank',             'adjustment', null,    null, 100.00, 50.00, null, null, null),
+        ('half-cent up',      'adjustment', 12.345,  null, 100.00, 50.00, null, null, null),
+        ('half-cent down',    'adjustment', -12.345, null, 100.00, 50.00, null, null, null),
+        ('half-cent small',   'adjustment', 0.005,   null, 100.00, 50.00, null, null, null),
+        ('zero',              'adjustment', 0,       null, 100.00, 50.00, null, null, null),
+        ('shared-looking',    'adjustment', 7.00,    'secondary', 100.00, 50.00, 100.00, 40, 10),
+        -- Control: the same inputs as an import line take the unshared branch.
+        ('import control',    'import',     null,    null, 100.00, 50.00, null, null, null);
+    `);
+
+    const result = await rows<{ label: string; amount: string | null; rep_payout: string | null }>(
+      db,
+      `select label, adjustment_amount::text as amount, rep_payout::text
+         from adjustment_scratch order by label`,
+    );
+    expect(result).toEqual([
+      { label: "blank", amount: null, rep_payout: null },
+      // numeric(14,2) rounds half away from zero on the way IN; the branch
+      // then pays the stored cents and adds no rounding of its own.
+      { label: "half-cent down", amount: "-12.35", rep_payout: "-12.35" },
+      { label: "half-cent small", amount: "0.01", rep_payout: "0.01" },
+      { label: "half-cent up", amount: "12.35", rep_payout: "12.35" },
+      { label: "import control", amount: null, rep_payout: "50.00" },
+      { label: "negative", amount: "-12.34", rep_payout: "-12.34" },
+      { label: "shared-looking", amount: "7.00", rep_payout: "7.00" },
+      // Zero pays zero -- not NULL, which would read as "not worked out yet".
+      { label: "zero", amount: "0.00", rep_payout: "0.00" },
+    ]);
   });
 });
 
