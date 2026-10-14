@@ -579,6 +579,15 @@ parser ignores `Account share`. The live test's exact header list is updated.
 
 ## 10. Data check: any `rep_split_pct` other than 50?
 
+> **Note, 14 Oct 2026: confirmed by the owner.** On **prod**, `rep_payout_rows` is **empty**:
+> no residual or rep payout data has ever been loaded there. The Phase 3 payout-column
+> rewrite on prod therefore touches **zero rows**. The §11 before/after check still runs
+> there, and should report 0 lines before and after. **Dev has test data**, so the rewrite
+> does real work there. **Phase 3 should prefer a single method that works on every Postgres
+> version**: drop and re-add the generated column (§3.3's fallback), not `SET EXPRESSION`.
+> One migration text then applies everywhere, so it cannot depend on the version result.
+> **Dev's Q-0 version result is still pending.**
+
 These are **read-only and have not been run.** Run them in the dev and prod SQL Editors, one
 query at a time. Each is wrapped so it cannot write anything.
 
