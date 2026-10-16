@@ -248,23 +248,29 @@ describe("it stays quiet about everything else", () => {
 
   it("has no trigger attached to the other three payout tables", async () => {
     await asPlatform(db);
-    const result = await rows<{ tgrelid: string }>(
+    const result = await rows<{ tgrelid: string; tgname: string }>(
       db,
-      `select c.relname as tgrelid
+      `select c.relname as tgrelid, t.tgname
          from pg_trigger t
          join pg_class c on c.oid = t.tgrelid
         where not t.tgisinternal
           and c.relname like 'rep_payout%'
-        order by c.relname`,
+        order by c.relname, t.tgname`,
     );
 
-    // Only the ledger has triggers (the history one and set_updated_at). Batches,
-    // staging and history itself have none — they carry no agent_id, so the
-    // cross-agent function would read NULL and log every write, the same trap
-    // support_ticket_replies needed its own function to avoid.
-    expect(new Set(result.map((r) => r.tgrelid))).toEqual(
-      new Set(["rep_payout_rows"]),
-    );
+    // Only the ledger has AUDIT triggers (the history one and set_updated_at,
+    // plus the shared-line guards). Batches, staging and history itself have
+    // none — they carry no agent_id, so the cross-agent function would read
+    // NULL and log every write, the same trap support_ticket_replies needed its
+    // own function to avoid. The one trigger elsewhere is not an audit trigger:
+    // the batch status guard (20261016170000), named here so a second one
+    // cannot slip in under it.
+    expect(
+      result.filter((r) => r.tgrelid !== "rep_payout_rows"),
+    ).toEqual([
+      { tgrelid: "rep_payout_batches", tgname: "rep_payout_batches_status_transition" },
+    ]);
+    expect(result.some((r) => r.tgrelid === "rep_payout_rows")).toBe(true);
   });
 });
 

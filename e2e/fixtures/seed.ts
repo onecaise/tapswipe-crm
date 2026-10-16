@@ -3096,6 +3096,8 @@ export async function plantAdjustments(period: string): Promise<{
       mid,
       merchant_name: "E2E Adjusted Co",
       volume: 1000,
+      average_ticket: 10,
+      total_cost: 25,
       residual_income: 50,
       rep_split_pct: 50,
     },

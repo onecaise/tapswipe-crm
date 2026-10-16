@@ -672,7 +672,16 @@ describe("PostgREST's wire types for the ledger", () => {
     const { data, error } = await adminClient()
       .from("rep_payout_rows")
       .select("volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout")
+      // Every column non-null, not just the residual: this reads whatever the
+      // shared local database holds, and a row with a blank ticket or cost
+      // (an e2e fixture, an adjustment line) is not evidence about the wire
+      // format -- typeof null is "object".
+      .not("volume", "is", null)
+      .not("average_ticket", "is", null)
+      .not("total_cost", "is", null)
       .not("residual_income", "is", null)
+      .not("rep_split_pct", "is", null)
+      .not("rep_payout", "is", null)
       .limit(1);
 
     expect(error).toBeNull();
@@ -1436,5 +1445,49 @@ describe("phase 5: a correction round-trips as Line = Adjustment, and the new fl
       expect(error, error?.message).toBeNull();
       expect(data).toEqual({ written: 5, skipped: 0 });
     });
+  });
+});
+
+/**
+ * guard_batch_status_transition() (20261016170000) through PostgREST: the role
+ * a client request actually runs as. The parses above have already updated
+ * batches as the service role, which the guard leaves alone.
+ */
+describe("a signed-in admin may only abandon a batch in review", () => {
+  it("abandons a review batch, and is refused every other status change over PATCH", async () => {
+    const asAdmin = userClient(fixtures.tokens.admin);
+    const { batchId } = await importFile(
+      [HEADER, ["Jul-26", OWNER_NUMBER, "LIVE-MID-STATUS", "Status Co", 10, 1, 1]],
+      "live-status.xlsx",
+    );
+
+    const committedJump = await asAdmin
+      .from("rep_payout_batches")
+      .update({ status: "committed" })
+      .eq("id", batchId);
+    expect(committedJump.error?.code).toBe("PT409");
+
+    const abandon = await asAdmin
+      .from("rep_payout_batches")
+      .update({ status: "abandoned" }, { count: "exact" })
+      .eq("id", batchId);
+    expect(abandon.error, abandon.error?.message).toBeNull();
+    expect(abandon.count).toBe(1);
+
+    const back = await asAdmin
+      .from("rep_payout_batches")
+      .update({ status: "review" })
+      .eq("id", batchId);
+    expect(back.error?.code).toBe("PT409");
+    expect(back.error?.message).toBe(
+      "Only an import still in review can be changed here, and only to abandoned. This one is abandoned.",
+    );
+
+    const { data } = await adminClient()
+      .from("rep_payout_batches")
+      .select("status")
+      .eq("id", batchId)
+      .single();
+    expect(data?.status).toBe("abandoned");
   });
 });
