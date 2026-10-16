@@ -27,7 +27,7 @@ import {
 
 test.use({ storageState: storageStateFor("admin") });
 
-test("commits a clean batch and lands on the periods list", async ({ page }) => {
+test("commits a clean batch and lands on its commit result", async ({ page }) => {
   const batchId = await createCommittableBatch("2027-06", 3);
   await page.goto(`/payouts/import/${batchId}`);
 
@@ -35,8 +35,15 @@ test("commits a clean batch and lands on the periods list", async ({ page }) => 
   await page.getByRole("button", { name: /commit 3 rows/i }).click();
   await page.getByRole("button", { name: "Commit import" }).click();
 
-  // The RPC returns how many rows it wrote; the button carries that into the URL.
-  await expect(page).toHaveURL(/\/payouts\?imported=3$/);
+  // commit_residual_import_v2 returns {written, skipped}; the button lands on
+  // the batch, whose committed page reports them, read back from the batch.
+  await expect(page).toHaveURL(new RegExp(`/payouts/import/${batchId}$`));
+  await expect(
+    page.locator('[data-slot="stat-card"]').filter({ hasText: "Rows imported" }),
+  ).toContainText("3");
+  // Nothing was skipped, so there is nothing to review.
+  await expect(page.getByTestId("residual-skips-notice")).toHaveCount(0);
+  await expect(page.getByText("Rows skipped")).toHaveCount(0);
 
   const evidence = await commitEvidence(batchId);
   expect(evidence).toEqual({
@@ -59,7 +66,12 @@ test("a double-click commits exactly once", async ({ page }) => {
   // check behind a row lock.
   await page.getByRole("button", { name: "Commit import" }).dblclick();
 
-  await expect(page).toHaveURL(/\/payouts\?imported=/);
+  await expect(page).toHaveURL(new RegExp(`/payouts/import/${batchId}$`));
+  // The commit result is the page the button was already on, so the URL alone
+  // proves nothing: wait for the committed figures to render.
+  await expect(
+    page.locator('[data-slot="stat-card"]').filter({ hasText: "Rows imported" }),
+  ).toBeVisible();
 
   const evidence = await commitEvidence(batchId);
   // One audit row is the assertion that matters. Two would mean the trail claims
@@ -93,7 +105,12 @@ test("two tabs cannot both commit the same batch", async ({ browser }) => {
   await pageB.getByRole("button", { name: /commit 2 rows/i }).click();
 
   await pageA.getByRole("button", { name: "Commit import" }).click();
-  await expect(pageA).toHaveURL(/\/payouts\?imported=2$/);
+  await expect(pageA).toHaveURL(new RegExp(`/payouts/import/${batchId}$`));
+  // The commit result is the page the button was already on, so the URL alone
+  // proves nothing: wait for the committed figures to render.
+  await expect(
+    pageA.locator('[data-slot="stat-card"]').filter({ hasText: "Rows imported" }),
+  ).toBeVisible();
 
   // The second tab's button is still sitting there, against a batch that is now
   // committed. Clicking it must be refused rather than doing it again.
@@ -113,7 +130,12 @@ test("a committed batch offers no way to commit it again", async ({ page }) => {
   await page.goto(`/payouts/import/${batchId}`);
   await page.getByRole("button", { name: /commit 1 row/i }).click();
   await page.getByRole("button", { name: "Commit import" }).click();
-  await expect(page).toHaveURL(/\/payouts\?imported=/);
+  await expect(page).toHaveURL(new RegExp(`/payouts/import/${batchId}$`));
+  // The commit result is the page the button was already on, so the URL alone
+  // proves nothing: wait for the committed figures to render.
+  await expect(
+    page.locator('[data-slot="stat-card"]').filter({ hasText: "Rows imported" }),
+  ).toBeVisible();
 
   // Back to the batch, now settled. Matching the STATUS BADGE, whose DOM text is
   // the raw lowercase status ("committed", capitalised by CSS) — not the
@@ -131,7 +153,12 @@ test("a committed batch reports the rows it imported, not zero", async ({
   await page.goto(`/payouts/import/${batchId}`);
   await page.getByRole("button", { name: /commit 3 rows/i }).click();
   await page.getByRole("button", { name: "Commit import" }).click();
-  await expect(page).toHaveURL(/\/payouts\?imported=/);
+  await expect(page).toHaveURL(new RegExp(`/payouts/import/${batchId}$`));
+  // The commit result is the page the button was already on, so the URL alone
+  // proves nothing: wait for the committed figures to render.
+  await expect(
+    page.locator('[data-slot="stat-card"]').filter({ hasText: "Rows imported" }),
+  ).toBeVisible();
 
   await page.goto(`/payouts/import/${batchId}`);
 

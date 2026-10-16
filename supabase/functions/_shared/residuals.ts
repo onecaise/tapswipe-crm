@@ -560,3 +560,145 @@ function isBlankRow(row: readonly unknown[]): boolean {
       cell === null || cell === undefined || String(cell).trim() === "",
   );
 }
+
+// ---------------------------------------------------------------------------
+// Shared-account preview flags (phase 4b of docs/design/residual-splits.md, §7)
+// ---------------------------------------------------------------------------
+
+/**
+ * What commit_residual_import_v2 would do with a row about a shared account,
+ * stored on the staging row as rep_payout_import_rows.preview_flag. The codes
+ * are v2's own plan names, so a flag and the skip it predicts read the same.
+ *
+ *   share_not_applied  the file names a rep outside the pair: imported as an
+ *                      ordinary line for that rep; the share pays nothing.
+ *   partner_named      the file names the partner: v2 skips the row.
+ *   line_not_shared    the file names the signer, but a key of the pair
+ *                      already holds a line that is not this share's: skipped.
+ *
+ * A flag never blocks. The commit recomputes all of this from the shares in
+ * force when it runs, so this is advisory by construction.
+ *
+ * THIS MIRRORS v2's PLAN, and nothing type-checks the pair: the CASE in
+ * commit_residual_import_v2 (20261016120000) is the authority. Change both
+ * together. tests/live/residual-import.test.ts runs a file through this
+ * preview and then through v2 and requires the flags to predict exactly the
+ * rows v2 skipped.
+ */
+export type SharePreviewFlag =
+  | "share_not_applied"
+  | "partner_named"
+  | "line_not_shared";
+
+export type PreviewShare = {
+  id: number;
+  /** The share's merchant's CURRENT mid, as v2 joins it. */
+  mid: string;
+  primaryAgentId: string;
+  secondaryAgentId: string;
+  /** YYYY-MM-DD, first of a month. */
+  effectiveFrom: string;
+  /** YYYY-MM-DD, exclusive; null = open-ended. */
+  effectiveTo: string | null;
+};
+
+export type PreviewLedgerLine = {
+  period: string;
+  mid: string;
+  agentId: string;
+  repShareId: number | null;
+  shareRole: string | null;
+};
+
+export type PreviewRow = {
+  period: string | null;
+  agentId: string | null;
+  mid: string | null;
+  /** A blocked row is never flagged: it cannot be committed as it stands. */
+  blocked: boolean;
+};
+
+export type SharePreview = { flag: SharePreviewFlag; share: PreviewShare };
+
+/** The share covering this MID in this month, as v2's join finds it. */
+export function shareCovering(
+  shares: readonly PreviewShare[],
+  mid: string,
+  period: string,
+): PreviewShare | null {
+  return (
+    shares.find(
+      (share) =>
+        share.mid === mid &&
+        period >= share.effectiveFrom &&
+        (share.effectiveTo === null || period < share.effectiveTo),
+    ) ?? null
+  );
+}
+
+export function previewSharedRow(
+  row: PreviewRow,
+  shares: readonly PreviewShare[],
+  ledger: readonly PreviewLedgerLine[],
+): SharePreview | null {
+  if (row.blocked) return null;
+  if (row.period === null || row.agentId === null || row.mid === null) {
+    return null;
+  }
+
+  const share = shareCovering(shares, row.mid, row.period);
+  if (share === null) return null;
+
+  if (row.agentId === share.secondaryAgentId) {
+    return { flag: "partner_named", share };
+  }
+  if (row.agentId !== share.primaryAgentId) {
+    return { flag: "share_not_applied", share };
+  }
+
+  const foreign = ledger.some(
+    (line) =>
+      line.period === row.period &&
+      line.mid === row.mid &&
+      (line.agentId === share.primaryAgentId ||
+        line.agentId === share.secondaryAgentId) &&
+      (line.repShareId !== share.id ||
+        line.shareRole !==
+          (line.agentId === share.primaryAgentId ? "primary" : "secondary")),
+  );
+  return foreign ? { flag: "line_not_shared", share } : null;
+}
+
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/** "2026-07-01" -> "July 2026". */
+export function monthLabel(period: string): string {
+  const [year, month] = period.split("-");
+  return `${MONTHS[Number(month) - 1] ?? month} ${year}`;
+}
+
+/** The sentence the review screen shows beside a flagged row. */
+export function sharePreviewNote(
+  preview: SharePreview,
+  context: {
+    mid: string;
+    period: string;
+    signerName: string;
+    partnerName: string;
+    fileRepName: string;
+  },
+): string {
+  const pair = `${context.signerName} / ${context.partnerName}`;
+  const when = monthLabel(context.period);
+  switch (preview.flag) {
+    case "share_not_applied":
+      return `Share ${pair} not applied to MID ${context.mid} for ${when}: the file names ${context.fileRepName}. This row imports as an ordinary line for ${context.fileRepName}.`;
+    case "partner_named":
+      return `MID ${context.mid} is shared by ${pair} for ${when}, and the file names the partner. This row will be skipped: a shared account is imported on the signer's row.`;
+    case "line_not_shared":
+      return `MID ${context.mid} is shared by ${pair} for ${when}, but the ledger already holds a line for one of them on this MID that is not part of the share. This row will be skipped.`;
+  }
+}

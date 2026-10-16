@@ -420,10 +420,10 @@ describe("committing over HTTP", () => {
     expect(error?.message).toMatch(/admin only/i);
   });
 
-  // commit_residual_import_v2 (phase 4) is not called by the app until phase
-  // 4b, so this is the only thing proving PostgREST exposes it with the right
-  // grant: anon holds no EXECUTE, an agent meets the hand-written guard, and an
-  // admin gets the jsonb shape back.
+  // commit_residual_import_v2 is what the commit button calls (phase 4b). This
+  // proves PostgREST exposes it with the right grant: anon holds no EXECUTE, an
+  // agent meets the hand-written guard, and an admin gets the jsonb shape back.
+  // The shared-account cycle is the last describe in this file.
   it("exposes commit_residual_import_v2: anon refused, agent refused, admin commits", async () => {
     const { batchId } = await importFile([
       HEADER,
@@ -928,5 +928,251 @@ describe("the export survives the path the browser actually takes", () => {
     );
 
     await response.arrayBuffer();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4b: the whole shared-account cycle the app runs -- upload, preview
+// flags, commit through v2, acknowledge the skipped rows -- with the same
+// calls the browser makes, against the running stack.
+//
+// What only this suite can prove: that parse-residual-import's preview (Deno,
+// _shared/residuals.ts) and commit_residual_import_v2 (SQL) agree about which
+// rows a share skips. Nothing type-checks that pair; this is where it is
+// pinned, row by row.
+//
+// Last in the file on purpose: it writes ledger lines in 2027, and nothing
+// after it reads the ledger.
+// ---------------------------------------------------------------------------
+
+describe("a shared account, through upload, preview, commit and acknowledge", () => {
+  const MID = "LIVE-MID-ADMIN"; // the admin persona's merchant; no other test imports it
+  const MAR = "2027-03-01";
+  const APR = "2027-04-01";
+  const THIRD_NUMBER = "LIVE-3333";
+  const INTRUDER_NUMBER = PERSONA_AGENT_NUMBERS.intruder as string;
+
+  let batchId: number;
+  let parse: Awaited<ReturnType<typeof invoke>>;
+
+  beforeAll(async () => {
+    if (FUNCTIONS_DOWN) return;
+    const service = adminClient();
+
+    // A rep outside the pair, for "share not applied". The deactivated persona
+    // is the only spare one; resolving a deactivated rep is ordinary (decision 10).
+    const { error: numberError } = await service
+      .from("profiles")
+      .update({ agent_number: THIRD_NUMBER })
+      .eq("id", fixtures.userIds.deactivated);
+    expect(numberError).toBeNull();
+
+    // The share, the way the app makes one: the admin's own session, through
+    // PostgREST. Signer = owner (40), partner = intruder (10), from March 2027.
+    const { error: shareError } = await userClient(fixtures.tokens.admin).rpc(
+      "set_merchant_rep_share",
+      {
+        merchant_id_input: fixtures.merchantIds.admin,
+        primary_agent_id_input: fixtures.userIds.owner,
+        secondary_agent_id_input: fixtures.userIds.intruder,
+        primary_rep_pct_input: 40,
+        secondary_rep_pct_input: 10,
+        effective_from_input: MAR,
+      },
+    );
+    expect(shareError, shareError?.message).toBeNull();
+
+    // A hand-made, UNSHARED line for the partner in April: the state
+    // line_not_shared exists for. (The share RPCs refuse a share over a
+    // committed month, so only a direct write reaches it.)
+    const { error: lineError } = await service.from("rep_payout_rows").insert({
+      agent_id: fixtures.userIds.intruder,
+      period: APR,
+      mid: MID,
+      merchant_name: "Hand-made line",
+    });
+    expect(lineError, lineError?.message).toBeNull();
+
+    ({ batchId, parse } = await importFile(
+      [
+        HEADER,
+        // row 2: the signer -> shared, no flag
+        ["Mar-27", OWNER_NUMBER, MID, "Live Shared Co", 1000, 10, 25],
+        // row 3: the partner -> partner_named, skipped
+        ["Mar-27", INTRUDER_NUMBER, MID, "Live Shared Co", 1000, 10, 25],
+        // row 4: a third rep -> share_not_applied, imported as ordinary
+        ["Mar-27", THIRD_NUMBER, MID, "Live Shared Co", 1000, 10, 25],
+        // row 5: the signer, but April holds the partner's unshared line -> skipped
+        ["Apr-27", OWNER_NUMBER, MID, "Live Shared Co", 1000, 10, 25],
+        // row 6: an unshared MID -> nothing to say
+        ["Mar-27", OWNER_NUMBER, "LIVE-MID-OWNER", "Live Owner Co", 500, 5, 3],
+      ],
+      "live-shared.xlsx",
+    ));
+  });
+
+  afterAll(async () => {
+    if (FUNCTIONS_DOWN) return;
+    await adminClient()
+      .from("profiles")
+      .update({ agent_number: null })
+      .eq("id", fixtures.userIds.deactivated);
+  });
+
+  it("previews each row's fate on the staged row, and blocks nothing", async () => {
+    expect(parse.status, parse.raw).toBe(200);
+    expect(parse.body).toMatchObject({ row_count: 5, blocked_count: 0, flagged_count: 3 });
+
+    const { data } = await adminClient()
+      .from("rep_payout_import_rows")
+      .select("row_number, blocker, preview_flag, preview_note")
+      .eq("batch_id", batchId)
+      .order("row_number");
+    const staged = data ?? [];
+
+    expect(staged.map((r) => [r.row_number, r.blocker, r.preview_flag])).toEqual([
+      [2, null, null],
+      [3, null, "partner_named"],
+      [4, null, "share_not_applied"],
+      [5, null, "line_not_shared"],
+      [6, null, null],
+    ]);
+
+    // The note names the pair and, for "not applied", who the row imports for.
+    const note = (n: number) => staged.find((r) => r.row_number === n)?.preview_note as string | null;
+    expect(note(4)).toBe(
+      `Share Live Owner Agent / Live Intruder Agent not applied to MID ${MID} for March 2027: the file names Live Deactivated Agent. This row imports as an ordinary line for Live Deactivated Agent.`,
+    );
+    expect(note(3)).toContain("This row will be skipped");
+    expect(note(5)).toContain("This row will be skipped");
+    expect(note(2)).toBeNull();
+  });
+
+  it("gives a rep none of the preview", async () => {
+    const { data } = await userClient(fixtures.tokens.owner)
+      .from("rep_payout_import_rows")
+      .select("preview_flag")
+      .eq("batch_id", batchId);
+    expect(data ?? []).toEqual([]);
+  });
+
+  it("commits through v2, and skips exactly the rows the preview said it would", async () => {
+    const { data, error } = await userClient(fixtures.tokens.admin).rpc(
+      "commit_residual_import_v2",
+      { batch_id_input: batchId },
+    );
+    expect(error, error?.message).toBeNull();
+    expect(data).toEqual({ written: 3, skipped: 2 });
+
+    const { data: batch } = await adminClient()
+      .from("rep_payout_batches")
+      .select("status, row_count, skipped_rows, skips_acknowledged_at")
+      .eq("id", batchId)
+      .single();
+    expect(batch?.status).toBe("committed");
+    expect(batch?.skips_acknowledged_at).toBeNull();
+    // What the commit result page shows: row_count - skipped = written.
+    expect((batch?.row_count as number) - (batch?.skipped_rows as unknown[]).length).toBe(3);
+    expect(batch?.skipped_rows).toEqual([
+      { row_number: 3, period: MAR, mid: MID, agent_number: INTRUDER_NUMBER, reason: "partner_named" },
+      { row_number: 5, period: APR, mid: MID, agent_number: OWNER_NUMBER, reason: "line_not_shared" },
+    ]);
+  });
+
+  it("wrote the pair, and the third rep's ordinary line, as the preview said", async () => {
+    const { data } = await adminClient()
+      .from("rep_payout_rows")
+      .select("agent_id, share_role, rep_share_id, volume")
+      .eq("mid", MID)
+      .eq("period", MAR);
+    const byAgent = new Map((data ?? []).map((l) => [l.agent_id as string, l]));
+
+    expect(byAgent.get(fixtures.userIds.owner)?.share_role).toBe("primary");
+    expect(byAgent.get(fixtures.userIds.intruder)?.share_role).toBe("secondary");
+    expect(byAgent.get(fixtures.userIds.intruder)?.volume).toBeNull();
+    expect(byAgent.get(fixtures.userIds.deactivated)?.share_role).toBeNull();
+    expect(byAgent.get(fixtures.userIds.deactivated)?.rep_share_id).toBeNull();
+    expect(byAgent.size).toBe(3);
+
+    // April: the hand-made partner line untouched, no signer line written.
+    const { data: april } = await adminClient()
+      .from("rep_payout_rows")
+      .select("agent_id, merchant_name")
+      .eq("mid", MID)
+      .eq("period", APR);
+    expect(april).toEqual([{ agent_id: fixtures.userIds.intruder, merchant_name: "Hand-made line" }]);
+  });
+
+  it("will not let an admin's session clear the skip record over PATCH", async () => {
+    const asAdmin = userClient(fixtures.tokens.admin);
+    for (const patch of [{ skipped_rows: [] }, { skips_acknowledged_at: new Date().toISOString() }]) {
+      const { error } = await asAdmin.from("rep_payout_batches").update(patch).eq("id", batchId);
+      expect(error?.code, JSON.stringify(patch)).toBe("42501");
+    }
+    const { data } = await adminClient()
+      .from("rep_payout_batches")
+      .select("skipped_rows, skips_acknowledged_at")
+      .eq("id", batchId)
+      .single();
+    expect((data?.skipped_rows as unknown[]).length).toBe(2);
+    expect(data?.skips_acknowledged_at).toBeNull();
+  });
+
+  it("keeps the skip record from every rep, including the ones it names", async () => {
+    for (const persona of ["owner", "intruder"] as const) {
+      const { data } = await userClient(fixtures.tokens[persona])
+        .from("rep_payout_batches")
+        .select("skipped_rows")
+        .eq("id", batchId);
+      expect(data ?? [], persona).toEqual([]);
+    }
+  });
+
+  it("acknowledges once: an agent is refused, the admin records it, a second time is refused", async () => {
+    const agent = await userClient(fixtures.tokens.owner).rpc("acknowledge_residual_skips", {
+      batch_id_input: batchId,
+    });
+    expect(agent.error?.message).toMatch(/admin only/i);
+
+    const anon = await anonClient().rpc("acknowledge_residual_skips", { batch_id_input: batchId });
+    expect(anon.error?.code).toBe("42501");
+
+    const asAdmin = userClient(fixtures.tokens.admin);
+    const first = await asAdmin.rpc("acknowledge_residual_skips", { batch_id_input: batchId });
+    expect(first.error, first.error?.message).toBeNull();
+    expect(typeof first.data).toBe("string");
+
+    const second = await asAdmin.rpc("acknowledge_residual_skips", { batch_id_input: batchId });
+    expect(second.error?.message).toBe("these skipped rows have already been reviewed");
+
+    const { data: batch } = await adminClient()
+      .from("rep_payout_batches")
+      .select("skips_acknowledged_at, skipped_rows")
+      .eq("id", batchId)
+      .single();
+    expect(batch?.skips_acknowledged_at).not.toBeNull();
+    expect((batch?.skipped_rows as unknown[]).length).toBe(2);
+
+    // Who reviewed it: one audit row, the admin, readable by the admin's session.
+    const { data: audit } = await asAdmin
+      .from("audit_log")
+      .select("actor_id")
+      .eq("action", "acknowledge_residual_skips")
+      .eq("row_id", String(batchId));
+    expect(audit).toEqual([{ actor_id: fixtures.userIds.admin }]);
+  });
+
+  it("the old commit refuses a shared batch with the reworded message", async () => {
+    const { batchId: other } = await importFile(
+      [HEADER, ["Mar-27", OWNER_NUMBER, MID, "Live Shared Co", 1000, 10, 25]],
+      "live-shared-old.xlsx",
+    );
+    const { error } = await userClient(fixtures.tokens.admin).rpc("commit_residual_import", {
+      batch_id_input: other,
+    });
+    expect(error?.code).toBe("PT409");
+    expect(error?.message).toBe(
+      "This import contains shared accounts, which this version of the CRM cannot commit. It needs the current version of the app.",
+    );
   });
 });

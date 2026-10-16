@@ -12,8 +12,12 @@ import {
   parsePeriodParam,
   payoutTotals,
   reviewImportRows,
+  rowsWritten,
+  skipReasonLabel,
+  skipsOwed,
   summarizeByPeriod,
   type PayoutImportRow,
+  type SkippedRow,
 } from "@/lib/payouts";
 
 /**
@@ -350,9 +354,19 @@ describe("reviewImportRows", () => {
       merchant_id: null,
       blocker: null,
       error: null,
+      preview_flag: null,
+      preview_note: null,
       ...over,
     };
   }
+
+  it("a shared-account preview flag never blocks: the row is still clean and the batch ready", () => {
+    const review = reviewImportRows([
+      staged({ preview_flag: "partner_named", preview_note: "skipped" }),
+      staged({ id: 2, mid_raw: "MID-2", preview_flag: "share_not_applied", preview_note: "x" }),
+    ]);
+    expect(review).toMatchObject({ total: 2, clean: 2, blocked: 0, ready: true });
+  });
 
   it("reports a clean batch as ready", () => {
     const review = reviewImportRows([staged(), staged({ id: 2, mid_raw: "MID-2" })]);
@@ -498,5 +512,35 @@ describe("blockerLabel", () => {
     // The review screen reads these straight from the database. A blocker added in
     // SQL and not here should look raw, not blank.
     expect(blockerLabel("something_new")).toBe("something_new");
+  });
+});
+
+describe("skipped rows on a committed batch (phase 4b)", () => {
+  const skip = (n: number): SkippedRow => ({
+    row_number: n,
+    period: "2026-07-01",
+    mid: `MID-${n}`,
+    agent_number: "5555",
+    reason: "partner_named",
+  });
+
+  it("are owed a review only on a committed, unacknowledged batch that skipped something", () => {
+    const base = { status: "committed" as const, skipped_rows: [skip(2), skip(3)], skips_acknowledged_at: null };
+    expect(skipsOwed(base)).toBe(2);
+    expect(skipsOwed({ ...base, skips_acknowledged_at: "2026-10-16T10:00:00Z" })).toBe(0);
+    expect(skipsOwed({ ...base, skipped_rows: [] })).toBe(0);
+    expect(skipsOwed({ ...base, status: "review" })).toBe(0);
+    expect(skipsOwed({ ...base, status: "abandoned" })).toBe(0);
+  });
+
+  it("written is row_count less the skips, so v2's {written, skipped} survives a reload", () => {
+    expect(rowsWritten({ row_count: 5, skipped_rows: [skip(2), skip(3)] })).toBe(3);
+    expect(rowsWritten({ row_count: 5, skipped_rows: [] })).toBe(5);
+  });
+
+  it("labels v2's two skip reasons and passes an unknown one through", () => {
+    expect(skipReasonLabel("partner_named")).toBe("Names the partner on a shared account");
+    expect(skipReasonLabel("line_not_shared")).toMatch(/not part of the share/);
+    expect(skipReasonLabel("something_new")).toBe("something_new");
   });
 });

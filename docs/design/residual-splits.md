@@ -331,7 +331,10 @@ type.)
 
 - **The old function stays byte-for-byte, with one guard added at the top.** If any staged
   row of the batch matches an active share, it raises PT409: "This import contains shared
-  accounts. Reload the page to commit it." Without that guard, an old client could commit a
+  accounts, which this version of the CRM cannot commit. It needs the current version of the
+  app." (Reworded in phase 4b, 20261016140000. It first said "Reload the page to commit it",
+  which was untrue: only an app older than v2 calls this function, and reloading that app
+  calls it again.) Without that guard, an old client could commit a
   shared MID as an ordinary signer line, which is the one outcome this design exists to
   prevent. With no shares, its behaviour is unchanged. The existing
   `commit-residual-import` tests keep passing against it.
@@ -484,14 +487,24 @@ Reader changes the adjustment line needs (small and listed so none is forgotten)
 
 None of these block. Each lists the sheet rows it applies to.
 
-| Flag | Trigger |
-| --- | --- |
-| **Share not applied** | The file names a rep outside the pair for a shared MID and month (§3.4). |
-| **Partner row skipped** | The file names the partner on a shared MID and month. |
-| **Shared figures ignored** | The file supplies residual or rep % for a shared line. The message says to set them on the period page. |
-| **Non-standard rate** | The rep % is not 50 on any row, shared or not (§10). |
-| **Deactivated rep** | Existing decision-10 warning, extended to the partner. |
-| **Looks shared, no share set** | Any of these, for a MID with no active share that month: (a) the same MID under two different Agent #s in this file; (b) the MID was committed under a different rep in any of the last 6 months; (c) the merchant's CRM owner (`merchants.agent_id`) is not the rep the file names. Heuristic and advisory. The message says "If two reps share this account, set it on the merchant page before committing." |
+| Flag | Trigger | Status |
+| --- | --- | --- |
+| **Share not applied** | The file names a rep outside the pair for a shared MID and month (§3.4). | **Built, phase 4b** (`share_not_applied`). Required before Release 3. |
+| **Partner row skipped** | The file names the partner on a shared MID and month. | **Built, phase 4b** (`partner_named`). |
+| **Line not shared** (added in phase 4) | The file names the signer, but a key of the pair already holds a line that is not this share's; v2 skips the row. | **Built, phase 4b** (`line_not_shared`). |
+| **Shared figures ignored** | The file supplies residual or rep % for a shared line. The message says to set them on the period page. | Deferred to phase 5. Informational; may follow Release 3. |
+| **Non-standard rate** | The rep % is not 50 on any row, shared or not (§10). | Deferred to phase 5. Informational; may follow Release 3. |
+| **Deactivated rep** | Existing decision-10 warning, extended to the partner. | Deferred to phase 5. Informational; may follow Release 3. |
+| **Looks shared, no share set** | Any of these, for a MID with no active share that month: (a) the same MID under two different Agent #s in this file; (b) the MID was committed under a different rep in any of the last 6 months; (c) the merchant's CRM owner (`merchants.agent_id`) is not the rep the file names. Heuristic and advisory. The message says "If two reps share this account, set it on the merchant page before committing." | Deferred to phase 5. **Required before Release 3 ships.** |
+
+**How the built flags are stored (phase 4b).** `parse-residual-import` writes
+`rep_payout_import_rows.preview_flag` (a CHECKed vocabulary of v2's own plan names) and
+`preview_note` (the sentence, naming the pair) on each resolved row, beside the blocker. The
+review screen lists them under "Shared accounts"; a flagged row still counts as ready. The rules
+live once, in `previewSharedRow()` in `supabase/functions/_shared/residuals.ts`, as a mirror of
+v2's plan CASE, which stays the authority. Nothing type-checks the pair; the live suite runs one
+file through the preview and then v2 and requires the flags to predict exactly the rows v2
+skipped. Adding a deferred flag means widening the CHECK in a migration.
 
 The preview is computed by `parse-residual-import`, which already reads with the admin client
 after verifying an active admin. Commit recomputes the facts that actually change the outcome
@@ -820,8 +833,8 @@ All four teardown lists clear `merchant_rep_shares` after `rep_payout_rows`.
 | 3 | Ledger columns | **Built 14 Oct 2026, with three decisions taken by Owen that day.** The new columns (`line_kind` and the adjustment columns included, so `rep_payout` is rewritten once), `rep_payout` dropped and re-added (version-independent), the guard and rate-copy triggers, `set_shared_residual`. Golden test 2, the snapshot and catalog tests, test 5. **Deferred out of this phase:** (a) the partial unique index stays in phase 5, because today's commit's `on conflict (period, agent_id, mid)` cannot infer a partial index; (b) the column-level UPDATE grant is its own step right after phase 3, so phase 3's before/after privilege check is exact. **Added after review, same day:** `rep_payout_rows_import_lines_only` (20261014150000), `check (line_kind = 'import')`, so no writer can insert an adjustment line before phase 5 changes the merge key; the adjustment branch is tested on a scratch table built from the migration's own expression text. |
 | 3b | UPDATE grant | **Built 14 Oct 2026 (20261014160000).** Narrow `update on rep_payout_rows` to `(residual_income, rep_split_pct)`, with a test that `column_privileges` changes in exactly that way (`tests/rls/rep-payout-update-grant.test.ts`; live: a 42501 through PostgREST in `residual-import.test.ts`). |
 | 4 | Commit (database) | **Built 16 Oct 2026 (20261016120000), split in two by Owen that day: this phase is the database half only.** `commit_residual_import_v2` (§5.1) beside the old function, plus the old function's share guard (it takes the share lock too). `skipped_rows` and `skips_acknowledged_at` on the batch (§5.4). Tests 3 (R-1) and 4, the old-vs-v2 comparison, catalog, grants and redaction (`tests/rls/commit-residual-import-v2.test.ts`); live: v2 through PostgREST. The share lock was checked by hand with two psql sessions in both directions. **Decisions taken that day:** a residual or rate the file supplies for a shared line is ignored on the first commit too (Q11, over §5.1 step 4); a partner row on a shared MID and month is always skipped (`partner_named`), since that key is the partner's shared line whether or not the pair exists yet; a signer row is skipped (`line_not_shared`) when either key already holds a line that is not this share's, rather than building half a pair; the "share not applied" and other flags stay preview-only (4b); v2's audit row keeps the action name `commit_residual_import`. |
-| 4b | Commit and preview (app) | The commit button calls v2 (**the phase that switches the app**). `parse-residual-import` preview flags (§7). `acknowledge_residual_skips()`, the skipped-rows Callout on the commit result and the period page, and the `rep_payout_batches` UPDATE grant narrowed to `(status)`. Live: the upload → preview flags → commit cycle with a shared MID. |
-| 5 | Correction | **Drops `rep_payout_rows_import_lines_only` in the same migration as** the partial unique index `(period, agent_id, mid) where line_kind = 'import'` plus a plain `(period, agent_id)` index, and both commit functions' `on conflict` targets gaining the predicate. `post_share_correction`, adjustment rendering, `payoutTotals`, the export `Line` column and parser skip. Test 6. |
+| 4b | Commit and preview (app) | **Built 16 Oct 2026 (20261016140000).** The commit button calls v2 (**the phase that switches the app**) and lands on the batch page, which is the commit result: rows imported (`row_count` less the skip record, so v2's `written` survives a reload), rows skipped, and the skipped-rows Callout at the top. The same Callout on every period page the batch touched (admins only, by RLS), until "I've reviewed these N skipped rows"; afterwards a muted line with the reviewer's name from `audit_log`, and the import list marks the batch either way. `acknowledge_residual_skips()`: definer, `is_admin()` first, batch locked, refuses a second acknowledgement, an uncommitted batch and one with nothing skipped, audit fails closed. `rep_payout_batches` UPDATE narrowed to `(status)`; the only client writer, Abandon, writes status alone. Preview flags `share_not_applied`, `partner_named` and `line_not_shared` stored on the staging row by `parse-residual-import` (§7). Old commit's guard message reworded (§5.1). Tests: `tests/rls/acknowledge-residual-skips.test.ts`, `tests/unit/residuals-preview.test.ts`; live: the upload → preview → commit → acknowledge cycle with a shared MID; e2e `residual-skips.spec.ts` at 1440 and 375. **Decisions taken that day:** "mismatched" means a rep outside the pair (a partner row stays skipped); the other four §7 flags are deferred to phase 5. |
+| 5 | Correction, and the deferred preview flags | **Deferred preview flags (§7), added 16 Oct 2026:** "looks shared, no share set" (6-month lookback) is **required before Release 3 ships**; "shared figures ignored", "non-standard rate" and "deactivated partner" are informational and may follow. ("Share not applied", also marked required, was built in 4b.) Each widens the `preview_flag` CHECK. **Correction:** Drops `rep_payout_rows_import_lines_only` in the same migration as** the partial unique index `(period, agent_id, mid) where line_kind = 'import'` plus a plain `(period, agent_id)` index, and both commit functions' `on conflict` targets gaining the predicate. `post_share_correction`, adjustment rendering, `payoutTotals`, the export `Line` column and parser skip. Test 6. |
 | 6 | Merchant page | Admin share card with the 40+10 input, `my_share_partners()`, the rep notice. e2e. |
 | 7 | Payout surfaces | Period-page markers and the account-total control, `PayoutBulkSplit` filter, statement marker and footnote, partner non-link. e2e geometry. |
 | 8 | Docs | CLAUDE.md and the RESIDUALS_SPEC addendum. Deployment stays a separate, explicit decision following §11. |

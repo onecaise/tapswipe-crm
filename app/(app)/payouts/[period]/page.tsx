@@ -14,17 +14,21 @@ import {
   periodParam,
 } from "@/lib/format";
 import {
+  PAYOUT_BATCH_COLUMNS,
   PAYOUT_ROW_COLUMNS,
   parsePeriodParam,
   payoutTotals,
+  type PayoutBatch,
   type PayoutRow,
 } from "@/lib/payouts";
+import { loadSkipReviewers } from "@/lib/residual-skips";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { PayoutBulkSplit } from "@/components/payout-bulk-split";
 import { PayoutExportButton } from "@/components/payout-export-button";
 import { PayoutFigureCell } from "@/components/payout-figure-cell";
 import { PayoutPeriodDelete } from "@/components/payout-period-delete";
+import { ResidualSkipsNotice } from "@/components/residual-skips-notice";
 import { StatCard } from "@/components/stat-card";
 import { Button } from "@/components/ui/button";
 import {
@@ -164,6 +168,25 @@ async function PeriodLedger({
   const groups = groupByAgent(rows, reps);
   const overall = payoutTotals(rows);
 
+  // Committed batches that skipped a row in THIS period (phase 4b, design
+  // §5.4). Not role-branched: rep_payout_batches is admin-only by policy, so a
+  // rep's query returns nothing and they never see a skip notice -- a skipped
+  // row is not on anyone's ledger. Matched with jsonb containment on the
+  // period each skip record carries.
+  const { data: skipData, error: skipError } = await supabase
+    .from("rep_payout_batches")
+    .select(PAYOUT_BATCH_COLUMNS)
+    .eq("status", "committed")
+    .contains("skipped_rows", JSON.stringify([{ period }]))
+    .order("id", { ascending: true });
+  const skipBatches = (skipData ?? []) as PayoutBatch[];
+  const skipReviewers = await loadSkipReviewers(
+    supabase,
+    skipBatches
+      .filter((batch) => batch.skips_acknowledged_at !== null)
+      .map((batch) => batch.id),
+  );
+
   return (
     <div className="flex flex-col gap-8">
       {repError !== null && (
@@ -195,6 +218,22 @@ async function PeriodLedger({
           </div>
         }
       />
+
+      {/* Above the stat cards: the period's totals are missing these rows, and
+          the admin should know that before reading them. */}
+      {skipError !== null && isAdmin && (
+        <p className="text-sm text-destructive">
+          Skipped rows could not be checked ({skipError.message}).
+        </p>
+      )}
+      {skipBatches.map((batch) => (
+        <ResidualSkipsNotice
+          key={batch.id}
+          batch={batch}
+          reviewerName={skipReviewers.get(batch.id)}
+          linkToBatch
+        />
+      ))}
 
       <div className="grid gap-3 sm:grid-cols-4">
         <StatCard label="Merchants" value={overall.rows} />

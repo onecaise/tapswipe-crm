@@ -417,7 +417,7 @@ describe("shared accounts", () => {
       const error = await attempt(() => commitOld(db, ADMIN_ID, batch));
       expect(error?.code).toBe("PT409");
       expect(error?.message).toBe(
-        "This import contains shared accounts. Reload the page to commit it.",
+        "This import contains shared accounts, which this version of the CRM cannot commit. It needs the current version of the app.",
       );
 
       expect(await count(db, `select count(*) from rep_payout_rows`)).toBe(ledgerBefore);
@@ -923,7 +923,7 @@ describe("catalog, grants and redaction", () => {
     const old = await fn("public.commit_residual_import(int)");
     expect(old.ret).toBe("integer");
     expect(old.prosecdef).toBe(true);
-    expect(old.body).toContain("This import contains shared accounts.");
+    expect(old.body).toContain("This import contains shared accounts, which this version of the CRM cannot commit.");
     expect(old.body.indexOf("pg_advisory_xact_lock")).toBeLessThan(old.body.indexOf("merchant_rep_shares s"));
     expect(old.acl).not.toMatch(/(^|[{,])=X/);
   });

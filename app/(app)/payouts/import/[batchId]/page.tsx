@@ -11,15 +11,19 @@ import {
   PAYOUT_IMPORT_ROW_COLUMNS,
   batchStatusIntent,
   blockerLabel,
+  previewFlagLabel,
   reviewImportRows,
+  rowsWritten,
   type PayoutBatch,
   type PayoutImportRow,
 } from "@/lib/payouts";
+import { loadSkipReviewers } from "@/lib/residual-skips";
 import { Callout } from "@/components/callout";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { ResidualBatchActions } from "@/components/residual-batch-actions";
 import { ResidualCommitButton } from "@/components/residual-commit-button";
+import { ResidualSkipsNotice } from "@/components/residual-skips-notice";
 import { StatCard } from "@/components/stat-card";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -91,6 +95,15 @@ async function BatchReview({
   const rows = (rowData ?? []) as PayoutImportRow[];
   const review = reviewImportRows(rows);
 
+  // Shared-account preview flags (phase 4b). Advisory: a flagged row is still
+  // ready, and the commit recomputes all of it from the shares in force then.
+  const flagged = rows.filter((row) => row.preview_flag !== null);
+
+  const reviewers =
+    batch.skipped_rows.length > 0
+      ? await loadSkipReviewers(supabase, [batch.id])
+      : new Map<number, string>();
+
   // Which resolved reps are switched off. Not a blocker — money owed and the
   // ability to log in are separate questions — but worth saying, because those
   // rows will import and the rep will not be able to see them (the own-row select
@@ -128,6 +141,14 @@ async function BatchReview({
         </div>
       </PageHeader>
 
+      {/* The commit result's skipped rows, at the TOP: the first thing an
+          admin sees after committing, until they are reviewed. */}
+      <ResidualSkipsNotice
+        batch={batch}
+        reviewerName={reviewers.get(batch.id)}
+        linkToBatch={false}
+      />
+
       {batch.row_count === 0 && rows.length === 0 ? (
         <Callout tone="warning">
           <p className="font-medium">This import has no rows.</p>
@@ -158,15 +179,34 @@ async function BatchReview({
               />
             </div>
           ) : (
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div
+              className={
+                batch.skipped_rows.length > 0
+                  ? "grid gap-3 sm:grid-cols-3"
+                  : "grid gap-3 sm:grid-cols-2"
+              }
+            >
+              {/* What commit_residual_import_v2 returned: written and
+                  skipped, read back from the batch so a reload agrees. */}
               <StatCard
                 label={
                   batch.status === "committed"
                     ? "Rows imported"
                     : "Rows in the file"
                 }
-                value={batch.row_count}
+                value={
+                  batch.status === "committed"
+                    ? rowsWritten(batch)
+                    : batch.row_count
+                }
               />
+              {batch.skipped_rows.length > 0 && (
+                <StatCard
+                  label="Rows skipped"
+                  value={batch.skipped_rows.length}
+                  accent
+                />
+              )}
               <StatCard
                 label="Committed"
                 value={
@@ -274,6 +314,43 @@ async function BatchReview({
                   </ul>
                 </div>
               ))}
+            </section>
+          )}
+
+          {flagged.length > 0 && batch.status === "review" && (
+            <section
+              className="flex flex-col gap-2"
+              data-testid="shared-account-flags"
+            >
+              <h2 className="text-sm font-semibold tracking-tight">
+                Shared accounts
+                <span className="ml-2 font-normal text-muted-foreground">
+                  {flagged.length} row{flagged.length === 1 ? "" : "s"}
+                </span>
+              </h2>
+              <p className="text-xs text-muted-foreground">
+                None of these stops the import. They say what committing will
+                do with each row on a shared account, as the shares stand now;
+                a share changed before you commit changes the outcome.
+              </p>
+              <ul className="flex flex-col gap-2">
+                {flagged.map((row) => (
+                  <li
+                    key={row.id}
+                    className="flex min-w-0 flex-col gap-0.5 rounded-xl border bg-card px-4 py-3"
+                  >
+                    <p className="text-sm font-medium">
+                      {previewFlagLabel(row.preview_flag as string)}
+                      <span className="ml-2 font-normal text-muted-foreground">
+                        Row {row.row_number}
+                      </span>
+                    </p>
+                    <p className="break-words text-xs text-muted-foreground">
+                      {row.preview_note}
+                    </p>
+                  </li>
+                ))}
+              </ul>
             </section>
           )}
 

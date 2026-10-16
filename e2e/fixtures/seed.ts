@@ -2841,3 +2841,181 @@ export async function preAppLocation(
   if (error || !data) throw new Error(`pre-app ${id}: ${error?.message}`);
   return data;
 }
+
+/**
+ * A batch whose commit SKIPS a row, for the phase 4b commit-result and
+ * skipped-rows Callout specs (docs/design/residual-splits.md §5.4).
+ *
+ * In `period` (YYYY-MM, one per spec so no two specs' Callouts share a period
+ * page): merchant E2E-SKIP-<period> carries a share with the e2e agent as
+ * signer and agent2 as partner. Three staged rows, as parse-residual-import
+ * would leave them:
+ *
+ *   row 2  the signer on the shared MID       -> the shared pair
+ *   row 3  the PARTNER on the shared MID      -> skipped (partner_named),
+ *          carrying the preview flag and note the parser would write
+ *   row 4  the signer on an unshared MID      -> an ordinary line
+ *
+ * So committing writes 2 and skips 1. Everything from an earlier run of the
+ * same period is cleared first, in FK order -- including committed batches,
+ * whose unreviewed Callouts would otherwise stack on the period page.
+ */
+export async function createSkippingBatch(period: string): Promise<{
+  batchId: number;
+  sharedMid: string;
+  plainMid: string;
+}> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const sharedMid = `E2E-SKIP-${period}`;
+  const plainMid = `E2E-SKIP-PLAIN-${period}`;
+  const fileName = `e2e-skips-${period}.xlsx`;
+  const month = firstOfMonth(period);
+
+  const { data: reps, error: repsError } = await db
+    .from("profiles")
+    .select("id, email")
+    .in("email", [PERSONAS.admin.email, PERSONAS.agent.email, PERSONAS.agent2.email]);
+  if (repsError || (reps ?? []).length !== 3) {
+    throw new Error(`skip reps: ${repsError?.message ?? "personas missing; run seedE2E() first"}`);
+  }
+  const idOf = (address: string) => reps!.find((rep) => rep.email === address)!.id as string;
+  const adminId = idOf(PERSONAS.admin.email);
+  const signerId = idOf(PERSONAS.agent.email);
+  const partnerId = idOf(PERSONAS.agent2.email);
+
+  // ---- Clear an earlier run, in FK order. ----
+  const { data: oldBatches } = await db
+    .from("rep_payout_batches")
+    .select("id")
+    .eq("file_name", fileName);
+  const oldBatchIds = (oldBatches ?? []).map((b) => b.id as number);
+  const { error: oldLinesError } = await db
+    .from("rep_payout_rows")
+    .delete()
+    .in("mid", [sharedMid, plainMid]);
+  if (oldLinesError) throw new Error(`old lines: ${oldLinesError.message}`);
+  if (oldBatchIds.length > 0) {
+    await db
+      .from("audit_log")
+      .delete()
+      .eq("table_name", "rep_payout_batches")
+      .in("row_id", oldBatchIds.map(String));
+    const { error } = await db.from("rep_payout_batches").delete().in("id", oldBatchIds);
+    if (error) throw new Error(`old batches: ${error.message}`);
+  }
+  const { data: oldMerchants } = await db.from("merchants").select("id").eq("mid", sharedMid);
+  for (const old of oldMerchants ?? []) {
+    await db.from("merchant_rep_shares").delete().eq("merchant_id", old.id);
+    const { error } = await db.from("merchants").delete().eq("id", old.id);
+    if (error) throw new Error(`old merchant: ${error.message}`);
+  }
+
+  // ---- Plant. ----
+  const { data: merchant, error: merchantError } = await db
+    .from("merchants")
+    .insert({
+      agent_id: signerId,
+      mid: sharedMid,
+      dba: `E2E Shared ${period} Co`,
+      status: "active",
+      city: "Nashville",
+      state: "TN",
+    })
+    .select("id")
+    .single();
+  if (merchantError || !merchant) throw new Error(`merchant: ${merchantError?.message}`);
+
+  const { error: shareError } = await db.from("merchant_rep_shares").insert({
+    merchant_id: merchant.id,
+    primary_agent_id: signerId,
+    secondary_agent_id: partnerId,
+    primary_rep_pct: 40,
+    secondary_rep_pct: 10,
+    effective_from: month,
+  });
+  if (shareError) throw new Error(`share: ${shareError.message}`);
+
+  const { data: batch, error: batchError } = await db
+    .from("rep_payout_batches")
+    .insert({
+      imported_by: adminId,
+      file_key: `e2e/${fileName}`,
+      file_name: fileName,
+      status: "review",
+      row_count: 3,
+    })
+    .select("id")
+    .single();
+  if (batchError || !batch) throw new Error(`batch: ${batchError?.message ?? "no row"}`);
+  const batchId = batch.id as number;
+
+  const base = {
+    batch_id: batchId,
+    period: month,
+    volume: 1000,
+    average_ticket: 10,
+    total_cost: 50,
+  };
+  const { error: rowsError } = await db.from("rep_payout_import_rows").insert([
+    {
+      ...base,
+      row_number: 2,
+      agent_id: signerId,
+      agent_number_raw: PERSONAS.agent.agentNumber,
+      mid_raw: sharedMid,
+      merchant_name_raw: `E2E Shared ${period} Co`,
+      merchant_id: merchant.id,
+    },
+    {
+      ...base,
+      row_number: 3,
+      agent_id: partnerId,
+      agent_number_raw: PERSONAS.agent2.agentNumber,
+      mid_raw: sharedMid,
+      merchant_name_raw: `E2E Shared ${period} Co`,
+      merchant_id: merchant.id,
+      preview_flag: "partner_named",
+      preview_note: `MID ${sharedMid} is shared by ${PERSONAS.agent.fullName} / ${PERSONAS.agent2.fullName}, and the file names the partner. This row will be skipped: a shared account is imported on the signer's row.`,
+    },
+    {
+      ...base,
+      row_number: 4,
+      agent_id: signerId,
+      agent_number_raw: PERSONAS.agent.agentNumber,
+      mid_raw: plainMid,
+      merchant_name_raw: `E2E Plain ${period} Co`,
+    },
+  ]);
+  if (rowsError) throw new Error(`staging: ${rowsError.message}`);
+
+  return { batchId, sharedMid, plainMid };
+}
+
+/** A batch's skip record and acknowledgement, read as the service role. */
+export async function skipEvidence(batchId: number): Promise<{
+  skipped: number;
+  acknowledged: boolean;
+  ackAudits: number;
+}> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const [batch, audits] = await Promise.all([
+    db.from("rep_payout_batches")
+      .select("skipped_rows, skips_acknowledged_at")
+      .eq("id", batchId)
+      .single(),
+    db.from("audit_log").select("id", { count: "exact", head: true })
+      .eq("action", "acknowledge_residual_skips").eq("row_id", String(batchId)),
+  ]);
+  return {
+    skipped: ((batch.data?.skipped_rows as unknown[] | undefined) ?? []).length,
+    acknowledged: batch.data?.skips_acknowledged_at != null,
+    ackAudits: audits.count ?? 0,
+  };
+}

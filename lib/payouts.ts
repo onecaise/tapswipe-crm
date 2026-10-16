@@ -110,10 +110,67 @@ export type PayoutBatch = {
   row_count: number;
   uploaded_at: string | null;
   committed_at: string | null;
+  /** What commit_residual_import_v2 did not apply, in sheet-row order. */
+  skipped_rows: SkippedRow[];
+  /** Null while skipped rows are still owed a review. */
+  skips_acknowledged_at: string | null;
 };
 
 export const PAYOUT_BATCH_COLUMNS =
-  "id, imported_by, file_key, file_name, status, row_count, uploaded_at, committed_at";
+  "id, imported_by, file_key, file_name, status, row_count, uploaded_at, committed_at, skipped_rows, skips_acknowledged_at";
+
+/**
+ * One row commit_residual_import_v2 did not apply, as it records it on the
+ * batch (20261016120000). Identifiers from the admin's own file only -- no
+ * figure, no name -- plus the period, because a batch can span months and each
+ * period page lists the skips that touch it.
+ */
+export type SkippedRow = {
+  row_number: number;
+  period: string;
+  mid: string;
+  agent_number: string | null;
+  reason: string;
+};
+
+const SKIP_REASONS: Record<string, string> = {
+  partner_named: "Names the partner on a shared account",
+  line_not_shared: "A line for this rep and MID is not part of the share",
+};
+
+export function skipReasonLabel(reason: string): string {
+  return SKIP_REASONS[reason] ?? reason;
+}
+
+/**
+ * Rows a committed batch skipped and nobody has reviewed yet. Zero for a batch
+ * that skipped nothing, a reviewed one, and any batch not committed.
+ */
+export function skipsOwed(batch: Pick<PayoutBatch, "status" | "skipped_rows" | "skips_acknowledged_at">): number {
+  if (batch.status !== "committed" || batch.skips_acknowledged_at !== null) return 0;
+  return batch.skipped_rows.length;
+}
+
+/**
+ * What the batch wrote. v2 returns {written, skipped} with written + skipped =
+ * the staged rows, and row_count is the staged count, so the figure the commit
+ * returned survives a reload. For a batch committed by the old function
+ * skipped_rows is [] and this is row_count, which is what that returned.
+ */
+export function rowsWritten(batch: Pick<PayoutBatch, "row_count" | "skipped_rows">): number {
+  return batch.row_count - batch.skipped_rows.length;
+}
+
+/** Shared-account preview flags (rep_payout_import_rows.preview_flag) as prose. */
+const PREVIEW_FLAGS: Record<string, string> = {
+  share_not_applied: "Share not applied",
+  partner_named: "Partner row will be skipped",
+  line_not_shared: "Will be skipped: existing line is not shared",
+};
+
+export function previewFlagLabel(flag: string): string {
+  return PREVIEW_FLAGS[flag] ?? flag;
+}
 
 /**
  * A period as it appears in a route segment: `YYYY-MM`.
@@ -339,10 +396,13 @@ export type PayoutImportRow = {
   merchant_id: number | null;
   blocker: string | null;
   error: string | null;
+  /** Advisory, never a blocker: see previewFlagLabel. */
+  preview_flag: string | null;
+  preview_note: string | null;
 };
 
 export const PAYOUT_IMPORT_ROW_COLUMNS =
-  "id, row_number, period_raw, agent_number_raw, mid_raw, merchant_name_raw, volume_raw, average_ticket_raw, total_cost_raw, residual_income_raw, rep_split_raw, period, agent_id, merchant_id, blocker, error";
+  "id, row_number, period_raw, agent_number_raw, mid_raw, merchant_name_raw, volume_raw, average_ticket_raw, total_cost_raw, residual_income_raw, rep_split_raw, period, agent_id, merchant_id, blocker, error, preview_flag, preview_note";
 
 /** An unrecognised agent number, and what it would import if it resolved. */
 export type UnknownAgentGroup = {

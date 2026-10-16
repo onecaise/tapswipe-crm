@@ -190,10 +190,20 @@ describe("grant surface after all migrations", () => {
     // rep_payout_batches: SELECT to list them, UPDATE to abandon one. No INSERT
     // because the Storage key contains the batch id, so the row is created
     // server-side before the upload exists; no DELETE because a batch is the
-    // record that an import happened.
+    // record that an import happened. UPDATE is on (status) only
+    // (20261016140000), so an admin's PATCH cannot clear a skip record --
+    // invisible to has_table_privilege, pinned by the per-column loop.
     expect(
       await tablePrivileges(db, "authenticated", "rep_payout_batches"),
-    ).toEqual(["SELECT", "UPDATE"]);
+    ).toEqual(["SELECT"]);
+    const batchUpdatable = await rows<{ column_name: string }>(
+      db,
+      `select attname as column_name from pg_attribute
+        where attrelid = 'rep_payout_batches'::regclass and attnum > 0 and not attisdropped
+          and has_column_privilege('authenticated', 'rep_payout_batches', attname, 'UPDATE')
+        order by attname`,
+    );
+    expect(batchUpdatable.map((r) => r.column_name)).toEqual(["status"]);
 
     // The staging table and the history table are read-only to every client.
     // Every write to either comes from a service-role Edge Function or from
@@ -641,6 +651,8 @@ describe("grant surface after all migrations", () => {
       // The shared-aware commit: writes the ledger, deletes staging and
       // writes audit_log as the owner.
       "public.commit_residual_import_v2(int)",
+      // Sets a batch's skips_acknowledged_at and writes audit_log as the owner.
+      "public.acknowledge_residual_skips(int)",
     ]) {
       expect(
         await canExecute(db, "anon", signature),

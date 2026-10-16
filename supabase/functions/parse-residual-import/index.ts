@@ -33,6 +33,10 @@ import {
   blockerMessage,
   parseResidualSheet,
   pickBlocker,
+  previewSharedRow,
+  sharePreviewNote,
+  type PreviewLedgerLine,
+  type PreviewShare,
   type ResidualBlocker,
 } from "../_shared/residuals.ts";
 
@@ -213,6 +217,107 @@ export default {
       }
     }
 
+    // ---- Shared-account preview flags (phase 4b) ------------------------
+    //
+    // What commit_residual_import_v2 would do with each row about a shared
+    // account: the rules are previewSharedRow() in _shared/residuals.ts, a
+    // mirror of v2's plan. Read with the admin client for the reason above --
+    // an active admin may read every share, ledger line and profile -- and,
+    // as above, nothing here DECIDES anything: a flag is advisory, never a
+    // blocker, and the commit recomputes it from the shares in force then.
+    const shares: PreviewShare[] = [];
+    const ledger: PreviewLedgerLine[] = [];
+    const names = new Map<string, string>();
+
+    const midOfMerchant = new Map<number, string>(
+      [...merchants].map(([mid, id]) => [id, mid]),
+    );
+    if (midOfMerchant.size > 0) {
+      const { data, error } = await ctx.supabaseAdmin
+        .from("merchant_rep_shares")
+        .select(
+          "id, merchant_id, primary_agent_id, secondary_agent_id, effective_from, effective_to",
+        )
+        .in("merchant_id", [...midOfMerchant.keys()]);
+
+      if (error) {
+        return json(
+          { error: `Could not look up shared accounts: ${error.message}` },
+          500,
+        );
+      }
+      for (const share of data ?? []) {
+        shares.push({
+          id: share.id as number,
+          mid: midOfMerchant.get(share.merchant_id as number) as string,
+          primaryAgentId: share.primary_agent_id as string,
+          secondaryAgentId: share.secondary_agent_id as string,
+          effectiveFrom: share.effective_from as string,
+          effectiveTo: (share.effective_to as string | null) ?? null,
+        });
+      }
+    }
+
+    if (shares.length > 0) {
+      const periods = [
+        ...new Set(
+          parsed.rows
+            .map((row) => row.period)
+            .filter((value): value is string => value !== null),
+        ),
+      ];
+      const sharedMids = [...new Set(shares.map((share) => share.mid))];
+
+      if (periods.length > 0) {
+        const { data, error } = await ctx.supabaseAdmin
+          .from("rep_payout_rows")
+          .select("period, mid, agent_id, rep_share_id, share_role")
+          .in("mid", sharedMids)
+          .in("period", periods);
+
+        if (error) {
+          return json(
+            { error: `Could not read the ledger: ${error.message}` },
+            500,
+          );
+        }
+        for (const line of data ?? []) {
+          ledger.push({
+            period: line.period as string,
+            mid: line.mid as string,
+            agentId: line.agent_id as string,
+            repShareId: (line.rep_share_id as number | null) ?? null,
+            shareRole: (line.share_role as string | null) ?? null,
+          });
+        }
+      }
+
+      const people = [
+        ...new Set([
+          ...shares.flatMap((share) => [
+            share.primaryAgentId,
+            share.secondaryAgentId,
+          ]),
+          ...reps.values(),
+        ]),
+      ];
+      const { data, error } = await ctx.supabaseAdmin
+        .from("profiles")
+        .select("id, full_name")
+        .in("id", people);
+
+      if (error) {
+        return json(
+          { error: `Could not look up rep names: ${error.message}` },
+          500,
+        );
+      }
+      for (const person of data ?? []) {
+        names.set(person.id as string, person.full_name as string);
+      }
+    }
+    const nameOf = (id: string) => names.get(id) ?? "an unknown rep";
+
     const staged = parsed.rows.map((row) => {
       const agentId =
         row.agent_number_raw === null
@@ -228,6 +333,17 @@ export default {
       }
 
       const blocker = pickBlocker(candidates);
+
+      const preview = previewSharedRow(
+        {
+          period: row.period,
+          agentId,
+          mid: row.mid_raw,
+          blocked: blocker !== null,
+        },
+        shares,
+        ledger,
+      );
 
       return {
         batch_id: batchId,
@@ -251,6 +367,16 @@ export default {
         residual_income: row.residual_income,
         rep_split_pct: row.rep_split_pct,
         blocker,
+        preview_flag: preview?.flag ?? null,
+        preview_note: preview === null || agentId === null
+          ? null
+          : sharePreviewNote(preview, {
+            mid: row.mid_raw ?? "",
+            period: row.period ?? "",
+            signerName: nameOf(preview.share.primaryAgentId),
+            partnerName: nameOf(preview.share.secondaryAgentId),
+            fileRepName: nameOf(agentId),
+          }),
         // A misplaced comma names its cell (D-10), so the admin is not left
         // hunting across five figures for the one that was refused.
         error:
@@ -291,6 +417,8 @@ export default {
     }
 
     const blockedCount = staged.filter((row) => row.blocker !== null).length;
+    const flaggedCount = staged.filter((row) => row.preview_flag !== null)
+      .length;
 
     const { error: countError } = await ctx.supabaseAdmin
       .from("rep_payout_batches")
@@ -311,6 +439,7 @@ export default {
       batch_id: batchId,
       row_count: staged.length,
       blocked_count: blockedCount,
+      flagged_count: flaggedCount,
     });
   }),
 };
@@ -325,7 +454,7 @@ export default {
     --header 'Content-Type: application/json' \
     --data '{"batch_id":1}'
 
-  Expected: 200 with { batch_id, row_count, blocked_count }
+  Expected: 200 with { batch_id, row_count, blocked_count, flagged_count }
             400 if the file is unreadable or a required column is missing
             404 if the batch does not exist, or has no uploaded file
             409 if the batch is already committed or abandoned
