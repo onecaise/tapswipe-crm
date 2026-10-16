@@ -17,7 +17,10 @@
 // is exactly one copy of these rules and no browser twin to drift from. Do not
 // create one.
 
-/** The nine columns, by the key each maps to on a staging row. */
+/**
+ * The nine columns, by the key each maps to on a staging row, plus `line`,
+ * which maps to nothing: it is read only to skip adjustment lines.
+ */
 export const RESIDUAL_COLUMNS = [
   "period",
   "agent_number",
@@ -28,6 +31,7 @@ export const RESIDUAL_COLUMNS = [
   "total_cost",
   "residual_income",
   "rep_split",
+  "line",
 ] as const;
 
 export type ResidualColumn = (typeof RESIDUAL_COLUMNS)[number];
@@ -52,6 +56,7 @@ export const COLUMN_HEADERS: Record<ResidualColumn, string> = {
   total_cost: "Total cost",
   residual_income: "Residual income",
   rep_split: "Rep split",
+  line: "Line",
 };
 
 /**
@@ -64,7 +69,25 @@ export const COLUMN_HEADERS: Record<ResidualColumn, string> = {
 export const OPTIONAL_COLUMNS: ResidualColumn[] = [
   "residual_income",
   "rep_split",
+  // The export's own marker (phase 5 of docs/design/residual-splits.md): a row
+  // whose Line says "Adjustment" is an adjustment line exported from the CRM,
+  // and is skipped rather than staged. See isAdjustmentLine.
+  "line",
 ];
+
+/**
+ * Whether a row's Line cell marks it as an exported adjustment line.
+ *
+ * An adjustment is entered in the CRM (post_share_correction) and only ever
+ * there. Re-importing one would make it an IMPORT line -- or merge it into the
+ * import line on the same key -- so the round trip would quietly turn a
+ * correction into processor data. Only the export's exact word counts, in any
+ * case; anything else in the column (blank, as the export writes for an
+ * import line) imports normally.
+ */
+export function isAdjustmentLine(value: unknown): boolean {
+  return typeof value === "string" && value.trim().toLowerCase() === "adjustment";
+}
 
 export const REQUIRED_COLUMNS: ResidualColumn[] = RESIDUAL_COLUMNS.filter(
   (column) => !OPTIONAL_COLUMNS.includes(column),
@@ -420,7 +443,12 @@ export type ParsedResidualRow = {
 
 export type ParseResult =
   | { ok: false; error: string }
-  | { ok: true; rows: ParsedResidualRow[] };
+  | {
+      ok: true;
+      rows: ParsedResidualRow[];
+      /** Rows marked Line = Adjustment, skipped rather than staged. */
+      adjustments_ignored: number;
+    };
 
 /**
  * Turns a sheet — a header row followed by data rows — into staging rows.
@@ -454,6 +482,7 @@ export function parseResidualSheet(
   const rows: ParsedResidualRow[] = [];
   /** (period, agent number, mid) already seen, for duplicate_in_file. */
   const seen = new Map<string, number>();
+  let adjustmentsIgnored = 0;
 
   for (let offset = 1; offset < sheet.length; offset += 1) {
     const raw = sheet[offset];
@@ -461,6 +490,15 @@ export function parseResidualSheet(
     const rowNumber = offset + 1;
 
     if (isBlankRow(raw)) continue;
+
+    // Before anything else is read, and in particular before the duplicate
+    // check: an exported adjustment shares its (period, agent, MID) with the
+    // import line beside it, and would otherwise block that line as a
+    // duplicate.
+    if (isAdjustmentLine(cellAt(raw, "line"))) {
+      adjustmentsIgnored += 1;
+      continue;
+    }
 
     const period = parsePeriodCell(cellAt(raw, "period"));
     const agentNumber = parseTextCell(cellAt(raw, "agent_number"));
@@ -538,10 +576,16 @@ export function parseResidualSheet(
   }
 
   if (rows.length === 0) {
-    return { ok: false, error: "That file has a header but no data rows." };
+    return {
+      ok: false,
+      error:
+        adjustmentsIgnored > 0
+          ? "That file holds only adjustment lines. Adjustments are entered in the CRM, not imported."
+          : "That file has a header but no data rows.",
+    };
   }
 
-  return { ok: true, rows };
+  return { ok: true, rows, adjustments_ignored: adjustmentsIgnored };
 }
 
 /** A Date has to be rendered deliberately, or the raw column reads "[object Date]". */
@@ -608,6 +652,12 @@ export type PreviewLedgerLine = {
   agentId: string;
   repShareId: number | null;
   shareRole: string | null;
+  /**
+   * 'import' or 'adjustment'. v2's line_not_shared looks at IMPORT lines only
+   * (20261016160000): an adjustment posted into the month must not make the
+   * signer's row look blocked. Absent means an import line.
+   */
+  lineKind?: string;
 };
 
 export type PreviewRow = {
@@ -658,6 +708,7 @@ export function previewSharedRow(
 
   const foreign = ledger.some(
     (line) =>
+      line.lineKind !== "adjustment" &&
       line.period === row.period &&
       line.mid === row.mid &&
       (line.agentId === share.primaryAgentId ||
@@ -701,4 +752,120 @@ export function sharePreviewNote(
     case "line_not_shared":
       return `MID ${context.mid} is shared by ${pair} for ${when}, but the ledger already holds a line for one of them on this MID that is not part of the share. This row will be skipped.`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Unshared-row preview flags (phase 5 of docs/design/residual-splits.md, §7)
+// ---------------------------------------------------------------------------
+
+/**
+ * Two warnings about a row NO share covers, so v2 imports it as an ordinary
+ * line paying the rep the file names the whole rep side. Neither predicts a
+ * skip -- v2 skips nothing here -- so unlike the three above they mirror no
+ * plan; they are heuristics, advisory by construction.
+ *
+ *   share_not_in_force  the MID's merchant has a share, but none covers this
+ *                       month (it ended, or starts later). Without this, v2
+ *                       pays the signer 100% of a month the admin may believe
+ *                       is shared.
+ *   looks_shared        no share exists on the MID, and another rep is paid on
+ *                       it within LOOKS_SHARED_MONTHS before this row's month
+ *                       or in that month itself -- a committed import line, or
+ *                       another row of the same file. (The CRM owner is not a
+ *                       signal: merchants.agent_id is often not the payee.)
+ *
+ * Applied only where previewSharedRow found nothing, so a row carries at most
+ * one flag, in that precedence: covered-share flags, then share_not_in_force,
+ * then looks_shared.
+ */
+export type UnsharedPreviewFlag = "share_not_in_force" | "looks_shared";
+
+/** The design's six-month lookback (design §7, §14). */
+export const LOOKS_SHARED_MONTHS = 6;
+
+/** A rep paid on a MID in a month: a committed import line, or a file row. */
+export type PaidLine = { period: string; mid: string; agentId: string };
+
+export type UnsharedPreview =
+  | { flag: "share_not_in_force"; shares: PreviewShare[] }
+  | { flag: "looks_shared"; others: PaidLine[] };
+
+/** "2026-07-01" minus n months, as YYYY-MM-01. Arithmetic, never Date. */
+export function monthsBefore(period: string, n: number): string {
+  const [year, month] = period.split("-").map(Number);
+  const index = year * 12 + (month - 1) - n;
+  const y = Math.floor(index / 12);
+  const m = index - y * 12 + 1;
+  return `${y}-${String(m).padStart(2, "0")}-01`;
+}
+
+/** The first month of the lookback window for a row in `period`. */
+export function lookbackStart(period: string): string {
+  return monthsBefore(period, LOOKS_SHARED_MONTHS);
+}
+
+export function previewUnsharedRow(
+  row: PreviewRow,
+  shares: readonly PreviewShare[],
+  paid: readonly PaidLine[],
+): UnsharedPreview | null {
+  if (row.blocked) return null;
+  if (row.period === null || row.agentId === null || row.mid === null) {
+    return null;
+  }
+  const { period, agentId, mid } = row;
+
+  if (shareCovering(shares, mid, period) !== null) return null;
+
+  const onMid = shares.filter((share) => share.mid === mid);
+  if (onMid.length > 0) {
+    return { flag: "share_not_in_force", shares: onMid };
+  }
+
+  const from = lookbackStart(period);
+  const others = paid.filter(
+    (line) =>
+      line.mid === mid &&
+      line.agentId !== agentId &&
+      line.period >= from &&
+      line.period <= period,
+  );
+  return others.length > 0 ? { flag: "looks_shared", others } : null;
+}
+
+/** "July 2026" to "September 2026", or "from November 2026". */
+function shareRange(share: PreviewShare): string {
+  const start = monthLabel(share.effectiveFrom);
+  if (share.effectiveTo === null) return `from ${start}`;
+  return `${start} to ${monthLabel(monthsBefore(share.effectiveTo, 1))}`;
+}
+
+export function unsharedPreviewNote(
+  preview: UnsharedPreview,
+  context: {
+    mid: string;
+    period: string;
+    fileRepName: string;
+    /** False when no merchant in the CRM has this MID. */
+    hasMerchant: boolean;
+    nameOf: (agentId: string) => string;
+  },
+): string {
+  const when = monthLabel(context.period);
+  if (preview.flag === "share_not_in_force") {
+    const ranges = preview.shares
+      .map(
+        (share) =>
+          `${context.nameOf(share.primaryAgentId)} / ${context.nameOf(share.secondaryAgentId)}, ${shareRange(share)}`,
+      )
+      .join("; ");
+    return `MID ${context.mid} has a share (${ranges}), but it does not cover ${when}. This row imports as an ordinary line paying ${context.fileRepName} the whole rep side.`;
+  }
+  const names = [...new Set(preview.others.map((line) => context.nameOf(line.agentId)))]
+    .sort()
+    .join(", ");
+  const advice = context.hasMerchant
+    ? "If two reps share this account, set it on the merchant page before committing."
+    : "No merchant in the CRM has this MID, so a share cannot be set on it until one is added.";
+  return `MID ${context.mid} is also paid to ${names} within the six months to ${when}, and no share is set on it. This row imports for ${context.fileRepName} alone. ${advice}`;
 }

@@ -739,7 +739,7 @@ describe("the export is scoped by RLS and re-importable", () => {
     expect(response.status).toBe(403);
   });
 
-  it("carries the nine importable headers, plus two the parser ignores", async () => {
+  it("carries the nine importable headers, two the parser ignores, and Line", async () => {
     const { rows } = await exportWorkbook(fixtures.tokens.admin, {
       period: PERIOD,
     });
@@ -756,6 +756,10 @@ describe("the export is scoped by RLS and re-importable", () => {
       "Residual income",
       "Rep split",
       "Rep payout",
+      // Phase 5: "Adjustment" or blank. The one extra the parser reads -- it
+      // skips a row so marked -- which is what keeps the round trip from
+      // turning a correction into an import line.
+      "Line",
     ]);
   });
 
@@ -1174,5 +1178,263 @@ describe("a shared account, through upload, preview, commit and acknowledge", ()
     expect(error?.message).toBe(
       "This import contains shared accounts, which this version of the CRM cannot commit. It needs the current version of the app.",
     );
+  });
+});
+
+/**
+ * Phase 5 of docs/design/residual-splits.md, end to end: a correction posted
+ * through PostgREST, exported with Line = Adjustment, re-imported with the
+ * adjustment lines skipped and counted on the batch; and the two new preview
+ * flags, written by the real parser under Deno.
+ *
+ * Months are in 2029 so nothing else in the suite (2026 here, 2027 in the
+ * shared describe and in e2e) is anywhere near them. The posting month is
+ * whatever post_share_correction() computes on this stack -- the month after
+ * the latest import line anywhere -- so it is read from the result, never
+ * assumed.
+ */
+describe("phase 5: a correction round-trips as Line = Adjustment, and the new flags preview", () => {
+  const JAN = "2029-01-01";
+  const SIGNER_MID = "LIVE-MID-OWNER";
+  const PARTNER_SHARE_MID = "LIVE-MID-INTRUDER";
+  const LOOKS_MID = "LIVE-MID-LOOKS";
+  const TWICE_MID = "LIVE-MID-TWICE";
+  const INTRUDER_NUMBER = PERSONA_AGENT_NUMBERS.intruder as string;
+  const NOTE = "Shared 40/10 with the intruder from January, agreed later";
+
+  let posting: string;
+  let partnerLine: number;
+  let signerLine: number;
+
+  const adjustmentColumns =
+    "id, agent_id, period, mid, line_kind, adjustment_amount, adjusts_period, adjustment_note, rep_payout, residual_income, rep_split_pct, volume, batch_id";
+
+  beforeAll(async () => {
+    if (FUNCTIONS_DOWN) return;
+    const service = adminClient();
+    // January 2029: the signer's committed month, 100.01 at 50% -> T 50.01.
+    const { error } = await service.from("rep_payout_rows").insert({
+      agent_id: fixtures.userIds.owner,
+      period: JAN,
+      mid: SIGNER_MID,
+      merchant_name: "Live Owner Co",
+      merchant_id: fixtures.merchantIds.owner,
+      residual_income: 100.01,
+      rep_split_pct: 50,
+    });
+    expect(error, error?.message).toBeNull();
+  });
+
+  const args = () => ({
+    merchant_id_input: fixtures.merchantIds.owner,
+    original_period_input: JAN,
+    partner_agent_id_input: fixtures.userIds.intruder,
+    primary_rep_pct_input: 40,
+    secondary_rep_pct_input: 10,
+    note_input: NOTE,
+  });
+
+  it("refuses anon and an agent over PostgREST, and posts the pair for an admin", async () => {
+    const anon = await anonClient().rpc("post_share_correction", args());
+    expect(anon.error).not.toBeNull();
+
+    const agent = await userClient(fixtures.tokens.owner).rpc("post_share_correction", args());
+    expect(agent.error?.message).toBe("admin only");
+
+    const { data, error } = await userClient(fixtures.tokens.admin).rpc("post_share_correction", args());
+    expect(error, error?.message).toBeNull();
+    // 50.01 x 10/50 = 10.002 -> 10.00; the signer keeps 40.01.
+    expect(data).toMatchObject({ amount: 10 });
+    posting = data.posting_period as string;
+    partnerLine = data.partner_line_id as number;
+    signerLine = data.signer_line_id as number;
+    expect(posting > JAN).toBe(true);
+
+    const { data: lines } = await adminClient()
+      .from("rep_payout_rows")
+      .select("agent_id, rep_payout, line_kind, adjusts_period")
+      .in("id", [partnerLine, signerLine])
+      .order("id");
+    expect(lines).toEqual([
+      { agent_id: fixtures.userIds.intruder, rep_payout: 10, line_kind: "adjustment", adjusts_period: JAN },
+      { agent_id: fixtures.userIds.owner, rep_payout: -10, line_kind: "adjustment", adjusts_period: JAN },
+    ]);
+  });
+
+  it("exports the pair with Line = Adjustment and blank figures, and a rep only their own line", async () => {
+    const admin = await exportWorkbook(fixtures.tokens.admin, { period: posting });
+    const header = admin.rows[0] as string[];
+    const at = (name: string) => header.indexOf(name);
+    const mine = admin.rows.slice(1).filter((row) => row[at("MID")] === SIGNER_MID);
+    expect(mine.map((row) => [row[at("Agent #")], row[at("Residual income")], row[at("Rep split")], row[at("Rep payout")], row[at("Line")]])).toEqual(
+      expect.arrayContaining([
+        [OWNER_NUMBER, null, null, -10, "Adjustment"],
+        [INTRUDER_NUMBER, null, null, 10, "Adjustment"],
+      ]),
+    );
+
+    const owner = await exportWorkbook(fixtures.tokens.owner, { period: posting });
+    const ownRows = owner.rows.slice(1).filter((row) => row[at("MID")] === SIGNER_MID);
+    expect(ownRows).toHaveLength(1);
+    expect(ownRows[0][at("Rep payout")]).toBe(-10);
+    expect(ownRows[0][at("Line")]).toBe("Adjustment");
+  });
+
+  it("re-imports the export with the adjustment lines skipped, counted on the batch, and untouched", async () => {
+    // The posting month gets an ordinary import line too, so the export is a
+    // real month: one import line beside the two adjustments on the same MID.
+    const { error: lineError } = await adminClient().from("rep_payout_rows").insert({
+      agent_id: fixtures.userIds.owner,
+      period: posting,
+      mid: SIGNER_MID,
+      merchant_name: "Live Owner Co",
+      merchant_id: fixtures.merchantIds.owner,
+      volume: 700,
+    });
+    expect(lineError, lineError?.message).toBeNull();
+
+    const before = await adminClient()
+      .from("rep_payout_rows")
+      .select(adjustmentColumns)
+      .in("id", [partnerLine, signerLine])
+      .order("id");
+
+    const exported = await exportWorkbook(fixtures.tokens.admin, { period: posting });
+    const header = exported.rows[0] as string[];
+    const adjustmentRows = exported.rows.slice(1).filter((row) => row[header.indexOf("Line")] === "Adjustment").length;
+    expect(adjustmentRows).toBeGreaterThanOrEqual(2);
+
+    const back = await importFile(exported.rows, "round-trip-adjustments.xlsx");
+    expect(back.parse.status, back.parse.raw).toBe(200);
+    expect(back.parse.body).toMatchObject({
+      blocked_count: 0,
+      adjustments_ignored: adjustmentRows,
+      row_count: exported.rows.length - 1 - adjustmentRows,
+    });
+
+    const { data: batch } = await adminClient()
+      .from("rep_payout_batches")
+      .select("adjustment_rows_ignored")
+      .eq("id", back.batchId)
+      .single();
+    expect(batch?.adjustment_rows_ignored).toBe(adjustmentRows);
+
+    // No staged row is an adjustment's: the signer's MID is staged once.
+    const staged = await stagedRows(back.batchId);
+    const { data: stagedMids } = await adminClient()
+      .from("rep_payout_import_rows")
+      .select("mid_raw, agent_number_raw")
+      .eq("batch_id", back.batchId)
+      .eq("mid_raw", SIGNER_MID);
+    expect(stagedMids).toEqual([{ mid_raw: SIGNER_MID, agent_number_raw: OWNER_NUMBER }]);
+    expect(staged.every((row) => row.blocker === null)).toBe(true);
+
+    const { data, error } = await userClient(fixtures.tokens.admin).rpc("commit_residual_import_v2", {
+      batch_id_input: back.batchId,
+    });
+    expect(error, error?.message).toBeNull();
+    expect(data).toMatchObject({ skipped: 0 });
+
+    const after = await adminClient()
+      .from("rep_payout_rows")
+      .select(adjustmentColumns)
+      .in("id", [partnerLine, signerLine])
+      .order("id");
+    expect(after.data).toEqual(before.data);
+
+    // The import line merged as always; still exactly three lines on the MID.
+    const { data: onMid } = await adminClient()
+      .from("rep_payout_rows")
+      .select("line_kind, volume")
+      .eq("mid", SIGNER_MID)
+      .eq("period", posting)
+      .order("id");
+    expect(onMid).toEqual([
+      { line_kind: "adjustment", volume: null },
+      { line_kind: "adjustment", volume: null },
+      { line_kind: "import", volume: 700 },
+    ]);
+  });
+
+  describe("the two new preview flags", () => {
+    let batchId: number;
+    let parse: Awaited<ReturnType<typeof invoke>>;
+
+    beforeAll(async () => {
+      if (FUNCTIONS_DOWN) return;
+      const service = adminClient();
+      // A share on the intruder's merchant that starts in June 2029: March is
+      // outside it.
+      const { error: shareError } = await userClient(fixtures.tokens.admin).rpc("set_merchant_rep_share", {
+        merchant_id_input: fixtures.merchantIds.intruder,
+        primary_agent_id_input: fixtures.userIds.intruder,
+        secondary_agent_id_input: fixtures.userIds.owner,
+        primary_rep_pct_input: 25,
+        secondary_rep_pct_input: 25,
+        effective_from_input: "2029-06-01",
+      });
+      expect(shareError, shareError?.message).toBeNull();
+
+      // The intruder was paid on a MID no merchant has, in January.
+      const { error } = await service.from("rep_payout_rows").insert({
+        agent_id: fixtures.userIds.intruder,
+        period: JAN,
+        mid: LOOKS_MID,
+        merchant_name: "Looks Shared Co",
+      });
+      expect(error, error?.message).toBeNull();
+
+      ({ batchId, parse } = await importFile(
+        [
+          HEADER,
+          // row 2: a share on the MID that does not cover March -> share_not_in_force
+          ["Mar-29", INTRUDER_NUMBER, PARTNER_SHARE_MID, "Live Intruder Co", 100, 10, 1],
+          // row 3: another rep paid in January, no share -> looks_shared (no merchant)
+          ["Mar-29", OWNER_NUMBER, LOOKS_MID, "Looks Shared Co", 100, 10, 1],
+          // rows 4-5: the same MID under two Agent #s in this file -> both looks_shared
+          ["Mar-29", OWNER_NUMBER, TWICE_MID, "Twice Co", 100, 10, 1],
+          ["Mar-29", INTRUDER_NUMBER, TWICE_MID, "Twice Co", 100, 10, 1],
+          // row 6: the signer's MID, where the only other rep is on an ADJUSTMENT line -> nothing
+          ["Mar-29", OWNER_NUMBER, SIGNER_MID, "Live Owner Co", 100, 10, 1],
+        ],
+        "live-phase5-flags.xlsx",
+      ));
+    });
+
+    it("stores share_not_in_force and looks_shared on the staged rows, blocking nothing", async () => {
+      expect(parse.status, parse.raw).toBe(200);
+      expect(parse.body).toMatchObject({ row_count: 5, blocked_count: 0, flagged_count: 4, adjustments_ignored: 0 });
+
+      const { data } = await adminClient()
+        .from("rep_payout_import_rows")
+        .select("row_number, blocker, preview_flag, preview_note")
+        .eq("batch_id", batchId)
+        .order("row_number");
+      const staged = data ?? [];
+      expect(staged.map((r) => [r.row_number, r.blocker, r.preview_flag])).toEqual([
+        [2, null, "share_not_in_force"],
+        [3, null, "looks_shared"],
+        [4, null, "looks_shared"],
+        [5, null, "looks_shared"],
+        [6, null, null],
+      ]);
+      const note = (n: number) => staged.find((r) => r.row_number === n)?.preview_note as string;
+      expect(note(2)).toBe(
+        `MID ${PARTNER_SHARE_MID} has a share (Live Intruder Agent / Live Owner Agent, from June 2029), but it does not cover March 2029. This row imports as an ordinary line paying Live Intruder Agent the whole rep side.`,
+      );
+      expect(note(3)).toBe(
+        `MID ${LOOKS_MID} is also paid to Live Intruder Agent within the six months to March 2029, and no share is set on it. This row imports for Live Owner Agent alone. No merchant in the CRM has this MID, so a share cannot be set on it until one is added.`,
+      );
+      expect(note(4)).toContain("is also paid to Live Intruder Agent");
+      expect(note(5)).toContain("is also paid to Live Owner Agent");
+    });
+
+    it("commits every flagged row through v2: the flags predict no skip", async () => {
+      const { data, error } = await userClient(fixtures.tokens.admin).rpc("commit_residual_import_v2", {
+        batch_id_input: batchId,
+      });
+      expect(error, error?.message).toBeNull();
+      expect(data).toEqual({ written: 5, skipped: 0 });
+    });
   });
 });

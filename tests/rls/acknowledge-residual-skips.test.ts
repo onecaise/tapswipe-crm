@@ -510,13 +510,20 @@ describe("rep_payout_import_rows preview columns", () => {
     await db.close();
   });
 
-  it("accept the three codes and null, and refuse anything else", async () => {
+  it("accept the five codes and null, and refuse anything else", async () => {
     await asPlatform(db);
-    for (const flag of ["share_not_applied", "partner_named", "line_not_shared"]) {
+    // The three of phase 4b and the two of phase 5 (20261016161000).
+    for (const flag of [
+      "share_not_applied",
+      "partner_named",
+      "line_not_shared",
+      "share_not_in_force",
+      "looks_shared",
+    ]) {
       await db.query(`update rep_payout_import_rows set preview_flag = '${flag}', preview_note = 'x'`);
     }
     await db.query(`update rep_payout_import_rows set preview_flag = null, preview_note = null`);
-    const error = await attempt(() => db.query(`update rep_payout_import_rows set preview_flag = 'looks_shared'`));
+    const error = await attempt(() => db.query(`update rep_payout_import_rows set preview_flag = 'non_standard_rate'`));
     expect(error?.message).toMatch(/preview_flag_check/);
   });
 

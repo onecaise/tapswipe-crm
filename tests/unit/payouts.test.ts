@@ -7,10 +7,15 @@ import {
   periodParam,
 } from "@/lib/format";
 import {
+  PAYOUT_BATCH_COLUMNS,
+  PAYOUT_ROW_COLUMNS,
   batchStatusIntent,
   blockerLabel,
+  isAdjustment,
   parsePeriodParam,
   payoutTotals,
+  previewFlagLabel,
+  splitPayoutLines,
   reviewImportRows,
   rowsWritten,
   skipReasonLabel,
@@ -172,6 +177,7 @@ describe("payoutTotals", () => {
     // If these concatenated instead, volume would be 12400.009900.00.
     expect(totals).toEqual({
       rows: 2,
+      adjustments: 0,
       volume: 22300,
       residualIncome: 159.6,
       repPayout: 88.64,
@@ -260,6 +266,7 @@ describe("payoutTotals", () => {
   it("returns zeros for an empty set", () => {
     expect(payoutTotals([])).toEqual({
       rows: 0,
+      adjustments: 0,
       volume: 0,
       residualIncome: 0,
       repPayout: 0,
@@ -542,5 +549,93 @@ describe("skipped rows on a committed batch (phase 4b)", () => {
     expect(skipReasonLabel("partner_named")).toBe("Names the partner on a shared account");
     expect(skipReasonLabel("line_not_shared")).toMatch(/not part of the share/);
     expect(skipReasonLabel("something_new")).toBe("something_new");
+  });
+});
+
+describe("adjustment lines (phase 5)", () => {
+  const importLine = (over: Partial<{ volume: number | null; residual_income: number | null; rep_split_pct: number | null; rep_payout: number | null }> = {}) => ({
+    line_kind: "import" as const,
+    volume: 1000,
+    residual_income: 100,
+    rep_split_pct: 50,
+    rep_payout: 50,
+    ...over,
+  });
+  // As post_share_correction writes one: no volume, residual or rate, by
+  // rep_payout_rows_adjustment_no_figures; the payout is the amount.
+  const adjustmentLine = (amount: number) => ({
+    line_kind: "adjustment" as const,
+    volume: null,
+    residual_income: null,
+    rep_split_pct: null,
+    rep_payout: amount,
+  });
+
+  it("counts an adjustment in the payout, and never as a merchant or as awaiting figures", () => {
+    expect(
+      payoutTotals([importLine(), importLine({ residual_income: null, rep_payout: null }), adjustmentLine(10.61), adjustmentLine(-0.01)]),
+    ).toEqual({
+      rows: 2,
+      adjustments: 2,
+      volume: 2000,
+      residualIncome: 100,
+      repPayout: 60.6,
+      unfilled: 1,
+    });
+  });
+
+  it("a period of adjustments only is complete, not awaiting figures", () => {
+    expect(payoutTotals([adjustmentLine(10.61), adjustmentLine(-10.61)])).toEqual({
+      rows: 0,
+      adjustments: 2,
+      volume: 0,
+      residualIncome: 0,
+      repPayout: 0,
+      unfilled: 0,
+    });
+  });
+
+  it("treats a row with no line_kind as an import line", () => {
+    const { line_kind: _drop, ...bare } = importLine({ residual_income: null });
+    void _drop;
+    expect(isAdjustment({ line_kind: undefined })).toBe(false);
+    expect(isAdjustment({ line_kind: null })).toBe(false);
+    expect(payoutTotals([bare]).unfilled).toBe(1);
+  });
+
+  it("splits lines into imports and adjustments, keeping order", () => {
+    const rows = [
+      { id: 1, line_kind: "import" as const },
+      { id: 2, line_kind: "adjustment" as const },
+      { id: 3, line_kind: "import" as const },
+      { id: 4, line_kind: "adjustment" as const },
+    ];
+    const { imports, adjustments } = splitPayoutLines(rows);
+    expect(imports.map((r) => r.id)).toEqual([1, 3]);
+    expect(adjustments.map((r) => r.id)).toEqual([2, 4]);
+  });
+
+  it("summarizeByPeriod carries the adjustment count per period", () => {
+    const periods = summarizeByPeriod([
+      { period: "2026-08-01", ...adjustmentLine(5) },
+      { period: "2026-07-01", ...importLine() },
+    ]);
+    expect(periods.map((p) => [p.period, p.rows, p.adjustments, p.repPayout])).toEqual([
+      ["2026-08-01", 0, 1, 5],
+      ["2026-07-01", 1, 0, 50],
+    ]);
+  });
+
+  it("reads the line kind and the adjustment columns on every payout read", () => {
+    const columns = PAYOUT_ROW_COLUMNS.split(", ");
+    for (const column of ["line_kind", "adjustment_amount", "adjusts_period", "adjustment_note", "rep_payout"]) {
+      expect(columns).toContain(column);
+    }
+    expect(PAYOUT_BATCH_COLUMNS.split(", ")).toContain("adjustment_rows_ignored");
+  });
+
+  it("labels the two phase-5 preview flags", () => {
+    expect(previewFlagLabel("share_not_in_force")).toBe("Share does not cover this month");
+    expect(previewFlagLabel("looks_shared")).toBe("Looks shared, no share set");
   });
 });

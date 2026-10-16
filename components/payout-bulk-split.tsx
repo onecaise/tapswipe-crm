@@ -68,7 +68,11 @@ export function PayoutBulkSplit({
       // Scoped to one rep and one period. Both are required: without agent_id it
       // would rewrite every rep's split for the month.
       .eq("period", period)
-      .eq("agent_id", agentId);
+      .eq("agent_id", agentId)
+      // Import lines only. An adjustment line carries no rate by design
+      // (rep_payout_rows_adjustment_no_figures), so including one would fail
+      // the whole statement; rowCount on the page counts import lines too.
+      .eq("line_kind", "import");
 
     setBusy(false);
     setConfirming(false);

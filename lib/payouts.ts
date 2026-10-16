@@ -88,7 +88,38 @@ export type PayoutRow = {
   /** Generated and stored; null whenever either input is null. Never written. */
   rep_payout: number | null;
   batch_id: number | null;
+  /**
+   * 'import' for a line a residual file put there; 'adjustment' for one
+   * post_share_correction() posted (20261016161000). An adjustment line pays
+   * adjustment_amount, carries no residual, rate or volume, and sits outside
+   * the merge key.
+   */
+  line_kind: PayoutLineKind;
+  adjustment_amount: number | null;
+  /** The month the adjustment corrects, YYYY-MM-01. */
+  adjusts_period: string | null;
+  adjustment_note: string | null;
 };
+
+export type PayoutLineKind = "import" | "adjustment";
+
+/** True for a line post_share_correction() wrote rather than a file. */
+export function isAdjustment(row: { line_kind?: PayoutLineKind | null }): boolean {
+  return row.line_kind === "adjustment";
+}
+
+/**
+ * Lines split the way every payout page shows them: merchant lines in the
+ * table, adjustment lines in their own block under it. Order is kept.
+ */
+export function splitPayoutLines<T extends { line_kind?: PayoutLineKind | null }>(
+  rows: readonly T[],
+): { imports: T[]; adjustments: T[] } {
+  const imports: T[] = [];
+  const adjustments: T[] = [];
+  for (const row of rows) (isAdjustment(row) ? adjustments : imports).push(row);
+  return { imports, adjustments };
+}
 
 /**
  * Columns every payout read asks for.
@@ -99,7 +130,7 @@ export type PayoutRow = {
  * recomputing it here from two strings.
  */
 export const PAYOUT_ROW_COLUMNS =
-  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id";
+  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id, line_kind, adjustment_amount, adjusts_period, adjustment_note";
 
 export type PayoutBatch = {
   id: number;
@@ -114,10 +145,16 @@ export type PayoutBatch = {
   skipped_rows: SkippedRow[];
   /** Null while skipped rows are still owed a review. */
   skips_acknowledged_at: string | null;
+  /**
+   * Rows the file marked `Line = Adjustment` that parse-residual-import did
+   * not stage (20261016161000): adjustments are entered in the CRM, never
+   * imported.
+   */
+  adjustment_rows_ignored: number;
 };
 
 export const PAYOUT_BATCH_COLUMNS =
-  "id, imported_by, file_key, file_name, status, row_count, uploaded_at, committed_at, skipped_rows, skips_acknowledged_at";
+  "id, imported_by, file_key, file_name, status, row_count, uploaded_at, committed_at, skipped_rows, skips_acknowledged_at, adjustment_rows_ignored";
 
 /**
  * One row commit_residual_import_v2 did not apply, as it records it on the
@@ -166,6 +203,8 @@ const PREVIEW_FLAGS: Record<string, string> = {
   share_not_applied: "Share not applied",
   partner_named: "Partner row will be skipped",
   line_not_shared: "Will be skipped: existing line is not shared",
+  share_not_in_force: "Share does not cover this month",
+  looks_shared: "Looks shared, no share set",
 };
 
 export function previewFlagLabel(flag: string): string {
@@ -217,11 +256,14 @@ export function blockerLabel(blocker: string): string {
 }
 
 export type PayoutTotals = {
+  /** Merchant (import) lines. Adjustment lines are counted separately. */
   rows: number;
+  /** Adjustment lines: in repPayout, never in rows or unfilled. */
+  adjustments: number;
   volume: number;
   residualIncome: number;
   repPayout: number;
-  /** Rows where residual income or split has not been filled in yet. */
+  /** Import lines where residual income or split has not been filled in yet. */
   unfilled: number;
 };
 
@@ -244,6 +286,12 @@ export type PayoutTotals = {
  *      distinction is the whole reason the columns are nullable.
  *   3. **Negatives are summed as-is.** Clawbacks reduce a total, which is what a
  *      clawback is. Nothing is clamped at zero.
+ *   4. **An adjustment line is money but not a merchant.** Its residual and rate
+ *      are NULL by design (rep_payout_rows_adjustment_no_figures) -- it pays
+ *      adjustment_amount -- so it counts in repPayout and in `adjustments`, and
+ *      never in `rows` or `unfilled`: a period holding a correction is not
+ *      "awaiting figures" because of it. A row with no line_kind (a hand-written
+ *      fixture) is an import line.
  *
  * Totals are summed in floating point and rounded once at the end. Exactness lives
  * in Postgres, which is why rep_payout is a generated column rather than computed
@@ -251,20 +299,28 @@ export type PayoutTotals = {
  * pass at the cent is enough.
  */
 export function payoutTotals(
-  rows: readonly Pick<
+  rows: readonly (Pick<
     PayoutRow,
     "volume" | "residual_income" | "rep_split_pct" | "rep_payout"
-  >[],
+  > &
+    Partial<Pick<PayoutRow, "line_kind">>)[],
 ): PayoutTotals {
   let volume = 0;
   let residualIncome = 0;
   let repPayout = 0;
   let unfilled = 0;
+  let adjustments = 0;
 
   for (const row of rows) {
+    repPayout += toNumber(row.rep_payout);
+
+    if (isAdjustment(row)) {
+      adjustments += 1;
+      continue;
+    }
+
     volume += toNumber(row.volume);
     residualIncome += toNumber(row.residual_income);
-    repPayout += toNumber(row.rep_payout);
 
     if (row.residual_income === null || row.rep_split_pct === null) {
       unfilled += 1;
@@ -272,7 +328,8 @@ export function payoutTotals(
   }
 
   return {
-    rows: rows.length,
+    rows: rows.length - adjustments,
+    adjustments,
     volume: round2(volume),
     residualIncome: round2(residualIncome),
     repPayout: round2(repPayout),
@@ -522,7 +579,8 @@ export function summarizeByPeriod(
   rows: readonly (Pick<
     PayoutRow,
     "volume" | "residual_income" | "rep_split_pct" | "rep_payout"
-  > & { period: string })[],
+  > &
+    Partial<Pick<PayoutRow, "line_kind">> & { period: string })[],
 ): PeriodSummary[] {
   const byPeriod = new Map<string, (typeof rows)[number][]>();
 

@@ -18,9 +18,11 @@ import {
   PAYOUT_ROW_COLUMNS,
   parsePeriodParam,
   payoutTotals,
+  splitPayoutLines,
   type PayoutBatch,
   type PayoutRow,
 } from "@/lib/payouts";
+import { PayoutAdjustments } from "@/components/payout-adjustments";
 import { loadSkipReviewers } from "@/lib/residual-skips";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
@@ -211,8 +213,13 @@ async function PeriodLedger({
             {isAdmin && (
               <PayoutPeriodDelete
                 period={period}
-                rowCount={overall.rows}
-                filledCount={overall.rows - overall.unfilled}
+                // Every line goes, adjustments included -- and an adjustment,
+                // like a hand-entered figure, is not something a re-import
+                // brings back.
+                rowCount={overall.rows + overall.adjustments}
+                filledCount={
+                  overall.rows - overall.unfilled + overall.adjustments
+                }
               />
             )}
           </div>
@@ -247,6 +254,10 @@ async function PeriodLedger({
 
       {groups.map((group) => {
         const totals = payoutTotals(group.rows);
+        // Merchant lines in the table; adjustment lines (post_share_correction,
+        // phase 5) in their own block under it. A rep can hold only
+        // adjustments in a month nobody has imported yet.
+        const { imports, adjustments } = splitPayoutLines(group.rows);
 
         return (
           <section key={group.agentId} className="flex flex-col gap-3">
@@ -269,6 +280,13 @@ async function PeriodLedger({
                   {totals.unfilled > 0 && (
                     <> · {totals.unfilled} awaiting figures</>
                   )}
+                  {totals.adjustments > 0 && (
+                    <>
+                      {" · "}
+                      {totals.adjustments} adjustment
+                      {totals.adjustments === 1 ? "" : "s"}
+                    </>
+                  )}
                   {" · "}
                   <Link
                     href={`/payouts/${periodParam(period)}/summary/${group.agentId}`}
@@ -280,7 +298,7 @@ async function PeriodLedger({
                 {/* The common case in one action: a rep's split is usually the
                     same percentage on every merchant, and typing it forty times
                     is how a wrong one gets missed. */}
-                {isAdmin && (
+                {isAdmin && imports.length > 0 && (
                   <PayoutBulkSplit
                     period={period}
                     agentId={group.agentId}
@@ -291,6 +309,7 @@ async function PeriodLedger({
               </div>
             </div>
 
+            {imports.length > 0 && (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -305,7 +324,7 @@ async function PeriodLedger({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {group.rows.map((row) => (
+                {imports.map((row) => (
                   <TableRow key={row.id}>
                     <TableCell className="font-mono text-xs">
                       {row.mid}
@@ -389,6 +408,12 @@ async function PeriodLedger({
                 ))}
               </TableBody>
             </Table>
+            )}
+
+            <PayoutAdjustments
+              lines={adjustments}
+              repName={group.rep?.full_name ?? "this rep"}
+            />
           </section>
         );
       })}

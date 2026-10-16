@@ -434,22 +434,45 @@ describe("constraints every writer meets, the commit included", () => {
     ).toContain("rep_payout_rows_share_snapshot");
   });
 
-  it("refuses any adjustment line until phase 5, even a well-formed one, and keeps adjustment columns off import lines", async () => {
-    // Every adjustment column valid; only rep_payout_rows_import_lines_only
-    // objects. Run as the owner, which holds every privilege and is what the
-    // definer commit runs as -- so no writer gets past it.
-    const error = await ownerInsert(`
-      insert into rep_payout_rows (agent_id, period, mid, line_kind,
-        adjustment_amount, adjusts_period, adjustment_note)
-      values ('${THIRD_AGENT_ID}', '2026-10-01', 'ADJ', 'adjustment', 12.34, '2026-07-01', 'test')`);
-    expect(error?.code).toBe("23514");
-    expect(error?.message).toContain("rep_payout_rows_import_lines_only");
+  it("admits a well-formed adjustment line since phase 5, and keeps adjustment columns off import lines", async () => {
+    // rep_payout_rows_import_lines_only refused this until 20261016160000
+    // dropped it with the merge-key swap. Run as the owner, which holds every
+    // privilege and is what the definer functions run as.
+    expect(
+      await ownerInsert(`
+        insert into rep_payout_rows (agent_id, period, mid, line_kind,
+          adjustment_amount, adjusts_period, adjustment_note)
+        values ('${THIRD_AGENT_ID}', '2026-10-01', 'ADJ', 'adjustment', 12.34, '2026-07-01', 'test')`),
+    ).toBeNull();
+    const [{ payout }] = await rows<{ payout: string }>(
+      db,
+      `select rep_payout::text as payout from rep_payout_rows where mid = 'ADJ'`,
+    );
+    expect(payout).toBe("12.34");
 
     expect(
       (await ownerInsert(`
         insert into rep_payout_rows (agent_id, period, mid, adjustment_amount)
         values ('${AGENT_ID}', '2026-10-01', 'NOTADJ', 1.00)`))?.message,
     ).toContain("rep_payout_rows_adjustment_columns");
+  });
+
+  it("refuses an adjustment line carrying a residual, rate, volume or batch", async () => {
+    for (const [column, value] of [
+      ["residual_income", "10.00"],
+      ["rep_split_pct", "50"],
+      ["volume", "1.00"],
+      ["average_ticket", "1.00"],
+      ["total_cost", "1.00"],
+    ]) {
+      const error = await ownerInsert(`
+        insert into rep_payout_rows (agent_id, period, mid, line_kind,
+          adjustment_amount, adjusts_period, adjustment_note, ${column})
+        values ('${THIRD_AGENT_ID}', '2026-10-01', 'ADJ-${column}', 'adjustment',
+                1.00, '2026-07-01', 'test', ${value})`);
+      expect(error?.code, column).toBe("23514");
+      expect(error?.message, column).toContain("rep_payout_rows_adjustment_no_figures");
+    }
   });
 
   it("refuses deleting a share that ledger lines name (ON DELETE RESTRICT)", async () => {
@@ -466,9 +489,11 @@ describe("constraints every writer meets, the commit included", () => {
 
 describe("the adjustment branch, against a scratch table built from the migration's text", () => {
   /**
-   * rep_payout_rows_import_lines_only refuses every adjustment line until
-   * phase 5, so the real table cannot hold one and the branch would otherwise
-   * ship untested. This builds a temp table whose rep_payout is the expression
+   * Written while rep_payout_rows_import_lines_only refused every adjustment
+   * line (until phase 5, 20261016160000), so the real table could not hold one
+   * and the branch would otherwise have shipped untested. Kept: it exercises
+   * the branch without the real table's CHECKs in the way (the real table's
+   * adjustment lines are in tests/rls/share-corrections.test.ts). This builds a temp table whose rep_payout is the expression
    * text COPIED OUT OF 20261014140000 -- not retyped -- over columns typed
    * exactly as the real ones, with none of the real table's CHECKs, and runs
    * the branch there. The deparsed expression is then compared with the live

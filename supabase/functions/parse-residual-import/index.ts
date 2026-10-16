@@ -31,14 +31,21 @@ import {
 } from "../_shared/residual-imports.ts";
 import {
   blockerMessage,
+  lookbackStart,
   parseResidualSheet,
   pickBlocker,
   previewSharedRow,
+  previewUnsharedRow,
   sharePreviewNote,
+  unsharedPreviewNote,
+  type PaidLine,
   type PreviewLedgerLine,
   type PreviewShare,
   type ResidualBlocker,
 } from "../_shared/residuals.ts";
+
+/** PostgREST caps a response at [api] max_rows; read in pages under that. */
+const PAGE_SIZE = 500;
 
 export default {
   fetch: withSupabase({ auth: "user" }, async (req, ctx) => {
@@ -271,7 +278,7 @@ export default {
       if (periods.length > 0) {
         const { data, error } = await ctx.supabaseAdmin
           .from("rep_payout_rows")
-          .select("period, mid, agent_id, rep_share_id, share_role")
+          .select("period, mid, agent_id, rep_share_id, share_role, line_kind")
           .in("mid", sharedMids)
           .in("period", periods);
 
@@ -288,19 +295,78 @@ export default {
             agentId: line.agent_id as string,
             repShareId: (line.rep_share_id as number | null) ?? null,
             shareRole: (line.share_role as string | null) ?? null,
+            lineKind: line.line_kind as string,
           });
         }
       }
+    }
 
-      const people = [
-        ...new Set([
-          ...shares.flatMap((share) => [
-            share.primaryAgentId,
-            share.secondaryAgentId,
-          ]),
-          ...reps.values(),
+    // ---- "Looks shared" lookback (phase 5) ------------------------------
+    //
+    // Who else was paid on each of the file's MIDs in the six months before
+    // a row's month, or in it: committed IMPORT lines (an adjustment is a
+    // correction, not a payee), read in pages because a large file times
+    // seven months can pass PostgREST's max_rows, and a truncated lookback
+    // would drop a warning silently. Admin client, for the reason above.
+    const filePeriods = parsed.rows
+      .map((row) => row.period)
+      .filter((value): value is string => value !== null)
+      .sort();
+    const paid: PaidLine[] = [];
+    if (mids.length > 0 && filePeriods.length > 0) {
+      const from = lookbackStart(filePeriods[0]);
+      const to = filePeriods[filePeriods.length - 1];
+      for (let page = 0; ; page += 1) {
+        const { data, error } = await ctx.supabaseAdmin
+          .from("rep_payout_rows")
+          .select("period, mid, agent_id")
+          .eq("line_kind", "import")
+          .in("mid", mids)
+          .gte("period", from)
+          .lte("period", to)
+          .order("id", { ascending: true })
+          .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
+
+        if (error) {
+          return json(
+            { error: `Could not read the ledger: ${error.message}` },
+            500,
+          );
+        }
+        for (const line of data ?? []) {
+          paid.push({
+            period: line.period as string,
+            mid: line.mid as string,
+            agentId: line.agent_id as string,
+          });
+        }
+        if ((data ?? []).length < PAGE_SIZE) break;
+      }
+    }
+    // The file's own rows count too: the same MID under two Agent #s.
+    for (const row of parsed.rows) {
+      const fileAgent =
+        row.agent_number_raw === null
+          ? undefined
+          : reps.get(row.agent_number_raw);
+      if (
+        fileAgent !== undefined && row.period !== null && row.mid_raw !== null
+      ) {
+        paid.push({ period: row.period, mid: row.mid_raw, agentId: fileAgent });
+      }
+    }
+
+    const people = [
+      ...new Set([
+        ...shares.flatMap((share) => [
+          share.primaryAgentId,
+          share.secondaryAgentId,
         ]),
-      ];
+        ...reps.values(),
+        ...paid.map((line) => line.agentId),
+      ]),
+    ];
+    if (people.length > 0) {
       const { data, error } = await ctx.supabaseAdmin
         .from("profiles")
         .select("id, full_name")
@@ -334,16 +400,18 @@ export default {
 
       const blocker = pickBlocker(candidates);
 
-      const preview = previewSharedRow(
-        {
-          period: row.period,
-          agentId,
-          mid: row.mid_raw,
-          blocked: blocker !== null,
-        },
-        shares,
-        ledger,
-      );
+      const previewRow = {
+        period: row.period,
+        agentId,
+        mid: row.mid_raw,
+        blocked: blocker !== null,
+      };
+      const preview = previewSharedRow(previewRow, shares, ledger);
+      // Only where no share covers the month: one flag per row, in the
+      // precedence _shared/residuals.ts documents.
+      const unshared = preview === null
+        ? previewUnsharedRow(previewRow, shares, paid)
+        : null;
 
       return {
         batch_id: batchId,
@@ -367,16 +435,26 @@ export default {
         residual_income: row.residual_income,
         rep_split_pct: row.rep_split_pct,
         blocker,
-        preview_flag: preview?.flag ?? null,
-        preview_note: preview === null || agentId === null
+        preview_flag: preview?.flag ?? unshared?.flag ?? null,
+        preview_note: agentId === null
           ? null
-          : sharePreviewNote(preview, {
+          : preview !== null
+          ? sharePreviewNote(preview, {
             mid: row.mid_raw ?? "",
             period: row.period ?? "",
             signerName: nameOf(preview.share.primaryAgentId),
             partnerName: nameOf(preview.share.secondaryAgentId),
             fileRepName: nameOf(agentId),
-          }),
+          })
+          : unshared !== null
+          ? unsharedPreviewNote(unshared, {
+            mid: row.mid_raw ?? "",
+            period: row.period ?? "",
+            fileRepName: nameOf(agentId),
+            hasMerchant: row.mid_raw !== null && merchants.has(row.mid_raw),
+            nameOf,
+          })
+          : null,
         // A misplaced comma names its cell (D-10), so the admin is not left
         // hunting across five figures for the one that was refused.
         error:
@@ -422,7 +500,10 @@ export default {
 
     const { error: countError } = await ctx.supabaseAdmin
       .from("rep_payout_batches")
-      .update({ row_count: staged.length })
+      .update({
+        row_count: staged.length,
+        adjustment_rows_ignored: parsed.adjustments_ignored,
+      })
       .eq("id", batchId);
 
     if (countError) {
@@ -440,6 +521,7 @@ export default {
       row_count: staged.length,
       blocked_count: blockedCount,
       flagged_count: flaggedCount,
+      adjustments_ignored: parsed.adjustments_ignored,
     });
   }),
 };
@@ -454,7 +536,8 @@ export default {
     --header 'Content-Type: application/json' \
     --data '{"batch_id":1}'
 
-  Expected: 200 with { batch_id, row_count, blocked_count, flagged_count }
+  Expected: 200 with { batch_id, row_count, blocked_count, flagged_count,
+            adjustments_ignored }
             400 if the file is unreadable or a required column is missing
             404 if the batch does not exist, or has no uploaded file
             409 if the batch is already committed or abandoned

@@ -317,6 +317,25 @@ async function BatchReview({
             </section>
           )}
 
+          {/* Rows the file marked Line = Adjustment, which the parser does
+              not stage (phase 5): a re-imported export carries the CRM's own
+              adjustment lines, and importing one would turn a correction into
+              processor data. Kept on the batch, so this survives a reload. */}
+          {batch.adjustment_rows_ignored > 0 && (
+            <Callout tone="warning">
+              <p className="font-medium" data-testid="adjustments-ignored">
+                {batch.adjustment_rows_ignored} adjustment line
+                {batch.adjustment_rows_ignored === 1 ? "" : "s"} ignored:
+                adjustments are entered in the CRM.
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                The file had rows marked &ldquo;Adjustment&rdquo; in its Line
+                column. They were not read, and the adjustments already in the
+                ledger are unchanged.
+              </p>
+            </Callout>
+          )}
+
           {flagged.length > 0 && batch.status === "review" && (
             <section
               className="flex flex-col gap-2"
@@ -330,7 +349,8 @@ async function BatchReview({
               </h2>
               <p className="text-xs text-muted-foreground">
                 None of these stops the import. They say what committing will
-                do with each row on a shared account, as the shares stand now;
+                do with each row on a shared account, or warn that a row looks
+                shared and no share covers its month, as the shares stand now;
                 a share changed before you commit changes the outcome.
               </p>
               <ul className="flex flex-col gap-2">

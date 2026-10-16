@@ -495,3 +495,67 @@ describe("parseResidualSheet", () => {
     expect(result.ok).toBe(false);
   });
 });
+
+describe("the Line column: exported adjustment lines are skipped, never staged (phase 5)", () => {
+  const WITH_LINE = [...HEADER, COLUMN_HEADERS.residual_income, COLUMN_HEADERS.rep_split, COLUMN_HEADERS.line];
+
+  it("skips a row marked Adjustment, in any case, and counts it", () => {
+    const result = parseResidualSheet([
+      WITH_LINE,
+      [...row(), "88.40", "60", ""],
+      [...row({ 2: "MID-2" }), "", "", "Adjustment"],
+      [...row({ 2: "MID-3" }), "", "", "  ADJUSTMENT "],
+    ]);
+    if (!result.ok) throw new Error("expected a parse");
+    expect(result.rows.map((r) => r.mid_raw)).toEqual(["MID-1"]);
+    expect(result.adjustments_ignored).toBe(2);
+  });
+
+  it("skips the adjustment BEFORE the duplicate check: it shares its key with the import line beside it", () => {
+    const result = parseResidualSheet([
+      WITH_LINE,
+      [...row(), "88.40", "60", ""],
+      [...row(), "", "", "Adjustment"],
+    ]);
+    if (!result.ok) throw new Error("expected a parse");
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].blockers).toEqual([]);
+    expect(result.rows[0].row_number).toBe(2);
+  });
+
+  it("counts a skipped line in the sheet's row numbers, so row 3 is still row 3", () => {
+    const result = parseResidualSheet([
+      WITH_LINE,
+      [...row(), "", "", "Adjustment"],
+      [...row({ 2: "MID-2" }), "", "", ""],
+    ]);
+    if (!result.ok) throw new Error("expected a parse");
+    expect(result.rows.map((r) => r.row_number)).toEqual([3]);
+  });
+
+  it("imports anything else in the column, blank included", () => {
+    const result = parseResidualSheet([
+      WITH_LINE,
+      [...row(), "", "", ""],
+      [...row({ 2: "MID-2" }), "", "", "Import"],
+      [...row({ 2: "MID-3" }), "", "", "adj"],
+    ]);
+    if (!result.ok) throw new Error("expected a parse");
+    expect(result.rows).toHaveLength(3);
+    expect(result.adjustments_ignored).toBe(0);
+  });
+
+  it("does not need the column: a processor file without it counts zero", () => {
+    const result = parseResidualSheet([HEADER, row()]);
+    if (!result.ok) throw new Error("expected a parse");
+    expect(result.adjustments_ignored).toBe(0);
+  });
+
+  it("refuses a file of adjustments only, saying why", () => {
+    const result = parseResidualSheet([WITH_LINE, [...row(), "", "", "Adjustment"]]);
+    expect(result).toEqual({
+      ok: false,
+      error: "That file holds only adjustment lines. Adjustments are entered in the CRM, not imported.",
+    });
+  });
+});

@@ -35,7 +35,12 @@ import {
 
 type PeriodRow = Pick<
   PayoutRow,
-  "period" | "volume" | "residual_income" | "rep_split_pct" | "rep_payout"
+  | "period"
+  | "volume"
+  | "residual_income"
+  | "rep_split_pct"
+  | "rep_payout"
+  | "line_kind"
 >;
 
 async function PayoutPeriods() {
@@ -46,7 +51,7 @@ async function PayoutPeriods() {
   // application code, where it could drift out of sync with it.
   const { data, error } = await supabase
     .from("rep_payout_rows")
-    .select("period, volume, residual_income, rep_split_pct, rep_payout")
+    .select("period, volume, residual_income, rep_split_pct, rep_payout, line_kind")
     .order("period", { ascending: false });
 
   if (error) {

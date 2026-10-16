@@ -16,6 +16,7 @@ import {
   PAYOUT_ROW_COLUMNS,
   parsePeriodParam,
   payoutTotals,
+  splitPayoutLines,
   type PayoutRow,
 } from "@/lib/payouts";
 import { PageShell } from "@/components/page-shell";
@@ -85,6 +86,9 @@ async function Summary({
 
   const rep = repData as { full_name: string; agent_number: string | null } | null;
   const totals = payoutTotals(rows);
+  // Adjustment lines (post_share_correction, phase 5) are printed in their own
+  // block, naming the month each corrects; the total includes them.
+  const { imports, adjustments } = splitPayoutLines(rows);
 
   return (
     <div className="flex flex-col gap-6">
@@ -141,7 +145,7 @@ async function Summary({
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row) => (
+                {imports.map((row) => (
                   <tr key={row.id} className="border-b last:border-0">
                     <td className="py-1.5 font-mono text-xs">{row.mid}</td>
                     <td className="py-1.5">{formatText(row.merchant_name)}</td>
@@ -155,6 +159,39 @@ async function Summary({
                       {formatPct(row.rep_split_pct)}
                     </td>
                     <td className="py-1.5 text-right font-medium tabular-nums">
+                      {formatMoney(row.rep_payout)}
+                    </td>
+                  </tr>
+                ))}
+                {adjustments.length > 0 && (
+                  <tr>
+                    <th
+                      colSpan={6}
+                      className="pb-1 pt-4 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground"
+                    >
+                      Adjustments
+                    </th>
+                  </tr>
+                )}
+                {adjustments.map((row) => (
+                  <tr
+                    key={row.id}
+                    className="border-b last:border-0"
+                    data-testid="statement-adjustment"
+                  >
+                    <td className="py-1.5 align-top font-mono text-xs">
+                      {row.mid}
+                    </td>
+                    <td className="py-1.5 align-top" colSpan={4}>
+                      {formatText(row.merchant_name)}
+                      <span className="block break-words text-xs text-muted-foreground">
+                        Corrects {formatPeriod(row.adjusts_period)}
+                        {row.adjustment_note
+                          ? ` — ${row.adjustment_note}`
+                          : ""}
+                      </span>
+                    </td>
+                    <td className="py-1.5 text-right align-top font-medium tabular-nums">
                       {formatMoney(row.rep_payout)}
                     </td>
                   </tr>

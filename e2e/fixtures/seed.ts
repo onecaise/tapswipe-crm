@@ -3019,3 +3019,115 @@ export async function skipEvidence(batchId: number): Promise<{
     ackAudits: audits.count ?? 0,
   };
 }
+
+/** The note on the e2e adjustment pair: long, so the block has to wrap it. */
+export const ADJUSTMENT_NOTE =
+  "Shared account agreed after February was committed: the partner is owed a fifth of that month's payout, moved here as an adjustment pair so no committed line changes.";
+
+/**
+ * A correction pair as post_share_correction() writes one (phase 5 of
+ * docs/design/residual-splits.md, §6): in `period`, the signer (agent) at
+ * -10.61 and the partner (agent2) at +10.61, both correcting the month before,
+ * plus one ordinary import line for the signer so the period page shows a
+ * merchant table AND an Adjustments block. Written as the service role
+ * directly -- the RPC needs an admin's auth.uid(), and its arithmetic is
+ * pinned in tests/rls/share-corrections.test.ts; what this spec needs is the
+ * rows. Also a review batch whose parse ignored two adjustment lines, for the
+ * review screen's notice. Clears an earlier run's first.
+ */
+export async function plantAdjustments(period: string): Promise<{
+  signerId: string;
+  partnerId: string;
+  mid: string;
+  batchId: number;
+}> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const mid = `E2E-ADJ-${period}`;
+  const fileName = `e2e-adjustments-${period}.xlsx`;
+  const month = firstOfMonth(period);
+  const [year, monthNumber] = period.split("-").map(Number);
+  const prior = `${monthNumber === 1 ? year - 1 : year}-${String(monthNumber === 1 ? 12 : monthNumber - 1).padStart(2, "0")}-01`;
+
+  const { data: reps, error: repsError } = await db
+    .from("profiles")
+    .select("id, email")
+    .in("email", [PERSONAS.admin.email, PERSONAS.agent.email, PERSONAS.agent2.email]);
+  if (repsError || (reps ?? []).length !== 3) {
+    throw new Error(`adjustment reps: ${repsError?.message ?? "personas missing; run seedE2E() first"}`);
+  }
+  const idOf = (address: string) => reps!.find((rep) => rep.email === address)!.id as string;
+  const adminId = idOf(PERSONAS.admin.email);
+  const signerId = idOf(PERSONAS.agent.email);
+  const partnerId = idOf(PERSONAS.agent2.email);
+
+  // ---- Clear an earlier run. ----
+  const { error: oldLinesError } = await db.from("rep_payout_rows").delete().eq("mid", mid);
+  if (oldLinesError) throw new Error(`old adjustment lines: ${oldLinesError.message}`);
+  const { data: oldBatches } = await db.from("rep_payout_batches").select("id").eq("file_name", fileName);
+  const oldBatchIds = (oldBatches ?? []).map((b) => b.id as number);
+  if (oldBatchIds.length > 0) {
+    await db.from("rep_payout_import_rows").delete().in("batch_id", oldBatchIds);
+    const { error } = await db.from("rep_payout_batches").delete().in("id", oldBatchIds);
+    if (error) throw new Error(`old adjustment batches: ${error.message}`);
+  }
+
+  // ---- Plant. ----
+  const adjustment = (agentId: string, amount: number) => ({
+    agent_id: agentId,
+    period: month,
+    mid,
+    merchant_name: LONG_MERCHANT_NAME,
+    line_kind: "adjustment",
+    adjustment_amount: amount,
+    adjusts_period: prior,
+    adjustment_note: ADJUSTMENT_NOTE,
+  });
+  const { error: linesError } = await db.from("rep_payout_rows").insert([
+    {
+      // Explicit: a multi-row PostgREST insert sends the UNION of the rows'
+      // keys, so a row that omits line_kind sends NULL, not the default.
+      line_kind: "import",
+      agent_id: signerId,
+      period: month,
+      mid,
+      merchant_name: "E2E Adjusted Co",
+      volume: 1000,
+      residual_income: 50,
+      rep_split_pct: 50,
+    },
+    adjustment(signerId, -10.61),
+    adjustment(partnerId, 10.61),
+  ]);
+  if (linesError) throw new Error(`adjustment lines: ${linesError.message}`);
+
+  const { data: batch, error: batchError } = await db
+    .from("rep_payout_batches")
+    .insert({
+      imported_by: adminId,
+      file_key: `e2e/${fileName}`,
+      file_name: fileName,
+      status: "review",
+      row_count: 1,
+      adjustment_rows_ignored: 2,
+    })
+    .select("id")
+    .single();
+  if (batchError || !batch) throw new Error(`adjustment batch: ${batchError?.message ?? "no row"}`);
+  const { error: rowError } = await db.from("rep_payout_import_rows").insert({
+    batch_id: batch.id,
+    row_number: 2,
+    period: month,
+    agent_id: signerId,
+    agent_number_raw: PERSONAS.agent.agentNumber,
+    mid_raw: mid,
+    merchant_name_raw: "E2E Adjusted Co",
+    volume: 1000,
+  });
+  if (rowError) throw new Error(`adjustment staging: ${rowError.message}`);
+
+  return { signerId, partnerId, mid, batchId: batch.id as number };
+}

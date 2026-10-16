@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  LOOKS_SHARED_MONTHS,
+  lookbackStart,
   monthLabel,
+  monthsBefore,
   previewSharedRow,
+  previewUnsharedRow,
   shareCovering,
   sharePreviewNote,
+  unsharedPreviewNote,
+  type PaidLine,
   type PreviewLedgerLine,
   type PreviewShare,
 } from "../../supabase/functions/_shared/residuals";
@@ -141,5 +147,104 @@ describe("sharePreviewNote", () => {
   it("labels months", () => {
     expect(monthLabel("2026-01-01")).toBe("January 2026");
     expect(monthLabel("2026-12-01")).toBe("December 2026");
+  });
+});
+
+describe("previewSharedRow ignores adjustment lines (20261016160000)", () => {
+  it("does not take an adjustment on the signer's key for a foreign line", () => {
+    const lines: PreviewLedgerLine[] = [
+      { period: JUL, mid: "MID-1", agentId: SIGNER, repShareId: null, shareRole: null, lineKind: "adjustment" },
+      { period: JUL, mid: "MID-1", agentId: PARTNER, repShareId: null, shareRole: null, lineKind: "adjustment" },
+    ];
+    expect(flag(row(SIGNER), lines)).toBeNull();
+    // The same lines as import lines are foreign, as before.
+    expect(flag(row(SIGNER), lines.map((l) => ({ ...l, lineKind: "import" })))).toBe("line_not_shared");
+  });
+});
+
+describe("previewUnsharedRow (phase 5): share_not_in_force and looks_shared", () => {
+  const OTHER = "other";
+  const unshared = (r: ReturnType<typeof row>, shares: PreviewShare[], paid: PaidLine[] = []) =>
+    previewUnsharedRow(r, shares, paid);
+
+  it("is silent where a share covers the month (previewSharedRow speaks there)", () => {
+    expect(unshared(row(THIRD), [SHARE], [{ period: JUL, mid: "MID-1", agentId: OTHER }])).toBeNull();
+  });
+
+  it("flags a share that has ended, or starts later, and names every share on the MID", () => {
+    const ended = unshared(row(SIGNER, { period: SEP }), [SHARE]);
+    expect(ended).toEqual({ flag: "share_not_in_force", shares: [SHARE] });
+    const later = unshared(row(SIGNER, { period: "2026-06-01" }), [SHARE]);
+    expect(later?.flag).toBe("share_not_in_force");
+    // A share on another MID is not this MID's.
+    expect(unshared(row(SIGNER, { mid: "MID-2" }), [SHARE])).toBeNull();
+  });
+
+  it("prefers share_not_in_force to looks_shared", () => {
+    const result = unshared(row(SIGNER, { period: SEP }), [SHARE], [{ period: AUG, mid: "MID-1", agentId: OTHER }]);
+    expect(result?.flag).toBe("share_not_in_force");
+  });
+
+  it("flags a MID another rep was paid on within six months before, or in, the row's month", () => {
+    const at = (period: string): PaidLine => ({ period, mid: "MID-1", agentId: OTHER });
+    // In the month itself (another row of the file, or a committed line).
+    expect(unshared(row(SIGNER), [], [at(JUL)])?.flag).toBe("looks_shared");
+    // Six months back is the edge, inside; seven is outside.
+    expect(lookbackStart(JUL)).toBe("2026-01-01");
+    expect(unshared(row(SIGNER), [], [at("2026-01-01")])?.flag).toBe("looks_shared");
+    expect(unshared(row(SIGNER), [], [at("2025-12-01")])).toBeNull();
+    // A LATER month is not a lookback.
+    expect(unshared(row(SIGNER), [], [at(AUG)])).toBeNull();
+  });
+
+  it("is not fooled by the same rep, or by another MID", () => {
+    expect(unshared(row(SIGNER), [], [{ period: JUL, mid: "MID-1", agentId: SIGNER }])).toBeNull();
+    expect(unshared(row(SIGNER), [], [{ period: JUL, mid: "MID-2", agentId: OTHER }])).toBeNull();
+  });
+
+  it("never flags a blocked or unresolved row", () => {
+    const paid = [{ period: JUL, mid: "MID-1", agentId: OTHER }];
+    expect(unshared(row(SIGNER, { blocked: true }), [], paid)).toBeNull();
+    expect(unshared(row(null), [], paid)).toBeNull();
+    expect(unshared(row(SIGNER, { period: null }), [], paid)).toBeNull();
+    expect(unshared(row(SIGNER, { mid: null }), [], paid)).toBeNull();
+  });
+
+  it("does month arithmetic across a year boundary, without Date", () => {
+    expect(LOOKS_SHARED_MONTHS).toBe(6);
+    expect(monthsBefore("2026-03-01", 6)).toBe("2025-09-01");
+    expect(monthsBefore("2026-01-01", 1)).toBe("2025-12-01");
+    expect(monthsBefore("2026-12-01", 12)).toBe("2025-12-01");
+    expect(monthsBefore("2026-07-01", 0)).toBe("2026-07-01");
+  });
+
+  describe("unsharedPreviewNote", () => {
+    const names: Record<string, string> = { [SIGNER]: "Ann Ito", [PARTNER]: "Bo Lee", [OTHER]: "Cy Day" };
+    const context = { mid: "MID-1", period: SEP, fileRepName: "Ann Ito", hasMerchant: true, nameOf: (id: string) => names[id] ?? id };
+
+    it("names the share and its range, and says the rep is paid the whole rep side", () => {
+      expect(unsharedPreviewNote({ flag: "share_not_in_force", shares: [SHARE] }, context)).toBe(
+        "MID MID-1 has a share (Ann Ito / Bo Lee, July 2026 to August 2026), but it does not cover September 2026. This row imports as an ordinary line paying Ann Ito the whole rep side.",
+      );
+      expect(
+        unsharedPreviewNote({ flag: "share_not_in_force", shares: [{ ...SHARE, effectiveTo: null, effectiveFrom: "2026-11-01" }] }, context),
+      ).toContain("(Ann Ito / Bo Lee, from November 2026)");
+    });
+
+    it("names the other reps once each, and gives the advice the merchant record allows", () => {
+      const preview = {
+        flag: "looks_shared" as const,
+        others: [
+          { period: JUL, mid: "MID-1", agentId: OTHER },
+          { period: AUG, mid: "MID-1", agentId: OTHER },
+        ],
+      };
+      expect(unsharedPreviewNote(preview, context)).toBe(
+        "MID MID-1 is also paid to Cy Day within the six months to September 2026, and no share is set on it. This row imports for Ann Ito alone. If two reps share this account, set it on the merchant page before committing.",
+      );
+      expect(unsharedPreviewNote(preview, { ...context, hasMerchant: false })).toContain(
+        "No merchant in the CRM has this MID, so a share cannot be set on it until one is added.",
+      );
+    });
   });
 });

@@ -41,6 +41,7 @@ type Row = {
   residual_income: string | null;
   rep_split_pct: string | null;
   rep_payout: string | null;
+  line_kind: string;
 };
 
 /** numeric arrives as a string; a workbook should carry numbers, not text. */
@@ -88,7 +89,7 @@ export default {
       let query = ctx.supabase
         .from("rep_payout_rows")
         .select(
-          "agent_id, period, mid, merchant_name, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout",
+          "agent_id, period, mid, merchant_name, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, line_kind",
         )
         .order("period", { ascending: false })
         .order("agent_id", { ascending: true })
@@ -136,6 +137,12 @@ export default {
     // it does not recognise. `Agent` does not collide with `Agent #` — the
     // normaliser reduces them to `agent` and `agent#`.
     //
+    // `Line` (phase 5) is the one extra the parser reads: "Adjustment" on a line
+    // post_share_correction() wrote, blank on an import line. The parser SKIPS a
+    // row marked Adjustment, so a round trip can never turn a correction into an
+    // import line or merge it into one. An adjustment's Residual income and Rep
+    // split are blank (it has neither); its Rep payout is the adjustment amount.
+    //
     // DELIBERATELY NO TOTAL ROW. A total has no MID, so re-importing this file would
     // block that row with missing_mid and refuse the whole batch — breaking the
     // round trip that is the entire point of the export. The pages show the totals.
@@ -152,6 +159,7 @@ export default {
         COLUMN_HEADERS.residual_income,
         COLUMN_HEADERS.rep_split,
         "Rep payout",
+        COLUMN_HEADERS.line,
       ],
     ];
 
@@ -174,6 +182,7 @@ export default {
         num(row.residual_income),
         num(row.rep_split_pct),
         num(row.rep_payout),
+        row.line_kind === "adjustment" ? "Adjustment" : "",
       ]);
     }
 

@@ -240,14 +240,25 @@ const SEQUENCE: StagedRow[][] = [
   ],
 ];
 
-type Variant = "pre-phase-4 old" | "guarded old" | "v2";
+/**
+ * "pre-phase-5 v2" is v2 exactly as phase 4b left it, before the merge key
+ * became a partial index (20261016160000) -- so the comparison also proves the
+ * swap changed nothing v2 does to an unshared batch.
+ */
+const MERGE_KEY_MIGRATION = "20261016160000_import_merge_key.sql";
+
+type Variant = "pre-phase-4 old" | "guarded old" | "pre-phase-5 v2" | "v2";
 
 async function runSequence(
   variant: Variant,
   withShareElsewhere: boolean,
 ): Promise<{ db: TestDb; returns: number[]; skipped: number[] }> {
   const db = await createTestDb(
-    variant === "pre-phase-4 old" ? await migrationsBefore(V2_MIGRATION) : undefined,
+    variant === "pre-phase-4 old"
+      ? await migrationsBefore(V2_MIGRATION)
+      : variant === "pre-phase-5 v2"
+        ? await migrationsBefore(MERGE_KEY_MIGRATION)
+        : undefined,
   );
   await resetData(db);
   const fx: PayoutFixtures = await seedPayouts(db);
@@ -267,7 +278,7 @@ async function runSequence(
   const returns: number[] = [];
   const skipped: number[] = [];
   for (const id of batches) {
-    if (variant === "v2") {
+    if (variant === "v2" || variant === "pre-phase-5 v2") {
       const result = await commitV2(db, ADMIN_ID, id);
       expect(Object.keys(result).sort()).toEqual(["skipped", "written"]);
       returns.push(result.written);
@@ -283,14 +294,17 @@ describe.each([
   { label: "no share anywhere", withShareElsewhere: false },
   { label: "a share on a merchant the batches never touch", withShareElsewhere: true },
 ])("with no shared account in the batch, v2 is the old commit ($label)", ({ withShareElsewhere }) => {
-  const NEW_BATCH_KEYS = ["skipped_rows", "skips_acknowledged_at"];
+  // The batch columns added after the pre-phase-4 function: phase 4 (the skip
+  // record) and phase 5 (adjustment rows a parse ignored).
+  const NEW_BATCH_KEYS = ["skipped_rows", "skips_acknowledged_at", "adjustment_rows_ignored"];
   const runs = {} as Record<Variant, Awaited<ReturnType<typeof runSequence>>>;
 
   beforeAll(async () => {
     runs["pre-phase-4 old"] = await runSequence("pre-phase-4 old", withShareElsewhere);
     runs["guarded old"] = await runSequence("guarded old", withShareElsewhere);
+    runs["pre-phase-5 v2"] = await runSequence("pre-phase-5 v2", withShareElsewhere);
     runs.v2 = await runSequence("v2", withShareElsewhere);
-  }, 180_000);
+  }, 240_000);
 
   afterAll(async () => {
     for (const run of Object.values(runs)) await run?.db.close();
@@ -299,6 +313,8 @@ describe.each([
   it("returns written = the old count at every step, and skips nothing", () => {
     expect(runs.v2.returns).toEqual(runs["guarded old"].returns);
     expect(runs.v2.returns).toEqual(runs["pre-phase-4 old"].returns);
+    expect(runs.v2.returns).toEqual(runs["pre-phase-5 v2"].returns);
+    expect(runs.v2.skipped).toEqual(runs["pre-phase-5 v2"].skipped);
     // Not vacuous: every batch wrote something.
     expect(runs.v2.returns).toEqual([1, 3, 3, 2, 3, 1]);
     expect(runs.v2.skipped).toEqual([0, 0, 0, 0, 0, 0]);
@@ -308,6 +324,12 @@ describe.each([
     const v2 = await snapshot(runs.v2.db);
     const guarded = await snapshot(runs["guarded old"].db);
     expect(v2).toEqual(guarded);
+
+    // Against v2 before the merge-key swap, only the batch column phase 5
+    // added differs.
+    expect(await snapshot(runs.v2.db, ["adjustment_rows_ignored"])).toEqual(
+      await snapshot(runs["pre-phase-5 v2"].db),
+    );
 
     // Against the function as it was before this phase, the two batch columns
     // this phase added are the only difference, so they are set aside...
@@ -899,7 +921,10 @@ describe("catalog, grants and redaction", () => {
       /\b(residual_income|account_residual_income|rep_split_pct|rep_share_id|share_role|primary_rep_pct|secondary_rep_pct)\s*=/,
     );
     const partnerInsert = body.slice(body.indexOf("-- 4b."), body.indexOf("-- 5."));
-    expect(partnerInsert).toMatch(/on conflict \(period, agent_id, mid\) do nothing;/);
+    // The partial merge key (20261016160000): every target names the predicate.
+    expect(partnerInsert).toMatch(
+      /on conflict \(period, agent_id, mid\) where line_kind = 'import' do nothing;/,
+    );
   });
 
   it("is executable by authenticated and service_role only", async () => {
