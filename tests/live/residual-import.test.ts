@@ -20,6 +20,7 @@ import {
   RESIDUAL_BUCKET,
   UNKNOWN_AGENT_NUMBER,
   adminClient,
+  anonClient,
   skipWhenFunctionsDown,
   getStackConfig,
   invoke,
@@ -417,6 +418,35 @@ describe("committing over HTTP", () => {
 
     expect(error).not.toBeNull();
     expect(error?.message).toMatch(/admin only/i);
+  });
+
+  // commit_residual_import_v2 (phase 4) is not called by the app until phase
+  // 4b, so this is the only thing proving PostgREST exposes it with the right
+  // grant: anon holds no EXECUTE, an agent meets the hand-written guard, and an
+  // admin gets the jsonb shape back.
+  it("exposes commit_residual_import_v2: anon refused, agent refused, admin commits", async () => {
+    const { batchId } = await importFile([
+      HEADER,
+      ["Jul-26", OWNER_NUMBER, "LIVE-MID-V2", "Live V2 Co", 100, 5, 3],
+    ]);
+
+    const anon = await anonClient().rpc("commit_residual_import_v2", {
+      batch_id_input: batchId,
+    });
+    expect(anon.error?.code).toBe("42501");
+
+    const agent = await userClient(fixtures.tokens.owner).rpc(
+      "commit_residual_import_v2",
+      { batch_id_input: batchId },
+    );
+    expect(agent.error?.message).toMatch(/admin only/i);
+
+    const admin = await userClient(fixtures.tokens.admin).rpc(
+      "commit_residual_import_v2",
+      { batch_id_input: batchId },
+    );
+    expect(admin.error).toBeNull();
+    expect(admin.data).toEqual({ written: 1, skipped: 0 });
   });
 
   it("refuses while a row is still blocked", async () => {

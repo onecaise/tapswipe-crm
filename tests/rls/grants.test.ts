@@ -638,6 +638,9 @@ describe("grant surface after all migrations", () => {
       "public.shared_part(numeric, numeric, numeric)",
       // Writes both lines of a shared pair as the owner.
       "public.set_shared_residual(int, date, numeric)",
+      // The shared-aware commit: writes the ledger, deletes staging and
+      // writes audit_log as the owner.
+      "public.commit_residual_import_v2(int)",
     ]) {
       expect(
         await canExecute(db, "anon", signature),
