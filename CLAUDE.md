@@ -2,18 +2,108 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+This file is the **core**: security and safety rules first, then deployment, commands, test baselines and an index. The long reference material lives in `docs/claude/*.md`, moved there **verbatim** on 19 Oct 2026 — those files are binding rules too, not history. Read the relevant one before touching its area.
+
+## Security and safety rules (read first)
+
+Each line is the rule; the full reasoning is in the linked file or in the sections directly below.
+
+**Hosted projects and secrets**
+
+- **Never touch the live Supabase projects (dev or prod) without asking first**, and treat `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) as live production. Use the guarded `npm run` wrappers, never trust `npm run db:push -- --db-url <prod>`, and run `scripts/push-prod-migration.ps1 -DryRun` before a prod push. → "Hosted projects and deployment" below.
+- **Never run `npx supabase config push`** and **never run `supabase projects api-keys`** by hand. Set the prod DB password with `Read-Host -AsSecureString`, never a literal. → below.
+- **The service-role key belongs in Edge Function secrets only**; the Next app holds the publishable key only, and `.env.deployed.local` stays publishable-keys-only. → "Next.js / auth wiring" below.
+- **SheetJS stays pinned to the cdn.sheetjs.com 0.20.3 build**, never `npm:xlsx` (two high-severity advisories). → `docs/claude/payouts-and-teardown.md`.
+
+**Database access control**
+
+- **Admin sees every row; an active agent sees only `agent_id = auth.uid()`** — `(agent_id = auth.uid() and is_active_agent()) or is_admin()`. Reuse the two `security definer` helpers; never inline a role lookup. → "Access control" below.
+- **A new table needs RLS *and* explicit grants** (the four-step checklist below); **a new function needs `revoke all … from public` + `grant execute … to authenticated, service_role`** in the same migration. Never grant `anon` anything. **Do not rely on `ensure_rls`.** → below.
+- **The three `*_secrets` tables: zero policies, zero grants, Edge Function only** — including the agent's first submission. Never add a policy or a grant. → "Three tiers" below.
+- **`security invoker` is the default for RPCs.** `definer` only when the function must reach what the caller may not, and then it owes a hand-written guard first (`is_admin()` / `is_active_agent()`) plus `set search_path`. `search_crm` and `dashboard_counts` must stay invoker (tests assert `prosecdef` false). → `docs/claude/rpcs-profiles-audit.md`.
+- **The cross-book definer functions return redacted shapes, built with `jsonb_build_object` so hidden fields are ABSENT, not null**: `check_duplicates()` (warns only — **must never become a block**), `accounts_in_city()` (equality on `norm_city()` only; never a prefix/autocomplete for non-admins), `my_share_partners()` (party-only for every caller; a rep never sees the partner's share, rate or payout, and gets no access to the partner's merchant). → `docs/claude/rpcs-profiles-audit.md`.
+- **`profiles` has no client write path**: new columns are set only by a `security definer` RPC with `is_admin()` first (`set_user_role`, `set_agent_number`, `set_territory`, `set_manager`). **`territory` and `manager_id` must never appear in a policy**; `role` stays `'agent' | 'admin'`; manager graph is one hop. → `docs/claude/rpcs-profiles-audit.md`.
+- **`log_cross_agent_change()` fails closed on purpose** — never wrap its audit insert in an exception handler. A new table must have **every verb** audited somewhere. `audit_log` has no insert policy and `authenticated` holds `select` only. → `docs/claude/rpcs-profiles-audit.md`.
+- **A column that must be immutable is a GRANT, not a policy.** Column-level UPDATE grants: `quotes.status` only; `rep_payout_rows.residual_income` + `rep_split_pct` only; `rep_payout_batches.status` only (and a trigger admits only `review -> abandoned`). `notes` has no UPDATE at either layer. → `docs/claude/proposals-and-catalog.md`, `docs/claude/payouts-and-teardown.md`.
+- **Any column the client supplies and no policy reads is unvalidated** (the `documents.file_key` lesson). Fix it at the layer that cannot be skipped: the price lock trigger `snapshot_quote_line_item()` overwrites every snapshot column; `enforce_quote_version()` assigns versions and refuses foreign groups; the browser sends only `product_id` and `quantity`. → `docs/claude/edge-functions-and-storage.md`, `docs/claude/proposals-and-catalog.md`.
+- **The commit RPC's merge rule is `coalesce(excluded.<col>, rep_payout_rows.<col>)`** — reversing the arguments silently wipes hand-entered residuals. Every `on conflict` on `rep_payout_rows` must say `where line_kind = 'import'`. → "Three tiers" below, `docs/claude/payouts-and-teardown.md`.
+- **The legacy `documents` table and bucket are closed** (SELECT for admin only, no client write, its three functions removed). Do not reopen them. → `docs/claude/notes-tasks-documents.md`.
+
+**Edge Functions, Storage and the app**
+
+- **All twelve functions are `verify_jwt = false`, so each authenticates itself in a fixed order**: `withSupabase` → `callerIsActive` on the caller-scoped client → authorization through RLS → only then `supabaseAdmin`. Return **404, never 403**, for "not yours". → "Edge Function authentication" below.
+- **`export-residuals` must never use `supabaseAdmin`** — RLS is its whole authorization. → Edge Functions table below.
+- **Bulk provisioning never hands out a credential**: `provision-user-batch` discards the temporary password unread. **Deactivation is two layers** (ban in GoTrue first, then `profiles.is_active`). `create-user` must delete the `auth.users` row if the `profiles` insert fails. → `docs/claude/user-accounts.md`, "Three tiers" below.
+- **Inline signed URLs are allow-listed by type** (PDF, plain text, three raster images; **never SVG**); everything else is forced to attachment. → `docs/claude/reference-data-and-marketing.md`.
+- **The per-bucket 50 MiB limit is the real upload ceiling**; `config.toml`'s `file_size_limit` limits nothing. Hosted buckets need it set out-of-band. → `docs/claude/edge-functions-and-storage.md`.
+- **The secrets validators exist twice and must change together** (`lib/pre-app-validation.ts` and `_shared/pre-app-secrets.ts`); the residual parser exists **once** — do not create a browser twin. → `docs/claude/edge-functions-and-storage.md`.
+- **Never show a `functions.invoke()` error's `.message` to a user** — use `lib/edge-functions.ts`. → "Next.js / auth wiring" below.
+- **"Email" on marketing materials sends nothing** and must say so; when sending lands it goes next to that log line. → `docs/claude/reference-data-and-marketing.md`.
+- **Nothing is invented on the printed proposal** (`PROPOSAL_TERMS` empty by default; no phone; no stale contact) and print routes return **404, never 403**. → `docs/claude/proposals-and-catalog.md`.
+
+## Security and access rules — the core text
+
+### Access control is the core design constraint
+
+One rule, everywhere: **`role = 'admin'` sees every row; an active `role = 'agent'` sees only rows where `agent_id = auth.uid()`.** Policies are written as `(agent_id = auth.uid() and is_active_agent()) or is_admin()`. Child tables of `pre_apps` (`pre_app_owners`, `pre_app_terminal`, `pre_app_business_profile`) reach the check through an `exists (select 1 from pre_apps ...)` subquery on the parent, with `is_active_agent()` wrapping the `exists` rather than inside it. Deletes are usually admin-only. (`documents` was the exception — reps deleted their own uploads — until 20261013121000 closed that table to every client write.)
+
+The `is_active_agent()` half is load-bearing: a valid JWT proves who the caller is, not that their account is still enabled. A deactivated agent keeps a working token until it expires, so every own-row branch re-checks per request. Both `is_admin()` and `is_active_agent()` are `security definer` on purpose — a policy on `profiles` that queried `profiles` directly would recurse. Reuse them; don't inline role lookups.
+
+### RLS and grants are two separate layers — a new table needs both
+
+RLS decides which **rows** a caller sees. Grants decide whether the caller may touch the table **at all**, and they are independent: a table with perfect policies and no grant answers every request with `permission denied for table X`. That was the repo's actual state until `20260805200000_grant_data_api_roles.sql`, because Supabase's auto-exposure of new objects is deprecated and off by default now.
+
+**When adding a table**, all four of these or it will silently be unreachable, wide open, or both:
+
+1. `agent_id uuid references profiles(id) not null`
+2. `alter table <t> enable row level security`
+3. the four policies above
+4. **explicit grants** — `grant select, insert, update, delete on <t> to authenticated` plus `grant usage on <t>_id_seq to authenticated`, and `grant all on <t> to service_role` if any Edge Function touches it. `20260805210000_revoke_legacy_anon_grants.sql` removed the default privileges that used to auto-grant new tables, precisely so this step can't be skipped by accident. Never grant `anon` anything, and never grant the three `*_secrets` tables to `authenticated`.
+
+**When adding a function**, it needs its own privilege lines in the same migration:
+
+```sql
+revoke all on function <sig> from public;
+grant execute on function <sig> to authenticated, service_role;
+```
+
+Postgres grants `EXECUTE` to `PUBLIC` on every new function, and `PUBLIC` includes `anon`. There is **no declarative backstop** for this: `alter default privileges ... revoke execute on functions from public` is a verified no-op here (a new function still lands with `proacl = NULL`, tested on both Postgres 17 and PGlite), which is why it isn't in the revoke migration. `tests/rls/grants.test.ts` pins the gap. Miss these lines and your RPC is callable unauthenticated from the moment it exists.
+
+**Do not rely on `ensure_rls`.** The linked project has an enabled event trigger (`ensure_rls` → `public.rls_auto_enable()`) that switches RLS on for new tables in `public`. It exists on that hosted project **only** — not in any migration, not on the local stack, not in PGlite, and `supabase db dump` can't carry it (the CLI comments out `CREATE EVENT TRIGGER` lines). A migration that forgets step 2 therefore fails two different ways: on production the table comes up RLS-enabled with no policies and denies everyone (looks like a broken feature), while everywhere else it's wide open (a leak). Same SQL, opposite failure, and the environment where it looks fine is the one nobody tests against. See the note in `docs/tapswipe_crm_schema.sql`.
+
+### Three tiers of data access — pick the right one
+
+1. **Normal tables via `supabase-js`** (`merchants`, `leads`, `ghost_sheets`, `pre_apps` + children, `support_tickets`, `notes`, `tasks`, `audit_log`, `rep_payout_rows` + the three other `rep_payout_*` tables, the two `user_import_*` tables, and the reference-data tables `marketing_materials`, `business_documents`, `products`, `brands`). The legacy `documents` table is SELECT-only for `authenticated` and admits only an admin since 20261013121000. RLS does the enforcement; the client talks to Postgres directly. Note how little of that list is client-*writable*: the payout and user-import tables are read-only to `authenticated` apart from one status update each, because everything that creates their rows runs as service role.
+2. **Secrets tables — Edge Function only.** `pre_app_owner_secrets` (SSN), `pre_app_banking_secrets` (ABA routing / account number), `pre_app_terminal_secrets` (RP password) are locked twice over: RLS enabled with **zero policies**, *and* no grant to `anon` or `authenticated` at all. Either alone denies read and write; both means a policy added by mistake still opens nothing. Values are stored as `bytea` AES ciphertext; only a service-role Edge Function holding the encryption key can touch them. This includes the agent's initial submission — the browser must POST that data to `submit-pre-app-secrets`, never insert it via `supabase-js`. Never add a policy to these tables, and never grant them.
+3. **`commit_residual_import(batch_id_input int)` RPC** — `security definer`, guarded by an explicit `is_admin()`, moves a reviewed batch's staging rows into `rep_payout_rows`. It is an RPC and **not** an eighth Edge Function on purpose: supabase-js has no client-side transaction, so a function would insert ledger rows, delete staging rows and flip the batch status as three round trips with a real window where a period is half-imported. It also sidesteps PostgREST's row cap (`insert … select` has none), gets a fail-closed audit row for free, and keeps `auth.uid()` — so the history rows the merge triggers name the committing admin. **The `coalesce(excluded.<col>, rep_payout_rows.<col>)` on the two money columns is the entire merge rule**: reverse those arguments and every re-import silently clears a month of hand-entered residuals, violating no constraint and raising no error. `tests/rls/commit-residual-import.test.ts` asserts both directions and greps the function body for it.
+4. **`approve_pre_app(pre_app_id_input int)` RPC** — `security definer` plpgsql that creates a `merchants` row from a pre-app, flips its status to `approved`, and writes `audit_log`. It guards itself with an explicit `is_admin()` check at the top; keep that check if you edit it.
+
+### Edge Function authentication
+
+**All twelve are `verify_jwt = false` in `config.toml`** — verified, every one of the twelve `[functions.*]` blocks sets it. The platform therefore performs **no** auth check before your handler runs, so **each function is responsible for authenticating the caller itself**. `functions deploy` carries this setting up with the code, so it holds in production too.
+
+Every one of them follows the same shape, and the order matters:
+
+1. `withSupabase({ auth: "user" }, ...)` rejects a missing or invalid JWT before the handler body (this is what returns the `401`).
+2. `callerIsActive(ctx.supabase)` — an `is_active_agent()` RPC through the **caller-scoped** client. A valid JWT does not mean the account is still enabled; a deactivated agent's token keeps working until it expires. Called via `ctx.supabaseAdmin` this would always be false, because a service-role connection has no `auth.uid()`.
+3. Authorization through the caller-scoped client, so RLS makes the decision — `resolveParentAgentId()` looks the parent record up as the caller rather than re-implementing ownership by hand.
+4. **Only then** `ctx.supabaseAdmin`, and only for the privileged step itself (minting the signed URL). It bypasses RLS, so nothing may reach it before authorization is settled.
+
+Also: return `404`, not `403`, when a record isn't the caller's — "not yours" and "doesn't exist" must be indistinguishable or the endpoint becomes an id oracle. `tests/live/business-documents.test.ts` and `tests/live/marketing-materials.test.ts` assert these branches against the running functions. (`document-urls` and `document-lifecycle` did the same for the legacy functions and went with them.)
+
 ## What this project is
 
 Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Leads, Ghost Sheets, Support Tickets, Document Center, My Submissions.
 
 **Current state matters when reading the code**, and it is a mix — real CRM pages alongside untouched starter scaffolding:
 
-- **Built:** every CRM route lives under the `app/(app)/` route group so it renders inside the shell — `app/(app)/{dashboard,merchants,leads,ghost-sheets,pre-apps,support-tickets,documents,documents/manage,notes,tasks,payouts,marketing,marketing/manage,admin/users,admin/users/import,admin/products,admin/products/[brandId],admin/products/unbranded,admin/merchants/missing-location,proposals,proposals/new,proposals/[quoteGroupId],proposals/[quoteGroupId]/print}`. Route groups don't affect URLs, so the paths are still `/dashboard`, `/merchants/7` and so on. Data-access helpers in `lib/{merchants,leads,ghost-sheets,pre-apps,pre-app-validation,masks,support-tickets,annotations,annotations-data,business-documents,storage-url,payouts,user-imports,products,brands,quotes,auth,format}.ts` and `hooks/use-autosave.ts`. Notes and tasks are **written** through panels (`components/{notes,tasks}-panel.tsx`) on the four owner records; `/notes` and `/tasks` are the cross-record view of the same rows, and are read-only (notes) or read plus the complete toggle (tasks). Creation stays on the record, because `owner_id` has no FK and the panels take the pair from a parent row already loaded under RLS. **`/documents` is the Document Center: a company library of business documents** (`business_documents` + the `business-documents` bucket, modelled on the marketing library) that every active rep views, downloads and prints, and an admin stocks at `/documents/manage`. **It is not per-record any more.** Until 13 Oct 2026 reps uploaded merchant paperwork (voided checks, driver's licences) onto records through a documents panel; the CRM no longer accepts that paperwork, so the panel is gone from all four record pages and the legacy `documents` table is closed — see "The Document Center" below. Proposals (the `quotes` tables — the UI says "Proposals", the database was deliberately not renamed) are their own record at `/proposals`: a rep's own, linked to at most one lead or merchant or to neither. The builder (`components/proposal-builder.tsx`) and version history (`components/proposal-view.tsx`) live there; lead and merchant pages carry only a compact list and a prefilled "New proposal" button (`components/record-proposals.tsx`). `/proposals/[quoteGroupId]/print` is the one print route; the old `/{leads,merchants}/[id]/quotes/[quoteGroupId]/print` URLs redirect to it from `next.config.ts`.
+- **Built:** every CRM route under `app/(app)/`, the `lib/*` data-access helpers, notes/tasks panels, the Document Center (a company library, not per-record), and Proposals at `/proposals`. Full route and helper inventory → `docs/claude/project-state.md`.
 - **Not built yet:** My Submissions.
-- **Still [starter-kit](https://github.com/vercel/next.js/tree/canary/examples/with-supabase) template, not product code:** `README.md`, and that is now the whole list. The scaffold's UI was deleted on 14 Sep 2026 — `app/protected/*`, `components/tutorial/*`, `components/{hero,deploy-button,next-logo,supabase-logo,env-var-warning,auth-button,theme-switcher}.tsx`, the `hasEnvVars` export, and the two `app/{opengraph,twitter}-image.png` banners that served a "Next.js Starter Kit" social preview from an internal tool. `app/page.tsx` is product code now: it renders nothing and redirects (see below). Don't reintroduce a greyed-out template page for the same reason `lib/nav.ts` shouldn't carry a permanently-disabled row.
-- **Edge Functions:** twelve in the repo — `submit-pre-app-secrets`, `read-pre-app-secrets`, `create-user`, `deactivate-user`, `admin-reset-password`, `residual-import-file-url`, `parse-residual-import`, `export-residuals`, `stage-user-import`, `provision-user-batch`, `marketing-material-file-url`, `business-document-file-url` (shared helpers in `supabase/functions/_shared/{documents,crypto,pre-app-secrets,secrets-env,admin-users,provision-user,residuals,residual-imports,user-imports,marketing-materials,business-documents}.ts`). `create-upload-url`, `create-download-url` and `delete-document` were **removed from the repo on 13 Oct 2026** with the legacy documents path — and are still deployed on the hosted projects until someone runs `supabase functions delete <name> --project-ref <ref>` for each, deliberately. `_shared/documents.ts` stays: the two pre-app-secrets functions import `callerIsActive`/`json`/`isPositiveInt` from it.
+- **Still starter-kit template:** `README.md` only. Edge Functions: twelve in the repo. Details of both → `docs/claude/project-state.md`.
 
 **`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Sixty-two migrations exist; `20260804201300_initial_schema.sql` is the first.
+
+## Hosted projects and deployment
 
 Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi` — and note **which** project that is: `tapswipe-crm-dev`. The second project `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) is **not linked, but it is deployed and real**: `PRE_APP_SECRETS_KEY` is set and its private buckets exist (made by hand before `20261009170000_storage_buckets.sql`, which only fills in a missing one). Treat it as live production, not as a spare project.
 
@@ -100,30 +190,15 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
-- **`npm test`** — vitest + `@electric-sql/pglite`, applying `supabase/migrations/` over a deliberately minimal auth shim (`tests/helpers/db.ts`: three Data API roles, `auth.users`, `auth.uid()` reading the `request.jwt.claims` GUC). Covers RLS policies (`tests/rls/*`) and the grant surface (`tests/rls/grants.test.ts`). **Run this for any schema change.** Queries must run as `authenticated`, not the owner — Postgres bypasses RLS for a table's owner, so an owner-run test passes regardless of policy.
-- **PGlite 0.5.4 is Postgres 18.3, one major version AHEAD of the local stack (17.6)** — measured 14 Oct 2026. Behaviour that changed between 17 and 18 therefore differs between `npm test` and every real server: an `ON DELETE RESTRICT` violation reports **23001** under PGlite and **23503** on the stack. Pin the constraint name in the message rather than that SQLSTATE, or a test green in PGlite goes red in `test:live`.
-- **Never write a literal `\xHH`-shaped escape inside a JS template literal**, including inside text meant to read as a SQL comment. `tests/helpers/db.ts` builds SQL in template literals, so JavaScript consumes the escape before Postgres ever sees the string: `\x00` becomes a real NUL byte, which desyncs the wire protocol and fails dozens of *unrelated* tests with a bare `invalid message format` from the pg-protocol parser, naming no statement and pointing nowhere near the cause. (It cost an hour once, in a comment that existed to warn about exactly this.) For `bytea` fixtures use `decode('0011', 'hex')` — no backslash to get wrong.
-- **`.gitattributes` pins `*.mjs`, `*.sql` and `*.sh` to LF in every working copy, and it is deliberately that narrow.** Before it, a Windows checkout with `core.autocrlf=true` gave the three shebang scripts (`scripts/{check-linked-project,load-hardware-catalog,purge-legacy-documents}.mjs`) a `\r` on their `#!` line, and vitest refused to LOAD both `purge-legacy-documents` test files — `SyntaxError: Invalid or unexpected token`, no test named, the run reporting `1 failed` file with zero failed tests. The index was already LF, so the attribute changed no committed content. Do not widen it to `* text=auto` without expecting a repo-wide diff. **A suite where a file fails to load is a failing suite**, not a passing one with a caveat.
-- **`npm run test:live`** — real HTTP with real JWTs. Covers what PGlite structurally cannot: GoTrue password sign-in, PostgREST grants, the Deno runtime, Storage signed URLs. Hard-errors rather than skipping when the stack is down. Run it when touching Edge Functions, auth, or Storage.
-- **The live suite FAILS LOUDLY when the functions runtime is down — it never skips silently.** `tests/live/helpers/global-setup.ts` probes every `[functions.*]` in `config.toml` before any file runs and requires each one's own **401**; anything else fails the whole run with one message, `functions runtime not reachable: restart \`npx supabase functions serve\``, listing what did not answer. The old check accepted any HTTP status from one function — and with the runtime down Kong still answers (503 "name resolution failed" when the container is gone, 502 "invalid response ... upstream" when it is stopped), so a dead runtime counted as served and the run ended in a column of 503s or 31 skipped tests that each looked like a result. `invoke()` treats those two Kong answers as the runtime dying mid-run and throws the same message after a 20s grace (a first-call restart 502s for seconds; an outage does not). **`ALLOW_SKIPPED_FUNCTION_TESTS=1`** is the only way to run without functions: the eleven function-dependent files then skip (they call `skipWhenFunctionsDown()` at top level and return early from `beforeAll`), the other four still run, and the reporter's last line — `[live] skipped tests: N` — names the files. A new live file that calls functions must use `skipWhenFunctionsDown()` the same way. The only legitimately conditional test in the repo is `e2e/print.spec.ts`'s "repeats on every sheet", which skips when run headed (`page.pdf()` needs headless Chromium).
-- **Call `warmFunctions([...])` in a live test's `beforeAll`, before any status-code assertion.** The CLI rewrites a function's `.npmrc` the first time that function is invoked in a `functions serve` session; its own file watcher sees the write and restarts the runtime, which `502`s whatever is in flight. On a cold serve this produced 24 failures across the suite, every one reading `expected 502 to be 200` and pointing nowhere near the cause. All live files warm the functions they exercise.
-- **A fixture that omits a denormalised column is invisible to everything that resolves by it, and nothing will tell you.** `provisionFixtures()` inserted its personas into `profiles` without an `email` for weeks. `create-user` has always written that column, so no real account looked like that — but `stage-user-import` detects an already-registered address by reading `profiles.email`, so every persona looked like a brand-new person and two correct tests failed against the fixture. `scripts/seed-local-users.mjs` had the identical gap with nothing asserting against it at all. Both now set it. The general form: if a column exists because something reads it, a fixture that skips it has silently opted out of that feature.
-- **A live test that writes `audit_log` must clean it up before deleting its users.** `audit_log.actor_id references profiles(id)` with **no `ON DELETE`**, so `deleteUser` fails on the FK while those rows exist — the persona survives teardown and the next run dies on "user already registered". `teardownFixtures()` and `deleteUserCompletely()` both delete by `actor_id` and by `row_id` first. The FK is deliberately left strict: production never deletes users (§8), so only tests pay for it.
-- **`npm run test:deployed`** — read-only Auth-config and schema-drift assertions against every project in `.env.deployed.local`, not just whichever one is linked. It used to read `.env.local`, which names dev, so "compliance checks against the deployed project" never once looked at production — and production sat with public sign-up enabled and 12 unpushed migrations until the 2 Sep 2026 outage found it. A project named `prod` is now required and the suite refuses to run without one, so coverage cannot be quietly dropped. A red result means a deployed project drifted, not that code broke. Uses only publishable keys.
-- **`npm run test:e2e`** — Playwright + Chromium against `next dev` on the local stack (`playwright.config.ts`, specs in `e2e/`). Covers only what needs a browser: **layout, paint, client state across a refresh, and `<input type="file">`.** `e2e/fixtures/seed.ts` provisions its own personas and its own periods (deliberately in **2027**, so it never collides with the `seed-dev-*` scripts' 2026), and `e2e/auth.setup.ts` signs each persona in once into `e2e/.auth/*.json` — so no spec logs in and no spec holds a password. Reuses a running dev server. Five personas: `admin`, `agent`, `agent2`, `agent3` (19 Oct 2026: the third rep of the shared-account specs, owns no records, so it is excluded from `docOwners` like `logout`) and `logout` (exists only to be signed out). The shared-account fixture (`ensureShareFixture()`, February 2027, MIDs `E2E-SHARE-1..4`) is reset by MID on every `seedE2E()`; a correction a spec posts lands in whatever month is open, so the specs read the expected month from the ledger (`expectedPostingPeriod()`) rather than hardcoding it, and clear their adjustments afterwards.
-- **`npm run test:e2e` needs `functions serve` running, and the table above said it did not until 7 Oct 2026.** `playwright.config.ts` starts `next dev` and nothing else, so the app is up but every signed-URL mint, document delete and user-import call 404s. The symptom was **18 specs failing at once** across the (since removed) `documents-panel` spec and `user-import` with ordinary-looking assertion errors — "expected visible", "expected 1 to be 0" — and not one of them naming a function or a port. Nothing in the run says the functions are missing. If a block of e2e failures appears all at once in files you did not touch, check `functions serve` before reading the diff.
-- **`e2e/dashboard-filters.spec.ts` can fail on a first full run because of a local Kong/PostgREST keep-alive race**: Kong 2.8.1 reuses idle upstream connections PostgREST has already closed, and POSTs are not retried. Found 2026-10-16; not a defect in `dashboard_counts`.
-- **Do not put RLS, PostgREST or pure-logic assertions in `e2e/`.** They are faster and more precise in the other three, and a browser copy is just a slower flakier duplicate. The rule of thumb: a spec belongs there only if a person could **only** find it by looking.
-- **A geometric bug needs a geometric assertion, and bounding boxes are usually the wrong one.** The `StatCard` clipping bug (a figure painted outside its card, hidden by the next card's opaque background) passed a bounding-box comparison: a block element's box is constrained by its parent, so the *ink* overflows while `getBoundingClientRect` reports the parent's width unchanged — measured, 213px box against a 270px `scrollWidth`. `scrollWidth > clientWidth` is what actually detects it. A text assertion cannot see it either, which is how it shipped.
-- **Prove an e2e spec is non-vacuous by reverting the fix.** Cheap here and worth doing every time, because a spec that drives a whole page can pass for reasons unrelated to what it claims. All seven specs covering the three browser-only payouts bugs were checked this way: revert the fix, watch exactly those specs go red, restore. Two of them were rewritten as a result of that check — they had passed against the reverted bug. The document pass repeated it for all six of its browser-only fixes and rewrote one spec: **`setInputFiles` dispatches `change` unconditionally**, so Playwright cannot reproduce "the user re-picks the identical file and no event fires" — the retry assertion passed with the fix reverted, and had to be replaced with one on the input's value, which is observable.
-- **A partial revert is the sharper instrument, and `e2e/root-redirect.spec.ts` is the worked example.** Its four specs go red together on the *full* original state — stuck on `http://localhost:3000/` — but reverting one layer at a time says much more. Restoring the starter page while leaving the proxy fixed changes **nothing**: all four still pass, because the proxy redirects before the page can render, so the "no starter markup" assertions in them are decoration rather than coverage. Reverting the proxy's `/` branch while leaving `app/page.tsx` fixed also leaves three of the four green, because the page's own redirect still gets you to `/dashboard` — only the rotated-cookie spec goes red, on `/ should redirect rather than render`. That one spec is therefore the entire proof that the proxy layer exists, and removing the cookie copy alone reds it and nothing else. Kept as-is rather than tightened: the URL assertions are the load-bearing ones and they are honest, and a spec that fails for two reasons at once is worse than two that each fail for one.
-- **A spec that fails ~1 run in 3 but passes 3/3 in isolation is measuring the wrong thing, not flaky infrastructure.** The two-tabs document spec asserted that each tab's own row appeared after two *concurrent* `router.refresh()` calls, which is a claim about Next's refresh timing under contention rather than about documents; and it read `storage.list()` once immediately after a PUT, making a read-after-write lag indistinguishable from a lost file. Rewritten to wait for an observable settled state, reload both tabs (a fresh server render races nothing), and poll the storage read. Same claims, no races. `retries: 0` is what surfaces this instead of hiding it.
-- **And when a spec fails ~1 run in 3 *in isolation too*, it is not a race — look at the clock.** The same two-tabs spec went on failing about one run in three, with passing runs landing at 23–29s against the 30s per-test timeout. The cause was not in the spec: `localStackConfig()` in `e2e/fixtures/seed.ts` ran `execSync("npx supabase status -o env")` on **every** call, and it has twelve call sites — including inside `expect.poll` loops, so it was spawning a CLI process per poll iteration. Roughly 17 of those seconds were `npx` starting up. Memoised (the ports cannot change mid-run), the spec now runs in a flat 10.0–10.7s, 4/4. The general form: a test whose *passing* runs sit just under the timeout is already failing, it just has not been unlucky yet — read the duration, not only the pass.
-- **Sometimes the right answer to a revert experiment is to DELETE the spec.** The marketing View button had a real, shipped bug — `window.open(url, "_blank", "noopener")` **returns null by spec**, so the handle was always null, the fallback navigated the *current* tab, and the blank tab the browser had already created sat orphaned. Found by hand in Chrome; fixed and re-verified by hand. Playwright can see none of it: the cross-origin assignment never moves the page object (`waitForURL` dies with `net::ERR_ABORTED; maybe frame was detached?`, polling `opened.url()` sits on `about:blank`), and crucially the **fallback does not navigate under Playwright either** — so the broken version is indistinguishable from the fixed one. Two drafts went green with the bug deliberately restored, the first because it read `page.url()` before the fallback had had time to run, the second because the fallback never runs there at all. A spec green for the bug *and* the fix is worse than no spec: it claims coverage that does not exist. It was removed, with the reasoning left in `e2e/marketing.spec.ts` where the next person will look for it.
-- **A spec that asserts an empty state is at the mercy of whatever ran before it.** `marketing_material_events` is append-only by design — no UPDATE or DELETE grant for `authenticated` — so a spec cannot undo its own writes, and the first draft of the Email test passed or failed on test ORDER. `clearMarketingEvents(leadId)` runs as the service role for exactly that reason. Per-lead rather than a blanket wipe, so a spec cannot quietly come to depend on being the only thing running.
-- **Expect leftovers after a revert experiment.** Reverting the delete-document fix leaves a storage object with no row; reverting the orphan-cleanup leaves the same. Both are invisible (private bucket) and neither is a product bug — but the file names a spec *refuses* have to be in its cleanup list too, or the next run's empty-state assertion fails for an unrelated reason.
+Baselines are the counts in the Commands block above (`npm test` 2025 tests / 91 files — every file must load; `test:live` 226; `test:deployed` 29; `test:e2e` 301, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
 
-Why four and not one: each suite is green while the next one's class of bug sits in the repo. The PGlite suite was 100% green with no Data API grants at all and an `[auth.email] enable_signup = false` that disabled password login — neither visible below PostgREST/GoTrue. All three of those were green while `/payouts` shipped a stale editable cell (the page showing `410 × 50% = $174.25`), a clipped money figure, and six columns pushed off screen by one long merchant name — none visible without a browser.
+- Run `npm test` for any schema change; queries must run as `authenticated`, never the owner.
+- PGlite is Postgres 18.3, the stack 17.6 — pin constraint names in assertions, not SQLSTATEs.
+- Never write a literal `\xHH`-shaped escape inside a JS template literal; use `decode('…', 'hex')` for `bytea`.
+- A suite where a file fails to load is a failing suite. `.gitattributes` pins `*.mjs`/`*.sql`/`*.sh` to LF and must stay that narrow.
+- The live suite fails loudly when functions are down; `ALLOW_SKIPPED_FUNCTION_TESTS=1` is the only skip; new live files use `skipWhenFunctionsDown()` and `warmFunctions([...])`.
+- Fixtures must set every denormalised column something reads (`profiles.email`); live tests clean `audit_log` before deleting users.
+- `test:e2e` needs `functions serve`; e2e holds only what a person could only find by looking; prove a spec by reverting the fix; read durations, not just passes; `retries: 0`.
 
 ### Build/lint exclusions are deliberate
 
@@ -141,129 +216,6 @@ A feature isn't done when it compiles — it's done when it's verified and commi
 
 ## Architecture
 
-### Access control is the core design constraint
-
-One rule, everywhere: **`role = 'admin'` sees every row; an active `role = 'agent'` sees only rows where `agent_id = auth.uid()`.** Policies are written as `(agent_id = auth.uid() and is_active_agent()) or is_admin()`. Child tables of `pre_apps` (`pre_app_owners`, `pre_app_terminal`, `pre_app_business_profile`) reach the check through an `exists (select 1 from pre_apps ...)` subquery on the parent, with `is_active_agent()` wrapping the `exists` rather than inside it. Deletes are usually admin-only. (`documents` was the exception — reps deleted their own uploads — until 20261013121000 closed that table to every client write.)
-
-The `is_active_agent()` half is load-bearing: a valid JWT proves who the caller is, not that their account is still enabled. A deactivated agent keeps a working token until it expires, so every own-row branch re-checks per request. Both `is_admin()` and `is_active_agent()` are `security definer` on purpose — a policy on `profiles` that queried `profiles` directly would recurse. Reuse them; don't inline role lookups.
-
-### RLS and grants are two separate layers — a new table needs both
-
-RLS decides which **rows** a caller sees. Grants decide whether the caller may touch the table **at all**, and they are independent: a table with perfect policies and no grant answers every request with `permission denied for table X`. That was the repo's actual state until `20260805200000_grant_data_api_roles.sql`, because Supabase's auto-exposure of new objects is deprecated and off by default now.
-
-**When adding a table**, all four of these or it will silently be unreachable, wide open, or both:
-
-1. `agent_id uuid references profiles(id) not null`
-2. `alter table <t> enable row level security`
-3. the four policies above
-4. **explicit grants** — `grant select, insert, update, delete on <t> to authenticated` plus `grant usage on <t>_id_seq to authenticated`, and `grant all on <t> to service_role` if any Edge Function touches it. `20260805210000_revoke_legacy_anon_grants.sql` removed the default privileges that used to auto-grant new tables, precisely so this step can't be skipped by accident. Never grant `anon` anything, and never grant the three `*_secrets` tables to `authenticated`.
-
-**When adding a function**, it needs its own privilege lines in the same migration:
-
-```sql
-revoke all on function <sig> from public;
-grant execute on function <sig> to authenticated, service_role;
-```
-
-Postgres grants `EXECUTE` to `PUBLIC` on every new function, and `PUBLIC` includes `anon`. There is **no declarative backstop** for this: `alter default privileges ... revoke execute on functions from public` is a verified no-op here (a new function still lands with `proacl = NULL`, tested on both Postgres 17 and PGlite), which is why it isn't in the revoke migration. `tests/rls/grants.test.ts` pins the gap. Miss these lines and your RPC is callable unauthenticated from the moment it exists.
-
-**Do not rely on `ensure_rls`.** The linked project has an enabled event trigger (`ensure_rls` → `public.rls_auto_enable()`) that switches RLS on for new tables in `public`. It exists on that hosted project **only** — not in any migration, not on the local stack, not in PGlite, and `supabase db dump` can't carry it (the CLI comments out `CREATE EVENT TRIGGER` lines). A migration that forgets step 2 therefore fails two different ways: on production the table comes up RLS-enabled with no policies and denies everyone (looks like a broken feature), while everywhere else it's wide open (a leak). Same SQL, opposite failure, and the environment where it looks fine is the one nobody tests against. See the note in `docs/tapswipe_crm_schema.sql`.
-
-### Three tiers of data access — pick the right one
-
-1. **Normal tables via `supabase-js`** (`merchants`, `leads`, `ghost_sheets`, `pre_apps` + children, `support_tickets`, `notes`, `tasks`, `audit_log`, `rep_payout_rows` + the three other `rep_payout_*` tables, the two `user_import_*` tables, and the reference-data tables `marketing_materials`, `business_documents`, `products`, `brands`). The legacy `documents` table is SELECT-only for `authenticated` and admits only an admin since 20261013121000. RLS does the enforcement; the client talks to Postgres directly. Note how little of that list is client-*writable*: the payout and user-import tables are read-only to `authenticated` apart from one status update each, because everything that creates their rows runs as service role.
-2. **Secrets tables — Edge Function only.** `pre_app_owner_secrets` (SSN), `pre_app_banking_secrets` (ABA routing / account number), `pre_app_terminal_secrets` (RP password) are locked twice over: RLS enabled with **zero policies**, *and* no grant to `anon` or `authenticated` at all. Either alone denies read and write; both means a policy added by mistake still opens nothing. Values are stored as `bytea` AES ciphertext; only a service-role Edge Function holding the encryption key can touch them. This includes the agent's initial submission — the browser must POST that data to `submit-pre-app-secrets`, never insert it via `supabase-js`. Never add a policy to these tables, and never grant them.
-3. **`commit_residual_import(batch_id_input int)` RPC** — `security definer`, guarded by an explicit `is_admin()`, moves a reviewed batch's staging rows into `rep_payout_rows`. It is an RPC and **not** an eighth Edge Function on purpose: supabase-js has no client-side transaction, so a function would insert ledger rows, delete staging rows and flip the batch status as three round trips with a real window where a period is half-imported. It also sidesteps PostgREST's row cap (`insert … select` has none), gets a fail-closed audit row for free, and keeps `auth.uid()` — so the history rows the merge triggers name the committing admin. **The `coalesce(excluded.<col>, rep_payout_rows.<col>)` on the two money columns is the entire merge rule**: reverse those arguments and every re-import silently clears a month of hand-entered residuals, violating no constraint and raising no error. `tests/rls/commit-residual-import.test.ts` asserts both directions and greps the function body for it.
-4. **`approve_pre_app(pre_app_id_input int)` RPC** — `security definer` plpgsql that creates a `merchants` row from a pre-app, flips its status to `approved`, and writes `audit_log`. It guards itself with an explicit `is_admin()` check at the top; keep that check if you edit it.
-
-**A `security definer` RPC is the exception, not the default.** `convert_ghost_sheet_to_lead`, `dashboard_counts` and `search_crm` are all plain **security invoker** functions on purpose: the caller's own policies scope every read inside them, so an agent gets their own rows and an admin the company's with no role branch in the SQL and no `agent_id` filter to fall out of step with the policies. Reach for `definer` only when the function must touch something the caller genuinely may not (the `*_secrets` tables, writing `audit_log`, creating a merchant) — and then it owes you a hand-written ownership check plus `set search_path`. **`dashboard_counts()` keeps that property while taking filter parameters** (`20261007120000`), including one for another rep's `agent_id` — which sounds like exactly the thing a definer is reached for and is the opposite: see the dashboard-filters section below.
-
-**`check_duplicates()` is the deliberate mirror of that, and the pair is worth reading together.** `search_crm` is invoker *so that* a search box cannot return a record the app hides; `check_duplicates` cannot be, because the duplicates that matter most are exactly the ones RLS hides — two reps working the same merchant. So it is `security definer` over `leads`, `ghost_sheets` and `merchants`, and it pays for that reach two ways: a hand-written `is_active_agent()` guard, and a return shape that for any record the caller could **not** already see carries the fact of a match plus the field it matched on and **nothing else** — `record_id`, `title` and `subtitle` are NULL from the function, not blanked in the UI. Redacted rows are also **aggregated** to `(record_type, matched_field, strength)`, so the row count cannot be read as a census of other people's books. `tests/rls/check-duplicates.test.ts` asserts `prosecdef` is **true** here — the opposite of `tests/rls/dashboard-and-search.test.ts`, and copying that file's assertion over would be asserting this function is broken.
-
-**`accounts_in_city(city, state)` (`20261013131000`) is the third function of this shape, and the narrowest.** "Do we already have accounts in this city?" is a question about other reps' books, so it is `security definer` behind an `is_active_agent()` guard. A non-admin gets **four keys per account — `dba`, `legal_business_name`, `city`, `state` — built with `jsonb_build_object`, so the admin fields are ABSENT, not null**; a fixed `returns table` would carry them as nulls and announce what exists. Admins also get `merchant_id`, `agent_id`, `agent_name`, `status`, `street` and `zip`, and `components/city-accounts-search.tsx` renders those only when the keys arrived, never from a role prop. Matching is **equality on `norm_city()` and nothing else** — no LIKE, trigram or prefix, because a prefix search across every book is an enumeration; `%`, `_` and `*` are punctuation to `norm_city`. City 2..60 characters after normalising (the range `merchants_location_format` puts on any stored city, so nothing stored is unfindable), state an optional two-letter filter, bad input is `22023` with a showable message, no accounts is `{"results": [], "has_more": false}`. `status = 'inactive'` is excluded as the closed state — there is no `closed` or `cancelled`. Capped at 100 plus `has_more`. **Not audited**: neither `check_duplicates` nor `pre_app_secrets_presence` logs its calls, so there was no mechanism to follow. Never add a list-the-cities or autocomplete affordance for non-admins: the caller must already know the city. `tests/rls/accounts-in-city.test.ts` asserts `prosecdef` **true**, and each reverted piece of the function was checked to turn it red.
-
-**`my_share_partners(merchant_id_input int default null)` (`20261019120000`) is the fourth, and it carries the privacy rule for shared accounts.** The rule (Owen, 14 Oct 2026): each rep on a shared account sees the partner's **name** and their **own** share and months — **never the partner's share, rate or payout**, and the partner gets **no access to the merchant record**. `merchant_rep_shares` is admin-only by policy and `profiles` shows a rep only themselves, so this definer function is a rep's **only** path to either fact. It answers **party-only for every caller, admins included** (decided 19 Oct 2026 — an admin who is not a party gets `[]`; admin screens read the table directly), behind an `is_active_agent()` guard as the first statement. Five keys built with `jsonb_build_object` — `rep_share_id`, `partner_name`, `own_rep_pct`, `effective_from`, `effective_to` — so anything else is **absent**, not null. `rep_share_id` is kept on purpose: a rep already reads it on their own line, and without it a name cannot be put against the right line. `merchant_id_input` filters (the signer's merchant-page notice) and is never echoed. **No policy changed**, and `tests/rls/my-share-partners.test.ts` greps `pg_policies` to keep it that way. Its revert checks live **in the suite**: the function is rebuilt from the migration's own text with each guard removed (active check, party filter, own/partner case, an extra key, invoker) and each probe must then see the leak. The UI half of the rule: rep-facing payout reads select `PAYOUT_ROW_COLUMNS` only, and the share snapshot (`PAYOUT_SHARE_ADMIN_COLUMNS` — both parties' shares and the account residual) is added **only on an admin's read**, so a rep page cannot render the partner's share even by mistake; `tests/unit/payouts.test.ts` pins that split. It is a display rule, not a secret (design §8's caveat: the snapshot sits on the rep's own row, and 40 + 10 = 50 is arithmetic) — do not "fix" that with column grants without reading §8 first.
-
-**It only ever warns, and must never become a block.** A hard block on a cross-book duplicate is unrecoverable from the UI by construction: the rep cannot see the offending record, so the only move left is to make the check miss, and the workaround reps find is typing the phone number wrong — which destroys the most reliable field the check depends on.
-
-**pg_trgm lives in the `extensions` schema** (Supabase convention), which is why everything downstream carries `set search_path = public, extensions`; without it the failure is a bare `operator does not exist: text % text` at runtime. In the hermetic suite it must additionally be handed to the **PGlite constructor** (`new PGlite({ extensions: { pg_trgm } })` in `tests/helpers/db.ts`) — `create extension` alone is not enough there, and because every suite applies every migration, forgetting it reds all 56 files at once. The `dup_digits` / `dup_email` / `dup_host` normalisers exist to be indexed: never `create or replace` one with different behaviour without reindexing, because Postgres leaves existing index entries computed by the old definition and a duplicate check that silently stops matching looks exactly like no duplicates.
-
-**`migrationsBefore()`, not `migrationsExcept()`, when a test reconstructs a point in history.** `migrationsExcept` drops a file out of the middle and still applies everything after it, which is right for the grant regression tests and wrong for everything else: the moment a later migration references a column the excluded one added, the suite dies on a missing relation in a migration the test is not about. That is not hypothetical — `20261002161500` indexes `leads.website` and broke the `leads-status` backfill block exactly this way.
-
-For `search_crm` that choice is a security property rather than a style preference: a search box is exactly the shape of thing that becomes a disclosure bug, and running as the invoker means it physically cannot return a record the rest of the app hides. `tests/rls/dashboard-and-search.test.ts` asserts the scoping per role *and* asserts `prosecdef` is false on both — because adding `security definer` to either signature would silently widen every count and every hit to the whole table, and nothing else in the suite would notice.
-
-`profiles` has no insert policy by design — rows are created by the `create-user` Edge Function using the service role, alongside `auth.users`. **That function must delete the `auth.users` row if the `profiles` insert fails.** The two together are one logical account, and half of one is the ghost-user state `lib/auth.ts` routes to `/auth/error?error=no-profile`: able to log in, sees nothing, and unable to self-heal precisely because there is no insert policy.
-
-`audit_log` has no insert policy either, which is what decides where an audited action has to live. Anything that must leave a trail runs as service role (an Edge Function) or as a `security definer` RPC — a plain client write cannot log itself. `set_user_role()` and `set_agent_number()` are `security definer` for that reason and one more: the 11 Aug audit removed the admin UPDATE policy on `profiles`, so there is now no client write path to that table at all. `authenticated` holds **`select` only** on `audit_log`; the security audit narrowed it, because write privileges there were previously held back by nothing but the absence of a policy for those verbs.
-
-`profiles.agent_number` (added `20260817101500`) is the only join between a processor's residual report and this database — the spreadsheet's "Agent #" column has never heard of a uuid. Nullable with a **partial** unique index (`where agent_number is not null`), because every profile predating the column has none and there is nothing to backfill from. Blank must never be stored: `''` is a value that index enforces, so two reps cleared that way would collide. Both write paths normalise it to null and both cap the length at 32 — `set_agent_number()` in SQL and `isAgentNumber()` in `supabase/functions/_shared/admin-users.ts`, which `create-user` applies. Nothing type-checks that pair, so change them together. See `RESIDUALS_SPEC.md`.
-
-`profiles.territory` (added `20261002143000`) looks like the same shape of column and is not. It is a **reporting label**: free text with no vocabulary (reference data an admin extends as the company opens a region, the same reasoning `support_tickets.category` stays unconstrained), no uniqueness — many reps per territory — and no index, because nothing resolves through it. Written only by `set_territory()`, which is the pattern to copy for **any** new `profiles` column: there is no UPDATE policy *and* no UPDATE grant for `authenticated` on that table, so a `security definer` RPC with a hand-written `is_admin()` guard is the only way a column there becomes settable. Answering that with a policy re-opens what the 11 Aug audit closed.
-
-**`territory` is not an access boundary, and must not become one by accident.** No policy reads it; every `agent_id` table is still scoped by `agent_id = auth.uid()`. "Agents see their whole territory" is a different and much larger feature — it rewrites the own-row half of all seven owner tables, turns a per-row equality check into a join against `profiles`, and needs an answer for a rep whose territory changes while holding live deals. Wiring it into a policy as a convenience silently widens every rep's book, and the existing policy tests would not notice because their fixtures all share one territory (none). `tests/rls/set-territory.test.ts` greps `pg_policies` for the word and asserts zero hits.
-
-**`profiles.manager_id` (added `20261002174500`) holds the same line for the same reason, and is the clearer case because "managers" sounds like access and is not.** A nullable self-reference written only by `set_manager()` — the `security definer` + hand-written `is_admin()` pattern above, because there is still no UPDATE policy or grant on `profiles`. What it buys is **filtering by an admin who already sees every row** (`agent_id in (select id from profiles where manager_id = $1)` in a dashboard query); it changes nothing about what a rep or a manager can see of their own accord, and `tests/rls/set-manager.test.ts` greps `pg_policies` the same way.
-
-**It is NOT a third role, and that is the cheaper half of the trade.** `role` stays `'agent' | 'admin'`: every policy here is a binary `is_admin()` check — around forty of them, plus the guard at the top of every definer RPC — so a third value needs either a third branch in all of them or a `manages()` helper called alongside `is_admin()` everywhere. That is a rewrite of the access-control design, not a column.
-
-**The graph is exactly one hop, enforced in BOTH directions and neither guard is redundant.** `set_manager()` refuses a proposed manager who already has a manager *and* refuses giving a manager to someone who already manages — the first blocks building a chain downward, the second blocks building the identical chain upward, which the first cannot see. Together they make cycles of any length unreachable, which is what keeps "does X manage Y" a single equality instead of a recursive CTE. The rule lives in the RPC because a `CHECK` cannot see another row. Both halves were verified by reverting each in turn: guard-by-guard, exactly the matching specs go red.
-
-**`log_cross_agent_change()` audits admin action on other people's records, and it FAILS CLOSED — intentionally.** An AFTER INSERT/UPDATE/DELETE trigger logging only when `auth.uid()` is not the row's `agent_id`, so a rep's own edits stay out of the trail and an admin's do not.
-
-**It is on TEN tables, not seven, and this paragraph said seven until 2 Oct 2026** — `merchants`, `leads`, `ghost_sheets`, `pre_apps`, `support_tickets`, `notes`, `tasks`, plus `documents` (added `20260811173000`), `bug_reports` (`20260812175050`) and `quotes` (`20261002194500`). `support_ticket_replies` is an eleventh table covered by a *sibling* function, `log_cross_agent_reply()`, which resolves the parent ticket's owner because the replies table has no `agent_id` of its own. Read `docs/tapswipe_crm_schema.sql` for the list rather than this file: the doc carries the per-table reasoning next to each `create trigger`, and it is what stayed correct while this sentence did not.
-
-**`documents` is in the list, and the story of why is the one to copy when deciding about a new table.** It was excluded at first on the grounds that its access is audited inside `create-upload-url` and `create-download-url`, where the signed-URL mint is the event rather than the metadata row. That reasoning is right about *reads* and still holds. It does not cover DELETE — `documents` is the one table whose delete policy is own-row-or-admin, and a delete mints no URL, so no function ran, no trigger fired, and the row vanished with its Storage object orphaned and nothing written down. Three audit mechanisms, and `documents` DELETE fell through all three. So the test for a new table is not "is it audited somewhere" but "is **every verb** audited somewhere".
-
-It is an AFTER ROW trigger with no `EXCEPTION` block, so it runs in the triggering statement's transaction and **an audit_log insert failure rolls the write back with it**. A mutation to those seven tables cannot succeed while its audit row quietly does not. Do not "fix" that by wrapping the insert in an exception handler — the rollback is the design, and `tests/rls/audit-trigger.test.ts` asserts it. Four audit sites, four different answers, each deliberate: this one, `read-pre-app-secrets` and `log_payout_row_change()` fail closed because nothing has been committed or handed over yet; `submit-pre-app-secrets` *cannot* (its ciphertext is already written, so it reports `auditWriteFailed`); `rls_auto_enable()` swallows failures, because a backstop that breaks DDL is worse than one that misses a table.
-
-**The `rep_payout_*` tables are the deliberate exception to `log_cross_agent_change()`, and the reasoning is worth knowing before you "fix" the omission.** `rep_payout_rows` carries `agent_id` and would work with that trigger unchanged — but nobody except an admin can write the table at all (no insert policy, admin-only update and delete), so `actor is distinct from row_agent_id` is true for *every* write. One forty-row import would produce forty `cross_agent_insert` rows, and it still could not record what a figure changed *from*, because `audit_log` has no detail column. So the trail is split by granularity instead: `audit_log` per committed batch and per deleted period, and `rep_payout_row_history` per value change, where a before and an after actually fit. The other three payout tables have no `agent_id` at all, which is the `support_ticket_replies` trap — that function would read NULL and log everything.
-
-`rep_payout_rows.rep_payout` is a **stored generated column** (`round(residual_income * rep_split_pct / 100, 2)`), so it is null whenever either input is null and cannot be written directly. Null means "not worked out yet", never zero, and every total, export and summary has to keep that distinction. `volume` and `average_ticket` are `check >= 0` because a negative there is a parse error; `total_cost` and `residual_income` are deliberately **signed**, because clawbacks are real and a constraint rejecting one turns valid processor data into an unexplainable blocked import.
-
-**`authenticated` holds UPDATE on exactly two `rep_payout_rows` columns, `residual_income` and `rep_split_pct`** (`20261014160000`, the `quotes.status` arrangement): those are all the inline cell and the bulk split write. Every other column is written by `commit_residual_import` / `set_shared_residual` (definer), FK `SET NULL` actions (owner) or the service role, none of which the grant reaches — so an admin's session writing `merchant_name`, `volume` or a share column gets `42501`, not a silent filter. A new client path that edits another column needs a grant line or a definer RPC, not a policy. **The merge key is a PARTIAL unique index since phase 5** (`20261016160000`): `rep_payout_rows_import_merge_key` on `(period, agent_id, mid) where line_kind = 'import'`, which replaced the `unique` constraint and dropped `rep_payout_rows_import_lines_only` in the same transaction. Adjustment lines (written only by `post_share_correction()`, `20261016161000`) sit outside it. Two consequences to carry everywhere: **every `on conflict` on this table must say `where line_kind = 'import'`** or Postgres cannot infer the index and the statement fails; and **every "is this month committed" read must look at import lines only** — v2's `line_not_shared`, the three share RPCs, the posting-month computation and the parser's lookback all do, because an adjustment sits in a month nobody has committed yet. An adjustment carries no residual, rate, volume or batch (`rep_payout_rows_adjustment_no_figures`), so `PayoutBulkSplit` filters to import lines. The export marks one `Line = Adjustment` and the parser skips such rows (counted in `rep_payout_batches.adjustment_rows_ignored`) — a round trip must never turn a correction into an import line. `tests/rls/import-merge-key.test.ts` pins the catalog diff and the migration's own nothing-moved check.
-
-**Shared accounts on the screens (phases 6–7, `docs/design/residual-splits.md`).** The merchant page carries the admin's share card (`components/merchant-share-card.tsx`: set in rep-percent terms "40 + 10" totalling 50, end, cancel, correct) and, for a party who can open the merchant — in practice the signer — a one-line notice from `my_share_partners()`. The correction control shows **"This will post to <month>" before anything is written**, from `share_correction_posting_period()` (`20261019130000`, read-only, admin-only definer). **The posting-month rule exists once**: `post_share_correction()` was re-created to *call* that function, and gained `expected_posting_period_input date default null` — given and no longer matching (a commit landed between the preview and the click), the post is refused PT409 rather than landing in a month nobody confirmed. Its six-argument signature was **dropped**, not overloaded (the `create_quote_version()` trap). On `/payouts/[period]` each shared line gets a full-width marker row beneath it (cells stay nowrap, so the money columns stay on screen); the admin's carries both parties and the account residual and, on the signer's line, `components/shared-residual-control.tsx` → `set_shared_residual()`, which replaces the per-line residual editor on both lines (the guard refuses that edit anyway); the partner's split is read-only. **A rep's partner line names the merchant as plain text**, never a link to a page they cannot open. `PayoutBulkSplit` skips partner lines (`.or("share_role.is.null,share_role.eq.primary")`) — the filter matters for a rep who is a partner on one account and has ordinary lines too, whose group would otherwise be refused whole. The statement marks each shared line "Shared account with <partner> · your share X% †" with a footnote; the export adds `Account share` last (the row's **own** share, blank when unshared; the parser's exact header lookup ignores it). Every control these phases added is 44px tall; the older payout controls (`PayoutFigureCell`, the bulk split's 28px input) are not, which is a recorded follow-up. Not on any hosted project yet.
-
-**`rep_payout_batches` is the same arrangement with one column: `authenticated` holds UPDATE on `status` only** (`20261016140000`, phase 4b). Abandon is the one client writer; `skipped_rows` and `skips_acknowledged_at` are written only by `commit_residual_import_v2` and `acknowledge_residual_skips()` (definer, `is_admin()` first, refuses a second acknowledgement, audit fails closed), so an admin's PATCH cannot clear a skip record. **Which status change that grant allows is a trigger's job** (`guard_batch_status_transition()`, `20261016170000`): when `current_user = 'authenticated'` the only update admitted is `review -> abandoned` (PT409 otherwise), so a client cannot move a committed batch back to review and re-commit a month, or mark one committed with nothing imported. The definer commits and acknowledgement run as the owner and the parser and file-url functions as the service role, so none of them is touched. Who acknowledged is in `audit_log` only — no `skips_acknowledged_by` column, so the `profiles` FK count stays twenty-five. The commit button calls v2 and lands on the batch page, which is the commit result; the old `commit_residual_import` stays only for an app version still deployed somewhere, and refuses any batch a share covers.
-
-**Deleting a user requires clearing five payout FKs first**, and all five are `NO ACTION`: `rep_payout_rows.agent_id`, `rep_payout_import_rows.agent_id`, `rep_payout_batches.imported_by`, and both `rep_payout_row_history.agent_id` and `.changed_by`. Exactly the trap `audit_log.actor_id` sets, with five doors instead of one — and it has already been walked into once: a teardown deleted a profile without clearing staging rows, the delete failed on the FK *unchecked*, and the surviving rep then resolved an agent number the next run expected to be unknown, which presented as a parser bug. Clear all five before `deleteUser`, and check the error.
-
-And know the real total while you are there: **twenty-five columns reference `profiles(id)`, and twenty-four of them are `NO ACTION`** (`profiles.manager_id`, added 2 Oct 2026, is the single exception at `on delete set null` — see below) — the five payout ones, `user_import_batches.imported_by`, `audit_log.actor_id`, `support_ticket_replies.author_id`, both `bug_reports` columns, `agent_id` on each of the seven owner tables, the two marketing ones added 2 Oct 2026 (`marketing_materials.uploaded_by`, `marketing_material_events.agent_id`), `quotes.agent_id` (`20261002194500`), `business_documents.uploaded_by` (`20261013120000`), and `merchant_rep_shares.primary_agent_id` + `.secondary_agent_id` (`20261014130000`; shares must be cleared by merchant first too, because `merchant_id` is `ON DELETE RESTRICT`). Any single leftover row blocks the delete, so a hand-written teardown list is permanently one table behind: `scripts/seed-local-users.mjs` carried two entries and broke the moment `seed-dev-payouts.mjs` gave the rep a ledger row. It now holds all nineteen, in FK-safe order, with the `pg_constraint` query to regenerate it in a comment — copy that list rather than reinventing it. The failure mode is worth recognising: an unchecked `deleteUser` that fails on an FK leaves the user in place, and the next `createUser` reports `email_exists` (422), which names the one thing that is not wrong.
-
-**There are now FOUR teardown lists, and they drift independently** — `scripts/seed-local-users.mjs` (`PROFILE_REFERENCES`), `tests/live/helpers/stack.ts` (`clearPayoutRows` + `clearUserImports` + `clearMarketingMaterials` + `clearBusinessDocuments`), `e2e/fixtures/seed.ts` (`clearImportedUsers`), and `seed-dev-local.mjs` (its own `PROFILE_REFERENCES`). That fourth one went undocumented for a month and carried eight entries while the canonical list had eighteen, so `node seed-dev-local.mjs` died with `email_exists` on any stack where `seed-dev-payouts.mjs` had run — the exact trap this paragraph describes, walked into by the one list nobody had written down. Fixed 2 Oct 2026, and its `deleteUser` is now checked.
-
-`tests/rls/user-imports.test.ts` asserts the count is exactly twenty-five and that the only non-`NO ACTION` one is `profiles.manager_id`, **by name** — a bare count of exceptions would let a twenty-second column arrive with an `ON DELETE` of its own and pass as the known one. So adding a twenty-fourth reds a test rather than a teardown — but the test only counts them, it cannot know which list forgot one. Update all four together.
-
-**The two marketing columns cannot be two more rows in the flat lists**, and that is worth knowing before adding the next table that looks like them. A material uploaded by one admin can carry events logged by a DIFFERENT rep, and `marketing_material_events.material_id` is `NO ACTION` too — so deleting by `uploaded_by` alone fails on somebody else's row, naming `marketing_materials` while the row actually in the way belongs to a rep the teardown was never asked about. Events are cleared by material and then by actor, and only then the materials. `clearPayoutRows` already had the same shape for the same reason.
-
-**`manager_id` is in all three lists even though it cannot block a delete**, and it is handled differently in each: `on delete set null` means Postgres would clear it unprompted, so these clear it with an **UPDATE, not a DELETE** — the row holding the pointer is a *different* rep's profile, which is also why it is not an entry in `PROFILE_REFERENCES` (that list deletes rows). The failure it guards against is the quiet one: a seeded reporting line vanishing from a surviving persona with nothing reporting that it happened.
-
-**SheetJS is pinned to `https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs`, not `npm:xlsx`** — in `parse-residual-import/deno.json` and as the devDependency that builds test fixtures. npm's latest is 0.18.5 and carries two high-severity advisories (prototype pollution, ReDoS) fixed only in SheetJS's own later builds, since they stopped publishing to npm. Don't "simplify" it back to `npm:xlsx`. The remote-URL import is verified under `functions serve`; whether it survives `functions deploy` is untested, and the fallback is vendoring the one `xlsx.mjs` file, not downgrading.
-
-Fixtures for these tables live in `seedPayouts()`, **not** `seed()`. Same reason `seed()` sets no `agent_number`: it is also run against a migration subset that predates them (`tests/rls/deactivation.test.ts` calls it with `createTestDb([INITIAL_MIGRATION])`), and anything it touches that a prefix has not created yet fails those suites with `relation does not exist`, pointing nowhere near the cause. `seedPayouts()` returns the ids it created rather than letting tests hardcode them, because `resetData()` clears these tables through the `cascade` from `profiles` without naming them — so their sequences are never restarted and the ids drift upward run after run.
-
-Two consequences worth knowing before you write a test or a fixture. **Service-role and owner writes are logged with `actor_id = null`**, since neither has an `auth.uid()` — that is wanted for real server writes, but it means any fixture that seeds these tables as the platform owner stamps a `cross_agent_insert` per row. `tests/helpers/db.ts` `seed()` clears `audit_log` at the end for exactly that reason, and the live-suite teardowns clear the rows their own inserts *and deletes* generate. **And expect deliberate duplication**: `approve_pre_app` / `decline_pre_app` write their own row and also mutate a rep's `pre_apps`, so one event yields two rows at different granularities. Assert on `action` rather than on row counts.
-
-### Bulk rep import — why its staging rows behave differently from the residual ones
-
-`user_import_batches` + `user_import_rows` look like `rep_payout_batches` + `rep_payout_import_rows`, and the resemblance is deliberate, but **one difference is the entire design and everything else follows from it.**
-
-`commit_residual_import` is a `security definer` RPC that moves a whole batch into the ledger in **one transaction** and **deletes** the staging rows. That is possible because everything it touches is in Postgres. Creating an account is not: each one is a GoTrue write plus a Postgres write, in two different systems, with nothing spanning them. Two hundred reps is four hundred operations that can stop anywhere, and there is no commit that either happens or does not — only progress.
-
-So **these staging rows are NOT deleted when the import finishes. They survive, each carrying its own outcome**, which makes the table the progress ledger as well as the staging area. `outcome is null` is the work list, and that single fact is the whole of batch-level resume. Do not "tidy up" by deleting committed rows: that throws away the only record of what each row did and makes a half-finished batch indistinguishable from a fresh one.
-
-Three consequences worth knowing before changing any of it:
-
-- **The loop lives in the browser, and that is not laziness.** An Edge Function's wall clock cannot hold two hundred sequential account creations, so `provision-user-batch` does a bounded chunk (5 by default, hard cap 10) and reports what is left; `components/user-import-run-button.tsx` asks again until the answer is zero. Every row's outcome is written **before the next row starts**, server-side, so closing the tab mid-run loses at most the in-flight row — and even that is recoverable, because `provisionUser`'s resume path adopts the orphan. A real queue would be new infrastructure with no observability surface here; the staging table already is one. The batch flips to `committed` **server-side** on the call that empties the work list, so a browser dying after the last chunk still leaves a correct batch.
-- **Blocking vs skippable is a real distinction, not a nicety.** Six blockers stop the import; `email_exists` and `agent_number_taken` do not — those rows are skipped and the rest still imports. Accounts are independent of one another, unlike the rows of one period's ledger, so refusing forty onboardings because three people already have logins is the wrong trade. The rule lives in `isBlocking()`, which exists **twice** — `supabase/functions/_shared/user-imports.ts` and `lib/user-imports.ts` — because the browser copy cannot import the shared one without dragging `generateTempPassword` and `writeAudit` into the bundle. Unlike the pre-app validator pair, this duplication **is** pinned: `tests/unit/user-import-lib.test.ts` imports both and asserts they agree.
-- **No credential is ever handed out in bulk, and that is structural.** `provisionUser` generates a temporary password per account; `provision-user-batch` discards it unread and returns nothing about it. Every account lands with `must_change_password = true` and **cannot sign in** until an admin issues a password per rep from Manage Users. A live test asserts the response body carries no credential and an e2e spec asserts the rendered page offers no copy affordance. The result screen has to say the accounts cannot sign in yet — without that line an admin creates forty accounts and reports a bug.
-
-`provisionUser` in `_shared/provision-user.ts` is the single account-creation path, shared by `create-user` and the batch. It returns a discriminated result rather than a `Response`, and `conflict` is the outcome that needs different answers from its two callers: a 409 for a form submission, a skipped row for a batch.
-
-**Deactivation is two layers and neither is optional.** `profiles.is_active = false` is what RLS reads; `banned_until` on `auth.users` (via `auth.admin.updateUserById(id, { ban_duration })`) is what GoTrue reads. Without the ban a "deactivated" rep still signs in successfully and lands on an app that is empty by design, which reads as a bug. `deactivate-user` writes the auth layer **first**, so a partial failure leaves the account locked-but-shown-active (visible, safe) rather than shown-inactive-but-usable (invisible, not). Neither layer revokes an access token already issued — that stays valid up to an hour, and RLS is what makes the window harmless. `admin.signOut()` is not the fix: it takes the target's own JWT, which an admin does not have.
-
-**A rep's own logout is a different thing again, and it is `scope: "global"`.** `components/logout-button.tsx` in the topbar calls `supabase.auth.signOut()` with supabase-js's default scope, so signing out at a desk revokes that user's refresh tokens on **every** device rather than ending just that browser's session — kept deliberately, but written down because nothing announces it: already-issued access tokens stay valid either way (JWTs are not checked against a revocation list), so the only thing that ever notices is something forcing a refresh, which is how it first surfaced — as `e2e/root-redirect.spec.ts`'s rotated-cookie test going red two files after the logout spec, pointing at the proxy rather than at the cause.
-
 ### Edge Functions
 
 Twelve functions, all registered in `supabase/config.toml` (a function not listed there won't deploy or serve):
@@ -278,554 +230,6 @@ Twelve functions, all registered in `supabase/config.toml` (a function not liste
 | `stage-user-import` | admin-only; parses a rep CSV into `user_import_rows`, creating the batch on the way. One function where residuals needs two, because the text arrives in the request body rather than via Storage. **Idempotent** — clears the batch's rows first, so "fix something, then read again" is one code path run twice. Two modes: `source_text` starts an import, `batch_id` re-reads the text already stored on the batch |
 | `provision-user-batch` | admin-only; creates the accounts for a staged import, **a bounded chunk per call**. Calls the same `provisionUser` core as `create-user` and **discards the temporary password unread**. See the bulk-import section below for why the loop lives in the browser |
 | `marketing-material-file-url` | the one function whose two modes have **different authorization**: an admin stocks the library (upload), every active user reads it (download). Copying `residual-import-file-url` wholesale would put `callerIsAdmin` on both branches and make the library invisible to the people it is for — with no policy failing, because the policy is correct and the function would simply be stricter than it. Creates the material row before signing, because the key is `{material_id}/{file_name}`. `download: true` asks Storage for `Content-Disposition: attachment`; without it the URL renders inline, which is what View and Print need |
-
-### Tables with no owner, and the one rule they share
-
-`business_documents` follows this section exactly — see "The Document Center" below for where it deliberately differs. `marketing_materials` and `products` are the only client-readable tables in the schema with **no `agent_id`**, and in both cases that is the design rather than an omission. They are company reference data: the select policy is `is_active_agent() or is_admin()` with nothing to compare an owner against, writes are `is_admin()`, and every active rep reads all of it. `is_active_agent()` is load-bearing on both and easy to misread as decoration — there is no ownership clause beside it, so it is the only thing stopping a let-go rep from reading the current rate cards and the current price list on a JWT that has not expired yet.
-
-Both are **archived, never deleted** (`archived_at`), for the same structural reason: each exists to be referenced by an append-only child (`marketing_material_events`, `quote_line_items`), so a delete would either cascade that history away or be blocked by the FK forever. Neither has a DELETE policy or a DELETE grant.
-
-**They differ on one thing worth knowing: `products` has no `profiles` reference and `marketing_materials` does.** A material has an upload lifecycle — `file_key` is nullable, an unfinished upload is a real state, and "which admin do I ask about this one" is a question the manage page answers — so `uploaded_by` earns its place. A product is a few fields an admin types and edits in place, so a `created_by` would record who first typed it and go stale the moment anybody repriced it, while costing a twenty-third column to clear before a user can be deleted. The saving is exactly the four teardown lists above.
-
-### Merchant location is required for NEW merchants only — existing ones stay editable
-
-`20261013130000` added nullable `street`, `city`, `state`, `zip` to `merchants`, plus `norm_city()` and its index. **The first version of that file used a table-wide `check (city and state present) NOT VALID`, and it was wrong in a way worth remembering: NOT VALID only skips the rows that exist when the constraint is added — Postgres still enforces it on every later UPDATE of those rows.** Every merchant that predated the columns became uneditable: an admin could not change a status or a MID without inventing a location. It was confirmed by test (three edits refused with `merchants_location_required`) and replaced. **The fixtures had hidden it**: `seed()` had been taught to give every merchant a location, so no existing test ever updated a location-less row — the leads-status precedent this copied gets away with it only because a lead's status is rewritten on the same save that edits it. Before reaching for NOT VALID again, ask what happens on the next UPDATE of an old row.
-
-What replaced it, split by what each piece applies to:
-
-- **`merchants_location_format`** — a validated, NULL-tolerant CHECK on every row: *when present*, a city normalising to 2+ characters and at most 60 trimmed (the range `accounts_in_city()` searches), a state matching `^[A-Z]{2}$`. A legacy row with neither passes. It has to tolerate NULL: a NULL-refusing version cannot even be added validated over the existing rows — the revert experiment fails the migration itself.
-- **`merchants_location_guard`** — a `BEFORE INSERT OR UPDATE OF city, state` trigger (`enforce_merchant_location()`): an INSERT needs both; an UPDATE may not remove a complete location (changing it is fine). PT422 with a sentence, which `friendlyDbError` passes through. A trigger because a CHECK cannot tell an insert from an update — which is the whole bug above. It binds the service role too, so **every fixture that inserts a merchant must supply a city and state**, and **nothing in the app can create a location-less merchant any more**: `e2e/fixtures/seed.ts`'s `ensureLegacyMerchant()` writes one under the trigger over `docker exec psql` with `session_replication_role = replica` (local stack only), and the RLS suites get theirs from `seed()` run against a pre-migration prefix (`migrationsBefore` → `seed` → `migrationsFrom`).
-- **The merchant form** puts location first, in a fieldset: required on create and on a merchant that already has one; optional on a legacy merchant, with a notice, and validated as both-or-neither if started.
-- **`approve_pre_app()`** carries the pre-app's address across and refuses by name (PT409), before any write, a pre-app with no usable city or state. **`submit_pre_app()`** (`20261013132000`) now refuses the same, so the rep meets it at submission; the wizard's business step requires city and state (Next greys out; autosave still saves a draft without them) and the review step lists it as a blocker. There is deliberately **no table constraint on `pre_apps`** — drafts are saved field by field. Nothing else creates a merchant: there is no lead→merchant conversion.
-
-Admins see the remaining gap as a warning notice on `/dashboard` (only when non-zero) linking to the read-only `/admin/merchants/missing-location`. **That notice is a `Callout`, not a `StatCard`, on purpose:** every StatCard on the dashboard is one of the filtered figures, `e2e/dashboard-filters.spec.ts` cross-reads them as a set, and an unfiltered card in that row turned four of its specs red.
-
-`norm_city()` lower-cases, turns punctuation into a **space** (so "St.Louis" meets "St. Louis" and "Winston-Salem" meets "Winston Salem"), collapses whitespace and trims; it expands **no** abbreviations. It is indexed and called by the format CHECK, so the `dup_*` rule applies twice over: never `create or replace` it with different behaviour without reindexing and re-checking the constraint.
-
-**Four hand-run SQL files, none of them a migration:**
-
-- `scripts/recon-merchant-location.sql` — read-only, for the **production SQL Editor**. Exactly three queries, one labelled row each (`a` merchants with no location, `b` submitted pre-apps approval would refuse, `c` how many the backfill could fill; `a` and `b` carry their records as JSON), so each still answers when nothing matches and each can be run on its own if the editor shows only the last result. **It runs on a project with OR without `20261013130000`**: it reads the location columns through `to_jsonb(m) ->> 'city'` and inlines `norm_city`, and the test asserts the database it runs against really lacks both.
-- `scripts/preview-merchant-location-backfill.sql` — read-only; why each location-less merchant can or cannot be filled.
-- `scripts/backfill-merchant-location.sql` — **psql** version; rolls back unless given `-v apply=1`.
-- `scripts/backfill-merchant-location-editor.sql` — **SQL Editor** version (no psql, no `-v`): a single statement, so one transaction in any editor, whose first CTE is the only switch, `select false as apply`. Preview returns a summary row plus up to 20 merchant rows and writes nothing; `true` does the same work and reports `rows_changed`. A single statement rather than a DO block because a DO block can only report through `RAISE NOTICE`, which the browser editor does not reliably show.
-
-Both backfills fill from the linked pre-app only where the merchant has no location at all and the pre-app passes approval's address rule, and never overwrite a merchant's own field. The read-only files wrap themselves in `begin transaction read only`. `tests/rls/merchant-location-backfill.test.ts` executes all four in PGlite — the editor variant in both modes, with a full-table snapshot proving preview writes nothing; none has been run against a hosted project.
-
-**Hosted state: DEV HAS THE OLD (FIRST) VERSION OF `20261013130000` APPLIED** — the table-wide NOT VALID CHECK — from an accidental `npm run db:push` on 13 Oct 2026, **until it is reverted**. The committed file is now the second design and differs from what dev ran (dev's was sha256 `cb6626d8…`). Because dev's migration ledger already holds the `20261013130000` row, **`db push` will not re-apply the new file on its own**: the plan is to revert dev's objects, remove that ledger row deliberately, and push again. `20261013131000` (`accounts_in_city`) and `20261013132000` (`submit_pre_app` location rule) are local only; prod has none of the three. Check `npm run migration:list` before assuming otherwise.
-
-### The marketing library
-
-`marketing_materials` is the only client-readable table in the schema with **no `agent_id`**, and that is the whole design rather than an omission. It is company reference data: its select policy is `is_active_agent() or is_admin()` with nothing to compare an owner against, writes are `is_admin()`, and every active rep reads all of it. The consequence to hold onto is that **nothing published there is private**, which no policy can enforce — the admin UI says so on the upload form.
-
-`marketing_material_events` carries the ownership instead, and its insert policy is where the `documents.file_key` lesson lands a second time. `lead_id` is client-supplied and nothing else in the policy reads it, so without the `exists` on `leads` a rep could write fabricated engagement history onto **another rep's lead** — not reading anything, but putting rows in front of the admin reviewing that deal. Proved by reverting that clause alone: exactly one test goes red.
-
-**Materials are archived, never deleted**, and there is no DELETE in policy or in grant. A material exists to be referenced by the event log; deleting one would either cascade that log away or be blocked by the FK forever. `archived_at` drops it out of every rep's library while every event naming it stays readable. The events table is stricter still — no UPDATE or DELETE at all, unlike `notes` and `support_ticket_replies`, which both allow a delete — because it gets read back in front of a merchant disputing what they were told.
-
-**Neither table gets `log_cross_agent_change()`, for two different reasons.** `marketing_materials` has no `agent_id`, so the trigger would read NULL and log every write (the `support_ticket_replies` trap). `marketing_material_events` **does** have one and the trigger would work — which makes it the more interesting omission: the table is already an audit trail, and a second one would record that an admin looked at something in a table whose entire content is a record of who looked at what. Admin action on the library is audited where it happens instead, in `marketing-material-file-url`.
-
-**An inline signed URL renders on the STORAGE origin, so the type is allow-listed.** `marketing-material-file-url` signs inline only for `application/pdf`, `text/plain` and the three raster image types; everything else is forced to `attachment` whatever the caller asked for. `create-download-url` solves the same problem by always passing `download` — a document is never meant to be read in the tab — but this bucket cannot take that option, because rendering the collateral *is* the feature. An allow-list, not a block-list: the executable set is larger and far less stable than the passive one, and an unknown type downloading is a harmless surprise where an unknown type rendering is not. **`image/svg+xml` is deliberately absent** — an image everywhere else in a product and a script host in a browser, which is the exact trap an allow-list is for. This is also what closes the tabnabbing route the opened tab would otherwise leave: the component's `window.open` keeps a live `opener`, and this is why that is safe.
-
-**"Email" sends nothing, deliberately, and says so on screen every time.** No proposal-email feature exists in this codebase — `proposal_sent` is a lead status, not an action, and nothing under `app/` or `supabase/functions/` sends mail. The button logs an `emailed` event and tells the rep plainly that nothing was sent, because an admin reading the history will otherwise see "Emailed" against the lead and believe it. **When the email phase lands, the send goes next to that log line** — do not build a second path.
-
-**`window.open(..., "noopener")` returns NULL by spec**, which cost a bug here and will cost another somewhere else. View and Print open a tab synchronously before the await (a popup blocker would swallow a post-await open), then point it at the signed URL — but with `noopener` there is no handle to point, so every click fell through to the fallback and navigated the *current* tab while the blank one sat orphaned. Nothing failed and nothing was logged; the only symptom was the file opening in the wrong place. The opener link is cut by assignment instead. Only a browser finds this.
-
-**All twelve are `verify_jwt = false` in `config.toml`** — verified, every one of the twelve `[functions.*]` blocks sets it. The platform therefore performs **no** auth check before your handler runs, so **each function is responsible for authenticating the caller itself**. `functions deploy` carries this setting up with the code, so it holds in production too.
-
-Every one of them follows the same shape, and the order matters:
-
-1. `withSupabase({ auth: "user" }, ...)` rejects a missing or invalid JWT before the handler body (this is what returns the `401`).
-2. `callerIsActive(ctx.supabase)` — an `is_active_agent()` RPC through the **caller-scoped** client. A valid JWT does not mean the account is still enabled; a deactivated agent's token keeps working until it expires. Called via `ctx.supabaseAdmin` this would always be false, because a service-role connection has no `auth.uid()`.
-3. Authorization through the caller-scoped client, so RLS makes the decision — `resolveParentAgentId()` looks the parent record up as the caller rather than re-implementing ownership by hand.
-4. **Only then** `ctx.supabaseAdmin`, and only for the privileged step itself (minting the signed URL). It bypasses RLS, so nothing may reach it before authorization is settled.
-
-Also: return `404`, not `403`, when a record isn't the caller's — "not yours" and "doesn't exist" must be indistinguishable or the endpoint becomes an id oracle. `tests/live/business-documents.test.ts` and `tests/live/marketing-materials.test.ts` assert these branches against the running functions. (`document-urls` and `document-lifecycle` did the same for the legacy functions and went with them.)
-
-**RLS proving a row is the caller's does NOT prove the row is internally consistent, and `documents` is where that bit** (history now — the table is closed and the two functions named below are removed — but the lesson is the one to carry). The metadata row is written by the *browser* — `create-upload-url` signs a key and the client inserts the row — so `owner_type`, `owner_id` and `file_key` are all client-supplied and the insert policy only ever looked at `agent_id`. Inserting a row with your own `agent_id` and *another agent's* `file_key` therefore got that agent's object signed for you with the service role: reproduced against the running stack, HTTP 200, someone else's bytes. Closed in two places, both needed — `documents_file_key_matches_owner` (a `CHECK`, `NOT VALID` so pre-existing hand-rolled fixture keys don't break `db push`; safe because `documents` has no UPDATE policy *or* grant, so nothing can be edited into violating it) and `fileKeyMatchesOwner()` in `create-download-url` and `delete-document`, which re-derives the key and refuses to sign or delete a mismatch, covering the rows `NOT VALID` exempts. In `delete-document` that check matters more than in the download path: there a forged key *leaked* a file, here it would have destroyed one. The general lesson: any column the client supplies and no policy reads is unvalidated, and the fix belongs at the layer that cannot be skipped.
-
-Runtime is Deno 2 with per-function `deno.json` import maps; `.vscode/settings.json` enables the Deno language server only for `supabase/functions`, so the rest of the repo stays on the Node TS server.
-
-**The residual parser exists ONCE, and that is the opposite arrangement to the secrets validators below — worth knowing before you "match the pattern".** `supabase/functions/_shared/residuals.ts` holds every parsing rule (header matching, period normalisation, number coercion, blocker precedence) and is deliberately dependency-free, so it needs no import map — and, usefully, Node can therefore import it: `tests/unit/residuals-parse.test.ts` exercises all of it under vitest with no Deno, no Docker and no running stack. Because parsing happens only server-side, there is no browser twin to drift from. **Do not create one.** (A file reached by an import is still type-checked even though `tsconfig` excludes `supabase` from its roots, so `npx tsc --noEmit` covers this module through that test.)
-
-**The secrets validators exist twice, on purpose, and TypeScript cannot see the pair.** `lib/pre-app-validation.ts` (zod, browser) and `supabase/functions/_shared/pre-app-secrets.ts` (hand-written, dependency-free) both implement `isSsn` / `isRouting` / `isAccount` / the `rp_password` cap. (`isRouting` enforced a 3-7-1 mod-10 checksum on both sides until 25 Sep 2026; it was dropped deliberately — nine digits is now the whole rule. Each file carries a note explaining why and what to restore if that is ever reversed.) Genuinely sharing one file would need each `deno.json` to map a specifier reaching *above* `supabase/functions/` **and** `functions deploy` to bundle from there — not worth betting a deploy on, and `_shared/documents.ts` already answered this question the same way. The risk is real and one-directional in effect: change the checksum on one side only and the function starts rejecting values the UI accepts, producing a `400` the rep cannot explain. Nothing type-checks the pair, so **it is pinned by behaviour instead** — `tests/live/pre-app-secrets.test.ts` POSTs every value the client validator rejects and asserts `400`, plus a valid round-trip asserting success. Change both files together, and keep the cross-reference comments in each. (`tests/rls/validation-copy.test.ts`, which SPEC §10 lists, was deliberately **not** built: there is no second file to diff.)
-
-Storage: **four** private buckets — `documents` (legacy, closed), `residual-imports`, `marketing` and `business-documents` — created by migrations **`20261009170000_storage_buckets.sql`** and **`20261013120500_business_documents_bucket.sql`** (same shape; a new bucket gets a new migration rather than an edit to an applied one) — not by the dashboard, and not by test helpers. Until that migration they were in none: the hosted ones were made by hand, the local ones by helpers, and `marketing` was never made on dev at all, so every marketing upload there failed while the helpers, creating the bucket themselves, kept every suite green. The migration is `on conflict (id) do nothing`, so it fills in a missing bucket and never changes an existing one's privacy or limit; it returns early under PGlite, which has no storage schema. `npx supabase db reset` now restores all four. The helpers (`tests/live/helpers/stack.ts`, `e2e/fixtures/seed.ts`) no longer create buckets — they only `updateBucket` the size limit, which errors on a missing bucket, so a missing one fails loudly instead of being quietly papered over. (`seed-dev-local.mjs` still calls `createBucket`.) `residual-imports` holds the raw XLSX behind every `rep_payout_batches` row under the key `{batch_id}/{file_name}`, reachable only through `residual-import-file-url`; it needed its own bucket because the `documents` path resolves a **parent record's** `agent_id` and a residual report has no owning rep — it spans every rep in the file. The `documents` table stores metadata only (`owner_type` + `owner_id` polymorphic pointer, `doc_type`, `file_key`); bytes are in the bucket, and since the two signed-URL functions were removed nothing but the service role reaches them — `scripts/purge-legacy-documents.mjs` is the only thing meant to. The object key is `{agent_id}/{owner_type}/{owner_id}/{uuid}`, where `agent_id` is the **parent record's** owner rather than the uploader — so an admin uploading for a rep files it under that rep, and the rep can see it. That key shape is now load-bearing rather than merely tidy: it is what `documents_file_key_matches_owner` and `fileKeyMatchesOwner()` check against.
-
-**`[storage] file_size_limit` in `config.toml` does NOT limit an upload.** Measured on the local stack with it set to `50MiB`: a 120 MiB PUT through `uploadToSignedUrl` was accepted, and so was a 120 MiB service-role upload, and `listBuckets()` reported `file_size_limit = null` on **both** private buckets. So there was no ceiling at any layer — one rep with a video file could fill the project's storage quota, and the UI sat on "Uploading…" with no progress and no error. The real ceiling is the **per-bucket** limit, 50 MiB on every bucket (set by the bucket migrations, and `MAX_MATERIAL_BYTES` / `MAX_BUSINESS_DOCUMENT_BYTES` in `lib/`), re-asserted by `tests/live/helpers/stack.ts`, `e2e/fixtures/seed.ts` and `seed-dev-local.mjs` — re-asserted on every run, because a bucket created before the limit existed keeps accepting unbounded uploads and says nothing about it. **The hosted buckets still need it set out-of-band** (dashboard or `storage.updateBucket`); no migration can carry it. `materialUploadProblem()` and `businessDocumentUploadProblem()` refuse an over-size or zero-byte file in the browser, which is what produces a readable message instead of a 413 — a courtesy, not the boundary.
-
-**A signed URL carries the *function's* `SUPABASE_URL` as its origin, which is not always the one the browser can reach.** On the local stack it is the container-internal `http://kong:8000`, so `create-download-url`'s links were unresolvable from the browser and the download button silently did nothing in development — navigating to a host that does not resolve is not an error the page can catch. `reachableStorageUrl()` in `lib/storage-url.ts` (moved from `lib/documents.ts` when that file was deleted) re-points the origin at `NEXT_PUBLIC_SUPABASE_URL`, leaving the path and `token` (the signature, which is not host-bound) untouched; a no-op in production. The upload side never had this problem because `uploadToSignedUrl(path, token, file)` builds its URL from the client's own config. The live suite's `toReachableUrl()` has always done the same rewrite to fetch a signed URL from Node — which was the standing clue that the browser needed it too.
-
-`notes` and `tasks` use the same polymorphic `owner_type` + `owner_id` shape (`lead` | `pre_app` | `merchant` | `ghost_sheet`) — there is no FK, so validate `owner_id` in application code. Concretely: the panels take `ownerType`/`ownerId` as props from a page that already loaded that parent row under RLS, never from a searchParam. Two consequences of the missing FK that no policy covers — the policies check only `agent_id` — are that a row can be filed against an owner the writer cannot see, and that deleting an owner orphans its notes and tasks. **`owner_type` must be in every query**: ids collide across types (lead 7 and merchant 7 both exist) and both rows can legitimately belong to the caller, so dropping it mixes one record's notes into another's page and RLS will not object. `notes` is the one Tier 1 table with **no update policy** — append-only by design, so never offer an edit affordance. As of `20260812143407` the UPDATE grant is revoked too, so an attempt now fails loudly (`permission denied`) instead of being filtered to zero rows and reporting a save that did nothing. Deletes on `support_tickets`, `notes` and `tasks` are admin-only, as of `20260810171500`.
-
-`documents.owner_type` is the same shape but a **different set** — `pre_app` | `merchant` | `support_ticket` | `lead`. Legacy since 13 Oct 2026: no page renders a documents panel any more, and the support ticket page still deliberately carries no notes or tasks panel (an admin's note on a rep's ticket would be invisible to that rep, since notes are scoped own-or-admin).
-
-### The Document Center is a company library, and the old per-record path is closed
-
-`/documents` lists `business_documents` (`20261013120000`): policies, agreements, forms and guides an admin publishes at `/documents/manage` and every active rep views, downloads and prints. **It is the marketing library's design, copied on purpose** — no `agent_id`, admin-only INSERT/UPDATE policies, every active user reads, row created before the upload because the key is `{document_id}/{file_name}`, a validated `business_documents_file_key_matches_id` CHECK plus `fileKeyMatchesBusinessDocument()` in the function, the same inline-type allow-list, and `business-document-file-url` archiving the new row when the key, audit or signing step fails. `BUSINESS_DOCUMENTS_BUCKET` is defined once, in `_shared/business-documents.ts`, and re-exported by `lib/business-documents.ts` — the `MARKETING_BUCKET` arrangement.
-
-Three differences, each decided rather than drifted into:
-
-- **No event table.** Marketing logs per-lead engagement because "what did we send this merchant" is a question about a deal. A business document is read for the rep's own reference; there is no deal to file it against.
-- **"Delete" is an archive, and an archived row is hidden from reps BY RLS** (`(is_active_agent() and archived_at is null) or is_admin()`), the opposite of `products`/`marketing_materials`, where hiding archived rows is the query's job because the row is still history somebody reads. Here archived means gone: the function signs an archived document for nobody (admins included), the manage page lists live rows only, and the row and its file survive only so a mistaken click is an engineer's one-line UPDATE. The UI labels it "Delete" behind `ConfirmPair`.
-- **`size_bytes`**, a display hint from the admin's browser. Nothing decides anything from it; the bucket limit is the ceiling.
-
-**The legacy `documents` path is closed in both layers by `20261013121000`, not just hidden.** `authenticated` keeps SELECT only (INSERT/DELETE and the sequence revoked); the three own-row policies are dropped, leaving `select admin`. `create-upload-url`, `create-download-url` and `delete-document` are removed from the repo — and therefore the bucket, which has no storage policies, has no client path at all. `tests/rls/documents.test.ts` and `tests/live/legacy-documents-closed.test.ts` assert the closure, each with a reopened-state check showing it is the closure that refuses. **The table and the bucket are kept** until `scripts/purge-legacy-documents.mjs` runs: dry run by default, `--target dev` the only target (prod refused by ref, the catalog loader's guard-then-derive pattern), lists the bucket itself so orphans are caught, removes objects through the Storage API's `remove()` in batches — **deleting `storage.objects` rows in SQL leaves the bytes behind** — then deletes only rows whose object is gone. The audit trigger stays on `documents` so each purged row leaves a `cross_agent_delete` with a null actor.
-
-### Quotes are append-only on EDIT, which is a different thing from `notes`
-
-A quote is never updated in place. Each edit **inserts a new row** sharing the previous one's `quote_group_id` with `version + 1`, and the old row stays exactly as it was. `notes` is append-only because a note is a record of what somebody said; a quote is append-only because it is a record of **what a merchant was shown**, and "we never quoted that" is an argument a CRM should be able to settle.
-
-**The current version is the highest `version` in the group.** There is no `is_current` flag, no partial unique index, and so no window where two rows both claim to be current. What the database enforces is that the rule is *well-defined*: `unique (quote_group_id, version)` means a group can never hold two rows at the same version. The rule itself lives in `currentVersion()` in `lib/quotes.ts` and nowhere else — spelling `Math.max` inline at two call sites is how a list page and a detail page come to disagree about which version a merchant was sent.
-
-**A group id, not a self-reference to v1.** A parent pointer makes "every version of this quote" a recursive CTE and makes the chain breakable in the middle; a flat group id makes it `where quote_group_id = $1 order by version`. Same reasoning that keeps `profiles.manager_id` one hop deep.
-
-**`status` is the one mutable column, and WHICH column is enforced by the GRANT rather than by a policy.** `grant update (status) on quotes to authenticated` is column-level, so an attempt on `title`, `version`, `lead_id` or `agent_id` fails with `permission denied for column` — loudly, before RLS is consulted. This is the `20260812143407` lesson applied one column at a time: a write the grant refuses is an error a rep can act on, where a write RLS filters is a save that silently did nothing. **RLS cannot express this** — it decides which *rows* an UPDATE may touch, never which columns — so if you are reaching for a policy to make a column immutable, the answer is a grant. `quote_line_items` is stricter still: no UPDATE or DELETE at either layer, because changing a line is the edit that is supposed to produce a new version.
-
-Note what this means for a grants test: `has_table_privilege(…, 'UPDATE')` returns **false** when the privilege is held only on a column, so a column grant is invisible to the table-level check rather than indistinguishable from a table-level one. `tests/rls/grants.test.ts` asserts both — the table shape *and* a per-column loop — because each catches a different widening.
-
-**`quote_line_items` snapshots `unit_price`, `product_name` and `product_sku`, and the snapshot is taken SERVER-SIDE.** Catalog prices change after a quote is sent; re-deriving a total from today's list price would silently restate what a merchant was offered last month, and the restatement would look exactly like the original. The browser sends `product_id` and `quantity` and nothing else that reaches a column — a client-supplied `unit_price` would be the `documents.file_key` shape one more time, a figure no policy reads on a document handed to a merchant.
-
-**`create_quote_version()` is `security invoker`, like `convert_ghost_sheet_to_lead`, and exists for atomicity rather than privilege.** supabase-js has no client-side transaction, so the alternative is "insert the quote, then insert its lines" — two round trips with a real window, and a failure there leaves a **$0.00 quote against a lead, indistinguishable from one a rep meant to send**. `marketing_materials` tolerates the equivalent window because a row with no file is recognisable as unfinished and re-uploadable; an empty quote is neither. It refuses three things by name rather than by one count, because the causes need three different actions: a product not in the catalog, a product with **no list price** (null means "not priced yet", never zero — coalescing it to 0.00 would put a free terminal on the document), and a quantity below 1.
-
-**`enforce_quote_version()` is `security definer`, and both of its jobs are the reason.** It assigns the version number — rather than validating a client's, so two tabs that both read "the latest is v2" cannot race into a constraint violation on an ordinary second edit — and it refuses an insert into **another rep's** quote group. That second check *cannot* be a policy: an `exists` subquery in the insert policy is itself filtered by the select policy, so a foreign group reads as an **absent** group and the forged row is admitted as a brand-new quote at version 1. It has to see past RLS to mean anything.
-
-**The audit trigger is on `quotes` and deliberately not on `quote_line_items`.** `quotes` carries `agent_id` and the ordinary writer is the owning rep, so `log_cross_agent_change()` is quiet by default and speaks only when an admin acts on somebody else's deal — this is *not* the `rep_payout_rows` case, where no rep can write at all and the trigger would fire on every row of a forty-row import. The child table is excluded twice over: it has no `agent_id` (the `support_ticket_replies` trap), and even a working sibling function would write N+1 rows for one admin edit, N of them naming a table nobody looks up by id. The `documents` hole does not apply either — there is no UPDATE or DELETE on line items to go unrecorded.
-
-**The catalog is loaded by a SCRIPT, and the staging-table pipeline this file once deferred is now cancelled rather than pending.** `data/hardware-catalog.csv` is the real lineup — 43 rows, 25 devices and 18 add-ons across five brands — and `scripts/load-hardware-catalog.mjs` loads it into `brands`, `products` and `product_compatibility` — brands first, because `products.brand` is a foreign key to `brands(name)`; it creates any brand the file names that is missing, never deletes one, and refuses a brand spelled differently only by case. A column-mapping and blocker pipeline of the `rep_payout_import_rows` / `user_import_rows` kind exists so a non-engineer can load a file nobody has seen before, repeatedly, and inspect the damage before committing. This file is 43 curated rows in version control that change a few times a year, and an admin maintains them on `/admin/products` afterwards — so the review screen is the script's **dry run** (the default; `--write` is opt-in), the staging table is the CSV's git history, and there is nothing to build. Don't build it later either: the thing that would justify it is an unseen file, and this one is in the repo.
-
-Five things the script decides that are worth knowing before changing it:
-
-- **Any validation problem stops the whole load**, with no skippable/blocking split. That split is right for the rep import because two hundred accounts are two hundred independent things; a catalog is one document, and loading forty-two of forty-three rows leaves a half-stocked store that looks complete. `tests/unit/hardware-catalog.test.ts` is where every rule lives, and it validates the **shipped file** as well as fixtures — a validator green on synthetic input while the real catalog is broken is the failure that would otherwise go unnoticed.
-- **A blank `retail_price` stays NULL, never 0.00** — `list_price` is nullable precisely so "not priced yet" survives as a different fact from "free", `create_quote_version()` refuses the null outright, and `Number("")` is 0. One row ships unpriced today (`greta-bs1560-ns`) and `valor-virtual-terminal` ships at a real $0.00, so both sides are live cases rather than hypotheticals. No migration is needed for this: the column was nullable from `20261002193000`.
-- **`active=no` is `archived_at`, and the `review` note goes into `specs`.** The CSV's `review` column is the only place that says *why* a row is parked, and an archived product on `/admin/products` with no stated reason is one an admin un-archives at the price nobody confirmed. `specs` owns exactly `connectivity` and `review`; every other key an admin adds there survives a re-run, because that column exists to be extended without a migration.
-- **It never deletes.** Not a product (`products` has no DELETE policy *or* grant, because `quote_line_items` snapshots what a product said), and not a compatibility link (an admin adding one on `/admin/products` is the expected workflow). A row or link the CSV no longer names is **reported and left**. A re-run does, however, RESET a product an admin edited back to what the file says — which is what the field-by-field dry run is for.
-- **`splitCsvRows()` is a verbatim copy of `parseDelimitedText()`** from `supabase/functions/_shared/user-imports.ts`, because a `.mjs` script run by plain `node` cannot import a TypeScript module under `supabase/`. Pinned by behaviour, the `isBlocking()` arrangement: the unit test imports both and asserts they agree, including on the two cases this catalog contains — a comma inside a quoted field, and the doubled quote standing for the inches mark in `Square KDS 15.6" touchscreen`.
-
-**Targets are `local` and `dev`, and there is no prod path in the file at all.** The client is built from the thing that was *checked*: `--target dev` spawns `scripts/check-linked-project.mjs` and then derives the URL from the same `supabase/.temp/linked-project.json` the guard read, so the `npm run db:push -- --db-url <prod>` shape — guard prints "dev, ok" while the command underneath goes elsewhere — is unreachable. It refuses the prod ref outright and does not honour `ALLOW_PROD_SUPABASE`. The guard also runs before a **local** write, because a relink is global CLI state and "I was only working locally" is the belief the 2 Sep incident was held under. The dev service-role key comes from the logged-in CLI (`projects api-keys --reveal`) or `$SUPABASE_SERVICE_ROLE_KEY`, is never printed and never written to a file — `.env.deployed.local` stays publishable-keys-only.
-
-### A proposal belongs to a REP, links to at most one lead or merchant, and a rep cannot price one
-
-As of `20261009150000` a proposal is its own record. `quotes` carries `lead_id`
-and `merchant_id`, both nullable, with `quotes_at_most_one_link`
-(`check (num_nonnulls(lead_id, merchant_id) <= 1)`, which replaced
-`quotes_exactly_one_owner`'s `= 1`). Linked to a lead to win a deal, to a
-merchant to sell more to a business on the books, or to nothing for a business
-not in the CRM yet — one table, one append-only version history, one printable
-document.
-
-**`agent_id` is the rep the proposal is FOR**, not "the owner of the parent
-record" as it was while a quote could only be made from a lead or merchant
-page. Same values for every existing row; a different rule for new ones. The
-insert policy (`insert own, linked only to what the caller can see`) says a rep
-creates for themselves and an admin for anyone, and that each link must be a
-record **the caller can see** — its `exists` subqueries deliberately lean on
-the leads/merchants select policies rather than spelling `agent_id` out, because
-"visible to the caller" IS the rule. Consequence: an admin may file rep A's
-proposal against rep B's lead; it is A's, and B sees it nowhere. A missing lead
-and another rep's lead are refused with the **identical** message — the BEFORE
-trigger runs first, so it must never raise on a missing record (measured: a
-trigger that did turned the insert into an id oracle).
-
-**`customer_name` is a per-version snapshot, NOT NULL and non-blank.** Linked:
-`enforce_quote_version()` copies the record's name over whatever was sent (the
-price lock's overwrite-don't-trust shape). Unlinked: the typed name, trimmed.
-"Prepared for" on the sheet is the printed version's snapshot, so renaming a
-lead does not readdress last month's proposal. The migration's backfill
-**disables `quotes_audit_cross_agent`** around its UPDATE — a migration has no
-`auth.uid()`, so the trigger would otherwise log a `cross_agent_update` for
-every quote in the table.
-
-**Not on any hosted project yet**, like `brands`: applied to the local stack
-only. The app code depends on it, so dev and prod need the migration pushed
-before this code is deployed there.
-
-**Two real foreign keys, NOT the polymorphic `owner_type` + `owner_id`** that
-`notes`, `tasks` and `documents` use. Those three point at four tables and
-carry no FK at all, which costs them three documented problems (a row filed
-against an invisible owner, orphans on delete, `owner_type` required in every
-query or ids collide). With two targets, one extra column buys all three back.
-
-**The constraint is ORDINARY, not `NOT VALID`,** and that is a decision rather
-than a default. `NOT VALID` is for a constraint added over data that predates
-it — `documents_file_key_matches_owner` and `merchants_split_totals_100` both
-carry it. Here the rows can be *proven* clean: `lead_id` was `not null` until
-that migration and `merchant_id` was added by it, so `num_nonnulls` is exactly
-1 for every pre-existing row by construction. Reaching for `NOT VALID` anyway
-gives up the guarantee for nothing, and silently — it looks identical in the
-schema. A test asserts `convalidated`.
-
-**THE PRICE LOCK is `snapshot_quote_line_item()`, a BEFORE INSERT trigger, and
-the hole it closes was real.** `grant select, insert on quote_line_items to
-authenticated` plus an insert policy that only asks whether the parent quote is
-the caller's means **a rep's own session can POST a line item with any
-`unit_price` it likes, on their own quote, and every policy agrees.** The three
-more obvious answers each fail for a specific reason worth knowing:
-
-- **Hiding the field in the UI** is not a boundary at all.
-- **A column-level grant** (`grant insert (quote_id, product_id, quantity,
-  sort_order)`) is the right instinct — it is exactly what makes
-  `quotes.status` the only mutable column, and the standing rule is that an
-  immutable column is a grant and not a policy. It fails *here* because
-  `create_quote_version()` is `security INVOKER`, so it inserts as the caller
-  and would be refused its own snapshot. Making it `definer` to work around
-  that trades a narrow problem for the broad one invoker exists to avoid.
-- **Revoking INSERT outright** fails identically.
-
-So the trigger **overwrites** all five snapshot columns from `products`,
-whatever the caller supplied — it sits below every path to the table.
-Overwrite rather than raise, because nothing legitimate ever supplies a price:
-`unit_price` is a **derived** column that merely cannot be `generated always
-as`, since that cannot reach another table. It is `security definer`, and
-**not for reach** (every active user already reads every product) — it is
-definer so the figure on a document cannot be changed by changing a *policy*.
-Contrast `enforce_compatibility_kinds()`, which is invoker precisely because it
-has no such claim to make. The RPC also snapshots, independently: two layers
-reading the same table in the same transaction, the
-`documents_file_key_matches_owner` / `fileKeyMatchesOwner()` arrangement again.
-
-`enforce_quote_version()` now also **pins who a group is about**, which a CHECK
-cannot express (it is a fact about a row's siblings). Reachable without it: the
-RPC takes a group id and an owner as separate arguments, so a rep passing their
-own group id with a different — also their own — record would add a "version 2"
-about another business. Nothing leaks, but the print route filters by owner, so
-one page would read "version 2 of 1" and the other "version 1 of 1".
-
-**`create_quote_version()`'s old signatures are DROPPED, not left beside the
-new one** — the 7-argument one in `20261007150000`, the 8-argument one (no
-`customer_name_input`) in `20261009150000`; it now takes nine. `create or replace function` with a different parameter count
-creates a *second* function, so a default on `merchant_id_input` would leave a
-7-argument call with two candidates — an ambiguity Postgres reports at call
-time, from the browser, as a failed save. The `dashboard_counts()` trap, same
-answer, same assertion that the name resolves exactly once.
-
-### The store, and what hides an archived product
-
-`products` gained `brand`, `kind` (`device` | `addon`) and `billing`
-(`one_time` | `monthly`), plus `product_compatibility (addon_product_id,
-device_product_id)` — the **third** client-readable table with no `agent_id`,
-which it inherits from its parents rather than choosing: a fact about two
-catalog rows cannot be owned by a rep. The checklist therefore applies with
-step 1 struck out, and **step 4's sequence grant refers to nothing** — the
-pair is the primary key, so there is no `_id_seq`. A test asserts that absence,
-so a future surrogate key cannot arrive without the missing grant being noticed.
-
-`brand` is free text like `category`; `kind` and `billing` are **closed
-vocabularies**, and the difference is who reads them. Those are labels a person
-reads; these are read by *code* — the compatibility trigger, the store's device
-list, the proposal's two totals — so an invented value is not a new label but a
-row all three silently skip. **The store's "device type" filter is `category`**;
-a second column for it would be the same fact twice.
-
-`product_compatibility` **allows DELETE where `products` withholds it**, and
-that is the one deliberate difference: a product is archived because
-`quote_line_items` snapshots what it said, so the row is history, while a
-compatibility row is a current-state claim nothing snapshots.
-
-**WHAT HIDES AN ARCHIVED PRODUCT FROM A REP IS THE QUERY, NOT RLS.** The select
-policy stays `is_active_agent() or is_admin()` with no row filter;
-`lib/quotes-data.ts` carries `.is("archived_at", null)` plus `isQuotable`.
-Three reasons: an admin must still see everything on `/admin/products` (a
-policy would need a role branch, which is two policies wearing one name);
-archiving is a **lifecycle state, not an access boundary** — `profiles.territory`'s
-lesson, where wiring a label into a policy means changing the label changes who
-can see what; and **a quote outlives the product on it**, so a policy hiding
-archived rows would make a future join from a historical line come back empty
-while looking perfectly correct. `tests/rls/product-compatibility.test.ts`
-asserts a rep can still *read* an archived row, and greps both tables' policies
-for the word. The database still refuses one twice over, by name in the RPC and
-again in the trigger — a hidden row is a courtesy, a refused write is the
-boundary.
-
-**The cart's ORDER is the saved proposal's structure.** `cartToPayload()` emits
-device, then that device's add-ons, then the next device;
-`create_quote_version()` writes `sort_order` from the array's order; and
-`groupQuoteLines()` reads the grouping back off `(sort_order, product_kind)`
-and nothing else. Deliberately **not** a live join against
-`product_compatibility` — that would make a sent proposal re-group itself when
-an admin unlinks an accessory, a document changing shape after it was handed
-over. `quote_line_items` snapshots `product_kind` and `product_billing` for
-exactly that, and **neither carries a CHECK**: these are a record of what was
-true when the quote was sent, so a value retired from the catalog's vocabulary
-is correct history, and a constraint would turn that migration into one that
-has to rewrite documents.
-
-**`components/quote-store.tsx` is deliberately NOT on `ListTable`,** the app's
-responsive list pattern. `ListTable` renders both layouts and hides one, and
-its own header records the cost: a locator that does not consult the
-accessibility tree matches the hidden copy too, and converting the payouts
-ledger reddened nine `getByLabel` specs. The store is almost entirely form
-controls, so it follows the same discipline with **one** rendered copy —
-`flex-col sm:flex-row`, `min-w-0` on every text child, nothing in a scrolling
-container. `e2e/quote-store.spec.ts` asserts `scrollWidth <= clientWidth` at
-375/768/1440 rather than trusting the classes.
-
-**Two totals, never summed** — one-time and monthly, on screen and on paper.
-$1,497 of terminals and $29 a month are not the same unit, so a combined figure
-is a number that means nothing and reads as a price. `isMonthlyBilling()` tests
-*for* `'monthly'` rather than against `'one_time'`, so an unrecognised value
-lands in the one-time total: a figure wrongly counted once is an understatement
-a rep can see, while one wrongly counted as recurring quietly multiplies by
-twelve.
-
-### Brands: a table so a box can exist before its products
-
-`/admin/products` is a grid of brand boxes, and each opens
-`/admin/products/<brand id>` — a compact list (devices first) with an Add
-product form and a per-row Edit. Unbranded products have
-`/admin/products/unbranded`, shown on the grid only while any exist.
-
-`brands` (`20261009120000`) is the **fourth** client-readable table with no
-`agent_id`, same policies as `products` plus an admin DELETE. **The FK is on the
-NAME:** `products.brand` stays text and references `brands(name)` `ON UPDATE
-CASCADE ON DELETE RESTRICT`. That was the smallest design that changed no
-reader — the store, `lib/quotes-data.ts` and the loader read the same text, and
-no quote snapshots the brand — where a `brand_id` would have rewritten all of
-them to join for a label they already held. Rename cascades in one statement;
-delete is refused while **any** product names the brand, archived included
-(`set null` would silently move them to the store's "Other" bucket). The
-surrogate `id` exists only so the page URL survives a rename.
-`idx_brands_name_lower` refuses "Square" beside "square". `tests/rls/brands.test.ts`
-pins all of it, each assertion checked by reverting what it guards.
-
-**Any fixture that writes `products.brand` must create the brand first** — the
-two RLS catalog seeders and `ensureStoreCatalog()` in `e2e/fixtures/seed.ts`
-now do. `brands` has no profiles reference, so like `products` it survives
-`resetData()`; insert with `on conflict (name) do nothing`.
-
-The add-on picker (`components/device-multi-select.tsx`) offers only the brand's
-**live** devices and saves with the form; chips still show a link to a device
-outside that set, so a stale link stays visible and removable.
-
-**Not on any hosted project yet.** Applied to the local stack only
-(`migration up --local`); dev and prod need a deliberate push.
-
-### The printed Hardware Proposal is ONE component on ONE route
-
-`/proposals/[quoteGroupId]/print` renders `QuoteProposalDocument`, fed by
-`loadProposal()` in `lib/quote-proposal.ts`. The old
-`/leads/[id]/quotes/[quoteGroupId]/print` and
-`/merchants/[id]/quotes/[quoteGroupId]/print` are `redirects()` in
-`next.config.ts` (query string kept, so `?quote=` still pins a version) rather
-than page files: under `cacheComponents` a page that calls `redirect()` paints
-its shell first. The loader flattens the two record tables into one shape (a lead has `dba` / `merchant_legal_name` and three contact
-columns; a merchant has `dba` / `legal_business_name` and **no contact columns
-at all**), which means the document has one set of fields and cannot quietly
-omit one on one route. This is a sheet somebody is handed, so two near-copies
-is the worst place in the app for a wording drift. **Four printable routes,
-four documents** — the counts in `print-document.tsx` and `globals.css` say so.
-
-**Nothing is invented on it.** `PROPOSAL_TERMS` is one constant and is **empty
-by default**, so no terms block renders at all — not an empty heading, not
-placeholder wording. Nothing in this repo knows Tapswipe's hardware terms, and
-a wrong price is obvious where wrong terms are not. "Prepared by" prints only
-what `profiles` actually has (`full_name`, `email`, `agent_number`) — there is
-no phone column, so no phone is printed; and a merchant's contact line is
-omitted rather than filled from its originating pre-app, because a contact
-pulled from a two-year-old application is worse than none since it looks
-current. The preparer is the **quote's own** `agent_id`, so an admin printing a
-rep's proposal prints the rep's name.
-
-**404 on everything, never 403** — and it matters more on the merchant route:
-merchant ids are sequential and a rep knows their own, so "does merchant 41
-exist" is exactly the question a distinguishable response would answer. Note
-the e2e assertions are on the **rendered** not-found copy, not the status code:
-under `cacheComponents` the static shell is flushed before the Suspense
-boundary streams, so `notFound()` lands as **200** with not-found content in
-the body. That is existing behaviour of every record page here, written up in
-`e2e/print.spec.ts`.
-
-### The dashboard's filters narrow a view the caller already had in full
-
-`dashboard_counts()` takes six optional parameters as of `20261007120000` — rep
-(`agent_id`), manager (via `profiles.manager_id`), territory, lead stage, and a
-`created_at` range — and **stays security invoker**. That is the whole design,
-not a property it happens to retain.
-
-Every parameter is an extra `WHERE` clause **ANDed on top of** the caller's own
-policies, never a substitute for one. An agent who passes another rep's
-`agent_id` gets `agent_id = other` and the policy's `agent_id = auth.uid()`,
-which is unsatisfiable — so the answer is zero, and that is a consequence of the
-function not bypassing anything rather than a check it performs. The manager and
-territory filters resolve *through* `profiles`, and that subselect is RLS-scoped
-too (own-row plus admin), so for an agent it can only ever return their own row:
-**the same call gives an admin the whole team and a rep only themselves.**
-`tests/rls/dashboard-filters.test.ts` asserts both halves, and asserts
-`prosecdef` is false — flip that and every scoping assertion in the file
-silently becomes an assertion about nothing.
-
-**It is not an access change.** No policy is touched, and none reads
-`manager_id` or `territory` — both stay the reporting labels their column
-comments describe. A manager gains no wider book by being nameable here; what
-this adds is filtering **for an admin who already sees every row**, which is the
-exact use `profiles.manager_id`'s own comment anticipates. The test greps
-`pg_policies` for both words, the same way `set-manager` and `set-territory` do.
-
-Three decisions worth knowing before changing any of it:
-
-- **The zero-argument function is DROPPED, not replaced.** Left beside the new
-  one it would give a bare `dashboard_counts()` two candidates, since every new
-  parameter has a default — an ambiguity Postgres reports at call time, from the
-  browser, not in the migration. A test asserts the name resolves exactly once.
-- **A stage filter gets its own output column, `leads_at_stage`**, rather than
-  narrowing `active_leads`. That column means "a lead no pre-app points at yet",
-  a funnel position the records prove; a stage is something a rep types. Folded
-  together, one output would mean two things depending on a parameter — and
-  would read as near-zero for `application_sent`, whose leads are precisely the
-  ones a pre-app points at, while looking entirely healthy. It is **null** when
-  no stage was asked for, which is a different fact from zero and renders as a
-  different thing (no card at all).
-- **The upper date bound is `< to + 1`, not `<= to`.** `created_at` is a
-  timestamptz, so `<=` compares against midnight and drops everything created on
-  the last day of the range the person believes they asked for — a plausible set
-  of smaller numbers with nothing to say it is wrong.
-
-The filter bar (`components/dashboard-filters.tsx`) is a **server component with
-no client JavaScript**: stage is a `FilterTabs` row whose chips carry the other
-five filters (the job `leadsHref` does for the leads list's pair), and
-rep/manager/territory/dates are a plain GET form with an Apply button. A rep
-list is unbounded, so those four could not be chips; a form keeps them linkable
-and working with JS off rather than introducing a second interaction model. The
-three people controls are **admin-only in the UI** — not because a rep sending
-`?rep=…` would learn anything, but because for a rep every setting of them is
-their own numbers again or a blank page, and a control whose every option is a
-no-op is a broken control.
-
-**The "Your tasks" digest takes no part in any of it**, and that is structural
-rather than a promise: `DashboardTasks` reads `profile.id` and never
-`searchParams`, and sits in its own `<Suspense>` boundary *outside*
-`DashboardOverview`. The page says so in a line under the heading, because the
-filter bar sits directly above it and an admin who has just narrowed the
-overview to one rep would otherwise read that list as that rep's.
-`e2e/dashboard-filters.spec.ts` pins it by choosing a date range that empties
-every figure above and showing the digest did not move.
-
-**The e2e specs assert no hardcoded counts.** Numbers in the dev database move —
-the live suite writes to the same stack — so each filter is checked by
-*cross-reading*: an admin filtering by one rep must see exactly what that rep
-sees on their own dashboard, which the suite can load because it holds a storage
-state for them. That is both robust and a sharper claim than a constant: it says
-the filter selected the same rows the policy would.
-
-### Follow-ups live in two places, and they are reconciled in the UI rather than in the schema
-
-`leads.next_followup_date` and the generic `tasks` table both answer "when is
-the next thing to do on this lead", and they stay **separate columns on
-purpose**. Three things decided it, and all three are reasons not to "fix" the
-duplication later:
-
-- **`tasks.owner_id` carries no foreign key** — it points into four tables — and
-  PostgREST needs one to embed. So a lead cannot cheaply pull its own tasks.
-- **The leads list would lose its single indexed query.** Today "order by next
-  follow-up, show overdue" is one scan of one table. Derived from `tasks` it is
-  N+1 or a new view/RPC, and the "Unscheduled" filter becomes a `NOT EXISTS`
-  with no FK for the planner to use.
-- **A sync trigger was considered and rejected.** Writing the lead from a task
-  would fire the lead's own `log_cross_agent_change()`, so an admin adding a
-  task on a rep's lead would produce **two audit rows for one event** — noise
-  bought for a convenience.
-
-The accepted cost is real and is written down rather than hidden: a rep can
-leave `next_followup_date` blank while a task is due tomorrow, and the leads
-list files that lead under "Unscheduled". The mitigation is two UI surfaces,
-neither of which stores anything new — nothing is duplicated, so nothing can
-drift silently afterwards:
-
-- `components/followup-reconcile.tsx` on the lead detail page, which surfaces
-  the earliest open task's date beside the lead's own and offers one click that
-  writes `leads.next_followup_date`. It renders **nothing** when there is no
-  dated open task; a permanent banner on every lead is how a prompt becomes
-  wallpaper.
-- The **"Your tasks" digest** on `/dashboard`, which is the login-surfaced half:
-  what is late, and what is due inside `nextWeekBound()` — literally the leads
-  list's own "Next 7 days", so a rep working a day sees one horizon rather than
-  two.
-
-`earliestOpenTaskDue()` in `lib/annotations.ts` is the one definition of "the
-earliest open task", for the reason `currentVersion()` is the one definition of
-a quote's current version: spelled inline, the surface that *shows* the date and
-the control that *writes* it come to disagree about which task they mean. It
-skips completed tasks — a bare `Math.min` over the panel's rows offers the date
-of work already done, which is the fixture's `done` row and the trap it exists
-for.
-
-**The digest narrows by `agent_id` in application code, and that is not the rule
-this repo otherwise follows.** `TaskIndexScope` in `lib/annotations-data.ts` is
-the distinction: the standing "don't copy a policy into application code" rule
-is about a query that means *everything I may see*; this means *a subset of it,
-chosen by the page*. RLS hands an admin every task in the database and is right
-to — `/tasks` shows them all — but an admin's own landing page listing the whole
-company's work is not a digest. A company-wide view is a different feature with
-a different shape. Because no policy expresses this, **no RLS test can see it**:
-`e2e/followups.spec.ts` is the only place that promise is checked, and it checks
-both halves (the admin's dashboard omits the rep's task; `/tasks` still shows it
-to them), so a broken read cannot pass as correct scoping.
-
-### The lead timeline merges five sources and widens none of them
-
-`components/lead-timeline.tsx` on the lead detail page is one chronological
-feed over notes, tasks, quote versions, marketing events and the audit trail.
-(Documents were a sixth until 13 Oct 2026: once `documents` became
-admin-read-only, a document source could only have shown on an admin's feed,
-breaking the rep/admin cross-read below, so it was removed.) **It is a
-re-projection, not a fifth set of reads**: the page already loads four of those
-for its panels, so `lib/timeline.ts` is **pure** —
-it takes rows and returns entries, which is what lets
-`tests/unit/timeline.test.ts` import it with no database. `lib/timeline-data.ts`
-holds the only genuinely new query. Extending `loadAnnotations()` instead would
-have pushed a lead-only concern into a function four detail pages share, and a
-`loadLeadTimeline()` doing its own five reads would have doubled every one of
-them on the page's hot path.
-
-**`audit_log` is admin-only with NO own-row branch, and that is the whole
-scoping story.** Its single policy is `for select using (is_admin())`, so an
-**agent reads zero audit rows — on their own lead as much as anyone else's** —
-while `grant select on audit_log to authenticated` means the query *succeeds*
-and returns nothing. A rep's feed therefore simply has no audit entries, and
-the page says **nothing** about the gap: a permanent notice would be wallpaper
-on every lead (the thing `followup-reconcile.tsx` renders nothing to avoid),
-and a conditional one would announce that an admin had touched the record,
-which is exactly what the policy conceals. No definer RPC and no service-role
-client anywhere in the chain.
-
-**The query still runs for a rep rather than being skipped on role**, and that
-is deliberate: a role branch there is a copy of a policy in application code,
-and if `audit_log` ever gains an own-row branch the feed should widen by itself
-rather than keep showing nothing while nothing fails.
-
-Four decisions worth knowing before changing any of it:
-
-- **Quotes must NOT carry a byline.** `quotes.agent_id` is not whoever acted
-  — it is the rep the proposal is FOR (an admin may make one on a rep's
-  behalf), so printing it would attribute the act to the wrong person. The real actor is in `audit_log` and
-  is therefore admin-only, which makes **no byline the honest rendering**.
-  Notes, tasks and marketing events do carry theirs (`profile.id` is what the
-  panels write).
-- **Audit rows are matched on the `(table_name, row_id)` PAIR**, in one query
-  per table. `row_id` is `text` and lead 7, quote 7 and pre-app 7 all plausibly
-  exist, so a combined `.in("table_name", …).in("row_id", …)` would file one
-  under another — and no policy would object, because an admin may read both.
-  `leads`, `quotes` and `pre_apps` are covered; **`documents` is deliberately
-  not** — its DELETE rows name a row that no longer exists, and since the table
-  closed they are the purge's housekeeping, not a lead's story.
-- **The ordering is a TOTAL order**, because exact ties are routine rather than
-  freak: `created_at` defaults to `now()`, frozen for a whole transaction, so a
-  quote and the audit row its own trigger writes tie to the microsecond. Rules
-  are instant (parsed, **not** string-compared — a different offset is not a
-  later time), then source rank with the audit *trace* after the act, then id
-  descending. Without the tie-break the feed reshuffles when an unrelated
-  source gains a row, since `Array.sort` is stable only against its input.
-- **A task is placed at its CREATION**, which is why `tasks.created_at` joined
-  `TASK_LIST_COLUMNS`. A due date is a plan, and dating the entry by it puts
-  next Tuesday's task above everything that has actually happened. Completion
-  is absent entirely: there is no `completed_at`, so there is no instant to
-  place it at. And **`emailed` gets its own wording** — nothing in this
-  codebase sends mail, and a row reading "Emailed" in a list of things that
-  happened is how an admin comes to believe a proposal went out.
-
-`e2e/lead-timeline.spec.ts` is where the scoping is actually checked, because
-no RLS test can: it loads **one** lead in two real sessions and cross-reads
-them, asserting the rep's four rows are *identical* to the admin's four rather
-than merely fewer. "The admin sees more" is also true of a feed showing the two
-roles unrelated things.
 
 ### Next.js / auth wiring
 
@@ -859,6 +263,25 @@ The sidebar is dark in every theme, so its tokens live only in `:root` and are n
 Sidebar contents are data in `lib/nav.ts`, not JSX. An item without an `href` renders as a muted, `aria-disabled` row — the mechanism for listing a section before its page exists. **No item currently uses it**; Notes and Tasks did until `/notes` and `/tasks` were built, and a permanently-greyed row trains people to ignore that part of the nav, so prefer building the page or dropping the row over leaving one there. `usePathname()` supplies the active item, which under `cacheComponents` is runtime-only data: the client nav **must** sit inside a `<Suspense>` boundary, and its fallback therefore cannot call the hook either. That is why `components/sidebar-nav-list.tsx` takes `pathname` as a prop and is shared by both the streamed nav and its fallback.
 
 <!-- BEGIN:nextjs-agent-rules -->
+
+## Docs index
+
+Everything below was moved verbatim out of this file; one line each.
+
+- `docs/tapswipe_crm_schema.sql` — **the authoritative spec** for the data model and access rules.
+- `docs/claude/project-state.md` — full route/helper inventory, removed starter scaffolding, Edge Function and `_shared` inventory, removed-but-still-deployed functions.
+- `docs/claude/testing.md` — the four suites in full: every test rule and the lessons behind it (revert experiments, timing, empty-state specs, leftovers).
+- `docs/claude/rpcs-profiles-audit.md` — invoker vs definer RPCs, `check_duplicates`, `accounts_in_city`, `my_share_partners`, pg_trgm, `migrationsBefore()`, profiles columns (`agent_number`, `territory`, `manager_id`), the cross-agent audit trigger.
+- `docs/claude/payouts-and-teardown.md` — `rep_payout_*` tables, merge key, shared accounts on the screens, batch status guard, the 25 `profiles` FKs and the four teardown lists, SheetJS pin, payout fixtures, audit consequences for fixtures.
+- `docs/claude/user-accounts.md` — bulk rep import (staging rows as progress ledger, blocking vs skippable, no bulk credentials), deactivation, global logout.
+- `docs/claude/reference-data-and-marketing.md` — tables with no owner (`products`, `marketing_materials`, `business_documents`), the marketing library, inline-URL allow-list, the Email button, `window.open` + `noopener`.
+- `docs/claude/edge-functions-and-storage.md` — the `file_key` consistency lesson, Deno runtime, parser-once vs validators-twice, the four buckets, upload size limits, signed-URL origin rewrite.
+- `docs/claude/notes-tasks-documents.md` — polymorphic `owner_type` + `owner_id`, notes append-only, the Document Center and the closed legacy `documents` path.
+- `docs/claude/merchant-location.md` — location required for new merchants only, the NOT VALID lesson, format CHECK + guard trigger, `norm_city()`, the four hand-run SQL files, dev's hosted state.
+- `docs/claude/proposals-and-catalog.md` — append-only quotes, column grants, line-item snapshots and the price lock, the catalog loader script, proposals as their own record, the store, brands, the printed proposal.
+- `docs/claude/dashboard-followups-timeline.md` — dashboard filters (invoker, ANDed on policies), follow-ups in two places, the lead timeline.
+- `docs/design/residual-splits.md` — shared-account design memo.
+- `docs/tapswipe_crm_master_plan.md` — product master plan.
 
 # This is NOT the Next.js you know
 
