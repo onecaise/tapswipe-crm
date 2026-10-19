@@ -72,7 +72,13 @@ export function PayoutBulkSplit({
       // Import lines only. An adjustment line carries no rate by design
       // (rep_payout_rows_adjustment_no_figures), so including one would fail
       // the whole statement; rowCount on the page counts import lines too.
-      .eq("line_kind", "import");
+      .eq("line_kind", "import")
+      // And not a shared account's PARTNER line: its rate copies the signer's
+      // (copy_signer_rate_to_partner) and guard_shared_line() refuses a direct
+      // change, which would fail the whole statement. The signer's line is
+      // included, and its new rate is carried across to the partner's by the
+      // trigger. rowCount on the page excludes partner lines to match.
+      .or("share_role.is.null,share_role.eq.primary");
 
     setBusy(false);
     setConfirming(false);

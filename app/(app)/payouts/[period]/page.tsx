@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Suspense } from "react";
+import { Fragment, Suspense } from "react";
 import { ArrowLeftIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
@@ -16,12 +16,21 @@ import {
 import {
   PAYOUT_BATCH_COLUMNS,
   PAYOUT_ROW_COLUMNS,
+  PAYOUT_SHARE_ADMIN_COLUMNS,
+  isPartnerLine,
   parsePeriodParam,
   payoutTotals,
   splitPayoutLines,
   type PayoutBatch,
   type PayoutRow,
 } from "@/lib/payouts";
+import {
+  loadAdminShareViews,
+  loadOwnShareViews,
+  type AdminShareView,
+  type OwnShareView,
+} from "@/lib/rep-shares";
+import { SharedResidualControl } from "@/components/shared-residual-control";
 import { PayoutAdjustments } from "@/components/payout-adjustments";
 import { loadSkipReviewers } from "@/lib/residual-skips";
 import { PageHeader } from "@/components/page-header";
@@ -129,9 +138,17 @@ async function PeriodLedger({
   const isAdmin = profile.role === "admin";
   const supabase = await createClient();
 
+  // The share snapshot (both parties' figures and the account residual) is
+  // asked for on an admin's read only. A rep's own share comes from
+  // my_share_partners() below, so nothing on a rep's render can show the
+  // partner's (docs/design/residual-splits.md §8).
   const { data, error } = await supabase
     .from("rep_payout_rows")
-    .select(PAYOUT_ROW_COLUMNS)
+    .select(
+      isAdmin
+        ? `${PAYOUT_ROW_COLUMNS}, ${PAYOUT_SHARE_ADMIN_COLUMNS}`
+        : PAYOUT_ROW_COLUMNS,
+    )
     .eq("period", period)
     .order("mid", { ascending: true });
 
@@ -143,7 +160,7 @@ async function PeriodLedger({
     );
   }
 
-  const rows = (data ?? []) as PayoutRow[];
+  const rows = (data ?? []) as unknown as PayoutRow[];
 
   // No rows the caller may see and no rows at all are deliberately the same
   // answer. Distinguishing them would turn this URL into an oracle for which
@@ -169,6 +186,21 @@ async function PeriodLedger({
 
   const groups = groupByAgent(rows, reps);
   const overall = payoutTotals(rows);
+
+  // Shared lines (phase 7). An admin sees both parties and both figures; a
+  // rep sees the partner's name and their own share, from my_share_partners()
+  // -- the only path a rep has to either.
+  const shareIds = [
+    ...new Set(
+      rows.map((row) => row.rep_share_id).filter((id): id is number => id !== null),
+    ),
+  ];
+  const adminShares = isAdmin
+    ? await loadAdminShareViews(supabase, shareIds)
+    : new Map<number, AdminShareView>();
+  const ownShares = isAdmin
+    ? new Map<number, OwnShareView>()
+    : await loadOwnShareViews(supabase, false, profile.id, shareIds);
 
   // Committed batches that skipped a row in THIS period (phase 4b, design
   // §5.4). Not role-branched: rep_payout_batches is admin-only by policy, so a
@@ -298,12 +330,15 @@ async function PeriodLedger({
                 {/* The common case in one action: a rep's split is usually the
                     same percentage on every merchant, and typing it forty times
                     is how a wrong one gets missed. */}
-                {isAdmin && imports.length > 0 && (
+                {/* A partner's line takes the signer's rate, never its own,
+                    so the bulk split skips it and counts without it. */}
+                {isAdmin &&
+                  imports.some((row) => !isPartnerLine(row)) && (
                   <PayoutBulkSplit
                     period={period}
                     agentId={group.agentId}
                     repName={group.rep?.full_name ?? "this rep"}
-                    rowCount={totals.rows}
+                    rowCount={imports.filter((row) => !isPartnerLine(row)).length}
                   />
                 )}
               </div>
@@ -325,7 +360,8 @@ async function PeriodLedger({
               </TableHeader>
               <TableBody>
                 {imports.map((row) => (
-                  <TableRow key={row.id}>
+                  <Fragment key={row.id}>
+                  <TableRow>
                     <TableCell className="font-mono text-xs">
                       {row.mid}
                     </TableCell>
@@ -351,7 +387,11 @@ async function PeriodLedger({
                         className="block max-w-[22ch] truncate"
                         title={row.merchant_name ?? undefined}
                       >
-                        {row.merchant_id === null ? (
+                        {/* A partner cannot open the merchant (design §8: no
+                            RLS widening), so on a rep's page the partner's
+                            line names it as plain text, not a dead link. */}
+                        {row.merchant_id === null ||
+                        (!isAdmin && isPartnerLine(row)) ? (
                           formatText(row.merchant_name)
                         ) : (
                           <Link
@@ -374,7 +414,11 @@ async function PeriodLedger({
                         reached the control would have their write filtered to
                         nothing, which is what the cell's count check catches. */}
                     <TableCell>
-                      {isAdmin ? (
+                      {/* A shared line's residual is its piece of the
+                          account total, which is set on the pair as a whole
+                          (the control under the signer's line) and refused
+                          per line by guard_shared_line(). */}
+                      {isAdmin && row.share_role === null ? (
                         <PayoutFigureCell
                           rowId={row.id}
                           field="residual_income"
@@ -386,7 +430,9 @@ async function PeriodLedger({
                       )}
                     </TableCell>
                     <TableCell>
-                      {isAdmin ? (
+                      {/* The partner's rate copies the signer's; edited on
+                          the signer's line only. */}
+                      {isAdmin && !isPartnerLine(row) ? (
                         <PayoutFigureCell
                           rowId={row.id}
                           field="rep_split_pct"
@@ -405,6 +451,34 @@ async function PeriodLedger({
                       <Money value={row.rep_payout} />
                     </TableCell>
                   </TableRow>
+                  {row.rep_share_id !== null && (
+                    // A full-width row under the shared line rather than more
+                    // text in its cells: the cells are nowrap and the money
+                    // columns must stay on screen (the long-name bug), while
+                    // this row wraps freely.
+                    <TableRow
+                      className="hover:bg-transparent"
+                      data-testid="payout-share-marker"
+                    >
+                      <TableCell
+                        colSpan={8}
+                        className="whitespace-normal pt-0 text-xs text-muted-foreground"
+                      >
+                        {isAdmin ? (
+                          <AdminShareMarker
+                            row={row}
+                            share={adminShares.get(row.rep_share_id)}
+                          />
+                        ) : (
+                          <RepShareMarker
+                            row={row}
+                            view={ownShares.get(row.rep_share_id)}
+                          />
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  </Fragment>
                 ))}
               </TableBody>
             </Table>
@@ -418,6 +492,69 @@ async function PeriodLedger({
         );
       })}
     </div>
+  );
+}
+
+/**
+ * Under a shared line, for an admin: both parties and both figures, the
+ * account residual, and on the SIGNER's line the one control that sets it.
+ * The partner's line says where its figures come from instead.
+ */
+function AdminShareMarker({
+  row,
+  share,
+}: {
+  row: PayoutRow;
+  share: AdminShareView | undefined;
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      <p className="min-w-0 break-words">
+        <span className="font-medium text-foreground">Shared</span>
+        {" · "}
+        {share?.primary_name ?? "Signer"} {formatPct(row.primary_rep_pct ?? null)}
+        {" / "}
+        {share?.secondary_name ?? "Partner"} {formatPct(row.secondary_rep_pct ?? null)}
+        {" · account residual "}
+        {formatMoney(row.account_residual_income ?? null)}
+        {isPartnerLine(row) &&
+          " · Partner's line: its residual and split follow the signer's line."}
+      </p>
+      {row.share_role === "primary" && row.rep_share_id !== null && (
+        <SharedResidualControl
+          shareId={row.rep_share_id}
+          period={row.period}
+          accountResidual={row.account_residual_income ?? null}
+          merchantName={row.merchant_name}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Under a shared line, for the rep it belongs to: the partner's name and
+ * their own share. Nothing else is available to render -- `view` is what
+ * my_share_partners() returned.
+ */
+function RepShareMarker({
+  row,
+  view,
+}: {
+  row: PayoutRow;
+  view: OwnShareView | undefined;
+}) {
+  return (
+    <p className="min-w-0 break-words">
+      <span className="font-medium text-foreground">Shared account</span>
+      {view && (
+        <>
+          {" with "}
+          {view.partner_name} · your share {formatPct(view.own_rep_pct)}
+        </>
+      )}
+      {isPartnerLine(row) && " · The account's volume is reported on the signer's line."}
+    </p>
   );
 }
 

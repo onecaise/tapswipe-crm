@@ -42,6 +42,9 @@ type Row = {
   rep_split_pct: string | null;
   rep_payout: string | null;
   line_kind: string;
+  share_role: string | null;
+  primary_rep_pct: string | null;
+  secondary_rep_pct: string | null;
 };
 
 /** numeric arrives as a string; a workbook should carry numbers, not text. */
@@ -89,7 +92,7 @@ export default {
       let query = ctx.supabase
         .from("rep_payout_rows")
         .select(
-          "agent_id, period, mid, merchant_name, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, line_kind",
+          "agent_id, period, mid, merchant_name, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, line_kind, share_role, primary_rep_pct, secondary_rep_pct",
         )
         .order("period", { ascending: false })
         .order("agent_id", { ascending: true })
@@ -143,6 +146,13 @@ export default {
     // import line or merge it into one. An adjustment's Residual income and Rep
     // split are blank (it has neither); its Rep payout is the adjustment amount.
     //
+    // `Account share` (phase 7) is the row's OWN share of the rep side on a
+    // shared account -- 40 on the signer's line, 10 on the partner's -- and
+    // blank on an unshared line. Never the other rep's figure: a rep's export
+    // holds only their own lines (RLS), and each line names its own share. Last
+    // in the row so no existing column moves, and ignored by the parser, whose
+    // header lookup is exact ("account share" matches nothing it reads).
+    //
     // DELIBERATELY NO TOTAL ROW. A total has no MID, so re-importing this file would
     // block that row with missing_mid and refuse the whole batch — breaking the
     // round trip that is the entire point of the export. The pages show the totals.
@@ -160,6 +170,7 @@ export default {
         COLUMN_HEADERS.rep_split,
         "Rep payout",
         COLUMN_HEADERS.line,
+        "Account share",
       ],
     ];
 
@@ -183,6 +194,11 @@ export default {
         num(row.rep_split_pct),
         num(row.rep_payout),
         row.line_kind === "adjustment" ? "Adjustment" : "",
+        row.share_role === "primary"
+          ? num(row.primary_rep_pct)
+          : row.share_role === "secondary"
+            ? num(row.secondary_rep_pct)
+            : null,
       ]);
     }
 

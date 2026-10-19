@@ -19,6 +19,7 @@ import {
   splitPayoutLines,
   type PayoutRow,
 } from "@/lib/payouts";
+import { loadOwnShareViews } from "@/lib/rep-shares";
 import { PageShell } from "@/components/page-shell";
 import { PrintButton } from "@/components/print-button";
 import { PrintDocument } from "@/components/print-document";
@@ -55,9 +56,13 @@ async function Summary({
     notFound();
   }
 
-  await requireUser();
+  const profile = await requireUser();
+  const isAdmin = profile.role === "admin";
   const supabase = await createClient();
 
+  // PAYOUT_ROW_COLUMNS only, for admins too: a statement is the REP's
+  // document, and it prints the rep's own share and the partner's name --
+  // never the partner's share or payout -- whoever is printing it.
   const { data, error } = await supabase
     .from("rep_payout_rows")
     .select(PAYOUT_ROW_COLUMNS)
@@ -90,9 +95,24 @@ async function Summary({
   // block, naming the month each corrects; the total includes them.
   const { imports, adjustments } = splitPayoutLines(rows);
 
+  // Shared lines: the partner's name and the rep's own share. An admin
+  // reads them from merchant_rep_shares relative to this statement's rep; the
+  // rep reads my_share_partners(), which answers for them alone.
+  const shareIds = [
+    ...new Set(
+      imports.map((row) => row.rep_share_id).filter((id): id is number => id !== null),
+    ),
+  ];
+  const shares = await loadOwnShareViews(supabase, isAdmin, agentId, shareIds);
+  const anyShared = shareIds.length > 0;
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-start justify-between gap-4 print:hidden">
+      {/* flex-wrap: "Back to September 2027" and Print do not fit side by
+          side at 360px, and both buttons are nowrap -- without it Print sat
+          5px off screen and the page scrolled sideways (found by the phase 7
+          specs, in February; May happened to fit). */}
+      <div className="flex flex-wrap items-start justify-between gap-4 print:hidden">
         <Button asChild variant="ghost" size="sm">
           <Link href={`/payouts/${periodSegment}`}>
             <ArrowLeftIcon size={16} />
@@ -148,7 +168,26 @@ async function Summary({
                 {imports.map((row) => (
                   <tr key={row.id} className="border-b last:border-0">
                     <td className="py-1.5 font-mono text-xs">{row.mid}</td>
-                    <td className="py-1.5">{formatText(row.merchant_name)}</td>
+                    <td className="py-1.5">
+                      {formatText(row.merchant_name)}
+                      {row.rep_share_id !== null && (
+                        <span
+                          className="block break-words text-xs text-muted-foreground"
+                          data-testid="statement-share-marker"
+                        >
+                          {/* The dagger ties the line to the footnote. */}
+                          Shared account
+                          {shares.has(row.rep_share_id) && (
+                            <>
+                              {" with "}
+                              {shares.get(row.rep_share_id)!.partner_name} · your share{" "}
+                              {formatPct(shares.get(row.rep_share_id)!.own_rep_pct)}
+                            </>
+                          )}
+                          {" †"}
+                        </span>
+                      )}
+                    </td>
                     <td className="py-1.5 text-right tabular-nums">
                       {formatMoney(row.volume)}
                     </td>
@@ -209,6 +248,18 @@ async function Summary({
               </tfoot>
             </table>
           </div>
+
+          {anyShared && (
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid="statement-share-footnote"
+            >
+              † Shared account: the payout is your share of the account&rsquo;s
+              rep payout, and the residual shown is your share of the
+              account&rsquo;s residual. The account&rsquo;s volume is reported
+              on the signer&rsquo;s line.
+            </p>
+          )}
 
           <footer className="border-t pt-3 text-xs text-muted-foreground">
             {/* No generation timestamp. It would change on every render, so two

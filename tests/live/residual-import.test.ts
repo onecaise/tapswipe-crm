@@ -769,6 +769,9 @@ describe("the export is scoped by RLS and re-importable", () => {
       // skips a row so marked -- which is what keeps the round trip from
       // turning a correction into an import line.
       "Line",
+      // Phase 7: the row's own share on a shared account, blank otherwise.
+      // The parser ignores it.
+      "Account share",
     ]);
   });
 
@@ -1114,6 +1117,79 @@ describe("a shared account, through upload, preview, commit and acknowledge", ()
       .eq("mid", MID)
       .eq("period", APR);
     expect(april).toEqual([{ agent_id: fixtures.userIds.intruder, merchant_name: "Hand-made line" }]);
+  });
+
+  it("exports each line's OWN share, and each rep's export holds only their own line", async () => {
+    // Phase 7. The admin sees both halves of the pair, each with its own
+    // figure; the signer's export carries 40 and never 10, the partner's 10
+    // and never 40 -- RLS decides which lines, the column decides which share.
+    const mine = (exported: { rows: unknown[][] }) => {
+      const header = exported.rows[0] as string[];
+      const at = (name: string) => header.indexOf(name);
+      return exported.rows
+        .slice(1)
+        .filter((row) => row[at("MID")] === MID && row[at("Period")] === MAR)
+        .map((row) => [row[at("Agent #")], row[at("Account share")] ?? null]);
+    };
+    const sortRows = (rows: unknown[][]) => [...rows].sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+
+    const admin = await exportWorkbook(fixtures.tokens.admin, { period: MAR });
+    expect(sortRows(mine(admin))).toEqual(
+      sortRows([
+        [OWNER_NUMBER, 40],
+        [INTRUDER_NUMBER, 10],
+        [THIRD_NUMBER, null],
+      ]),
+    );
+    expect(mine(await exportWorkbook(fixtures.tokens.owner, { period: MAR }))).toEqual([
+      [OWNER_NUMBER, 40],
+    ]);
+    expect(mine(await exportWorkbook(fixtures.tokens.intruder, { period: MAR }))).toEqual([
+      [INTRUDER_NUMBER, 10],
+    ]);
+  });
+
+  it("my_share_partners over PostgREST: each party gets the other's name and their own share, nobody else anything", async () => {
+    const shape = (data: unknown) =>
+      (data as Record<string, unknown>[]).map((entry) => ({
+        keys: Object.keys(entry).sort(),
+        partner_name: entry.partner_name,
+        own_rep_pct: entry.own_rep_pct,
+        effective_from: entry.effective_from,
+      }));
+    const keys = ["effective_from", "effective_to", "own_rep_pct", "partner_name", "rep_share_id"];
+
+    const owner = await userClient(fixtures.tokens.owner).rpc("my_share_partners", {
+      merchant_id_input: fixtures.merchantIds.admin,
+    });
+    expect(owner.error, owner.error?.message).toBeNull();
+    expect(shape(owner.data)).toEqual([
+      { keys, partner_name: "Live Intruder Agent", own_rep_pct: 40, effective_from: MAR },
+    ]);
+
+    const intruder = await userClient(fixtures.tokens.intruder).rpc("my_share_partners", {
+      merchant_id_input: fixtures.merchantIds.admin,
+    });
+    expect(shape(intruder.data)).toEqual([
+      { keys, partner_name: "Live Owner Agent", own_rep_pct: 10, effective_from: MAR },
+    ]);
+
+    // Party-only for every caller: the admin is not a party.
+    const admin = await userClient(fixtures.tokens.admin).rpc("my_share_partners", {
+      merchant_id_input: fixtures.merchantIds.admin,
+    });
+    expect(admin.data).toEqual([]);
+
+    const deactivated = await userClient(fixtures.tokens.deactivated).rpc("my_share_partners", {});
+    expect(deactivated.error?.code).toBe("PT403");
+
+    const anon = await anonClient().rpc("my_share_partners", {});
+    expect(anon.data ?? null).toBeNull();
+    expect(anon.error).not.toBeNull();
+
+    // And the table itself stays shut to the parties.
+    const direct = await userClient(fixtures.tokens.intruder).from("merchant_rep_shares").select("id");
+    expect(direct.data ?? []).toEqual([]);
   });
 
   it("will not let an admin's session clear the skip record over PATCH", async () => {

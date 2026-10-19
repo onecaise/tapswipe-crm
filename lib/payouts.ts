@@ -99,7 +99,25 @@ export type PayoutRow = {
   /** The month the adjustment corrects, YYYY-MM-01. */
   adjusts_period: string | null;
   adjustment_note: string | null;
+  /**
+   * The share this line is half of (20261014140000), or null on an unshared
+   * line. A rep reads it on their own line; my_share_partners() keys its
+   * answer by it, which is how a partner's NAME is put against the right line.
+   */
+  rep_share_id: number | null;
+  /** 'primary' (the signer) or 'secondary' (the partner), or null. */
+  share_role: ShareRole | null;
+  /**
+   * The share snapshot, read ONLY on admin pages (PAYOUT_SHARE_ADMIN_COLUMNS).
+   * Absent on a rep's rows by construction: a rep page never selects them,
+   * so the partner's share cannot be rendered there even by mistake.
+   */
+  account_residual_income?: number | null;
+  primary_rep_pct?: number | null;
+  secondary_rep_pct?: number | null;
 };
+
+export type ShareRole = "primary" | "secondary";
 
 export type PayoutLineKind = "import" | "adjustment";
 
@@ -130,7 +148,27 @@ export function splitPayoutLines<T extends { line_kind?: PayoutLineKind | null }
  * recomputing it here from two strings.
  */
 export const PAYOUT_ROW_COLUMNS =
-  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id, line_kind, adjustment_amount, adjusts_period, adjustment_note";
+  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id, line_kind, adjustment_amount, adjusts_period, adjustment_note, rep_share_id, share_role";
+
+/**
+ * The shared-account snapshot, added to PAYOUT_ROW_COLUMNS on ADMIN pages
+ * only. The rule (docs/design/residual-splits.md §8): a rep sees their own
+ * share and the partner's name, never the partner's share or payout. The rep
+ * can technically read these columns on their own line (design §8's "honest
+ * caveat"), so the guarantee here is that no rep-facing page ASKS for them:
+ * a rep's own share comes from my_share_partners() instead.
+ */
+export const PAYOUT_SHARE_ADMIN_COLUMNS =
+  "account_residual_income, primary_rep_pct, secondary_rep_pct";
+
+/**
+ * True for the partner's half of a shared pair: its residual and rate are
+ * set from the signer's line, never edited on it (guard_shared_line()), so
+ * every surface shows it read-only.
+ */
+export function isPartnerLine(row: { share_role?: ShareRole | null }): boolean {
+  return row.share_role === "secondary";
+}
 
 export type PayoutBatch = {
   id: number;

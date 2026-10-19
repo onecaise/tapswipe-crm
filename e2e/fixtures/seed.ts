@@ -3181,6 +3181,9 @@ export const SHARE_FIXTURE = {
   shared: { mid: "E2E-SHARE-1", dba: "E2E Shared Diner" },
   admin: { mid: "E2E-SHARE-2", dba: "E2E Share Admin Co" },
   third: { mid: "E2E-SHARE-3", dba: "E2E Third Rep Cafe" },
+  /** The partner's own ordinary line in the same month: what makes the
+   *  partner's group a MIX, which is the case the bulk split's filter is for. */
+  partnerOwn: { mid: "E2E-SHARE-4", dba: "E2E Partner Own Cafe" },
   signerPct: 40,
   partnerPct: 10,
   accountResidual: 1234.56,
@@ -3203,7 +3206,7 @@ async function ensureShareFixture(
 ): Promise<ShareFixture> {
   const f = SHARE_FIXTURE;
   const period = firstOfMonth(f.period);
-  const mids = [f.shared.mid, f.admin.mid, f.third.mid];
+  const mids = [f.shared.mid, f.admin.mid, f.third.mid, f.partnerOwn.mid];
 
   const { data: oldLines } = await db.from("rep_payout_rows").select("id").in("mid", mids);
   const oldIds = (oldLines ?? []).map((row) => row.id as number);
@@ -3273,6 +3276,11 @@ async function ensureShareFixture(
       agent_id: ids.agent, period, mid: f.admin.mid, merchant_name: f.admin.dba,
       merchant_id: adminMerchantId, volume: 9000, average_ticket: 30, total_cost: 150,
       residual_income: 200, rep_split_pct: 50,
+    },
+    {
+      agent_id: ids.agent2, period, mid: f.partnerOwn.mid, merchant_name: f.partnerOwn.dba,
+      volume: 5000, average_ticket: 20, total_cost: 90,
+      residual_income: 100, rep_split_pct: 50,
     },
     {
       agent_id: ids.agent3, period, mid: f.third.mid, merchant_name: f.third.dba,

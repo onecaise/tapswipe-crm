@@ -250,3 +250,108 @@ export async function loadShareLedger(
     months,
   };
 }
+
+/**
+ * What a payout page prints beside one rep's shared line: the OTHER party's
+ * name and this rep's own share. Nothing else, on every path.
+ */
+export type OwnShareView = { partner_name: string; own_rep_pct: number };
+
+/** One share as an admin page sees it: both parties, both figures. */
+export type AdminShareView = {
+  id: number;
+  primary_agent_id: string;
+  secondary_agent_id: string;
+  primary_rep_pct: number;
+  secondary_rep_pct: number;
+  primary_name: string;
+  secondary_name: string;
+};
+
+/**
+ * The shares behind a page's shared lines, for an ADMIN: read from
+ * merchant_rep_shares under its is_admin() policy, with both names. Returns
+ * an empty map for anyone else, because the table returns them no rows --
+ * a rep page must use loadOwnShareViews() instead.
+ */
+export async function loadAdminShareViews(
+  supabase: SupabaseClient,
+  shareIds: number[],
+): Promise<Map<number, AdminShareView>> {
+  const views = new Map<number, AdminShareView>();
+  if (shareIds.length === 0) return views;
+
+  const { data: shares } = await supabase
+    .from("merchant_rep_shares")
+    .select("id, primary_agent_id, secondary_agent_id, primary_rep_pct, secondary_rep_pct")
+    .in("id", shareIds);
+  const rows = (shares ?? []) as Record<string, unknown>[];
+  if (rows.length === 0) return views;
+
+  const people = [
+    ...new Set(rows.flatMap((s) => [s.primary_agent_id as string, s.secondary_agent_id as string])),
+  ];
+  const { data: profiles } = await supabase
+    .from("profiles")
+    .select("id, full_name")
+    .in("id", people);
+  const names = new Map(
+    ((profiles ?? []) as { id: string; full_name: string }[]).map((p) => [p.id, p.full_name]),
+  );
+
+  for (const s of rows) {
+    views.set(Number(s.id), {
+      id: Number(s.id),
+      primary_agent_id: s.primary_agent_id as string,
+      secondary_agent_id: s.secondary_agent_id as string,
+      primary_rep_pct: Number(s.primary_rep_pct),
+      secondary_rep_pct: Number(s.secondary_rep_pct),
+      primary_name: names.get(s.primary_agent_id as string) ?? "Unknown rep",
+      secondary_name: names.get(s.secondary_agent_id as string) ?? "Unknown rep",
+    });
+  }
+  return views;
+}
+
+/** An admin's share, seen from one of its parties. */
+export function ownShareFromAdminView(
+  share: AdminShareView,
+  agentId: string,
+): OwnShareView {
+  return share.primary_agent_id === agentId
+    ? { partner_name: share.secondary_name, own_rep_pct: share.primary_rep_pct }
+    : { partner_name: share.primary_name, own_rep_pct: share.secondary_rep_pct };
+}
+
+/**
+ * The share views for one rep's lines, by rep_share_id.
+ *
+ * As an admin: from the table, relative to `agentId` (the statement's subject).
+ * As a rep: from my_share_partners() and nothing else -- the caller is the
+ * subject, since RLS shows a rep only their own lines. Never the partner's
+ * share or payout on either path, because OwnShareView has nowhere to put them.
+ */
+export async function loadOwnShareViews(
+  supabase: SupabaseClient,
+  isAdmin: boolean,
+  agentId: string,
+  shareIds: number[],
+): Promise<Map<number, OwnShareView>> {
+  const views = new Map<number, OwnShareView>();
+  if (shareIds.length === 0) return views;
+
+  if (isAdmin) {
+    for (const [id, share] of await loadAdminShareViews(supabase, shareIds)) {
+      views.set(id, ownShareFromAdminView(share, agentId));
+    }
+    return views;
+  }
+
+  for (const entry of await loadMySharePartners(supabase)) {
+    views.set(entry.rep_share_id, {
+      partner_name: entry.partner_name,
+      own_rep_pct: entry.own_rep_pct,
+    });
+  }
+  return views;
+}

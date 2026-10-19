@@ -9,6 +9,8 @@ import {
 import {
   PAYOUT_BATCH_COLUMNS,
   PAYOUT_ROW_COLUMNS,
+  PAYOUT_SHARE_ADMIN_COLUMNS,
+  isPartnerLine,
   batchStatusIntent,
   blockerLabel,
   isAdjustment,
@@ -632,6 +634,26 @@ describe("adjustment lines (phase 5)", () => {
       expect(columns).toContain(column);
     }
     expect(PAYOUT_BATCH_COLUMNS.split(", ")).toContain("adjustment_rows_ignored");
+  });
+
+  it("reads a line's own share key on every payout read, and the partner's figures on none a rep sees", () => {
+    // Phase 7. The statement and a rep's period page select PAYOUT_ROW_COLUMNS
+    // alone; the snapshot (both parties' shares, the account residual) is added
+    // only on an admin's read. A rep's own share comes from my_share_partners().
+    const columns = PAYOUT_ROW_COLUMNS.split(", ");
+    expect(columns).toContain("rep_share_id");
+    expect(columns).toContain("share_role");
+    for (const column of PAYOUT_SHARE_ADMIN_COLUMNS.split(", ")) {
+      expect(columns, column).not.toContain(column);
+    }
+    expect(PAYOUT_SHARE_ADMIN_COLUMNS.split(", ").sort()).toEqual([
+      "account_residual_income",
+      "primary_rep_pct",
+      "secondary_rep_pct",
+    ]);
+    expect(isPartnerLine({ share_role: "secondary" })).toBe(true);
+    expect(isPartnerLine({ share_role: "primary" })).toBe(false);
+    expect(isPartnerLine({ share_role: null })).toBe(false);
   });
 
   it("labels the two phase-5 preview flags", () => {

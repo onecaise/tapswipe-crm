@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   monthInputToPeriod,
   nextPeriod,
+  ownShareFromAdminView,
   parseRepPct,
   periodToMonthInput,
   previousPeriod,
@@ -87,5 +88,28 @@ describe("months", () => {
   it("shows an exclusive end as the last month paid", () => {
     expect(shareMonths("2026-08-01", null)).toBe("from August 2026");
     expect(shareMonths("2026-08-01", "2026-11-01")).toBe("August 2026 – October 2026");
+  });
+});
+
+describe("ownShareFromAdminView", () => {
+  const share = {
+    id: 7,
+    primary_agent_id: "signer",
+    secondary_agent_id: "partner",
+    primary_rep_pct: 40,
+    secondary_rep_pct: 10,
+    primary_name: "Ann Signer",
+    secondary_name: "Bo Partner",
+  };
+
+  it("gives each party the OTHER's name and their OWN share, and nothing else", () => {
+    expect(ownShareFromAdminView(share, "signer")).toEqual({
+      partner_name: "Bo Partner",
+      own_rep_pct: 40,
+    });
+    expect(ownShareFromAdminView(share, "partner")).toEqual({
+      partner_name: "Ann Signer",
+      own_rep_pct: 10,
+    });
   });
 });
