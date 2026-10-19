@@ -28,6 +28,7 @@ export function ConfirmPair({
   onCancel,
   busy,
   destructive = false,
+  buttonClassName,
 }: {
   label: string;
   confirmLabel?: string;
@@ -35,6 +36,8 @@ export function ConfirmPair({
   onCancel: () => void;
   busy: boolean;
   destructive?: boolean;
+  /** Extra classes for both buttons, e.g. a 44px touch height. */
+  buttonClassName?: string;
 }) {
   return (
     <span className="flex items-center gap-1.5">
@@ -44,6 +47,7 @@ export function ConfirmPair({
         size="sm"
         variant={destructive ? "destructive" : "default"}
         disabled={busy}
+        className={buttonClassName}
         onClick={onConfirm}
       >
         {busy ? "Working…" : confirmLabel}
@@ -53,6 +57,7 @@ export function ConfirmPair({
         size="sm"
         variant="ghost"
         disabled={busy}
+        className={buttonClassName}
         onClick={onCancel}
       >
         Cancel

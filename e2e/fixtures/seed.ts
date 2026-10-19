@@ -59,6 +59,14 @@ export const PERSONAS = {
    * Hence a persona whose session nothing else depends on. Do not reuse it.
    */
   logout: { email: "e2e-logout@tapswipe.test", fullName: "E2E Logout", role: "agent", agentNumber: "9004", territory: null },
+  /**
+   * The THIRD rep of the shared-account specs: party to no share, paid on
+   * an ordinary line in the shared period. Exists so "a rep outside the pair
+   * sees nothing of it" is asserted with a real session that has a statement
+   * of its own, rather than with agent or agent2, who are the pair. Owns no
+   * other records, like `logout`.
+   */
+  agent3: { email: "e2e-agent3@tapswipe.test", fullName: "E2E Agent Three", role: "agent", agentNumber: "9005", territory: null },
 } as const;
 
 export type PersonaKey = keyof typeof PERSONAS;
@@ -151,8 +159,8 @@ export type SeedResult = {
   /** The one published business document, for the Document Center specs. */
   businessDocumentId: number;
   /** persona -> owner type -> record id, for the document specs. */
-  /** Every persona but `logout`, which owns no records — see PERSONAS. */
-  docOwners: Record<Exclude<PersonaKey, "logout">, DocOwnerIds>;
+  /** Every persona but `logout` and `agent3`, which own no records — see PERSONAS. */
+  docOwners: Record<Exclude<PersonaKey, "logout" | "agent3">, DocOwnerIds>;
   /** The agent's two-version quote, for the quote print spec. */
   quote: QuoteFixture;
   /** The task rows behind the dashboard digest and the follow-up affordance. */
@@ -163,6 +171,8 @@ export type SeedResult = {
   store: StoreFixture;
   /** A saved proposal on the agent's MERCHANT, for the second print route. */
   merchantProposal: MerchantProposalFixture;
+  /** The two shared-account merchants and the live share between them. */
+  shares: ShareFixture;
   apiUrl: string;
 };
 
@@ -701,6 +711,7 @@ export async function seedE2E(): Promise<SeedResult> {
     agent: await ensurePersona(db, "agent"),
     agent2: await ensurePersona(db, "agent2"),
     logout: await ensurePersona(db, "logout"),
+    agent3: await ensurePersona(db, "agent3"),
   } satisfies Record<PersonaKey, string>;
 
   const ownedPeriods = Object.values(PERIODS).map(firstOfMonth);
@@ -740,7 +751,7 @@ export async function seedE2E(): Promise<SeedResult> {
     // leaving a reader to wonder whether it was forgotten. That persona exists
     // to be signed out; it opens no records, so seeding it a merchant, a lead,
     // a pre-app and a ticket on every run would be four rows nothing reads.
-  } satisfies Record<Exclude<PersonaKey, "logout">, DocOwnerIds>;
+  } satisfies Record<Exclude<PersonaKey, "logout" | "agent3">, DocOwnerIds>;
 
   await ensureDocumentsBucket(db);
   const materialId = await ensureMarketingMaterial(db, ids.admin);
@@ -760,6 +771,7 @@ export async function seedE2E(): Promise<SeedResult> {
   );
   await ensureCityAccounts(db, ids);
   ensureLegacyMerchant(ids.agent);
+  const shares = await ensureShareFixture(db, ids);
 
   return {
     ids,
@@ -771,6 +783,7 @@ export async function seedE2E(): Promise<SeedResult> {
     timeline,
     store,
     merchantProposal,
+    shares,
     apiUrl,
   };
 }
@@ -1141,7 +1154,7 @@ async function ensureReportingLine(
 async function ensureTasks(
   db: SupabaseClient,
   ids: Record<PersonaKey, string>,
-  docOwners: Record<Exclude<PersonaKey, "logout">, DocOwnerIds>,
+  docOwners: Record<Exclude<PersonaKey, "logout" | "agent3">, DocOwnerIds>,
 ): Promise<TaskFixture> {
   const quietLeadId = await ensureQuietLead(db, ids.agent);
 
@@ -3132,4 +3145,225 @@ export async function plantAdjustments(period: string): Promise<{
   if (rowError) throw new Error(`adjustment staging: ${rowError.message}`);
 
   return { signerId, partnerId, mid, batchId: batch.id as number };
+}
+
+/**
+ * The shared-account fixture (docs/design/residual-splits.md phases 6-7).
+ *
+ * Two merchants, both owned by the e2e agent, in a month no other spec uses
+ * (February 2027):
+ *
+ *   * SHARED -- a live share, agent signs 40 / agent2 partners 10, from
+ *     February 2027, with its shared pair of ledger lines for that month and
+ *     an account residual of $1,234.56 at the 50 rate. The payouts are
+ *     $493.82 (signer) and $123.46 (partner): distinctive strings, so "the
+ *     partner's payout is not on the signer's screen" cannot pass by a
+ *     coincidence of digits. agent3 gets an ordinary line in the same month,
+ *     so the third rep has a statement of their own to look at.
+ *   * ADMIN -- no share, one committed ordinary line for agent in February
+ *     (residual $200, rate 50), which the admin card's specs set, end and
+ *     cancel shares on and post a correction for.
+ *
+ * Reset on every call, by MID: history, then every line on any of the three
+ * MIDs (adjustments a previous run posted land in whatever month was open
+ * then, so they are found by MID, never by period), then the shares, then
+ * rebuilt.
+ */
+export type ShareFixture = {
+  sharedMerchantId: number;
+  adminMerchantId: number;
+  shareId: number;
+};
+
+export const SHARE_FIXTURE = {
+  period: "2027-02",
+  monthName: "February 2027",
+  shared: { mid: "E2E-SHARE-1", dba: "E2E Shared Diner" },
+  admin: { mid: "E2E-SHARE-2", dba: "E2E Share Admin Co" },
+  third: { mid: "E2E-SHARE-3", dba: "E2E Third Rep Cafe" },
+  signerPct: 40,
+  partnerPct: 10,
+  accountResidual: 1234.56,
+  signerResidual: 987.65,
+  partnerResidual: 246.91,
+  signerPayout: "$493.82",
+  partnerPayout: "$123.46",
+} as const;
+
+function serviceClient(): SupabaseClient {
+  const { apiUrl, serviceKey } = localStackConfig();
+  return createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
+async function ensureShareFixture(
+  db: SupabaseClient,
+  ids: Record<PersonaKey, string>,
+): Promise<ShareFixture> {
+  const f = SHARE_FIXTURE;
+  const period = firstOfMonth(f.period);
+  const mids = [f.shared.mid, f.admin.mid, f.third.mid];
+
+  const { data: oldLines } = await db.from("rep_payout_rows").select("id").in("mid", mids);
+  const oldIds = (oldLines ?? []).map((row) => row.id as number);
+  if (oldIds.length > 0) {
+    await db.from("rep_payout_row_history").delete().in("row_id", oldIds);
+    const { error } = await db.from("rep_payout_rows").delete().in("id", oldIds);
+    if (error) throw new Error(`share fixture lines: ${error.message}`);
+  }
+
+  const merchantIds: number[] = [];
+  for (const m of [f.shared, f.admin]) {
+    const { data: existing } = await db.from("merchants").select("id").eq("mid", m.mid).maybeSingle();
+    let id = existing?.id as number | undefined;
+    if (id === undefined) {
+      const { data: created, error } = await db
+        .from("merchants")
+        .insert({ agent_id: ids.agent, mid: m.mid, dba: m.dba, status: "active", city: "Nashville", state: "TN" })
+        .select("id")
+        .single();
+      if (error || !created) throw new Error(`share fixture merchant: ${error?.message}`);
+      id = created.id as number;
+    } else {
+      await db.from("merchants").update({ agent_id: ids.agent, dba: m.dba }).eq("id", id);
+    }
+    const { error: shareError } = await db.from("merchant_rep_shares").delete().eq("merchant_id", id);
+    if (shareError) throw new Error(`share fixture shares: ${shareError.message}`);
+    merchantIds.push(id);
+  }
+  const [sharedMerchantId, adminMerchantId] = merchantIds;
+
+  const { data: share, error: shareError } = await db
+    .from("merchant_rep_shares")
+    .insert({
+      merchant_id: sharedMerchantId,
+      primary_agent_id: ids.agent,
+      secondary_agent_id: ids.agent2,
+      primary_rep_pct: f.signerPct,
+      secondary_rep_pct: f.partnerPct,
+      effective_from: period,
+    })
+    .select("id")
+    .single();
+  if (shareError || !share) throw new Error(`share fixture share: ${shareError?.message}`);
+
+  const pair = [
+    { agent_id: ids.agent, share_role: "primary", residual_income: f.signerResidual },
+    { agent_id: ids.agent2, share_role: "secondary", residual_income: f.partnerResidual },
+  ].map((line) => ({
+    ...line,
+    period,
+    mid: f.shared.mid,
+    merchant_name: f.shared.dba,
+    merchant_id: sharedMerchantId,
+    rep_split_pct: 50,
+    rep_share_id: share.id,
+    primary_rep_pct: f.signerPct,
+    secondary_rep_pct: f.partnerPct,
+    account_residual_income: f.accountResidual,
+    // Volume only on the signer's line (design Q4): counted once.
+    ...(line.share_role === "primary"
+      ? { volume: 41000, average_ticket: 41, total_cost: 820 }
+      : {}),
+  }));
+  const { error: linesError } = await db.from("rep_payout_rows").insert([
+    ...pair,
+    {
+      agent_id: ids.agent, period, mid: f.admin.mid, merchant_name: f.admin.dba,
+      merchant_id: adminMerchantId, volume: 9000, average_ticket: 30, total_cost: 150,
+      residual_income: 200, rep_split_pct: 50,
+    },
+    {
+      agent_id: ids.agent3, period, mid: f.third.mid, merchant_name: f.third.dba,
+      volume: 7000, average_ticket: 25, total_cost: 120,
+      residual_income: 300, rep_split_pct: 50,
+    },
+  ]);
+  if (linesError) throw new Error(`share fixture ledger: ${linesError.message}`);
+
+  return { sharedMerchantId, adminMerchantId, shareId: share.id as number };
+}
+
+/**
+ * The month post_share_correction() would post into right now, computed the
+ * way share_correction_posting_period() does (the month after the latest
+ * import line anywhere), read as the service role. The specs cross-read the
+ * page's confirmation against THIS rather than a constant: other specs and
+ * the live suite commit months, so the answer moves.
+ */
+export async function expectedPostingPeriod(): Promise<string> {
+  const { data, error } = await serviceClient()
+    .from("rep_payout_rows")
+    .select("period")
+    .eq("line_kind", "import")
+    .order("period", { ascending: false })
+    .limit(1)
+    .single();
+  if (error || !data) throw new Error(`latest import month: ${error?.message}`);
+  const [year, month] = (data.period as string).split("-").map(Number);
+  return month === 12
+    ? `${year + 1}-01-01`
+    : `${year}-${String(month + 1).padStart(2, "0")}-01`;
+}
+
+export type AdjustmentLine = {
+  agent_id: string;
+  period: string;
+  adjustment_amount: number;
+  adjusts_period: string;
+};
+
+/** Adjustment lines on a MID, as the service role, largest amount first. */
+export async function adjustmentLines(mid: string): Promise<AdjustmentLine[]> {
+  const { data, error } = await serviceClient()
+    .from("rep_payout_rows")
+    .select("agent_id, period, adjustment_amount, adjusts_period")
+    .eq("mid", mid)
+    .eq("line_kind", "adjustment")
+    .order("adjustment_amount", { ascending: false });
+  if (error) throw new Error(`adjustments: ${error.message}`);
+  return (data ?? []).map((row) => ({
+    agent_id: row.agent_id as string,
+    period: row.period as string,
+    adjustment_amount: Number(row.adjustment_amount),
+    adjusts_period: row.adjusts_period as string,
+  }));
+}
+
+/**
+ * Removes the adjustment lines a spec posted on a MID. They land in the next
+ * open month, which no seed clears by period, and would otherwise sit on the
+ * agents' /payouts list as a stray future month until the next seed.
+ */
+export async function clearAdjustments(mid: string): Promise<void> {
+  const { error } = await serviceClient()
+    .from("rep_payout_rows")
+    .delete()
+    .eq("mid", mid)
+    .eq("line_kind", "adjustment");
+  if (error) throw new Error(`clear adjustments: ${error.message}`);
+}
+
+export type ShareRowSnapshot = {
+  primary_rep_pct: number;
+  secondary_rep_pct: number;
+  effective_from: string;
+  effective_to: string | null;
+};
+
+/** The shares on a merchant, as the service role, oldest first. */
+export async function sharesOn(merchantId: number): Promise<ShareRowSnapshot[]> {
+  const { data, error } = await serviceClient()
+    .from("merchant_rep_shares")
+    .select("primary_rep_pct, secondary_rep_pct, effective_from, effective_to")
+    .eq("merchant_id", merchantId)
+    .order("id");
+  if (error) throw new Error(`shares: ${error.message}`);
+  return (data ?? []).map((row) => ({
+    primary_rep_pct: Number(row.primary_rep_pct),
+    secondary_rep_pct: Number(row.secondary_rep_pct),
+    effective_from: row.effective_from as string,
+    effective_to: (row.effective_to as string | null) ?? null,
+  }));
 }

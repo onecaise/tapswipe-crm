@@ -656,6 +656,10 @@ describe("grant surface after all migrations", () => {
       // Reads merchant_rep_shares and other reps' names past RLS. Its guard
       // refuses a caller with no uid, but that is a second lock.
       "public.my_share_partners(int)",
+      // Reads every rep's ledger month past RLS to compute it.
+      "public.share_correction_posting_period()",
+      // Re-created with a seventh argument by 20261019130000.
+      "public.post_share_correction(int, date, uuid, numeric, numeric, text, date)",
     ]) {
       expect(
         await canExecute(db, "anon", signature),

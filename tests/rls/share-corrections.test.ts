@@ -295,15 +295,30 @@ describe("post_share_correction", () => {
       ).toBe(0);
     });
 
-    it("takes no posting month from the caller: there is no such argument", async () => {
-      await asUser(db, ADMIN_ID);
-      const error = await attempt(() =>
-        db.query(`select post_share_correction((select id from merchants where mid = '${MID}'),
-                    '${PAYOUT_PERIOD}', '${PARTNER_ID}', 40, 10, 'n', '${PAYOUT_PERIOD}')`),
+    it("takes no posting month from the caller: a seventh argument can only CONFIRM the computed one", async () => {
+      // 20261019130000 added expected_posting_period_input so the merchant
+      // page's "this will post to <month>" cannot be overtaken by a commit.
+      // It never chooses the month: a mismatch is refused, nothing written.
+      const call = (expected: string) =>
+        attempt(async () => {
+          await asUser(db, ADMIN_ID);
+          try {
+            await db.query(`select post_share_correction((select id from merchants where mid = '${MID}'),
+                        '${PAYOUT_PERIOD}', '${PARTNER_ID}', 40, 10, 'n', '${expected}')`);
+          } finally {
+            await asPlatform(db);
+          }
+        });
+      const error = await call(PAYOUT_PERIOD);
+      expect(error?.code).toBe("PT409");
+      expect(error?.message).toBe(
+        "A month was committed after this correction was reviewed, so it would now post to August 2026, not July 2026. Review it again.",
       );
-      expect(error?.message).toMatch(/function post_share_correction\(.*\) does not exist/);
-      await asPlatform(db);
-      await asPlatform(db);
+      await nothingWritten();
+      expect(await call(AUG)).toBeNull();
+      expect(
+        await count(`select count(*) from rep_payout_rows where line_kind = 'adjustment' and period = '${AUG}'`),
+      ).toBe(2);
       expect(await count(`select count(*) from pg_proc where proname = 'post_share_correction'`)).toBe(1);
     });
 
@@ -474,7 +489,7 @@ describe("catalog", () => {
     await db.close();
   });
 
-  const SIG = "public.post_share_correction(int, date, uuid, numeric, numeric, text)";
+  const SIG = "public.post_share_correction(int, date, uuid, numeric, numeric, text, date)";
 
   it("is security definer, search_path pinned, guarded first, locked before reading, fails closed", async () => {
     await asPlatform(db);
@@ -495,6 +510,10 @@ describe("catalog", () => {
     expect(fn.body).toContain(
       "shared_part(signer.rep_payout, secondary_rep_pct_input,\n                        primary_rep_pct_input + secondary_rep_pct_input)",
     );
+    // The posting month has ONE rule, in share_correction_posting_period(),
+    // which the merchant page's preview also calls (20261019130000).
+    expect(fn.body).toContain("posting := share_correction_posting_period();");
+    expect(fn.body).not.toMatch(/max\(period\)/);
     // No exception handler anywhere: the audit insert fails closed.
     expect(fn.body).not.toMatch(/\bexception\s+when\b/i);
     expect(fn.acl).not.toMatch(/(^|[{,])=X/);

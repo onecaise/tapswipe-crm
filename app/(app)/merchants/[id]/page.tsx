@@ -13,6 +13,16 @@ import {
 import { formatDate, formatPct, formatText } from "@/lib/format";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { loadRecordProposals } from "@/lib/quotes-data";
+import {
+  loadMerchantShares,
+  loadMySharePartners,
+  loadShareLedger,
+} from "@/lib/rep-shares";
+import {
+  MerchantShareCard,
+  type ShareRep,
+} from "@/components/merchant-share-card";
+import { MerchantShareNotice } from "@/components/merchant-share-notice";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { NotesPanel } from "@/components/notes-panel";
@@ -36,6 +46,37 @@ function Field({
       <dd className="text-sm">{children}</dd>
     </div>
   );
+}
+
+/**
+ * Everything the admin's share card needs, in three reads an admin's RLS
+ * admits in full: the merchant's shares, every rep (for the selects and for
+ * names on old shares, deactivated reps included), and the MID's ledger lines.
+ */
+async function loadShareCard(
+  merchant: Merchant,
+): Promise<React.ComponentProps<typeof MerchantShareCard>> {
+  const supabase = await createClient();
+  const [shares, repsResult, ledger] = await Promise.all([
+    loadMerchantShares(supabase, merchant.id),
+    supabase
+      .from("profiles")
+      .select("id, full_name, is_active")
+      .order("full_name", { ascending: true }),
+    merchant.mid
+      ? loadShareLedger(supabase, merchant.mid)
+      : Promise.resolve({ latestCommitted: null, months: [] }),
+  ]);
+  const reps = (repsResult.data ?? []) as ShareRep[];
+  return {
+    merchantId: merchant.id,
+    mid: merchant.mid,
+    shares,
+    reps,
+    defaultSignerId: merchant.agent_id,
+    latestCommitted: ledger.latestCommitted,
+    months: ledger.months,
+  };
 }
 
 async function MerchantDetail({
@@ -84,6 +125,17 @@ async function MerchantDetail({
   // Proposals linked to this merchant that the caller can see. The builder
   // lives on /proposals now; this page lists them and links there.
   const proposals = await loadRecordProposals("merchant", merchant.id);
+
+  // Shared account (docs/design/residual-splits.md §8). An admin gets the
+  // card with every share and its controls, read from merchant_rep_shares
+  // under its admin-only policy. Anyone else gets only what
+  // my_share_partners() returns for THEM on this merchant -- the partner's
+  // name and their own share -- and nothing when they are not a party.
+  const isAdmin = profile.role === "admin";
+  const shareCard = isAdmin ? await loadShareCard(merchant) : null;
+  const shareEntries = isAdmin
+    ? []
+    : await loadMySharePartners(supabase, merchant.id);
 
   return (
     <>
@@ -154,6 +206,9 @@ async function MerchantDetail({
           </Field>
         )}
       </dl>
+
+      <MerchantShareNotice entries={shareEntries} />
+      {shareCard && <MerchantShareCard {...shareCard} />}
 
       <TasksPanel
         ownerType="merchant"
