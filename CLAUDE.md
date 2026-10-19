@@ -13,6 +13,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **Never touch the live Supabase projects (dev or prod) without asking first**, and treat `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) as live production. Use the guarded `npm run` wrappers, never trust `npm run db:push -- --db-url <prod>`, and run `scripts/push-prod-migration.ps1 -DryRun` before a prod push. → "Hosted projects and deployment" below.
 - **Never run `npx supabase config push`** and **never run `supabase projects api-keys`** by hand. Set the prod DB password with `Read-Host -AsSecureString`, never a literal. → below.
 - **The service-role key belongs in Edge Function secrets only**; the Next app holds the publishable key only, and `.env.deployed.local` stays publishable-keys-only. → "Next.js / auth wiring" below.
+- **`scripts/reset-business-data.sql` is a hand-run, one-off SQL Editor reset** (empties every `public` table except `profiles`; dry run by default). **A new `public` table must be added to its `keep_tables` or `clear_tables`**, or the script aborts. Never run it from here. → `docs/claude/reset-business-data.md`.
 - **SheetJS stays pinned to the cdn.sheetjs.com 0.20.3 build**, never `npm:xlsx` (two high-severity advisories). → `docs/claude/payouts-and-teardown.md`.
 
 **Database access control**
@@ -161,8 +162,8 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2025 tests, 91 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (226 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2040 tests, 92 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (234 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
 npm run test:e2e       # Playwright, real browser against the app on the local stack (301 tests, 6 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
@@ -190,7 +191,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
-Baselines are the counts in the Commands block above (`npm test` 2025 tests / 91 files — every file must load; `test:live` 226; `test:deployed` 29; `test:e2e` 301, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
+Baselines are the counts in the Commands block above (`npm test` 2040 tests / 92 files — every file must load; `test:live` 234; `test:deployed` 29; `test:e2e` 301, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
 
 - Run `npm test` for any schema change; queries must run as `authenticated`, never the owner.
 - PGlite is Postgres 18.3, the stack 17.6 — pin constraint names in assertions, not SQLSTATEs.
@@ -280,6 +281,7 @@ Everything below was moved verbatim out of this file; one line each.
 - `docs/claude/merchant-location.md` — location required for new merchants only, the NOT VALID lesson, format CHECK + guard trigger, `norm_city()`, the four hand-run SQL files, dev's hosted state.
 - `docs/claude/proposals-and-catalog.md` — append-only quotes, column grants, line-item snapshots and the price lock, the catalog loader script, proposals as their own record, the store, brands, the printed proposal.
 - `docs/claude/dashboard-followups-timeline.md` — dashboard filters (invoker, ANDed on policies), follow-ups in two places, the lead timeline.
+- `docs/claude/reset-business-data.md` — operator runbook for the one-off business-data reset (dev, then prod), plus the script's design notes. Written 19 Oct 2026, not moved.
 - `docs/design/residual-splits.md` — shared-account design memo.
 - `docs/tapswipe_crm_master_plan.md` — product master plan.
 
