@@ -688,7 +688,7 @@ returns void
 language plpgsql
 security definer
 set search_path = public
-as $
+as $$
 declare
   target profiles;
   proposed profiles;
@@ -751,7 +751,7 @@ begin
     profile_id::text
   );
 end;
-$;
+$$;
 
 revoke all on function clear_must_change_password() from public;
 grant execute on function clear_must_change_password() to authenticated, service_role;
@@ -5162,7 +5162,7 @@ create or replace function guard_batch_status_transition()
 returns trigger
 language plpgsql
 set search_path = public
-as $
+as $$
 begin
   if current_user = 'authenticated'
      and not (old.status = 'review' and new.status = 'abandoned') then
@@ -5171,7 +5171,7 @@ begin
   end if;
   return new;
 end;
-$;
+$$;
 
 revoke all on function guard_batch_status_transition() from public;
 
@@ -8709,7 +8709,7 @@ stable
 -- so an output called `ghost_sheets` would collide with the relation of the
 -- same name. Every reference below is schema- or alias-qualified for the same
 -- reason. The parameters carry _input for the same reason.
-as $
+as $$
   with filters as (
     select (agent_id_input is not null
          or manager_id_input is not null
@@ -8767,7 +8767,7 @@ as $
          and (from_date_input is null or ls.created_at >= from_date_input)
          and (to_date_input is null or ls.created_at < to_date_input + 1)
     ) end;
-$;
+$$;
 
 -- The signature changed, so these have to name the new one: the privileges on
 -- the dropped zero-argument function went with it, and a function with no
