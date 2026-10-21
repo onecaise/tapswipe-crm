@@ -69,11 +69,23 @@ Snapshotting `mid` onto the share at `set_merchant_rep_share()` and matching sta
 
 - **For:** no later MID edit, by anyone, can detach a share during review; the ledger is keyed by MID text anyway.
 - **Against:** a *legitimate* MID change (a typo fix, a processor re-boarding the account) silently detaches the share the other way — the share keeps matching the old MID, and next month's file, carrying the new one, commits unshared. That is the same failure from an honest edit. Avoiding it needs either a sync trigger (which re-couples them) or a block on MID changes while a share is active. It also means two sources of truth, a backfill of existing shares, and lockstep changes to `commit_residual_import_v2`, `previewSharedRow()` in `_shared/residuals.ts`, and the three share RPCs' "latest committed month" reads.
-- **Recommendation:** not now. With rep writes closed and every MID change audited, the remaining exposure is an admin. A cheaper guard if wanted later: staged rows already carry `merchant_id`; the commit could block a row whose `merchant_id`'s current MID differs from `mid_raw` ("this merchant's MID changed since the file was read").
+- **Recommendation:** not now (Owen agreed, 21 Oct 2026). With rep writes closed and every MID change audited, the remaining exposure is an admin. A cheaper guard if wanted later: staged rows already carry `merchant_id`; the commit could block a row whose `merchant_id`'s current MID differs from `mid_raw` ("this merchant's MID changed since the file was read").
 
-### Open question for Owen
+### Ownership: an admin creates a merchant for a rep, and moves one between books
 
-**An admin's New merchant lands in the admin's own book.** The form inserts `agent_id = <caller>` and has no owner picker, and the edit form cannot reassign. That was already true for admins; it matters more now that it is the only manual path. If admins need to create a merchant *for a rep*, the form needs an owner field. Not built.
+Decision (Owen, 21 Oct 2026). The admin's New merchant and Edit forms have a required **Owner** select (`lib/merchant-owners.ts`, `ownerOptions()`): every active rep by name with their Agent #, then the admin themself as "(you)". There is **no default** on New — the admin picks, themself included. On Edit it starts on the current owner; a current owner who would not otherwise be offered (a deactivated rep, another admin) is listed first and labelled, so saving the form never silently moves the merchant.
+
+- **No schema change was needed.** "admin insert only" / "admin update only" already admit any owner for an admin and nobody else.
+- **Audited by the existing trigger.** `log_cross_agent_change()` writes `cross_agent_insert` when an admin creates a merchant in another rep's book and `record_reassigned` on any owner change — including out of the admin's own book, which its reassignment branch checks before ownership. Creating a merchant in the admin's own book is not an ownership change and logs nothing.
+- **Payouts do not follow the owner.** `parse-residual-import` resolves the payee from the file's Agent # (`profiles.agent_number`), and `commit_residual_import_v2` never reads `merchants.agent_id`. Asserted: after reassigning `MID-AGENT-1` to another rep, a row naming the old rep's number is paid to the old rep; after reassigning a shared merchant, the signer's row still commits as the signer/partner pair.
+- **`merchant_rep_shares` is untouched.** No trigger on `merchants` writes it; asserted by snapshotting the table and the ledger across a reassignment. The share card's *default* signer for a new share is still the merchant's current owner.
+- **Visibility moves with it.** Asserted: the previous owner's `select` returns 0 rows and the new owner's returns 1. A rep cannot give a merchant away or take one (0 rows each, no audit row).
+
+**What a reassignment does not move** (reported, not changed): notes, tasks and proposals on the merchant keep their author's `agent_id`, so the new owner does not see the old owner's notes/tasks/quotes, and the old owner still sees their own notes and tasks on a merchant they can no longer open; the merchant's `pre_app_id` still points at the old owner's pre-app. Owen to decide whether a reassignment should carry any of these.
+
+Tests: 7 in `tests/rls/merchants-admin-only-writes.test.ts` ("an admin decides who owns a merchant", one of them the mutation check with `merchants_audit_cross_agent` dropped), 5 in `tests/unit/merchant-owners.test.ts`, 3 in `e2e/merchant-owner.spec.ts`. Revert experiment: with the form put back to inserting into the caller's own book, "creates the merchant in the chosen rep's book" goes red (the serial reassign spec after it was skipped, so it was not independently proven that way; its RLS twin was).
+
+The cheaper "block a staged row when the merchant's current MID no longer matches the file" idea is recorded in `docs/claude/security-followups.md`.
 
 ### Not verified
 

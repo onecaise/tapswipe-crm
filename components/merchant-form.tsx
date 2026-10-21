@@ -12,6 +12,7 @@ import {
 } from "@/lib/merchants";
 import { US_STATES, isZip } from "@/lib/masks";
 import { EMPTY } from "@/lib/format";
+import type { OwnerOption } from "@/lib/merchant-owners";
 import { friendlyDbError } from "@/lib/db-errors";
 import {
   useTypedInput,
@@ -30,6 +31,7 @@ import { Label } from "@/components/ui/label";
 import { Callout } from "@/components/callout";
 
 type FormState = {
+  agent_id: string;
   dba: string;
   legal_business_name: string;
   mid: string;
@@ -46,6 +48,8 @@ type FormState = {
 
 function toFormState(merchant?: Merchant): FormState {
   return {
+    // No default on create: the admin picks the owner, themself included.
+    agent_id: merchant?.agent_id ?? "",
     dba: merchant?.dba ?? "",
     legal_business_name: merchant?.legal_business_name ?? "",
     mid: merchant?.mid ?? "",
@@ -84,6 +88,7 @@ function toPayload(form: FormState) {
   const company = companySplitFrom(form.split_agent_pct);
 
   return {
+    agent_id: form.agent_id,
     dba: form.dba.trim(),
     legal_business_name: text(form.legal_business_name),
     mid: text(form.mid),
@@ -107,12 +112,12 @@ function toPayload(form: FormState) {
 
 export function MerchantForm({
   merchant,
-  agentId,
+  owners,
 }: {
   /** Present when editing; absent when creating. */
   merchant?: Merchant;
-  /** The caller's own profile id, used as agent_id on insert. */
-  agentId: string;
+  /** Who the merchant can belong to: ownerOptions() in lib/merchant-owners.ts. */
+  owners: OwnerOption[];
 }) {
   const isEdit = merchant !== undefined;
   // Required for a NEW merchant, and for one that already has a location
@@ -147,6 +152,10 @@ export function MerchantForm({
     // only spaces, a half-filled location, or a malformed ZIP. The database
     // is the boundary (merchants_location_guard / _format); this says it in
     // words first.
+    if (form.agent_id === "") {
+      setError("Choose the rep this merchant belongs to.");
+      return;
+    }
     const problem = locationProblem(form, locationRequired);
     if (problem !== null) {
       setError(problem);
@@ -177,12 +186,12 @@ export function MerchantForm({
 
         router.push(`/merchants/${merchant.id}`);
       } else {
-        // agent_id is the caller's own. The insert policy's `with check` means
-        // an agent physically cannot create a row owned by someone else, so
-        // this supplies the value the policy requires rather than enforcing it.
+        // agent_id is the owner the admin picked. "admin insert only" admits
+        // any owner for an admin and nobody else; log_cross_agent_change()
+        // records a merchant created into another rep's book.
         const { data, error: insertError } = await supabase
           .from("merchants")
-          .insert({ ...payload, agent_id: agentId })
+          .insert(payload)
           .select("id")
           .single();
 
@@ -208,8 +217,9 @@ export function MerchantForm({
         <CardTitle>{isEdit ? "Edit merchant" : "New merchant"}</CardTitle>
         <CardDescription>
           {isEdit
-            ? "Only admins can change merchant information."
-            : "This merchant will be added to your own book."}
+            ? "Only admins can change merchant information. Changing the owner moves the merchant to that rep's book."
+            : "Choose the rep whose book this merchant belongs to."}{" "}
+          {"The owner decides who can see the merchant, not who is paid: residuals follow the Agent # on the processor's file, and a shared account's split is set on the merchant page."}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -282,6 +292,24 @@ export function MerchantForm({
               </div>
             </div>
           </fieldset>
+
+          <div className="grid gap-2">
+            <Label htmlFor="agent_id">Owner *</Label>
+            <select
+              id="agent_id"
+              required
+              className="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+              value={form.agent_id}
+              onChange={(e) => set("agent_id", e.target.value)}
+            >
+              <option value="">Choose an owner</option>
+              {owners.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
 
           <div className="grid gap-6 sm:grid-cols-2">
             <div className="grid gap-2">

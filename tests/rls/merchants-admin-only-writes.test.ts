@@ -4,6 +4,7 @@ import {
   ADMIN_ID,
   AGENT_ID,
   AGENT_NUMBER,
+  OTHER_AGENT_ID,
   PAYOUT_PERIOD,
   asPlatform,
   asUser,
@@ -414,6 +415,195 @@ describe("every MID change is audited", () => {
       await asUser(broken, ADMIN_ID);
       await broken.query(`update merchants set mid = 'MID-AGENT-1B' where id = ${id}`);
       expect(await midAudit(broken)).toEqual([]);
+    } finally {
+      await broken.close();
+    }
+  });
+});
+
+// -------------------------------------------------------------------------
+// Ownership (follow-up to phase 1): an admin creates a merchant FOR a rep and
+// moves one between books. Ownership decides who SEES a merchant; it does
+// not decide who is paid, and it does not touch merchant_rep_shares.
+// -------------------------------------------------------------------------
+
+async function visibleTo(target: TestDb, userId: string, dba: string): Promise<number> {
+  await asUser(target, userId);
+  const r = await rows<{ id: number }>(target, `select id from merchants where dba = '${dba}'`);
+  await asPlatform(target);
+  return r.length;
+}
+
+async function snapshotOf(target: TestDb, table: string): Promise<string> {
+  await asPlatform(target);
+  const [{ s }] = await rows<{ s: string }>(
+    target,
+    `select coalesce(jsonb_agg(to_jsonb(t) order by t.id), '[]')::text as s from ${table} t`,
+  );
+  return s;
+}
+
+async function allAudit(target: TestDb): Promise<AuditRow[]> {
+  await asPlatform(target);
+  return rows<AuditRow>(target, `select actor_id, action, row_id from audit_log order by id`);
+}
+
+describe("an admin decides who owns a merchant", () => {
+  beforeEach(async () => {
+    await asPlatform(db);
+    await db.exec(`delete from audit_log`);
+  });
+
+  it("creates a merchant in a rep's book, and the insert is audited", async () => {
+    await asUser(db, ADMIN_ID);
+    await db.query(
+      `insert into merchants (agent_id, dba, city, state)
+       values ('${AGENT_ID}', 'For The Rep Co', 'Nashville', 'TN')`,
+    );
+    const id = await merchantId(db, "For The Rep Co");
+
+    expect(await visibleTo(db, AGENT_ID, "For The Rep Co")).toBe(1);
+    expect(await visibleTo(db, OTHER_AGENT_ID, "For The Rep Co")).toBe(0);
+    expect(await allAudit(db)).toEqual([
+      { actor_id: ADMIN_ID, action: "cross_agent_insert", row_id: String(id) },
+    ]);
+  });
+
+  it("reassigns: the old owner loses sight of it, the new owner gains it, and it is audited", async () => {
+    const id = await merchantId(db, "Agent Active Co");
+    expect(await visibleTo(db, AGENT_ID, "Agent Active Co")).toBe(1);
+    expect(await visibleTo(db, OTHER_AGENT_ID, "Agent Active Co")).toBe(0);
+
+    await asUser(db, ADMIN_ID);
+    const moved = await db.query(
+      `update merchants set agent_id = '${OTHER_AGENT_ID}' where id = ${id}`,
+    );
+    expect(moved.affectedRows).toBe(1);
+
+    expect(await visibleTo(db, AGENT_ID, "Agent Active Co")).toBe(0);
+    expect(await visibleTo(db, OTHER_AGENT_ID, "Agent Active Co")).toBe(1);
+    expect(await allAudit(db)).toEqual([
+      { actor_id: ADMIN_ID, action: "record_reassigned", row_id: String(id) },
+    ]);
+  });
+
+  it("audits a reassignment out of the admin's OWN book too", async () => {
+    await asPlatform(db);
+    await db.exec(`
+      insert into merchants (agent_id, dba, city, state)
+      values ('${ADMIN_ID}', 'Admin Kept Co', 'Nashville', 'TN');
+      delete from audit_log;
+    `);
+    const id = await merchantId(db, "Admin Kept Co");
+    await asUser(db, ADMIN_ID);
+    await db.query(`update merchants set agent_id = '${AGENT_ID}' where id = ${id}`);
+    expect(await allAudit(db)).toEqual([
+      { actor_id: ADMIN_ID, action: "record_reassigned", row_id: String(id) },
+    ]);
+  });
+
+  it("a rep can neither give their merchant away nor take someone else's", async () => {
+    const mine = await merchantId(db, "Agent Active Co");
+    const theirs = await merchantId(db, "Other Active Co");
+
+    await asUser(db, AGENT_ID);
+    const give = await db.query(
+      `update merchants set agent_id = '${OTHER_AGENT_ID}' where id = ${mine}`,
+    );
+    const take = await db.query(
+      `update merchants set agent_id = '${AGENT_ID}' where id = ${theirs}`,
+    );
+    expect([give.affectedRows, take.affectedRows]).toEqual([0, 0]);
+
+    await asPlatform(db);
+    const owners = await rows<{ id: number; agent_id: string }>(
+      db,
+      `select id, agent_id from merchants where id in (${mine}, ${theirs}) order by id`,
+    );
+    expect(owners).toEqual([
+      { id: mine, agent_id: AGENT_ID },
+      { id: theirs, agent_id: OTHER_AGENT_ID },
+    ]);
+    expect(await allAudit(db)).toEqual([]);
+  });
+
+  it("does not touch merchant_rep_shares or a single ledger line", async () => {
+    await addPartner(db);
+    await shareMerchant(db);
+    const sharesBefore = await snapshotOf(db, "merchant_rep_shares");
+    const ledgerBefore = await snapshotOf(db, "rep_payout_rows");
+
+    await asUser(db, ADMIN_ID);
+    await db.query(
+      `update merchants set agent_id = '${OTHER_AGENT_ID}' where mid = '${SHARED_MID}'`,
+    );
+
+    expect(await snapshotOf(db, "merchant_rep_shares")).toBe(sharesBefore);
+    expect(await snapshotOf(db, "rep_payout_rows")).toBe(ledgerBefore);
+  });
+
+  it("does not change who is paid: the commit still follows the file's Agent #", async () => {
+    // Shared merchant moved to OTHER_AGENT: the signer's row still commits
+    // as the AGENT/PARTNER pair.
+    await addPartner(db);
+    await shareMerchant(db);
+    await asUser(db, ADMIN_ID);
+    await db.query(
+      `update merchants set agent_id = '${OTHER_AGENT_ID}' where mid = '${SHARED_MID}'`,
+    );
+    const shared = await stageSignerRow(db);
+    await asUser(db, ADMIN_ID);
+    await db.query(`select commit_residual_import_v2(${shared})`);
+    expect((await ledgerLines(db)).map((l) => [l.agent_id, l.share_role])).toEqual([
+      [AGENT_ID, "primary"],
+      [PARTNER_ID, "secondary"],
+    ]);
+
+    // Unshared merchant moved to OTHER_AGENT: a row naming AGENT's number is
+    // paid to AGENT, not to the new owner.
+    await asUser(db, ADMIN_ID);
+    await db.query(
+      `update merchants set agent_id = '${OTHER_AGENT_ID}' where mid = 'MID-AGENT-1'`,
+    );
+    await asPlatform(db);
+    const [{ id: batch }] = await rows<{ id: number }>(
+      db,
+      `insert into rep_payout_batches (imported_by, file_key, file_name, status)
+       values ('${ADMIN_ID}', 'test/owner.xlsx', 'owner.xlsx', 'review') returning id`,
+    );
+    await db.exec(`
+      insert into rep_payout_import_rows
+        (batch_id, row_number, agent_number_raw, mid_raw, merchant_name_raw,
+         period, agent_id, merchant_id, volume, average_ticket, total_cost,
+         residual_income, rep_split_pct)
+      values (${batch}, 2, '${AGENT_NUMBER}', 'MID-AGENT-1', 'Agent Active Co',
+         '2026-08-01', '${AGENT_ID}', (select id from merchants where mid = 'MID-AGENT-1'),
+         100.00, 10.00, 5.00, 40.00, 50.00);
+    `);
+    await asUser(db, ADMIN_ID);
+    await db.query(`select commit_residual_import_v2(${batch})`);
+    await asPlatform(db);
+    expect(
+      await rows<{ agent_id: string; rep_payout: string }>(
+        db,
+        `select agent_id, rep_payout::text from rep_payout_rows
+          where mid = 'MID-AGENT-1' and period = '2026-08-01'`,
+      ),
+    ).toEqual([{ agent_id: AGENT_ID, rep_payout: "20.00" }]);
+  });
+
+  it("goes red with the cross-agent trigger dropped: the reassignment leaves no row", async () => {
+    const broken = await createTestDb();
+    try {
+      await resetData(broken);
+      await asPlatform(broken);
+      await broken.exec(
+        `drop trigger merchants_audit_cross_agent on merchants; delete from audit_log;`,
+      );
+      const id = await merchantId(broken, "Agent Active Co");
+      await asUser(broken, ADMIN_ID);
+      await broken.query(`update merchants set agent_id = '${OTHER_AGENT_ID}' where id = ${id}`);
+      expect(await allAudit(broken)).toEqual([]);
     } finally {
       await broken.close();
     }

@@ -6,6 +6,7 @@ import { ArrowLeftIcon } from "lucide-react";
 import { requireAdmin } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { type Merchant } from "@/lib/merchants";
+import { loadOwnerOptions } from "@/lib/merchant-owners";
 import { PageShell } from "@/components/page-shell";
 import { MerchantForm } from "@/components/merchant-form";
 import { Button } from "@/components/ui/button";
@@ -39,6 +40,7 @@ async function EditMerchant({
   }
 
   const merchant = data as Merchant;
+  const owners = await loadOwnerOptions(supabase, profile.id, merchant.agent_id);
 
   return (
     <>
@@ -48,7 +50,7 @@ async function EditMerchant({
           Back to merchant
         </Link>
       </Button>
-      <MerchantForm merchant={merchant} agentId={profile.id} />
+      <MerchantForm merchant={merchant} owners={owners} />
     </>
   );
 }
