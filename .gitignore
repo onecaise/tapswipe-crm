@@ -33,6 +33,9 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*.local
 .env
+.env.production
+.env.development
+.env.test
 
 # vercel
 .vercel
@@ -47,6 +50,8 @@ next-env.d.ts
 # supabase cli scratch
 supabase/.temp/
 supabase/.branches/
+# JWT signing keys for the local stack (`supabase gen signing-key`). Private keys.
+supabase/signing_keys.json
 
 # playwright e2e
 #

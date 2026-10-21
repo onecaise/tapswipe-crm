@@ -154,3 +154,28 @@ The correction: the review's example (an attacker framing `/admin/users`, pre-ap
 - The **deployed** site. Whatever serves production must not strip or override these; checking needs one `curl -D -` against the real URL after a deploy.
 - Browsers other than Chromium.
 - `.next/` currently holds that local-stack production build; the next `npm run build` replaces it.
+
+## Phase 4 (hygiene): the deploy-guard bypass, ignored files, `api-keys` advice
+
+### The guard bypass, reproduced
+
+npm appends `npm run <script> -- <args>` to the **end** of the script string. The wrappers read `npm run guard:linked && npx supabase functions deploy`, so `npm run functions:deploy -- --project-ref <prod>` gave the flag to the CLI and nothing to the guard: the guard read the (dev) link file, printed "dev, ok", exited 0, and the command underneath targeted prod. Same for `db:push -- --db-url <url>`. Reproduced in `tests/unit/linked-project-guard.test.ts` ("control: the old … form"), which runs the real `npm run` with the old script string against a fake `supabase` bin and asserts the CLI received `--project-ref`.
+
+### The fix
+
+- **The wrappers launch the CLI from the guard**: `"db:push": "node scripts/check-linked-project.mjs -- db push"` (and `db:dump`, `migration:list`, `functions:deploy`). npm's appended arguments now land in the guard's own argv.
+- **The guard refuses `--project-ref` and `--db-url`** (both the `--flag value` and `--flag=value` spellings) before reading the link file and before running anything, **even with `ALLOW_PROD_SUPABASE=1`**: those flags name a target other than the linked project, so a check of the linked project vouches for nothing. The message says to call `npx supabase` directly for a by-ref/by-URL target, which is the rule CLAUDE.md already gave.
+- Only then does it check the link (unchanged: prod refused unless `ALLOW_PROD_SUPABASE=1`, a missing link file or an unknown ref refused) and spawn `npx supabase <args>` with inherited stdio, so `db push`'s confirmation prompt still streams. The CLI's exit code is passed back.
+- **Check-only mode is unchanged**: with no `--`, the guard only checks and exits. `load-hardware-catalog.mjs` and `purge-legacy-documents.mjs` spawn it that way.
+
+Tests (20, all hermetic): every wrapper's string starts with the guard and contains no `&&`/`;`/`|` or `npx supabase`; real `npm run` refusals for `functions:deploy -- --project-ref`, `db:push -- --db-url`, and `migration:list -- --project-ref=…` with `ALLOW_PROD_SUPABASE=1`; all four wrappers × both flags × both spellings through the guard's argv; the allowed paths (`functions:deploy -- create-user`, `db:push -- --yes`, prod with the override) reach the fake CLI with exactly the right argv; prod linked, no link file and an unknown ref run nothing; exit-code pass-through; check-only mode. Mutation checks: with the flag refusal disabled, 7 tests go red; with `package.json` put back to the `&&` form, 11 go red. Smoke-checked in this repo with a **bogus** ref and URL (so a guard bug could reach nothing): both refused, exit 1.
+
+**Not closed by this:** npm echoes the full command line (`npm notice run node scripts/… --db-url=…`) before the guard runs, so a password inside a `--db-url` still lands in the terminal scrollback even though the command is refused. Raw `npx supabase …` still bypasses the guard entirely, as before.
+
+### Ignored files
+
+`.gitignore` adds `.env.production`, `.env.development`, `.env.test` (the existing `.env*.local` and `.env` did not cover them) and `supabase/signing_keys.json`. Checked with `git check-ignore -v` on a touched copy of each. None of them existed or was tracked.
+
+### `supabase projects api-keys` advice removed
+
+`.env.example` told people to run `npx supabase projects api-keys --project-ref <ref>` to fill `.env.deployed.local`; so did the error `tests/deployed/helpers/projects.ts` throws when that file is missing. Both now say to copy the publishable key from the dashboard and not to run that command (it prints the service-role key). The two scripts that call it with `--reveal` (`load-hardware-catalog.mjs`, `purge-legacy-documents.mjs`) capture the output and never print it; they are CLAUDE.md's stated exception and were not changed.

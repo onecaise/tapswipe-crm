@@ -134,7 +134,7 @@ Port 5432, not 6543: transaction mode breaks a migration partway through. Both p
 
 Two things they encode that cost a session each: `db push` **prompts** for confirmation on a remote target, so it must be run with `--yes` and its output must STREAM rather than be captured — buffering with `Out-String` swallows the prompt and hangs forever at near-zero CPU. And `db push` applies **everything** pending with no target-version flag, so any verification pinned to one migration reports PASS over the ones it did not look at; the migration check is now derived from `supabase/migrations/` instead.
 
-**The one combination to never trust: `npm run db:push -- --db-url <prod>`.** The guard reads the *linked* project, so it prints `dev, ok` and exits 0 while the command underneath goes to prod. That is a false reassurance from the very script written to prevent this mistake. When targeting prod by URL, call `npx supabase` directly so nothing claims to have checked something it did not.
+**`npm run db:push -- --db-url <prod>` used to print `dev, ok` and go to prod** (npm appended the flag after the guard); since 21 Oct 2026 the wrappers launch the CLI from the guard, which refuses `--project-ref` and `--db-url` (`docs/claude/security-fixes.md`, phase 4). When targeting prod by URL, call `npx supabase` directly so nothing claims to have checked something it did not.
 
 **The linked-project claim above drifted once, silently, and the guard exists because of it.** On 2 Sep 2026 12:15 EDT the CLI was manually relinked to **prod**, and this file went on asserting dev was linked for seven days. Two read-only commands (`migration list --linked`, `npm run test:deployed`) ran under that false belief before anyone noticed — no writes, no data touched, and the 4 Sep prod deployment that followed was deliberate and taken from a full `db dump` backup first. That was luck rather than design: nothing in the repo compared the documented link against the actual one. Now something does — `scripts/check-linked-project.mjs` prints the linked project and **fails closed** when it is prod, missing, or an unrecognised ref. Use the wrapped scripts for anything acting on the linked project:
 
@@ -161,7 +161,7 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2073 tests, 96 files — every file must load)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2093 tests, 97 files — every file must load)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (229 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
 npm run test:e2e       # Playwright, real browser against the app on the local stack (313 tests, 6 of them the shared setup)
@@ -190,7 +190,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
-Baselines are the counts in the Commands block above (`npm test` 2073 tests / 96 files — every file must load; `test:live` 229; `test:deployed` 29; `test:e2e` 313, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
+Baselines are the counts in the Commands block above (`npm test` 2093 tests / 97 files — every file must load; `test:live` 229; `test:deployed` 29; `test:e2e` 313, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
 
 - Run `npm test` for any schema change; queries must run as `authenticated`, never the owner.
 - PGlite is Postgres 18.3, the stack 17.6 — pin constraint names in assertions, not SQLSTATEs.

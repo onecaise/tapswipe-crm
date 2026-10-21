@@ -50,8 +50,8 @@ function parseEnvFile(file: string): Map<string, string> {
         `  DEPLOYED_PROJECT_DEV_KEY=<dev publishable/anon key>\n` +
         `  DEPLOYED_PROJECT_PROD_URL=https://<prod-ref>.supabase.co\n` +
         `  DEPLOYED_PROJECT_PROD_KEY=<prod publishable/anon key>\n\n` +
-        `Both are in the dashboard under project settings > API, or from\n` +
-        `\`npx supabase projects api-keys --project-ref <ref>\`.`,
+        `Both are in the dashboard under project settings > API keys. Do not\n` +
+        `use \`supabase projects api-keys\`: it prints the service-role key.`,
     );
   }
 
