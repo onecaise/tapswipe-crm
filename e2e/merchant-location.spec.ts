@@ -79,8 +79,10 @@ test.describe("an admin editing a merchant with no location", () => {
   });
 });
 
-test.describe("an agent", () => {
-  test.use({ storageState: storageStateFor("agent") });
+// The form rules below ran as the agent until 20261021120000 made merchants
+// admin-only to change; the form only opens for an admin now, so they do too.
+test.describe("an admin on the merchant form", () => {
+  test.use({ storageState: storageStateFor("admin") });
 
   test("cannot create a merchant without a city and state", async ({ page }) => {
     await page.goto("/merchants/new");
@@ -104,5 +106,52 @@ test.describe("an agent", () => {
       city: CITY_FIXTURE.city,
       state: CITY_FIXTURE.state,
     });
+  });
+});
+
+/**
+ * Security fix phase 1 (docs/claude/security-fixes.md): a rep reads their
+ * merchants and changes none of them. RLS is the boundary
+ * (tests/rls/merchants-admin-only-writes.test.ts); what only a browser shows
+ * is that the app does not offer a rep a form that could only fail.
+ */
+test.describe("an agent and their own merchant", () => {
+  test.use({ storageState: storageStateFor("agent") });
+
+  test("sees no Edit button, and is told to contact an admin", async ({ page }) => {
+    const { id } = await merchantByMid(CITY_FIXTURE.own.mid);
+    await page.goto(`/merchants/${id}`);
+    await expect(page.getByText("To change this merchant, contact an admin.")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Print" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Edit" })).toHaveCount(0);
+  });
+
+  test("is sent away from the edit and new-merchant routes", async ({ page }) => {
+    const { id } = await merchantByMid(CITY_FIXTURE.own.mid);
+    await page.goto(`/merchants/${id}/edit`);
+    await expect(page).toHaveURL(/\/dashboard$/);
+
+    await page.goto("/merchants/new");
+    await expect(page).toHaveURL(/\/dashboard$/);
+  });
+
+  test("sees no New merchant button on the list", async ({ page }) => {
+    await page.goto("/merchants");
+    await expect(page.getByRole("heading", { name: "Merchants" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "New merchant" })).toHaveCount(0);
+  });
+});
+
+test.describe("an admin on the merchant pages", () => {
+  test.use({ storageState: storageStateFor("admin") });
+
+  test("still gets Edit and New merchant, and no contact-an-admin line", async ({ page }) => {
+    const { id } = await merchantByMid(CITY_FIXTURE.own.mid);
+    await page.goto(`/merchants/${id}`);
+    await expect(page.getByRole("link", { name: "Edit" })).toBeVisible();
+    await expect(page.getByText("To change this merchant, contact an admin.")).toHaveCount(0);
+
+    await page.goto("/merchants");
+    await expect(page.getByRole("link", { name: "New merchant" })).toBeVisible();
   });
 });

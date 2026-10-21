@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import { ArrowLeftIcon } from "lucide-react";
 
-import { requireUser } from "@/lib/auth";
+import { requireAdmin } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { type Merchant } from "@/lib/merchants";
 import { PageShell } from "@/components/page-shell";
@@ -16,7 +16,9 @@ async function EditMerchant({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const profile = await requireUser();
+  // Merchants are admin-only to change (20261021120000). RLS refuses a rep's
+  // update anyway; this keeps them off a form that could only fail.
+  const profile = await requireAdmin();
   const supabase = await createClient();
 
   const merchantId = Number(id);

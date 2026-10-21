@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import {
   AGENT_ID,
+  OTHER_AGENT_ID,
   asPlatform,
   createTestDb,
   migrationsBefore,
@@ -26,7 +27,11 @@ import {
  * The fixture is built the way a real project got here: merchants written
  * before 20261013130000, some linked to a pre-app with a usable address, some
  * to one without, one with no pre-app at all, and one that already carries a
- * street of its own. Each describe that WRITES gets its own database, so the
+ * street of its own -- and one linked to ANOTHER rep's pre-app with a perfectly
+ * usable address, which must never be copied (security fix phase 1: until
+ * 20261021120000 a rep could set their own merchant's pre_app_id to any id,
+ * so the link alone proves nothing about whose address it is). Each describe
+ * that WRITES gets its own database, so the
  * psql and editor variants are each tested from the same starting state.
  */
 
@@ -75,7 +80,8 @@ async function legacyDb(): Promise<TestDb> {
       ('${AGENT_ID}', 'approved', 'Own Street', 'Own Street LLC', '9 Pre St', 'Franklin', 'TN', null),
       ('${AGENT_ID}', 'approved', 'No City', 'No City LLC', '2 Oak St', null, 'TN', '37000'),
       ('${AGENT_ID}', 'approved', 'Bad State', 'Bad State LLC', null, 'Jackson', 'Tennessee', null),
-      ('${AGENT_ID}', 'submitted', 'Waiting Bare', 'Waiting Bare LLC', null, null, null, null);
+      ('${AGENT_ID}', 'submitted', 'Waiting Bare', 'Waiting Bare LLC', null, null, null, null),
+      ('${OTHER_AGENT_ID}', 'approved', 'Foreign Addr', 'Foreign Addr LLC', '7 Their St', 'Memphis', 'TN', '38103');
     select set_config('tapswipe.pre_app_transition', '', false);
 
     insert into merchants (agent_id, dba, status, pre_app_id) values
@@ -83,7 +89,8 @@ async function legacyDb(): Promise<TestDb> {
       ('${AGENT_ID}', 'M Own Street', 'active', (select id from pre_apps where dba_name = 'Own Street')),
       ('${AGENT_ID}', 'M No City',    'active', (select id from pre_apps where dba_name = 'No City')),
       ('${AGENT_ID}', 'M Bad State',  'active', (select id from pre_apps where dba_name = 'Bad State')),
-      ('${AGENT_ID}', 'M No Pre-App', 'active', null);
+      ('${AGENT_ID}', 'M No Pre-App', 'active', null),
+      ('${AGENT_ID}', 'M Foreign',    'active', (select id from pre_apps where dba_name = 'Foreign Addr'));
   `);
   return db;
 }
@@ -116,6 +123,8 @@ async function auditCount(db: TestDb): Promise<number> {
 
 const EXPECTED_AFTER_FILL = [
   { dba: "M Bad State", street: null, city: null, state: null, zip: null },
+  // Linked to OTHER_AGENT's pre-app: left alone, the other rep's address unread.
+  { dba: "M Foreign", street: null, city: null, state: null, zip: null },
   { dba: "M Good", street: "1 Elm St", city: "Knoxville", state: "TN", zip: "37902" },
   { dba: "M No City", street: null, city: null, state: null, zip: null },
   { dba: "M No Pre-App", street: null, city: null, state: null, zip: null },
@@ -155,9 +164,9 @@ describe("the recon, on the schema BEFORE the migration (prod as it is today)", 
     const [[a], [b], [c]] = sets;
 
     expect(a.query).toBe("a: merchants with no city or state");
-    // seed()'s four plus the five above: none has a location on this schema.
-    expect(Number(a.total)).toBe(9);
-    expect((a.merchants as unknown[]).length).toBe(9);
+    // seed()'s four plus the six above: none has a location on this schema.
+    expect(Number(a.total)).toBe(10);
+    expect((a.merchants as unknown[]).length).toBe(10);
 
     expect(b.query).toBe("b: submitted pre-apps without a usable city or state");
     // 'Agent Submitted App' has an address (seed); 'Waiting Bare' does not.
@@ -165,7 +174,8 @@ describe("the recon, on the schema BEFORE the migration (prod as it is today)", 
     expect((b.pre_apps as { dba_name: string }[]).map((p) => p.dba_name)).toEqual(["Waiting Bare"]);
 
     expect(c.query).toBe("c: merchants the backfill could fill");
-    // Good Addr and Own Street; No City, Bad State and no pre-app are not.
+    // Good Addr and Own Street; No City, Bad State, no pre-app and the other
+    // rep's pre-app are not.
     expect(Number(c.total)).toBe(2);
   });
 
@@ -215,6 +225,7 @@ describe("the preview, the recon and the psql backfill, after the migration", ()
       "no linked pre-app": 5, // seed()'s four, plus M No Pre-App
       "pre-app has no usable city": 1,
       "pre-app has no usable state": 1,
+      "linked pre-app belongs to another rep": 1,
     });
   });
 
@@ -278,7 +289,7 @@ describe("the SQL Editor backfill variant", () => {
       row_kind: "summary",
       mode: "PREVIEW: nothing written",
     });
-    expect(Number(summary.merchants_without_location)).toBe(9);
+    expect(Number(summary.merchants_without_location)).toBe(10);
     expect(Number(summary.would_fill)).toBe(2);
     expect(Number(summary.rows_changed)).toBe(0);
     expect(Number(summary.would_also_get_street)).toBe(1); // M Own Street keeps its own

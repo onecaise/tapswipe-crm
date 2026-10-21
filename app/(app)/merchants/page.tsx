@@ -142,6 +142,25 @@ async function MerchantsList({
   );
 }
 
+/**
+ * Admin only: merchants are admin-only to create (20261021120000), and
+ * /merchants/new requires an admin. A rep's merchants come from
+ * approve_pre_app().
+ */
+async function HeaderActions() {
+  const profile = await requireUser();
+  if (profile.role !== "admin") return null;
+
+  return (
+    <Button asChild size="sm">
+      <Link href="/merchants/new">
+        <PlusIcon size={16} />
+        New merchant
+      </Link>
+    </Button>
+  );
+}
+
 export default function MerchantsPage({
   searchParams,
 }: {
@@ -153,12 +172,11 @@ export default function MerchantsPage({
         title="Merchants"
         subtitle="Agents see their own book; admins see the whole company."
         action={
-          <Button asChild size="sm">
-            <Link href="/merchants/new">
-              <PlusIcon size={16} />
-              New merchant
-            </Link>
-          </Button>
+          // Its own Suspense boundary because it reads the session, and
+          // cacheComponents: true means a dynamic read cannot sit outside one.
+          <Suspense fallback={null}>
+            <HeaderActions />
+          </Suspense>
         }
       />
 

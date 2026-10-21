@@ -947,13 +947,35 @@ create trigger merchants_location_guard
 
 alter table merchants enable row level security;
 
+-- MERCHANTS ARE ADMIN-ONLY TO CHANGE (20261021120000; security fix phase 1,
+-- docs/claude/security-fixes.md).
+--
+-- A rep READS their own book (and adds notes and tasks, which are other
+-- tables); only an admin inserts, updates or deletes a merchant. Until this,
+-- "insert own" and "update own or admin" let a rep write every column of
+-- their own merchant, MID included -- and commit_residual_import_v2 finds the
+-- share covering a staged row by the merchant's CURRENT mid. A rep padding
+-- the MID while a month was in review made the signer's row match no
+-- merchant: it committed unshared, the partner got nothing, the rep restored
+-- the MID, and log_cross_agent_change() recorded nothing because the editor
+-- owned the row. tests/rls/merchants-admin-only-writes.test.ts runs that
+-- attack against the schema before and after.
+--
+-- The rule is in the POLICIES, and only there can it be: admins and reps are
+-- both `authenticated`, so a grant cannot tell them apart, and the admin's
+-- merchant form and the missing-location screen need insert and update.
+-- The table-wide grant therefore stays as it is.
+--
+-- Every merchant a rep's work produces is created by approve_pre_app(),
+-- `security definer` behind its own is_admin() check, so it is unaffected.
+-- The MID itself is also watched by merchants_mid_audit (below, next to the
+-- cross-agent trigger), for every caller, admins included.
 create policy "select own or admin" on merchants
   for select using ((agent_id = auth.uid() and is_active_agent()) or is_admin());
-create policy "insert own" on merchants
-  for insert with check ((agent_id = auth.uid() and is_active_agent()) or is_admin());
-create policy "update own or admin" on merchants
-  for update using ((agent_id = auth.uid() and is_active_agent()) or is_admin())
-  with check ((agent_id = auth.uid() and is_active_agent()) or is_admin());
+create policy "admin insert only" on merchants
+  for insert with check (is_admin());
+create policy "admin update only" on merchants
+  for update using (is_admin()) with check (is_admin());
 create policy "admin delete only" on merchants
   for delete using (is_admin());
 
@@ -7773,6 +7795,50 @@ revoke all on function log_cross_agent_change() from public;
 create trigger merchants_audit_cross_agent
   after insert or update or delete on merchants
   for each row execute function log_cross_agent_change();
+
+-- EVERY MID CHANGE IS AUDITED (20261021120000; security fix phase 1).
+--
+-- Defense in depth behind "admin update only": the MID is the key
+-- commit_residual_import_v2 and parse-residual-import find a merchant -- and
+-- so its share -- by, so changing it while a month is in review changes who
+-- gets paid. log_cross_agent_change() is silent when the editor owns the row,
+-- which is exactly the case that hid the original attack; this trigger has no
+-- ownership test at all. One `merchant_mid_changed` row per changed merchant,
+-- for every caller: an admin, a service-role script (actor NULL, the
+-- backfill convention), and anyone a future policy lets in by mistake.
+--
+-- Only an ACTUAL change: `update of mid` fires whenever mid is in the SET
+-- list, so an edit form re-sending the same value would otherwise log noise.
+-- The row records who, when and which merchant, not the values -- audit_log
+-- has no column for them. Two rows for one merchant inside one review window
+-- is the shape of a pad-and-restore.
+--
+-- FAILS CLOSED, like log_cross_agent_change(): no exception handler, so a
+-- change that cannot be audited does not happen. BEFORE rather than AFTER so
+-- it runs ahead of the row being written; either way it shares the update's
+-- transaction. `security definer` because no caller holds INSERT on audit_log.
+create or replace function audit_merchant_mid_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if NEW.mid is distinct from OLD.mid then
+    insert into audit_log (actor_id, action, table_name, row_id)
+    values (auth.uid(), 'merchant_mid_changed', 'merchants', OLD.id::text);
+  end if;
+  return NEW;
+end;
+$$;
+
+-- A trigger function needs no EXECUTE grant to fire, so nobody gets one.
+revoke all on function audit_merchant_mid_change() from public;
+revoke all on function audit_merchant_mid_change() from anon, authenticated;
+
+create trigger merchants_mid_audit
+  before update of mid on merchants
+  for each row execute function audit_merchant_mid_change();
 
 create trigger leads_audit_cross_agent
   after insert or update or delete on leads

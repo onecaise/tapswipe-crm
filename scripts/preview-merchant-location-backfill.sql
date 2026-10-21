@@ -20,7 +20,7 @@
 begin transaction read only;
 
 with merchant_loc as (
-  select m.id, m.dba, m.status, m.pre_app_id,
+  select m.id, m.dba, m.status, m.pre_app_id, m.agent_id,
          to_jsonb(m) ->> 'city'  as city,
          to_jsonb(m) ->> 'state' as state
     from merchants m
@@ -35,6 +35,8 @@ classified as (
          case
            when mi.pre_app_id is null then 'no linked pre-app'
            when p.id is null then 'linked pre-app no longer exists'
+           when p.agent_id is distinct from mi.agent_id
+             then 'linked pre-app belongs to another rep'
            when coalesce(char_length(nullif(btrim(regexp_replace(
                   regexp_replace(lower(p.city), '[[:punct:]]', ' ', 'g'),
                   '\s+', ' ', 'g')), '')), 0) < 2

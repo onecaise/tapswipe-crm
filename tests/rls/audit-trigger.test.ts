@@ -75,13 +75,16 @@ afterAll(async () => {
 });
 
 describe("a rep's own edits are not logged", () => {
-  it("stays silent when an agent updates their own merchant", async () => {
-    const id = await merchantId(db, "Agent Active Co");
-
+  // On leads, not merchants: since 20261021120000 a rep cannot write a
+  // merchant at all (tests/rls/merchants-admin-only-writes.test.ts), so a
+  // merchant example here would pass on a zero-row update and prove nothing.
+  // Every rep write is asserted to land before the silence is asserted.
+  it("stays silent when an agent updates their own lead", async () => {
     await asUser(db, AGENT_ID);
-    await db.exec(
-      `update merchants set processor = 'Elavon' where id = ${id}`,
+    const result = await db.query(
+      `update leads set contact_name = 'Pat Rep 0100' where dba = 'Agent Lead A'`,
     );
+    expect(result.affectedRows).toBe(1);
 
     // The whole design rests on this. If ordinary self-service work landed in
     // audit_log, the trail would be thousands of rows of noise and the admin
@@ -92,14 +95,14 @@ describe("a rep's own edits are not logged", () => {
   it("stays silent across a rep's whole own-row lifecycle", async () => {
     await asUser(db, AGENT_ID);
     await db.exec(`
-      insert into merchants (agent_id, dba, status, city, state)
-      values ('${AGENT_ID}', 'Rep Own Co', 'active', 'Nashville', 'TN');
+      insert into leads (agent_id, dba) values ('${AGENT_ID}', 'Rep Own Lead');
     `);
-    await asPlatform(db);
-    const id = await merchantId(db, "Rep Own Co");
 
     await asUser(db, AGENT_ID);
-    await db.exec(`update merchants set status = 'inactive' where id = ${id}`);
+    const result = await db.query(
+      `update leads set contact_name = 'Pat Rep 0101' where dba = 'Rep Own Lead'`,
+    );
+    expect(result.affectedRows).toBe(1);
 
     expect(await auditRows(db)).toEqual([]);
   });

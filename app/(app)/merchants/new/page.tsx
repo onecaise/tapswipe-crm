@@ -2,13 +2,15 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { ArrowLeftIcon } from "lucide-react";
 
-import { requireUser } from "@/lib/auth";
+import { requireAdmin } from "@/lib/auth";
 import { PageShell } from "@/components/page-shell";
 import { MerchantForm } from "@/components/merchant-form";
 import { Button } from "@/components/ui/button";
 
 async function NewMerchant() {
-  const profile = await requireUser();
+  // Merchants are admin-only to create (20261021120000); a rep's come from
+  // approve_pre_app(). RLS refuses a rep's insert anyway.
+  const profile = await requireAdmin();
 
   return <MerchantForm agentId={profile.id} />;
 }

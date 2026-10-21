@@ -150,12 +150,16 @@ async function MerchantDetail({
                 Print
               </Link>
             </Button>
-            <Button asChild size="sm">
-              <Link href={`/merchants/${merchant.id}/edit`}>
-                <PencilIcon size={16} />
-                Edit
-              </Link>
-            </Button>
+            {/* Admin only: merchants are admin-only to change
+                (20261021120000), and the edit route requires an admin. */}
+            {isAdmin && (
+              <Button asChild size="sm">
+                <Link href={`/merchants/${merchant.id}/edit`}>
+                  <PencilIcon size={16} />
+                  Edit
+                </Link>
+              </Button>
+            )}
           </div>
         }
       >
@@ -169,6 +173,11 @@ async function MerchantDetail({
             </span>
           )}
         </div>
+        {!isAdmin && (
+          <p className="mt-2 text-sm text-muted-foreground">
+            To change this merchant, contact an admin.
+          </p>
+        )}
       </PageHeader>
 
       <dl className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -178,9 +187,11 @@ async function MerchantDetail({
         <Field label="MID">{formatText(merchant.mid)}</Field>
         {/* A merchant that predates the location columns has none, and
             says so plainly rather than rendering a dash that reads as "not
-            applicable" — the edit form will ask for it on the next save. */}
+            applicable" — the edit form will ask for it on the next save.
+            Only an admin can make that save, so only an admin is told to. */}
         <Field label="Location">
-          {formatCityState(merchant) ?? "Not recorded — edit to add"}
+          {formatCityState(merchant) ??
+            (isAdmin ? "Not recorded — edit to add" : "Not recorded")}
         </Field>
         <Field label="Street">{formatText(merchant.street)}</Field>
         <Field label="ZIP">{formatText(merchant.zip)}</Field>

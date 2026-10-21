@@ -158,13 +158,20 @@ describe("merchants write scoping", () => {
   it("does not let an agent reassign their own merchant to someone else", async () => {
     await asUser(db, AGENT_ID);
 
-    // The update policy's `with check` catches the outgoing row, so this is a
-    // hard error rather than a silent no-op.
-    await expect(
-      db.exec(
-        `update merchants set agent_id = '${OTHER_AGENT_ID}' where dba = 'Agent Active Co';`,
-      ),
-    ).rejects.toThrow(/row-level security/i);
+    // Since 20261021120000 the update policy's USING is is_admin(), so a rep's
+    // update matches nothing at all: a silent no-op rather than the `with
+    // check` error this used to be. The row count is the assertion.
+    const result = await db.query(
+      `update merchants set agent_id = '${OTHER_AGENT_ID}' where dba = 'Agent Active Co';`,
+    );
+    expect(result.affectedRows).toBe(0);
+
+    await asPlatform(db);
+    const [m] = await rows<MerchantRow>(
+      db,
+      `select ${LIST_COLUMNS} from merchants where dba = 'Agent Active Co'`,
+    );
+    expect(m.agent_id).toBe(AGENT_ID);
   });
 
   it("does not let an agent insert a merchant owned by someone else", async () => {
@@ -177,16 +184,31 @@ describe("merchants write scoping", () => {
     ).rejects.toThrow(/row-level security/i);
   });
 
-  it("lets an agent insert a merchant in their own book", async () => {
+  it("does not let an agent insert a merchant even in their own book", async () => {
+    // Merchants are admin-only to create (20261021120000). A rep's merchants
+    // come from approve_pre_app(), which is security definer behind is_admin().
     await asUser(db, AGENT_ID);
 
-    await db.exec(
-      `insert into merchants (agent_id, dba, city, state) values ('${AGENT_ID}', 'My New Co', 'Nashville', 'TN');`,
-    );
+    await expect(
+      db.exec(
+        `insert into merchants (agent_id, dba, city, state) values ('${AGENT_ID}', 'My New Co', 'Nashville', 'TN');`,
+      ),
+    ).rejects.toThrow(/row-level security/i);
 
     const result = await rows<MerchantRow>(db, listQuery());
+    expect(result).toHaveLength(2);
+  });
+
+  it("lets an admin insert a merchant into a rep's book", async () => {
+    await asUser(db, ADMIN_ID);
+    await db.exec(
+      `insert into merchants (agent_id, dba, city, state) values ('${AGENT_ID}', 'Admin Made Co', 'Nashville', 'TN');`,
+    );
+
+    await asUser(db, AGENT_ID);
+    const result = await rows<MerchantRow>(db, listQuery());
     expect(result).toHaveLength(3);
-    expect(result.map((m) => m.dba)).toContain("My New Co");
+    expect(result.map((m) => m.dba)).toContain("Admin Made Co");
   });
 
   it("bumps updated_at when a merchant is edited", async () => {
@@ -196,7 +218,7 @@ describe("merchants write scoping", () => {
       `select updated_at, created_at from merchants where dba = 'Agent Active Co'`,
     );
 
-    await asUser(db, AGENT_ID);
+    await asUser(db, ADMIN_ID);
     await db.exec(
       `update merchants set processor = 'Nuvei' where dba = 'Agent Active Co';`,
     );
@@ -216,7 +238,9 @@ describe("merchants write scoping", () => {
   });
 
   it("does not let the client dictate updated_at", async () => {
-    await asUser(db, AGENT_ID);
+    // As the admin: a rep's update would match no row (20261021120000) and
+    // the year assertion below would pass without the trigger running.
+    await asUser(db, ADMIN_ID);
 
     // The trigger overwrites whatever is supplied, so a wrong clock or a
     // hostile client can't backdate a row. This is why the form doesn't send
@@ -228,26 +252,40 @@ describe("merchants write scoping", () => {
     `);
 
     await asPlatform(db);
-    const [after] = await rows<{ updated_at: string }>(
+    const [after] = await rows<{ updated_at: string; processor: string }>(
       db,
-      `select updated_at from merchants where dba = 'Agent Active Co'`,
+      `select updated_at, processor from merchants where dba = 'Agent Active Co'`,
     );
 
+    expect(after.processor).toBe("Nuvei");
     expect(new Date(after.updated_at).getUTCFullYear()).toBeGreaterThan(2000);
   });
 
-  it("lets an agent update their own merchant", async () => {
+  it("does not let an agent update even their own merchant", async () => {
+    // Merchants are admin-only to change (20261021120000). Filtered, not
+    // refused: the rep's update matches no row.
     await asUser(db, AGENT_ID);
 
-    await db.exec(
+    const result = await db.query(
       `update merchants set processor = 'Nuvei' where dba = 'Agent Active Co';`,
     );
+    expect(result.affectedRows).toBe(0);
 
+    await asPlatform(db);
     const [{ n }] = await rows<CountRow>(
       db,
-      `select count(*)::int as n from merchants where dba = 'Agent Active Co' and processor = 'Nuvei'`,
+      `select count(*)::int as n from merchants where dba = 'Agent Active Co' and processor = 'TSYS'`,
     );
     expect(n).toBe(1);
+  });
+
+  it("lets an admin update a rep's merchant", async () => {
+    await asUser(db, ADMIN_ID);
+
+    const result = await db.query(
+      `update merchants set processor = 'Nuvei' where dba = 'Agent Active Co';`,
+    );
+    expect(result.affectedRows).toBe(1);
   });
 
   it("does not let an agent delete even their own merchant", async () => {
@@ -260,8 +298,8 @@ describe("merchants write scoping", () => {
       db,
       `select count(*)::int as n from merchants where dba = 'Agent Active Co'`,
     );
-    // Deletes are admin-only across the board (§5): reps edit, they don't remove
-    // company records.
+    // Deletes are admin-only across the board (§5), and since 20261021120000
+    // so is every other merchant write.
     expect(n).toBe(1);
   });
 
@@ -376,7 +414,7 @@ describe("merchant split must total 100", () => {
   `;
 
   it("accepts a pair totalling 100", async () => {
-    await asUser(db, AGENT_ID);
+    await asUser(db, ADMIN_ID);
     await db.exec(insertSplit("55", "45"));
 
     await asPlatform(db);
@@ -389,21 +427,21 @@ describe("merchant split must total 100", () => {
   });
 
   it("rejects a pair that does not total 100", async () => {
-    await asUser(db, AGENT_ID);
+    await asUser(db, ADMIN_ID);
     await expect(db.exec(insertSplit("60", "45"))).rejects.toThrow(
       /merchants_split_totals_100/,
     );
   });
 
   it("rejects one half on its own, which would read as the other being zero", async () => {
-    await asUser(db, AGENT_ID);
+    await asUser(db, ADMIN_ID);
     await expect(db.exec(insertSplit("55", "null"))).rejects.toThrow(
       /merchants_split_totals_100/,
     );
   });
 
   it("allows both halves null — a split simply not recorded yet", async () => {
-    await asUser(db, AGENT_ID);
+    await asUser(db, ADMIN_ID);
     await db.exec(insertSplit("null", "null"));
 
     await asPlatform(db);
@@ -425,7 +463,7 @@ describe("merchant split must total 100", () => {
     // Seeded 60/40, so raising the agent half alone takes it to 110. NOT VALID
     // skips the initial scan but still binds every later write, including
     // writes to rows that predate the constraint — which is the whole point.
-    await asUser(db, AGENT_ID);
+    await asUser(db, ADMIN_ID);
     await expect(
       db.exec(`update merchants set split_agent_pct = 70 where id = ${m.id}`),
     ).rejects.toThrow(/merchants_split_totals_100/);

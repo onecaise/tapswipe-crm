@@ -57,6 +57,7 @@ select 'c: merchants the backfill could fill' as query,
        count(*) as total
   from merchants m
   join pre_apps p on p.id = m.pre_app_id
+                  and p.agent_id = m.agent_id   -- same owner: never another rep's address
  where nullif(btrim(coalesce(to_jsonb(m) ->> 'city', '')), '') is null
    and nullif(btrim(coalesce(to_jsonb(m) ->> 'state', '')), '') is null
    and coalesce(char_length(nullif(btrim(regexp_replace(

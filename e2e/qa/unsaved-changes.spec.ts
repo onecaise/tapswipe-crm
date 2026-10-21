@@ -64,17 +64,23 @@ test("C3a the browser really shows its leave-page dialog", async ({ page }) => {
   await shown.accept();
 });
 
-for (const [path, label] of [
-  ["/merchants/new", "DBA *"],
-  ["/ghost-sheets/new", "DBA"],
+// /merchants/new is admin-only since 20261021120000 (a rep is redirected),
+// so it is checked as the admin; the rest of the file stays the agent's.
+for (const [path, label, persona] of [
+  ["/merchants/new", "DBA *", "admin"],
+  ["/ghost-sheets/new", "DBA", "agent"],
 ] as const) {
-  test(`C3a ${path} warns once typed in`, async ({ page }) => {
-    await page.goto(path);
-    const field = page.getByLabel(label, { exact: true }).first();
-    await expect(field).toBeVisible();
-    expect(await wouldWarn(page)).toBe(false);
-    await field.fill("QA C3a typed");
-    expect(await wouldWarn(page)).toBe(true);
+  test.describe(`as the ${persona}`, () => {
+    test.use({ storageState: storageStateFor(persona) });
+
+    test(`C3a ${path} warns once typed in`, async ({ page }) => {
+      await page.goto(path);
+      const field = page.getByLabel(label, { exact: true }).first();
+      await expect(field).toBeVisible();
+      expect(await wouldWarn(page)).toBe(false);
+      await field.fill("QA C3a typed");
+      expect(await wouldWarn(page)).toBe(true);
+    });
   });
 }
 

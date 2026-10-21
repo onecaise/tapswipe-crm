@@ -100,10 +100,22 @@ describe("an existing merchant with no location stays editable", () => {
     await db.exec(`update merchants set mid = 'MID-OTHER-1' where dba = 'Other Active Co'`);
   });
 
-  it("lets the owning rep edit it too", async () => {
+  it("lets an admin edit a rep's legacy merchant; the owning rep cannot (20261021120000)", async () => {
     expect(await legacy("Agent Active Co")).toEqual({ city: null, state: null });
+
+    // Merchants are admin-only to change. The rep's update is filtered, not
+    // refused, so the row count is the assertion.
     await asUser(db, AGENT_ID);
-    await db.exec(`update merchants set processor = 'Elavon' where dba = 'Agent Active Co'`);
+    const rep = await db.query(
+      `update merchants set processor = 'Elavon' where dba = 'Agent Active Co'`,
+    );
+    expect(rep.affectedRows).toBe(0);
+
+    await asUser(db, ADMIN_ID);
+    const admin = await db.query(
+      `update merchants set processor = 'Elavon' where dba = 'Agent Active Co'`,
+    );
+    expect(admin.affectedRows).toBe(1);
     await asPlatform(db);
     await db.exec(`update merchants set processor = 'TSYS' where dba = 'Agent Active Co'`);
   });
@@ -130,7 +142,7 @@ describe("a NEW merchant must have a location (merchants_location_guard)", () =>
 
   it("accepts a new merchant with a city and a two-letter state", async () => {
     await expect(
-      insertAs(AGENT_ID, { city: "St. Louis", state: "MO", dba: "Valid Loc Co" }),
+      insertAs(ADMIN_ID, { city: "St. Louis", state: "MO", dba: "Valid Loc Co" }),
     ).resolves.toBeUndefined();
   });
 
@@ -139,7 +151,7 @@ describe("a NEW merchant must have a location (merchants_location_guard)", () =>
     ["no state", "Nashville", null],
     ["neither", null, null],
   ])("refuses a new merchant with %s, by name", async (_label, city, state) => {
-    await expect(insertAs(AGENT_ID, { city, state })).rejects.toThrow(
+    await expect(insertAs(ADMIN_ID, { city, state })).rejects.toThrow(
       /A new merchant needs a city and a two-letter state/,
     );
   });
@@ -158,9 +170,9 @@ describe("a NEW merchant must have a location (merchants_location_guard)", () =>
   });
 
   it("reports PT422, which the forms show verbatim", async () => {
-    await asUser(db, AGENT_ID);
+    await asUser(db, ADMIN_ID);
     try {
-      await db.query(`insert into merchants (agent_id, dba) values ('${AGENT_ID}', 'Code Co')`);
+      await db.query(`insert into merchants (agent_id, dba) values ('${ADMIN_ID}', 'Code Co')`);
       throw new Error("expected a refusal");
     } catch (error) {
       expect((error as { code?: string }).code).toBe("PT422");
@@ -177,7 +189,7 @@ describe("merchants_location_format — shape when present, on every row", () =>
     ["a lower-case state", "Nashville", "tn"],
     ["a state name instead of a code", "Nashville", "Tennessee"],
   ])("refuses %s on insert", async (_label, city, state) => {
-    await expect(insertAs(AGENT_ID, { city, state })).rejects.toThrow(
+    await expect(insertAs(ADMIN_ID, { city, state })).rejects.toThrow(
       /merchants_location_format/,
     );
   });
@@ -191,14 +203,14 @@ describe("merchants_location_format — shape when present, on every row", () =>
 
   it("accepts exactly 60 characters", async () => {
     await expect(
-      insertAs(AGENT_ID, { city: "B".repeat(60), state: "TN", dba: "Sixty Co" }),
+      insertAs(ADMIN_ID, { city: "B".repeat(60), state: "TN", dba: "Sixty Co" }),
     ).resolves.toBeUndefined();
   });
 });
 
 describe("once a merchant has a location", () => {
-  it("lets a legacy merchant be given one", async () => {
-    await asUser(db, AGENT_ID);
+  it("lets an admin give a legacy merchant one", async () => {
+    await asUser(db, ADMIN_ID);
     await db.exec(
       `update merchants set city = 'Nashville', state = 'TN', street = '1 Main St', zip = '37201'
         where dba = 'Agent Inactive Co'`,
@@ -227,9 +239,30 @@ describe("once a merchant has a location", () => {
     ).rejects.toThrow(/can be changed but not removed/);
   });
 
-  it("still lets every other column be edited", async () => {
-    await asUser(db, AGENT_ID);
+  it("still lets an admin edit every other column", async () => {
+    await asUser(db, ADMIN_ID);
     await db.exec(`update merchants set processor = 'FDMS' where dba = 'Agent Inactive Co'`);
+    await asPlatform(db);
+    const [m] = await rows<{ processor: string }>(
+      db,
+      `select processor from merchants where dba = 'Agent Inactive Co'`,
+    );
+    expect(m.processor).toBe("FDMS");
+  });
+
+  it("does not let the owning rep add or change a location (20261021120000)", async () => {
+    // The detail page used to say "edit to add"; a rep now asks an admin.
+    await asUser(db, AGENT_ID);
+    const r = await db.query(
+      `update merchants set city = 'Memphis', state = 'TN' where dba = 'Agent Active Co'`,
+    );
+    expect(r.affectedRows).toBe(0);
+    await asPlatform(db);
+    const [m] = await rows<{ city: string | null }>(
+      db,
+      `select city from merchants where dba = 'Agent Active Co'`,
+    );
+    expect(m.city).toBeNull();
   });
 });
 

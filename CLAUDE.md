@@ -280,6 +280,7 @@ Everything below was moved verbatim out of this file; one line each.
 - `docs/claude/merchant-location.md` — location required for new merchants only, the NOT VALID lesson, format CHECK + guard trigger, `norm_city()`, the four hand-run SQL files, dev's hosted state.
 - `docs/claude/proposals-and-catalog.md` — append-only quotes, column grants, line-item snapshots and the price lock, the catalog loader script, proposals as their own record, the store, brands, the printed proposal.
 - `docs/claude/dashboard-followups-timeline.md` — dashboard filters (invoker, ANDed on policies), follow-ups in two places, the lead timeline.
+- `docs/claude/security-fixes.md` — the Oct 2026 outside-review fixes by phase: merchants admin-only to change, every MID change audited, backfill same-owner rule.
 - `docs/design/residual-splits.md` — shared-account design memo.
 - `docs/tapswipe_crm_master_plan.md` — product master plan.
 

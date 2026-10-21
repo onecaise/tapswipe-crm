@@ -27,6 +27,9 @@
 --
 -- WHAT IT CHANGES — identical rules to the psql version:
 --   * only merchants whose city AND state are both NULL;
+--   * only where the linked pre-app has the SAME OWNER as the merchant -- a
+--     merchant pointing at another rep's pre-app is never filled from it (until
+--     20261021120000 a rep could set pre_app_id on their own merchant);
 --   * only where the linked pre-app's address passes approve_pre_app()'s rule
 --     (norm_city >= 2 characters, at most 60 trimmed, state two letters once
 --     trimmed and upper-cased) — the merchants_location_format rule, so no
@@ -55,6 +58,7 @@ plan as (
          case when m.zip    is null then nullif(btrim(p.zip), '') end              as new_zip
     from merchants m
     join pre_apps p on p.id = m.pre_app_id
+                    and p.agent_id = m.agent_id   -- same owner: never another rep's address
    where m.city is null
      and m.state is null
      and coalesce(char_length(norm_city(p.city)), 0) >= 2

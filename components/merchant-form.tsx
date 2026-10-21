@@ -159,9 +159,10 @@ export function MerchantForm({
 
     try {
       if (isEdit) {
-        // count: "exact" matters. RLS filters rather than erroring, so updating
-        // a merchant you don't own returns no error and touches nothing — this
-        // form would otherwise report a successful save that never happened.
+        // count: "exact" matters. RLS filters rather than erroring, so an
+        // update the policy refuses returns no error and touches nothing —
+        // this form would otherwise report a successful save that never
+        // happened. Since 20261021120000 only an admin passes that policy.
         const { error: updateError, count } = await supabase
           .from("merchants")
           .update(payload, { count: "exact" })
@@ -170,7 +171,7 @@ export function MerchantForm({
         if (updateError) throw updateError;
         if (count === 0) {
           throw new Error(
-            "That merchant could not be updated. It may no longer be in your book.",
+            "That merchant could not be updated. It may have been deleted, or your account may no longer be an admin.",
           );
         }
 
@@ -207,7 +208,7 @@ export function MerchantForm({
         <CardTitle>{isEdit ? "Edit merchant" : "New merchant"}</CardTitle>
         <CardDescription>
           {isEdit
-            ? "Changes are scoped by your own access — you can only edit merchants in your book."
+            ? "Only admins can change merchant information."
             : "This merchant will be added to your own book."}
         </CardDescription>
       </CardHeader>
