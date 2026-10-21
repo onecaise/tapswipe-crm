@@ -124,3 +124,33 @@ One fixture changed: `makeSubmittable()` in `tests/rls/pre-app-state-machine.tes
 - **The write path, `submit-pre-app-secrets`, already refuses a non-draft for non-admins** (409 "Pre-app is not editable") before `supabaseAdmin` is reached. That branch had **no test**; `tests/live/pre-app-secrets.test.ts` now has three ("after submission"): the rep's secrets write gets 409 and stores nothing, the rep's owner edit and delete through PostgREST get 409 and the SSN row stays, and an admin can still do both. Live mutation check: with `pre_app_owners_draft_only` dropped on the local stack, the owner-edit test went red; the trigger was recreated.
 - **The gap that did exist was indirect**: deleting an owner cascaded the SSN row. Closed by the owners trigger.
 - **Not built: a trigger on the secrets tables themselves.** The function writes them as service role, which has no `auth.uid()`, so the database cannot tell an admin's write from a rep's there; a status trigger would refuse an admin correcting a submitted pre-app's banking details. The function's check remains the only guard on that path. Recorded in `docs/claude/security-followups.md`.
+
+## Phase 3 (Medium): security headers
+
+**Rule:** every response carries `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'` (and **no other CSP directive**), `Referrer-Policy: strict-origin-when-cross-origin`, `X-Content-Type-Options: nosniff`. The list is `lib/security-headers.ts`; `next.config.ts`'s `headers()` applies it to `/:path*`. Nothing is exempt.
+
+### Nothing is legitimately framed
+
+Searched `app/`, `components/`, `lib/`, `hooks/`, `e2e/`: no `<iframe>`, `<embed>`, `<object>` or frame scripting anywhere. The print pages call `window.print()` on the top-level page (`components/print-button.tsx`). The file viewers (business documents, marketing materials, residual files) open a signed Storage URL in a **new tab** on the Supabase origin, which our headers do not govern. So `DENY` everywhere, with no `SAMEORIGIN` route — the app never frames itself either. No `vercel.json` or other layer sets headers.
+
+### The finding, reproduced — with one correction
+
+`e2e/security-headers.spec.ts`, run before the config change, went red on all four checks: no header on any response, the login page rendered inside a cross-origin iframe, and a signed-in `/admin/users` rendered inside a same-origin frame.
+
+The correction: the review's example (an attacker framing `/admin/users`, pre-app approve or residual commit) does **not** work cross-site today. The session cookie is `SameSite=Lax` (the `@supabase/ssr` default; checked in `e2e/.auth/admin.json`), so a third-party iframe loads the app signed out and gets the login page. The first draft of the framing test framed `/admin/users` from another origin and **passed with no headers at all** for exactly that reason. It was rewritten. What was actually exposed:
+
+- the **sign-in form**, frameable from anywhere (credential-overlay phishing, and the login-CSRF shape phase 7 deals with);
+- **every signed-in screen from a same-site origin** — another app on a sibling subdomain of the deployed domain, or the app itself — where Lax cookies are sent;
+- and any signed-in screen cross-site the day the cookie's SameSite changes, or in a browser that does not apply Lax by default.
+
+### What checks it
+
+- `e2e/security-headers.spec.ts` (5 tests): the four values on a public page, the proxy's own 307, a static file, a route handler (`/auth/confirm`), the signed-in dashboard, `/admin/users`, a print page and a 404; a cross-origin iframe of `/auth/login` shows no password field; a same-origin iframe of signed-in `/admin/users` shows nothing; control — the same screen renders at the top level. All but the control were red before the fix.
+- `tests/unit/security-headers.test.ts` (3 tests): the exact four values, a CSP of `frame-ancestors 'none'` and nothing else, and that `next.config.ts` applies the list to `/:path*`.
+- **Production build, by hand:** `next build` with the local stack's URL and key passed in the environment (so nothing pointed at a hosted project), then `next start -p 3100`. `curl -D -` on `/auth/login` (200), signed-out `/dashboard` (307), `/favicon.ico` (200), an unknown path (307) and a hashed `/_next/static/chunks/*.js` (200) all carried the headers. The spec itself runs against `next dev`.
+
+### Not verified
+
+- The **deployed** site. Whatever serves production must not strip or override these; checking needs one `curl -D -` against the real URL after a deploy.
+- Browsers other than Chromium.
+- `.next/` currently holds that local-stack production build; the next `npm run build` replaces it.

@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 import { assertSupabaseEnv } from "./lib/env-guard";
+import { SECURITY_HEADERS } from "./lib/security-headers";
 
 // Runs once when the dev server boots (and at build time), which is the
 // earliest point the Supabase URL is known. Throwing here means a
@@ -26,6 +27,14 @@ const nextConfig: NextConfig = {
   // group id alone names the proposal, and the new route 404s a group the
   // caller cannot see exactly as the old one did. 307, not 308, so the old
   // paths stay reusable rather than cached by browsers forever.
+  // Anti-framing and hygiene headers on every route (security fix phase 3):
+  // see lib/security-headers.ts for why each is there and why nothing is
+  // exempt. e2e/security-headers.spec.ts reads them on each kind of response
+  // and has a real browser try to frame the app.
+  async headers() {
+    return [{ source: "/:path*", headers: [...SECURITY_HEADERS] }];
+  },
+
   async redirects() {
     return [
       {
