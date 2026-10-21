@@ -1443,6 +1443,90 @@ create policy "delete via parent pre_app" on pre_app_business_profile
   );
 
 -- =====================================================================
+-- PRE-APP CHILDREN ARE FROZEN WITH THEIR PARENT (20261021130000; security
+-- fix phase 2, docs/claude/security-fixes.md).
+--
+-- pre_apps_guard_transitions (below) has frozen a non-draft pre_apps row for
+-- non-admins since 20260806141000. The three child tables above were never
+-- covered: their policies ask only whether the PARENT is the rep's, never
+-- what state it is in -- a policy cannot see the parent's status without
+-- re-querying it on every row, and nobody had. So after submit_pre_app() a
+-- rep could rewrite the owners an admin was about to approve (names, DOB,
+-- percent owned -- the 51% control rule submit just checked), add an owner
+-- with no SSN, or delete one, which cascades their pre_app_owner_secrets row
+-- away. tests/rls/pre-app-children-draft-only.test.ts runs that against the
+-- schema before and after.
+--
+-- The rule is the parent's, copied: agents change a draft's children, admins
+-- change anyone's. Refused as PT409 with a sentence naming the status. A
+-- rep with a declined pre-app calls reopen_pre_app() first, which returns it
+-- to draft -- the same path pre_apps itself already requires.
+--
+--   * INSERT checks the new parent; DELETE the old one; UPDATE BOTH, so an
+--     owner cannot be re-parented onto, or off, a non-draft pre-app.
+--   * A parent that no longer exists is not a refusal: that is a cascade from
+--     a pre_apps delete (admin-only by policy, or the platform owner), and
+--     the children must go with it. `security definer` so that "not found"
+--     means "deleted" and never "not visible to this caller"; ownership stays
+--     the policies' job, and they still run after this trigger.
+--   * The state machine's own flag (tapswipe.pre_app_transition) passes it,
+--     as it passes pre_apps_guard_transitions: fixtures use it, and a client
+--     cannot set it. No RPC writes these tables today.
+--   * A service-role connection is NOT exempt (no auth.uid(), so is_admin()
+--     is false), exactly as for pre_apps. The secrets Edge Functions write
+--     only the *_secrets tables, never these.
+-- =====================================================================
+create or replace function pre_app_children_guard()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  parent_status text;
+begin
+  if coalesce(current_setting('tapswipe.pre_app_transition', true), '') = 'on'
+     or is_admin() then
+    return case when tg_op = 'DELETE' then old else new end;
+  end if;
+
+  if tg_op in ('UPDATE', 'DELETE') then
+    select status into parent_status from pre_apps where id = old.pre_app_id;
+    if found and parent_status <> 'draft' then
+      raise exception 'the owners, terminal and business profile of a % pre-app can only be changed by an admin',
+        parent_status using errcode = 'PT409';
+    end if;
+  end if;
+
+  if tg_op in ('INSERT', 'UPDATE') then
+    select status into parent_status from pre_apps where id = new.pre_app_id;
+    if found and parent_status <> 'draft' then
+      raise exception 'the owners, terminal and business profile of a % pre-app can only be changed by an admin',
+        parent_status using errcode = 'PT409';
+    end if;
+  end if;
+
+  return case when tg_op = 'DELETE' then old else new end;
+end;
+$$;
+
+-- A trigger function needs no EXECUTE grant to fire, so nobody gets one.
+revoke all on function pre_app_children_guard() from public;
+revoke all on function pre_app_children_guard() from anon, authenticated;
+
+create trigger pre_app_owners_draft_only
+  before insert or update or delete on pre_app_owners
+  for each row execute function pre_app_children_guard();
+
+create trigger pre_app_terminal_draft_only
+  before insert or update or delete on pre_app_terminal
+  for each row execute function pre_app_children_guard();
+
+create trigger pre_app_business_profile_draft_only
+  before insert or update or delete on pre_app_business_profile
+  for each row execute function pre_app_children_guard();
+
+-- =====================================================================
 -- SENSITIVE FIELD TABLES — SSN, routing/account number, terminal
 -- password. RLS is enabled with NO policies for the authenticated role,
 -- so direct client access is denied entirely, both read and write. The

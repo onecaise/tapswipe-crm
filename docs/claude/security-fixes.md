@@ -91,3 +91,36 @@ The cheaper "block a staged row when the merchant's current MID no longer matche
 
 - Nothing ran against a hosted project. The policy change and trigger are verified on PGlite (`npm test`) and on the local stack (`migration up --local`, then `test:live` and `test:e2e`).
 - `audit_merchant_mid_change()` is not in `tests/rls/grants.test.ts`'s function inventory by name; its privileges are asserted in its own file.
+
+## Phase 2 (Medium): pre-app child rows are frozen with their parent
+
+**Rule:** a rep changes the owners, terminal and business profile of a **draft** pre-app only; an admin changes them at any status. The same rule `pre_apps_guard_transitions` has applied to the `pre_apps` row itself since 20260806141000.
+
+### The finding, reproduced
+
+The policies on `pre_app_owners`, `pre_app_terminal` and `pre_app_business_profile` check that the parent pre-app is the rep's and never its status. `tests/rls/pre-app-children-draft-only.test.ts` submits the seeded draft through the real `submit_pre_app()` as the rep, then — on the schema **before** the fix — the rep successfully updated an owner, inserted an owner, deleted an owner, and updated and deleted the terminal and business profile (1 row each). Deleting the owner cascaded their `pre_app_owner_secrets` row away (SSN rows 2 → 1) on an application waiting for approval.
+
+### The fix — `20261021130000_pre_app_children_draft_only.sql`
+
+`pre_app_children_guard()`, one `BEFORE INSERT OR UPDATE OR DELETE` row trigger on each of the three tables (`*_draft_only`). No policy or grant changes.
+
+- Passes an admin (`is_admin()`) and the state machine's own flag (`tapswipe.pre_app_transition`, which a client cannot set). Otherwise refuses with **PT409** "the owners, terminal and business profile of a {status} pre-app can only be changed by an admin" when the parent is not a draft. `lib/db-errors.ts` passes PT4xx text through verbatim.
+- INSERT checks the new parent, DELETE the old one, UPDATE **both** — an owner cannot be re-parented onto or off a non-draft pre-app.
+- **A parent that is not found is allowed**: that is a cascade from a `pre_apps` delete, and the children must go with it. `security definer` (with `set search_path = public, pg_temp`) so "not found" means deleted, never "not visible to this caller"; ownership stays the policies' job, and they still run afterwards. Checked on PGlite (Postgres 18) and by hand on the local stack's Postgres 17.6 (a rep's update refused; a platform-owner delete of a submitted pre-app cascaded its owner), in a rolled-back transaction.
+- **A service-role connection is not exempt**, exactly as for `pre_apps` (no `auth.uid()`, so not admin). No Edge Function writes these three tables — the secrets functions only read `pre_app_owners`.
+- `revoke all … from public` and from `anon, authenticated` (a trigger function needs no EXECUTE).
+
+### Transitions and the wizard still work
+
+Asserted in the test file: submitted, approved and declined all refuse the rep; after `reopen_pre_app()` the rep can change every child again; an admin can at any status; the rep's own draft is fully editable; deleting a non-draft pre-app still cascades, as an admin and as the platform owner. Mutation checks: with the trigger dropped on any **one** of the three tables, that table's rep update lands. The existing state-machine suite (64 tests: submit, approve, decline, reopen) passes.
+
+The wizard already opened only for a draft or an admin (`canEditPreApp()` in `lib/pre-apps.ts`, which redirects a rep off `/pre-apps/[id]/edit` for anything else), so the database rule now matches what the UI promised and no app change was needed. e2e (308, including `pre-app-wizard.spec.ts` and the pre-app QA specs) passes.
+
+One fixture changed: `makeSubmittable()` in `tests/rls/pre-app-state-machine.test.ts` writes owners onto the seeded **submitted** pre-app as the platform owner, and now sets the transition flag around that write, as `seed()` does for `pre_apps`. Its assertions are unchanged.
+
+### The secrets tables: no client gap; one gap closed by this fix
+
+- **No client path at all**: zero policies, zero grants (pinned by `tests/rls/grants.test.ts`).
+- **The write path, `submit-pre-app-secrets`, already refuses a non-draft for non-admins** (409 "Pre-app is not editable") before `supabaseAdmin` is reached. That branch had **no test**; `tests/live/pre-app-secrets.test.ts` now has three ("after submission"): the rep's secrets write gets 409 and stores nothing, the rep's owner edit and delete through PostgREST get 409 and the SSN row stays, and an admin can still do both. Live mutation check: with `pre_app_owners_draft_only` dropped on the local stack, the owner-edit test went red; the trigger was recreated.
+- **The gap that did exist was indirect**: deleting an owner cascaded the SSN row. Closed by the owners trigger.
+- **Not built: a trigger on the secrets tables themselves.** The function writes them as service role, which has no `auth.uid()`, so the database cannot tell an admin's write from a rep's there; a status trigger would refuse an admin correcting a submitted pre-app's banking details. The function's check remains the only guard on that path. Recorded in `docs/claude/security-followups.md`.

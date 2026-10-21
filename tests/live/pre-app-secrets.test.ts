@@ -7,6 +7,7 @@ import {
   getStackConfig,
   invoke,
   MISSING_ID,
+  userClient,
   warmFunctions,
 } from "./helpers/stack";
 
@@ -584,5 +585,96 @@ describe("every access is audited", () => {
       .eq("actor_id", owner.id)
       .like("action", "submit_pre_app_secrets%");
     expect((data ?? []).length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Security fix phase 2 (docs/claude/security-fixes.md): once a pre-app is
+ * submitted, the rep can change neither its secrets (this function's own
+ * draft-or-admin check, which had no test) nor its owner rows
+ * (pre_app_children_guard, here through PostgREST). An admin still can.
+ */
+describe("after submission", () => {
+  let submittedId: number;
+  let submittedOwnerId: number;
+
+  beforeAll(async () => {
+    if (FUNCTIONS_DOWN) return;
+    ({ preAppId: submittedId, ownerRowId: submittedOwnerId } = await makePreApp(
+      owner.id,
+      "Submitted Live Co",
+    ));
+    const { error: locationError } = await adminClient()
+      .from("pre_apps")
+      .update({ city: "Nashville", state: "TN" })
+      .eq("id", submittedId);
+    if (locationError) throw locationError;
+
+    const secrets = await invoke(
+      "submit-pre-app-secrets",
+      {
+        secrets: [
+          { kind: "owner_ssn", pre_app_owner_id: submittedOwnerId, ssn: PLAINTEXT.ssn },
+          { kind: "banking", pre_app_id: submittedId, aba_routing: PLAINTEXT.routing, account_number: PLAINTEXT.account },
+        ],
+      },
+      owner.token,
+    );
+    expect(secrets.status, secrets.raw).toBe(200);
+
+    const { error: submitError } = await userClient(owner.token).rpc("submit_pre_app", {
+      pre_app_id_input: submittedId,
+    });
+    if (submitError) throw submitError;
+  });
+
+  it("refuses the rep's secrets with 409, before any write", async () => {
+    const { status, body } = await invoke(
+      "submit-pre-app-secrets",
+      { secrets: [{ kind: "terminal", pre_app_id: submittedId, rp_password: "late-change" }] },
+      owner.token,
+    );
+    expect(status).toBe(409);
+    expect(body.error).toBe("Pre-app is not editable");
+    const { data } = await adminClient()
+      .from("pre_app_terminal_secrets")
+      .select("pre_app_id")
+      .eq("pre_app_id", submittedId);
+    expect(data).toEqual([]);
+  });
+
+  it("refuses the rep's owner edit and owner delete with 409, and the SSN row stays", async () => {
+    const rep = userClient(owner.token);
+    const update = await rep
+      .from("pre_app_owners")
+      .update({ owner_name: "Rewritten" })
+      .eq("id", submittedOwnerId);
+    expect(update.status).toBe(409);
+    expect(update.error?.message).toMatch(/submitted pre-app can only be changed by an admin/);
+
+    const remove = await rep.from("pre_app_owners").delete().eq("id", submittedOwnerId);
+    expect(remove.status).toBe(409);
+
+    const { data } = await adminClient()
+      .from("pre_app_owner_secrets")
+      .select("pre_app_owner_id")
+      .eq("pre_app_owner_id", submittedOwnerId);
+    expect(data).toEqual([{ pre_app_owner_id: submittedOwnerId }]);
+  });
+
+  it("still lets an admin change the secrets and the owner", async () => {
+    const { status } = await invoke(
+      "submit-pre-app-secrets",
+      { secrets: [{ kind: "terminal", pre_app_id: submittedId, rp_password: "admin-change" }] },
+      admin.token,
+    );
+    expect(status).toBe(200);
+
+    const { error, count } = await userClient(admin.token)
+      .from("pre_app_owners")
+      .update({ owner_name: "Corrected by admin" }, { count: "exact" })
+      .eq("id", submittedOwnerId);
+    expect(error).toBeNull();
+    expect(count).toBe(1);
   });
 });

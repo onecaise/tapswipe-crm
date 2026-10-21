@@ -34,6 +34,19 @@ let otherDraftId: number;
 /** Everything submit_pre_app demands, so individual tests can remove one rule. */
 async function makeSubmittable(id: number): Promise<void> {
   await asPlatform(db);
+  // The flag: one caller passes the seeded SUBMITTED pre-app, whose children
+  // pre_app_children_guard (20261021130000) freezes for everyone but an admin
+  // or the state machine -- and the platform owner is neither. seed() does the
+  // same for pre_apps itself.
+  await db.exec(`select set_config('tapswipe.pre_app_transition', 'on', false)`);
+  try {
+    await fillSubmittable(id);
+  } finally {
+    await db.exec(`select set_config('tapswipe.pre_app_transition', '', false)`);
+  }
+}
+
+async function fillSubmittable(id: number): Promise<void> {
   await db.exec(`
     delete from pre_app_owners where pre_app_id = ${id};
     insert into pre_app_owners (pre_app_id, owner_name, percent_owned)
