@@ -48,6 +48,13 @@ const MESSAGES: Record<string, { title: string; detail: string }> = {
       "Part of the link is missing — it may have been cut off when it was " +
       "copied. Open it straight from the email, or ask for a new one.",
   },
+  // Phase 7: /auth/confirm takes only the link types the app sends.
+  "link-unsupported": {
+    title: "This kind of link is not used here",
+    detail:
+      "The only email links this app sends are password resets. Sign in " +
+      "with your password, or use Forgot password to get a reset link.",
+  },
 };
 
 /**

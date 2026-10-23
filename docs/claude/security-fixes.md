@@ -245,3 +245,61 @@ All three scripts percent-encoded `$env:SUPABASE_DB_PASSWORD` into `postgresql:/
 - Nothing ran against prod or any hosted project, so the pooler accepting `PGPASSWORD` with the ref-carrying username is inferred (libpq and pgconn treat it like any password), not observed.
 - `db push` itself was not run. That it reads `PGPASSWORD` with `--db-url` is inferred from `migration list --db-url` behaving that way in the same CLI build.
 - **What this does not close.** The value is still in the environment of the PowerShell process, docker.exe and the CLI while they run, and in psql's environment inside the container; a process running as the same user (or root in the container) can read an environment block. The gain is that command lines are what process-creation logging (Sysmon, 4688 auditing, EDR) records and what `ps` shows to everyone, and environments are not. `SUPABASE_DB_PASSWORD` itself lives in the operator's terminal for as long as they keep it there.
+
+## Phase 7 (Medium): login CSRF through `GET /auth/confirm`
+
+**Rule:** `GET /auth/confirm` verifies nothing. It checks the link's shape and redirects to `/auth/confirm/continue`, a page whose **Continue** button POSTs to a Server Action (`app/auth/confirm/continue/actions.ts`). That action is the only code that calls `verifyOtp`. The one type accepted is `recovery`. The link rules are `lib/confirm-link.ts`.
+
+### The finding, reproduced
+
+The claim was that a rep can send an admin their own unused sign-in link and the admin is silently signed in as the rep. It held, and it did not depend on the email templates:
+
+1. A rep calls GoTrue's **public** API for a magic link to their own address (`signInWithOtp` with the publishable key; the app has no magic-link screen, and none is needed). The email arrives.
+2. GoTrue's **default** email link is `…/auth/v1/verify?token=<hash>&type=magiclink…`. That `token` is the same hash `verifyOtp({ token_hash })` takes.
+3. `GET /auth/confirm?token_hash=<hash>&type=magiclink`, opened by a browser that holds no session, answered `307 /` with a session cookie for the rep. A signed-in admin's session is replaced the same way, with no click and nothing on screen. Recovery links (`type=recovery`) behaved the same.
+
+A `token_hash` works in any browser. A PKCE `code` needs the verifier cookie of the browser that asked, and the app's PKCE browser client refuses fragment tokens (`#access_token=`, checked in `@supabase/auth-js`'s `_getSessionFromURL`). So GoTrue's own `/verify` link cannot be used this way; only `/auth/confirm` could. Reproduced with a script against the local stack before the change. `e2e/qa/auth-confirm-csrf.spec.ts` holds the browser version.
+
+### The fix
+
+- **`GET /auth/confirm`** (`route.ts`): `parseConfirmLink()` → `307 /auth/error?error=link-incomplete` (no token or type), `307 /auth/error?error=link-unsupported` (any type but `recovery`), else `307 /auth/confirm/continue?token_hash=…&type=recovery&next=<safe>`. It never creates a Supabase client.
+- **The Continue page** says what the link does ("Reset your password … Continue"). When the browser is already signed in, it also says: "You are signed in as <email>. Continuing signs you out of that account and into the one this link was sent to. If you did not ask for this email, close this page." Opening it changes nothing. A mail scanner that fetches links ahead of the reader no longer uses the token up.
+- **The Server Action** runs only on POST. Next aborts an action whose `Origin` does not match the host (the same rule is in `node_modules/next/dist/server/app-render/action-handler.js`). The action also refuses a `Sec-Fetch-Site` other than `same-origin` itself, so the rule does not rest on a framework default alone. It **re-parses the form** with the same allow-list and `safeNextPath`, because hidden fields are whatever the POST says. It then calls `verifyOtp` and redirects to `next`. A failure still goes to the fixed code `link-invalid` (A3), never GoTrue's message.
+- **Types.** The code sends exactly one auth email: `resetPasswordForEmail` in `components/forgot-password-form.tsx`. `[auth].enable_signup = false`, so no sign-up confirmations. No code sends invites (`provisionUser` uses `createUser` with a temporary password) or magic links, and there is no email-change screen. Hence `CONFIRM_LINK_TYPES = ["recovery"]`. `invite` and `magiclink` are **refused, not "supported but unused"**: a magic link is exactly what anyone can request for their own address. An invite sent by hand from the dashboard now ends on `link-unsupported` if its template points at `/auth/confirm`. Adding `invite` back is one line, and safe, because a rep cannot mint one; it was left out because nothing in the app sends one.
+- `next` with no safe value falls back per type: `recovery` → `/auth/update-password`.
+- `/auth/error` gained `link-unsupported`: "This kind of link is not used here".
+
+### The reset email template
+
+`supabase/templates/recovery.html`, wired into `config.toml` as `[auth.email.template.recovery]`, for the **local stack**:
+
+```html
+<a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=recovery&next=/auth/update-password">Reset password</a>
+```
+
+The hosted projects' templates live in the dashboard and are **not** governed by this file (never `config push`). The fix does not need them changed: it is server-side, and it holds whatever the templates say. The change is still recommended. Measured on the local stack with GoTrue's default `{{ .ConfirmationURL }}` before the template was added: the forgot-password email's link fell back to the Site URL, because `redirectTo` was not on the redirect allow-list, and landed signed out on `/auth/login?code=…` with no reset form. That path also only works in the browser that asked (PKCE verifier), and a mail scanner fetching GoTrue's `/verify` link uses the token up. The token-hash link has none of those problems now that its GET is inert.
+
+### What checks it
+
+- `e2e/qa/auth-confirm-csrf.spec.ts` (5):
+  - a signed-in admin opens the rep's public-API magic link and is still the admin (session read from the cookie);
+  - the admin opens the rep's reset link and gets the Continue page naming the admin's session; nothing changed (`/admin/users` still renders) and the token is still unused;
+  - a cross-site POST (attacker `Origin`), and a same-`Origin` POST with `Sec-Fetch-Site: cross-site`, set no session; a genuine same-origin POST of the **same** token then does, so the hand-built POST is a real action call;
+  - a POST that swaps the hidden `type` to `magiclink` is refused;
+  - neither GET sets a session.
+- `e2e/qa/auth-confirm-redirect.spec.ts` (rewritten, 11):
+  - the four off-site `next` shapes fall back to `/auth/update-password`, after Continue;
+  - recovery with `next`, without it, and with a same-site `next` (`/leads?status=new`);
+  - **the real email end to end**: forgot-password form → Mailpit → the template's link, opened in a *different* browser → Continue → new password → `/dashboard`, and the new password signs in;
+  - `magiclink` and `invite` are refused at the GET and at the Continue page, with no session cookie.
+- `e2e/qa/auth-error-copy.spec.ts`: the A3 cases now press Continue before the bad token is discovered.
+- `tests/unit/confirm-link.test.ts` (23): parsing, the allow-list, `next` fallback, form and query parsed alike, URL encoding, that `route.ts` has no `verifyOtp`/client and no other method, that the action checks `sec-fetch-site` and re-parses, and the template's link.
+- **Revert checks**, each restored afterwards:
+  - the old `route.ts` back: the three GET-path tests in the CSRF spec go red, including the admin-becomes-rep case;
+  - the action's `Sec-Fetch-Site` check removed: the cross-site POST test goes red at the same-`Origin` case (the attacker-`Origin` POST is still stopped by Next).
+
+### Not verified
+
+- **The hosted projects.** Their email templates, Site URL and redirect allow-list are unknown from here. Nothing ran against them.
+- Behind a proxy or CDN that rewrites `Host` and not `X-Forwarded-Host`, Next's origin check would refuse genuine POSTs; Vercel sets both. Checking needs one real reset on the deployed domain.
+- `qa/explore/auth.explore.ts` (exploratory, run by no suite) still probes the old GET shape. Left as is.

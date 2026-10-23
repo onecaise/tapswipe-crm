@@ -35,25 +35,31 @@ test("A3 known codes keep their own words", async ({ page }) => {
   await expect(page.getByText("This account has been deactivated")).toBeVisible();
 });
 
-test("A3 a failed OTP verify redirects with a fixed code, not the GoTrue message", async ({ request }) => {
-  const response = await request.get(
-    "/auth/confirm?token_hash=not-a-real-token&type=magiclink",
-    { maxRedirects: 0 },
+// Since phase 7 the verify happens when the Continue page POSTs, not on the
+// GET, so a bad token is only discovered after the click.
+test("A3 a failed OTP verify redirects with a fixed code, not the GoTrue message", async ({ page }) => {
+  await page.goto("/auth/confirm?token_hash=not-a-real-token&type=recovery");
+  const confirmed = page.waitForResponse(
+    (r) => r.request().method() === "POST" && r.url().includes("/auth/confirm/continue"),
   );
-  expect(response.status()).toBe(307);
-  expect(response.headers()["location"]).toBe("/auth/error?error=link-invalid");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await confirmed;
+  await expect(page).toHaveURL(/\/auth\/error\?error=link-invalid$/);
 });
 
 test("A3 a confirm link missing its token redirects with a fixed code", async ({ request }) => {
-  const response = await request.get("/auth/confirm?type=magiclink", { maxRedirects: 0 });
+  const response = await request.get("/auth/confirm?type=recovery", { maxRedirects: 0 });
   expect(response.status()).toBe(307);
   expect(response.headers()["location"]).toBe("/auth/error?error=link-incomplete");
 });
 
 test("A3 the invalid-link page explains itself", async ({ page }) => {
-  await page.goto("/auth/confirm?token_hash=not-a-real-token&type=magiclink");
+  await page.goto("/auth/confirm?token_hash=not-a-real-token&type=recovery");
+  await page.getByRole("button", { name: "Continue" }).click();
   await expect(page).toHaveURL(/\/auth\/error\?error=link-invalid$/);
   await expect(page.getByText("This link has expired or was already used")).toBeVisible();
+  // GoTrue's own words never reach the page.
+  await expect(page.locator("body")).not.toContainText(/token|otp/i);
 });
 
 test("A3 a prototype key is not mistaken for a known code", async ({ page }) => {

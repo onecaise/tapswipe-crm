@@ -39,6 +39,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **The secrets validators exist twice and must change together** (`lib/pre-app-validation.ts` and `_shared/pre-app-secrets.ts`); the residual parser exists **once** — do not create a browser twin. → `docs/claude/edge-functions-and-storage.md`.
 - **Never show a `functions.invoke()` error's `.message` to a user** — use `lib/edge-functions.ts`. → "Next.js / auth wiring" below.
 - **"Email" on marketing materials sends nothing** and must say so; when sending lands it goes next to that log line. → `docs/claude/reference-data-and-marketing.md`.
+- **`GET /auth/confirm` never verifies a token**: it redirects to the Continue page, and only that page's Server Action (same-origin POST) calls `verifyOtp`. Link types are an allow-list of what the app sends — `recovery` only. → `docs/claude/security-fixes.md`, phase 7.
 - **Nothing is invented on the printed proposal** (`PROPOSAL_TERMS` empty by default; no phone; no stale contact) and print routes return **404, never 403**. → `docs/claude/proposals-and-catalog.md`.
 
 ## Security and access rules — the core text
@@ -161,10 +162,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2108 tests, 98 files — every file must load)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2138 tests, 100 files — every file must load)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (232 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (314 tests, 6 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (321 tests, 6 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -190,7 +191,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
-Baselines are the counts in the Commands block above (`npm test` 2108 tests / 98 files — every file must load; `test:live` 232; `test:deployed` 29; `test:e2e` 314, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
+Baselines are the counts in the Commands block above (`npm test` 2138 tests / 100 files — every file must load; `test:live` 232; `test:deployed` 29; `test:e2e` 321, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
 
 - Run `npm test` for any schema change; queries must run as `authenticated`, never the owner.
 - PGlite is Postgres 18.3, the stack 17.6 — pin constraint names in assertions, not SQLSTATEs.
@@ -236,7 +237,7 @@ Twelve functions, all registered in `supabase/config.toml` (a function not liste
 - Three Supabase client factories, don't mix them up: `lib/supabase/client.ts` (browser), `lib/supabase/server.ts` (Server Components / Actions / Route Handlers, cookie-backed, `async`), `lib/supabase/proxy.ts` (request pipeline). Never hoist any of them into a module-level global — Fluid compute reuses processes across requests.
 - `proxy.ts` at the repo root is Next 16's renamed middleware. It calls `updateSession()`, which refreshes the session cookie and redirects unauthenticated requests to `/auth/login` for everything except `/auth/*`. Do not insert code between `createServerClient()` and `supabase.auth.getClaims()` in that file, and return the `supabaseResponse` object unchanged — the comments there explain why (random logouts).
 - **`/` renders nothing: it redirects, in two places, and both are load-bearing.** Signed in goes to `/dashboard`, signed out to `/auth/login`. `app/page.tsx` holds the rule, and `updateSession()` holds it again so the hop happens in the request pipeline. Under `cacheComponents` a page's static shell paints *before* its dynamic segment can stream a redirect, so the page on its own means a blank frame first — which is precisely how the starter's marketing page stayed visible to signed-in users. The page is not redundant: it is what stops `/` from 404ing or going blank if the proxy matcher is ever narrowed. Note the proxy's `/` branch copies `supabaseResponse`'s cookies onto the redirect; `getClaims()` may have rotated the session, and a bare `NextResponse.redirect()` drops the new pair and logs the user out at random. `updateSession()` also no longer bails out when the public env vars are unset — that starter hatch skipped the auth check entirely for a deploy missing a variable, and `lib/env-guard.ts` only throws in development.
-- Auth pages live under `app/auth/*` with matching form components at the top level of `components/`; `app/auth/confirm/route.ts` handles email OTP verification.
+- Auth pages live under `app/auth/*` with matching form components at the top level of `components/`; `app/auth/confirm/route.ts` takes the email link and verifies nothing; `app/auth/confirm/continue/` (page + Server Action) exchanges the token on POST (phase 7). The local reset email is `supabase/templates/recovery.html`; the hosted ones are set in the dashboard.
 - `next.config.ts` sets `cacheComponents: true`, so dynamic data fetching must sit inside a `<Suspense>` boundary (see `app/page.tsx`, or `ForcePasswordChangeGate` in `app/(app)/layout.tsx`, for the shape).
 - Env vars (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`) live in **two** gitignored files, and the split matters: `.env.local` holds the **hosted** project and is what `next build` and production use; `.env.development.local` holds the **local stack** and wins in dev, because Next resolves `.env.development.local` ahead of `.env.local`. So `npm run dev` talks to the local stack with no flag to remember. Recreate it from `npx supabase status -o env` (`API_URL` + `PUBLISHABLE_KEY`) whenever the local ports change; `.env.example` documents the whole arrangement.
 - **`lib/env-guard.ts` throws at dev-server boot if the Supabase URL isn't local.** This is not hypothetical: with only `.env.local` present, `npm run dev` pointed the app at production, and the symptoms were an admin-only column appearing for a rep and a list reading "no pre-apps yet" because the row was in the other database. Nothing announced it. The guard runs from `next.config.ts` (hard throw, server) and once per page load in `lib/supabase/client.ts` (warn, browser — a built bundle can't fix its own URL). Set `ALLOW_REMOTE_SUPABASE_IN_DEV=1` to develop against the hosted project deliberately.
@@ -278,7 +279,7 @@ Everything below was moved verbatim out of this file; one line each.
 - `docs/claude/merchant-location.md` — location required for new merchants only, the NOT VALID lesson, format CHECK + guard trigger, `norm_city()`, the four hand-run SQL files, dev's hosted state.
 - `docs/claude/proposals-and-catalog.md` — append-only quotes, column grants, line-item snapshots and the price lock, the catalog loader script, proposals as their own record, the store, brands, the printed proposal.
 - `docs/claude/dashboard-followups-timeline.md` — dashboard filters (invoker, ANDed on policies), follow-ups in two places, the lead timeline.
-- `docs/claude/security-fixes.md` — the Oct 2026 outside-review fixes by phase: merchants admin-only to change, every MID change audited, backfill same-owner rule, owner picker; pre-app children frozen once submitted; anti-framing headers; npm wrappers refuse `--project-ref`/`--db-url`, env/key gitignores; `accounts_in_city` audited and rate-limited (30/hour).
+- `docs/claude/security-fixes.md` — the Oct 2026 outside-review fixes, all seven phases: (1) merchants admin-only to change, every MID change audited, backfill same-owner rule, owner picker; (2) pre-app children frozen once submitted; (3) anti-framing and hygiene headers on every route; (4) npm wrappers refuse `--project-ref`/`--db-url`, env/key gitignores, no `api-keys` advice; (5) `accounts_in_city` audited and rate-limited (30/hour); (6) the prod DB password passed in `PGPASSWORD`, never on a command line; (7) login CSRF closed — `GET /auth/confirm` verifies nothing, a Continue page POSTs to a Server Action, `recovery` is the only link type, and the reset email template.
 - `docs/claude/security-followups.md` — review findings recorded but deliberately not built, each with severity, evidence and a suggested fix.
 - `docs/design/residual-splits.md` — shared-account design memo.
 - `docs/tapswipe_crm_master_plan.md` — product master plan.

@@ -259,6 +259,17 @@ otp_expiry = 3600
 # admin_email = "admin@email.com"
 # sender_name = "Admin"
 
+# The reset email links to /auth/confirm with a token_hash, which opens a
+# Continue page and verifies nothing until that page POSTs (phase 7,
+# docs/claude/security-fixes.md). The hosted projects need the SAME template
+# set in the dashboard; this file governs the local stack only. Unlike GoTrue's
+# default {{ .ConfirmationURL }} (a PKCE code, so the reset only works in the
+# browser that asked for it, and a mail scanner fetching the link uses it up),
+# this link works in any browser and survives a prefetch.
+[auth.email.template.recovery]
+subject = "Reset your password"
+content_path = "./supabase/templates/recovery.html"
+
 # Uncomment to customize email template
 # [auth.email.template.invite]
 # subject = "You have been invited"
