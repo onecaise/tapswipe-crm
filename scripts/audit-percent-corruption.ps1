@@ -107,8 +107,11 @@ if ([string]::IsNullOrEmpty($env:SUPABASE_DB_PASSWORD)) {
   exit 1
 }
 
-$enc = [uri]::EscapeDataString([string]$env:SUPABASE_DB_PASSWORD)
-$url = "postgresql://postgres.${ProjectRef}:${enc}@${POOLER_HOST}:${POOLER_PORT}/postgres"
+. (Join-Path $PSScriptRoot 'prod-db.ps1')
+
+# No password in the URL: psql gets it through PGPASSWORD, so it is never on a
+# command line (scripts\prod-db.ps1 says why).
+$url = Get-PoolerUrl -ProjectRef $ProjectRef -PoolerHost $POOLER_HOST -Port $POOLER_PORT
 
 Say "audit-percent-corruption -- READ ONLY"
 Say "project ref : $ProjectRef"
@@ -120,7 +123,8 @@ $auditSql = Get-Content -Raw (Join-Path $PSScriptRoot 'audit-percent-corruption.
 
 # -w so psql never prompts: a prompt here would hang on a wrong password
 # rather than failing. Piped in rather than copied into the container.
-$result = ($auditSql | docker exec -i $CONTAINER psql -w -d "$url" -f - 2>&1 | Out-String)
+$dockerArgs = Get-PsqlDockerArgs -Container $CONTAINER -Url $url -PsqlArgs @('-f', '-') -Stdin
+$result = (Invoke-WithDbPassword { $auditSql | docker @dockerArgs 2>&1 | Out-String })
 $result = Redact $result
 
 if ($result -match 'Tenant or user not found') {

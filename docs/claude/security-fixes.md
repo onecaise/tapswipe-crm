@@ -217,3 +217,31 @@ Same signature, `create or replace`, grants restated. Schema doc updated first.
 - Nothing ran against a hosted project.
 - The limit's behaviour under PgBouncer transaction pooling. PostgREST talks to Postgres directly on hosted Supabase, and the lock is transaction-scoped, so pooling should not matter, but this was not tested there.
 - Other cross-book definer reads (`check_duplicates()`, `my_share_partners()`) remain unaudited and unlimited. `check_duplicates` takes free-text inputs that could be looped the same way, though its output is narrower. Not in scope; noted for review.
+
+## Phase 6 (hygiene): the prod database password on process command lines
+
+**Rule:** no script passes a database password as an argument. The connection URL carries none; the value travels in `PGPASSWORD`. Shared plumbing: `scripts/prod-db.ps1`, dot-sourced by `diag-prod-trigger.ps1`, `push-prod-migration.ps1` and `audit-percent-corruption.ps1` (the review named "the two diag scripts"; the audit script built the same URL, so it is covered too).
+
+### The finding, reproduced
+
+All three scripts percent-encoded `$env:SUPABASE_DB_PASSWORD` into `postgresql://postgres.<ref>:<pw>@<pooler>/postgres` and passed that URL to `docker exec … psql -d <url>`, and the push script also passed it to `supabase db push --db-url <url>`. Reproduced on the local stack with a canary password (the container's `127.0.0.1` is `trust` in its `pg_hba`, so the canary was never checked and nothing remote was involved): while `psql` ran `pg_sleep(4)`, `Get-CimInstance Win32_Process` returned docker.exe's CommandLine with `CANARY-Phase6%2Fx%3Ay` in it. `ps` inside the container shows psql's argv the same way.
+
+### The fix
+
+- **psql**: `docker exec -e PGPASSWORD <container> psql -w -d <url-without-password>`. The name only: docker copies the value from the docker client's own environment. `-e PGPASSWORD=<value>` would put it straight back on docker.exe's command line.
+- **The CLI**: `db push --db-url <url-without-password>` with `PGPASSWORD` in its environment. **Not `SUPABASE_DB_PASSWORD`**: measured on CLI 2.111.0 with `migration list --db-url` against the local stack (read-only; `db push` was not run), a wrong `SUPABASE_DB_PASSWORD` still connected and a wrong `PGPASSWORD` failed with 28P01, so with `--db-url` the CLI reads `PGPASSWORD` (pgconn) and ignores the other. With neither set it silently tries a default password, so an unset variable fails at authentication.
+- `Invoke-WithDbPassword` sets `PGPASSWORD` from `SUPABASE_DB_PASSWORD` **only around each call that needs it** and puts it back exactly as found (removed, or the caller's own value) in a `finally`, so `docker ps` and everything else never inherit it. `SUPABASE_DB_PASSWORD` is left alone: it is the operator's input, and the diag script tells them to run the push next from the same terminal.
+- `Assert-NoPasswordInUrl` refuses, without echoing the URL, to build arguments from a URL with `user:password@`.
+- The old `CHECK pwchars= urlchars= expected=` length check guarded the percent-encoding in transit, which no longer happens; it is now `CHECK pwchars=N (passed in PGPASSWORD, not in the URL)`. Target selection (`$PROJECT_REF`, `$POOLER_HOST`, `-ProjectRef`) is unchanged. `Redact` is unchanged.
+
+### What checks it
+
+- `tests/unit/prod-db-password.test.ts` (7, Windows-only, hermetic): each real script is copied into a temp layout and run with a canary `SUPABASE_DB_PASSWORD`; `docker` is a recording PowerShell function, the CLI a recording `node_modules\.bin\supabase.cmd`, and PATH holds only System32 and PowerShell, so the real docker.exe cannot be reached. Asserted: no argv element of any docker or CLI call holds the canary, raw or encoded; every `docker exec` has `-e PGPASSWORD` and nothing `PGPASSWORD=`; the URL has no password; psql and the CLI saw the canary in `PGPASSWORD`; `docker ps` did not; stdout and the log file never contain it; `PGPASSWORD` is empty after the script, and a caller's own `PGPASSWORD` is restored. Push is run both `-DryRun` and for real (the after-push reads too). Plus `prod-db.ps1` itself: a URL with a password is refused without being echoed.
+- **Mutation checks**, each restored afterwards: the three scripts reverted to their committed versions, 5 red; the password put back into the CLI's `--db-url` only, 2 red; `-e "PGPASSWORD=$value"`, 6 red; the `finally` restore removed, 5 red.
+- **By hand against the local stack's Postgres**, through the real `prod-db.ps1` and the real docker.exe, at the container's own IP (`scram-sha-256` in its `pg_hba`, so the value really is checked): right password connects, wrong one gets `password authentication failed`, `PGPASSWORD` is unset after each call, and during a `pg_sleep` neither docker.exe's CommandLine nor `ps` in the container holds a secret.
+
+### Not verified
+
+- Nothing ran against prod or any hosted project, so the pooler accepting `PGPASSWORD` with the ref-carrying username is inferred (libpq and pgconn treat it like any password), not observed.
+- `db push` itself was not run. That it reads `PGPASSWORD` with `--db-url` is inferred from `migration list --db-url` behaving that way in the same CLI build.
+- **What this does not close.** The value is still in the environment of the PowerShell process, docker.exe and the CLI while they run, and in psql's environment inside the container; a process running as the same user (or root in the container) can read an environment block. The gain is that command lines are what process-creation logging (Sysmon, 4688 auditing, EDR) records and what `ps` shows to everyone, and environments are not. `SUPABASE_DB_PASSWORD` itself lives in the operator's terminal for as long as they keep it there.

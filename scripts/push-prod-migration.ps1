@@ -70,6 +70,10 @@
 # connection string in several of its error messages, so a log that records a
 # failed push is exactly where a credential would otherwise end up.
 #
+# THE PASSWORD IS NEVER ON A COMMAND LINE. The URL handed to psql and to the CLI
+# carries no password; the value travels in PGPASSWORD, set only around each
+# call. Why, and why not SUPABASE_DB_PASSWORD for the CLI: scripts\prod-db.ps1.
+#
 # READ-ONLY UNTIL THE PUSH STEP, and it aborts before that step if the pre-flight
 # cannot prove it is talking to a remote server.
 
@@ -95,6 +99,7 @@ $REPO        = Split-Path $PSScriptRoot -Parent
 $CLI         = Join-Path $REPO 'node_modules\.bin\supabase.cmd'
 
 . (Join-Path $PSScriptRoot 'prod-state.ps1')
+. (Join-Path $PSScriptRoot 'prod-db.ps1')
 
 # ---------- logging ----------
 $LOG_DIR = Join-Path $PSScriptRoot 'logs'
@@ -124,12 +129,14 @@ function Say {
 
 function Get-ProdState {
   param([string]$Url)
-  return (docker exec $CONTAINER psql -w -d "$Url" -tA -c $PROD_STATE_SQL 2>&1 | Out-String).Trim()
+  $dockerArgs = Get-PsqlDockerArgs -Container $CONTAINER -Url $Url -PsqlArgs @('-tA', '-c', $PROD_STATE_SQL)
+  return (Invoke-WithDbPassword { docker @dockerArgs 2>&1 | Out-String }).Trim()
 }
 
 function Get-AppliedVersions {
   param([string]$Url)
-  $raw = (docker exec $CONTAINER psql -w -d "$Url" -tA -c $PROD_VERSIONS_SQL 2>&1 | Out-String)
+  $dockerArgs = Get-PsqlDockerArgs -Container $CONTAINER -Url $Url -PsqlArgs @('-tA', '-c', $PROD_VERSIONS_SQL)
+  $raw = (Invoke-WithDbPassword { docker @dockerArgs 2>&1 | Out-String })
   return @($raw -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d{14}$' })
 }
 
@@ -172,17 +179,11 @@ if (-not (Test-Path $CLI)) {
   exit 1
 }
 
-$enc      = [uri]::EscapeDataString([string]$env:SUPABASE_DB_PASSWORD)
-$url      = "postgresql://postgres.${PROJECT_REF}:${enc}@${POOLER_HOST}:${POOLER_PORT}/postgres"
-$expected = "postgresql://postgres.${PROJECT_REF}:@${POOLER_HOST}:${POOLER_PORT}/postgres".Length + $enc.Length
+# No password in the URL: it reaches psql and the CLI through PGPASSWORD.
+$url = Get-PoolerUrl -ProjectRef $PROJECT_REF -PoolerHost $POOLER_HOST -Port $POOLER_PORT
 
-Say ('CHECK pwchars=' + $enc.Length + ' urlchars=' + $url.Length + ' expected=' + $expected)
+Say ('CHECK pwchars=' + ([string]$env:SUPABASE_DB_PASSWORD).Length + ' (passed in PGPASSWORD, not in the URL)')
 Say ('TARGET ' + $POOLER_HOST + ':' + $POOLER_PORT + ' as postgres.' + $PROJECT_REF)
-
-if ($url.Length -ne $expected) {
-  Say 'ABORT: connection string length does not match expected -- it was mangled in transit.'
-  exit 1
-}
 
 # ---------- PRE-FLIGHT (read-only) ----------
 Say '--- before ---'
@@ -215,7 +216,7 @@ if ($missingBefore.Count -eq 0) {
     Say 'NOTE: every migration in the repo is already recorded here, and the structure checks pass.'
     Say 'RESULT: PASS -- nothing to push.'
     Say ('--- end --- log written to ' + $LOG)
-    Remove-Variable enc, url -ErrorAction SilentlyContinue
+    Remove-Variable url -ErrorAction SilentlyContinue
     exit 0
   }
 
@@ -225,7 +226,7 @@ if ($missingBefore.Count -eq 0) {
   foreach ($problem in $problemsBefore) { Say ("  - " + $problem) }
   Say 'Nothing was pushed. db push skips recorded versions, so this needs a look rather than a re-run.'
   Say ('--- end --- log written to ' + $LOG)
-  Remove-Variable enc, url -ErrorAction SilentlyContinue
+  Remove-Variable url -ErrorAction SilentlyContinue
   exit 1
 }
 
@@ -247,14 +248,15 @@ if ($DryRun) {
 # each of those lines in an ErrorRecord -- which renders with "At line:N char:M"
 # noise and a stack trace around what is really just a status message. Flattened
 # with ToString() so the log reads like the terminal does.
-$pushArgs = @('db', 'push', '--db-url', $url, '--yes')
-if ($DryRun) { $pushArgs += '--dry-run' }
+$pushArgs = Get-DbPushArgs -Url $url -DryRun:$DryRun
 
-& $CLI @pushArgs 2>&1 | ForEach-Object {
-  if ($_ -is [System.Management.Automation.ErrorRecord]) {
-    Say $_.ToString()
-  } else {
-    Say ([string]$_)
+Invoke-WithDbPassword {
+  & $CLI @pushArgs 2>&1 | ForEach-Object {
+    if ($_ -is [System.Management.Automation.ErrorRecord]) {
+      Say $_.ToString()
+    } else {
+      Say ([string]$_)
+    }
   }
 }
 $pushExit = $LASTEXITCODE
@@ -277,7 +279,7 @@ $missingAfter = Get-MissingMigrations -Local $localVersions -Applied $appliedAft
 
 Report-State -State $after -Missing $missingAfter
 
-Remove-Variable enc, url -ErrorAction SilentlyContinue
+Remove-Variable url -ErrorAction SilentlyContinue
 
 $problems = Get-ProdStateFailures -State $after -Missing $missingAfter
 

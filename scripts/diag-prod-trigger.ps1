@@ -7,10 +7,10 @@
 #
 #   powershell -File scripts\diag-prod-trigger.ps1
 #
-# The password is never printed. It is read from $env:SUPABASE_DB_PASSWORD,
-# percent-encoded into the connection URL, and only its CHARACTER COUNT is
-# reported -- enough to see the variable is populated, not enough to disclose
-# anything.
+# The password is never printed and never on a command line. It is read from
+# $env:SUPABASE_DB_PASSWORD and handed to psql in PGPASSWORD (the URL carries
+# none -- see scripts\prod-db.ps1), and only its CHARACTER COUNT is reported --
+# enough to see the variable is populated, not enough to disclose anything.
 #
 # EVERY LINE IS ALSO WRITTEN TO scripts\logs\, and that is not a convenience.
 # This script was run three times in one session and left no artifact at all, so
@@ -55,6 +55,7 @@ $CONTAINER   = 'supabase_db_tapswipe-crm'        # psql client only
 $REPO        = Split-Path $PSScriptRoot -Parent
 
 . (Join-Path $PSScriptRoot 'prod-state.ps1')
+. (Join-Path $PSScriptRoot 'prod-db.ps1')
 
 # ---------- logging ----------
 $LOG_DIR = Join-Path $PSScriptRoot 'logs'
@@ -111,13 +112,10 @@ if ($null -eq $containerUp) {
   exit 1
 }
 
-$enc      = [uri]::EscapeDataString([string]$env:SUPABASE_DB_PASSWORD)
-$url      = "postgresql://postgres.${PROJECT_REF}:${enc}@${POOLER_HOST}:${POOLER_PORT}/postgres"
-$expected = "postgresql://postgres.${PROJECT_REF}:@${POOLER_HOST}:${POOLER_PORT}/postgres".Length + $enc.Length
+# No password in the URL: psql gets it through PGPASSWORD.
+$url = Get-PoolerUrl -ProjectRef $PROJECT_REF -PoolerHost $POOLER_HOST -Port $POOLER_PORT
 
-# Integrity line. pwchars=0 means the variable was empty; urlchars != expected
-# means the string was mangled somewhere between here and psql.
-Say ('CHECK pwchars=' + $enc.Length + ' urlchars=' + $url.Length + ' expected=' + $expected)
+Say ('CHECK pwchars=' + ([string]$env:SUPABASE_DB_PASSWORD).Length + ' (passed in PGPASSWORD, not in the URL)')
 Say ('TARGET ' + $POOLER_HOST + ':' + $POOLER_PORT + ' as postgres.' + $PROJECT_REF)
 
 Say '--- state ---'
@@ -125,7 +123,8 @@ Say '--- state ---'
 # Captured rather than streamed, so it reaches the log as well as the screen.
 # 2>&1 so a connection failure is recorded too: that is the output most worth
 # keeping and the one most likely to be lost.
-$state = (docker exec $CONTAINER psql -w -d "$url" -tA -c $PROD_STATE_SQL 2>&1 | Out-String).Trim()
+$dockerArgs = Get-PsqlDockerArgs -Container $CONTAINER -Url $url -PsqlArgs @('-tA', '-c', $PROD_STATE_SQL)
+$state = (Invoke-WithDbPassword { docker @dockerArgs 2>&1 | Out-String }).Trim()
 $code  = $LASTEXITCODE
 Say $state
 Say ('exit code: ' + $code)
@@ -137,7 +136,7 @@ if ($code -ne 0 -or $state -notmatch 'server=') {
   Say ('  ' + $POOLER_ALT)
   Say 'CLAUDE.md documents that one; this script has always used the other.'
   Say ('--- end --- log written to ' + $LOG)
-  Remove-Variable enc, url -ErrorAction SilentlyContinue
+  Remove-Variable url -ErrorAction SilentlyContinue
   exit 1
 }
 
@@ -147,7 +146,8 @@ if ($state -match 'SOCKET-LOCAL') {
 }
 
 # ---------- what is pending ----------
-$rawVersions = (docker exec $CONTAINER psql -w -d "$url" -tA -c $PROD_VERSIONS_SQL 2>&1 | Out-String)
+$dockerArgs  = Get-PsqlDockerArgs -Container $CONTAINER -Url $url -PsqlArgs @('-tA', '-c', $PROD_VERSIONS_SQL)
+$rawVersions = (Invoke-WithDbPassword { docker @dockerArgs 2>&1 | Out-String })
 $applied     = @($rawVersions -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d{14}$' })
 $missing     = Get-MissingMigrations -Local $localVersions -Applied $applied
 
@@ -177,6 +177,6 @@ if ($problems.Count -eq 0) {
 
 Say ('--- end --- log written to ' + $LOG)
 
-Remove-Variable enc, url, state -ErrorAction SilentlyContinue
+Remove-Variable url, state -ErrorAction SilentlyContinue
 
 if ($problems.Count -eq 0) { exit 0 } else { exit 1 }

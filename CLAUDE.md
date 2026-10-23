@@ -123,7 +123,7 @@ So `supabase db push`, `functions deploy` and `migration list --linked` target *
 **And the URL is not the obvious one.** `db.zuvsdkjnfstrjahstsmg.supabase.co` resolves to an **AAAA record only** (measured 16 Sep 2026), so on a host without IPv6 egress it fails at DNS — "No address associated with hostname" — before any credential is tested. Use the pooler in **session** mode, and note the username carries the ref:
 
 ```
-postgresql://postgres.zuvsdkjnfstrjahstsmg:<password>@aws-0-us-west-2.pooler.supabase.com:5432/postgres
+postgresql://postgres.zuvsdkjnfstrjahstsmg@aws-0-us-west-2.pooler.supabase.com:5432/postgres   # password in $env:PGPASSWORD, never in the URL (a command line is readable by other processes; scripts/prod-db.ps1)
 ```
 
 Port 5432, not 6543: transaction mode breaks a migration partway through. Both projects are `us-west-2`, so dev's pooler host is prod's too.
