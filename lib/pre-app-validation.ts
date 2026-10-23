@@ -125,6 +125,13 @@ export const businessStepSchema = z.object({
   bank_name: text,
 
   /**
+   * A processor code from the select, or "" for not set. Not checked against
+   * the list here: the list is a table, and pre_apps_processor_fkey is what
+   * refuses anything else.
+   */
+  processor: text,
+
+  /**
    * Only the agent's share is entered; the company's is derived as 100 minus
    * it and the two are written together.
    *

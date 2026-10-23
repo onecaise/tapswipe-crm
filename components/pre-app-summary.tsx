@@ -68,6 +68,7 @@ export function PreAppSummary({
         <Field label="EIN">{formatText(preApp.ein_number)}</Field>
         <Field label="Started">{formatDate(preApp.business_start_date)}</Field>
         <Field label="Goods sold">{formatText(preApp.goods_sold)}</Field>
+        <Field label="Processor">{formatText(preApp.processor)}</Field>
         <Field label="Bank">{formatText(preApp.bank_name)}</Field>
         <Field label="Billing">{formatText(preApp.billing_type)}</Field>
         <Field label="Split (agent / company)">

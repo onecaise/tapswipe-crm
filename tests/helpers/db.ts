@@ -318,9 +318,9 @@ export async function seed(db: TestDb): Promise<void> {
     insert into merchants (agent_id, mid, dba, legal_business_name, status, processor, split_agent_pct, split_company_pct${hasLocation ? ", city, state" : ""})
     values
       ('${AGENT_ID}',       'MID-AGENT-1', 'Agent Active Co',   'Agent Active Co LLC',   'active',   'TSYS',  60.00, 40.00${loc("Nashville", "TN")}),
-      ('${AGENT_ID}',       'MID-AGENT-2', 'Agent Inactive Co', 'Agent Inactive Co LLC', 'inactive', 'FDMS',  55.00, 45.00${loc("Nashville", "TN")}),
+      ('${AGENT_ID}',       'MID-AGENT-2', 'Agent Inactive Co', 'Agent Inactive Co LLC', 'inactive', 'Square', 55.00, 45.00${loc("Nashville", "TN")}),
       ('${OTHER_AGENT_ID}', 'MID-OTHER-1', 'Other Active Co',   'Other Active Co LLC',   'active',   'TSYS',  50.00, 50.00${loc("Nashville", "TN")}),
-      ('${OTHER_AGENT_ID}', 'MID-OTHER-2', 'Other Other Co',    'Other Other Co LLC',    'other',    'Elavon', 70.00, 30.00${loc("Memphis", "TN")});
+      ('${OTHER_AGENT_ID}', 'MID-OTHER-2', 'Other Other Co',    'Other Other Co LLC',    'other',    'PayBright', 70.00, 30.00${loc("Memphis", "TN")});
 
     -- Documents. owner_id is resolved by lookup rather than a hardcoded serial.
     -- One per agent against a merchant, plus one against a lead, so the

@@ -220,7 +220,7 @@ describe("merchants write scoping", () => {
 
     await asUser(db, ADMIN_ID);
     await db.exec(
-      `update merchants set processor = 'Nuvei' where dba = 'Agent Active Co';`,
+      `update merchants set processor = 'Square' where dba = 'Agent Active Co';`,
     );
 
     await asPlatform(db);
@@ -247,7 +247,7 @@ describe("merchants write scoping", () => {
     // the column at all.
     await db.exec(`
       update merchants
-      set processor = 'Nuvei', updated_at = '2000-01-01T00:00:00Z'
+      set processor = 'Square', updated_at = '2000-01-01T00:00:00Z'
       where dba = 'Agent Active Co';
     `);
 
@@ -257,7 +257,7 @@ describe("merchants write scoping", () => {
       `select updated_at, processor from merchants where dba = 'Agent Active Co'`,
     );
 
-    expect(after.processor).toBe("Nuvei");
+    expect(after.processor).toBe("Square");
     expect(new Date(after.updated_at).getUTCFullYear()).toBeGreaterThan(2000);
   });
 
@@ -267,7 +267,7 @@ describe("merchants write scoping", () => {
     await asUser(db, AGENT_ID);
 
     const result = await db.query(
-      `update merchants set processor = 'Nuvei' where dba = 'Agent Active Co';`,
+      `update merchants set processor = 'Square' where dba = 'Agent Active Co';`,
     );
     expect(result.affectedRows).toBe(0);
 
@@ -283,7 +283,7 @@ describe("merchants write scoping", () => {
     await asUser(db, ADMIN_ID);
 
     const result = await db.query(
-      `update merchants set processor = 'Nuvei' where dba = 'Agent Active Co';`,
+      `update merchants set processor = 'Square' where dba = 'Agent Active Co';`,
     );
     expect(result.affectedRows).toBe(1);
   });
@@ -334,7 +334,7 @@ describe("regression: what the trigger migration changes", () => {
 
     await asUser(old, AGENT_ID);
     await old.exec(
-      `update merchants set processor = 'Nuvei' where dba = 'Agent Active Co';`,
+      `update merchants set processor = 'Square' where dba = 'Agent Active Co';`,
     );
 
     await asPlatform(old);

@@ -207,7 +207,7 @@ async function repWrites(target: TestDb): Promise<{
 }> {
   await asUser(target, AGENT_ID);
   const updated =
-    (await target.query(`update merchants set processor = 'Nuvei' where dba = 'Agent Active Co'`))
+    (await target.query(`update merchants set processor = 'Square' where dba = 'Agent Active Co'`))
       .affectedRows ?? 0;
   const deleted =
     (await target.query(`delete from merchants where dba = 'Agent Active Co'`)).affectedRows ?? 0;
@@ -249,7 +249,7 @@ describe("merchant writes are admin-only", () => {
   it("an admin updates, creates and deletes any rep's merchant", async () => {
     await asUser(db, ADMIN_ID);
     const updated = await db.query(
-      `update merchants set processor = 'Nuvei' where dba = 'Agent Active Co'`,
+      `update merchants set processor = 'Square' where dba = 'Agent Active Co'`,
     );
     expect(updated.affectedRows).toBe(1);
 
@@ -380,7 +380,7 @@ describe("every MID change is audited", () => {
     await db.query(
       `update merchants set mid = 'MID-AGENT-1', dba = 'Agent Active Co' where id = ${id}`,
     );
-    await db.query(`update merchants set processor = 'Nuvei' where id = ${id}`);
+    await db.query(`update merchants set processor = 'Square' where id = ${id}`);
 
     expect(await midAudit(db)).toEqual([]);
   });

@@ -13,6 +13,7 @@ import {
   type PreAppTerminal,
   parsePreAppStep,
 } from "@/lib/pre-apps";
+import { loadProcessors } from "@/lib/processors";
 import { PageShell } from "@/components/page-shell";
 import { PreAppWizardShell } from "@/components/pre-app-wizard-shell";
 import { BusinessStep } from "@/components/pre-app-steps/business-step";
@@ -66,7 +67,7 @@ async function PreAppEditor({
   // step change would triple the query count for data the step cannot show.
   // Review is the one step that needs more than its own section: it mirrors
   // submit_pre_app's rules, which span owners and the card mix.
-  const [owners, terminal, cardMix] = await Promise.all([
+  const [owners, terminal, cardMix, processors] = await Promise.all([
     step === "owners" || step === "secrets" || step === "review"
       ? supabase
           .from("pre_app_owners")
@@ -94,6 +95,7 @@ async function PreAppEditor({
           .maybeSingle()
           .then(({ data }) => (data ?? null) as PreAppBusinessProfile | null)
       : Promise.resolve<PreAppBusinessProfile | null>(null),
+    step === "business" ? loadProcessors(supabase) : Promise.resolve([]),
   ]);
 
   return (
@@ -104,7 +106,9 @@ async function PreAppEditor({
       status={preApp.status}
       isAdmin={isAdmin}
     >
-      {step === "business" && <BusinessStep preApp={preApp} canEdit />}
+      {step === "business" && (
+        <BusinessStep preApp={preApp} canEdit processors={processors} />
+      )}
       {step === "owners" && (
         <OwnersStep preAppId={preApp.id} owners={owners} canEdit />
       )}

@@ -90,7 +90,9 @@ describe("the paper form asks what the wizard asks", () => {
    * printed layout, rather than drifting.
    */
   it("carries the same number of fields per step", () => {
-    expect(fieldsOf(BUSINESS_SECTION)).toHaveLength(28);
+    // 29 since 20261023130000 added pre_apps.processor (phase 1 of
+    // docs/design/intake-and-reports.md).
+    expect(fieldsOf(BUSINESS_SECTION)).toHaveLength(29);
     expect(fieldsOf(OWNER_SECTION)).toHaveLength(16);
     expect(fieldsOf(TERMINAL_SECTION)).toHaveLength(24);
     expect(fieldsOf(PROFILE_SECTION)).toHaveLength(8);

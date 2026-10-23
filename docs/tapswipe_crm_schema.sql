@@ -765,6 +765,54 @@ revoke all on function set_manager(uuid, uuid) from public;
 grant execute on function set_manager(uuid, uuid) to authenticated, service_role;
 
 -- ---------------------------------------------------------------------
+-- PROCESSORS -- the one processor vocabulary (20261023130000; phase 1 of
+-- docs/design/intake-and-reports.md).
+--
+-- The same list everywhere a processor is named: merchants.processor and
+-- pre_apps.processor now, rep_payout_batches and rep_payout_rows when the
+-- residual import is rebuilt. A TABLE referenced by foreign key rather than a
+-- CHECK repeated on each column, because the repeats drift -- three copies of
+-- the list is the pattern this repo keeps paying for. Adding a processor is
+-- one insert, in a migration.
+--
+-- `code` is the stored value AND what the screens show (memo A1: code =
+-- label). `label` exists so a display name can change later without
+-- rewriting every row that names the code; until then the two are equal.
+-- No `id serial`: the natural key is what the referencing columns hold, so
+-- there is no sequence and no sequence grant.
+--
+-- Reference data with no owner (the products/brands shape, minus the
+-- admin-write policies): every active user reads it, nobody writes it from a
+-- client. No insert/update/delete policy and no write grant, so a write is
+-- `permission denied`, not a filtered no-op. Never anything for anon.
+-- ---------------------------------------------------------------------
+create table processors (
+  code text primary key
+    constraint processors_code_trimmed check (code = btrim(code) and code <> ''),
+  label text not null
+    constraint processors_label_trimmed check (label = btrim(label) and label <> ''),
+  -- The drop-down order. Unique so two processors cannot tie and reorder
+  -- between page loads.
+  sort_order int not null constraint processors_sort_order_key unique
+);
+
+alter table processors enable row level security;
+
+-- is_active_agent() covers every active profile, admins included -- the
+-- brands/products wording, kept identical so the two read alike.
+create policy "select active or admin" on processors
+  for select using (is_active_agent() or is_admin());
+
+-- Spellings exactly as Owen gave them (23 Oct 2026). sort_order in tens so a
+-- later insert can land between two without renumbering.
+insert into processors (code, label, sort_order) values
+  ('TSYS',       'TSYS',       10),
+  ('Red Fynn',   'Red Fynn',   20),
+  ('PayBright',  'PayBright',  30),
+  ('Netevia HQ', 'Netevia HQ', 40),
+  ('Square',     'Square',     50);
+
+-- ---------------------------------------------------------------------
 -- MERCHANTS
 -- ---------------------------------------------------------------------
 create table merchants (
@@ -774,7 +822,12 @@ create table merchants (
   dba text not null,
   legal_business_name text,
   status text not null default 'active' check (status in ('active', 'inactive', 'other')),
-  processor text,
+  -- One of processors.code, or NULL for "not set yet" (20261023130000).
+  -- Free text until then. Nullable and staying that way: a merchant created
+  -- before anyone knows the processor is normal, and the residual import
+  -- treats an unset processor as "no mismatch" (memo A6). NO ACTION on delete:
+  -- a processor a merchant names cannot be removed from the list.
+  processor text constraint merchants_processor_fkey references processors(code),
   split_agent_pct numeric(5,2),
   split_company_pct numeric(5,2),
   -- Which pre-app was approved into this merchant, when one was. The foreign
@@ -1223,6 +1276,13 @@ create table pre_apps (
   split_company_pct numeric(5,2) not null default 50,
   constraint pre_apps_split_sums_to_100
     check (split_agent_pct + split_company_pct = 100),
+
+  -- The processor this application is for (20261023130000), from the same
+  -- list as merchants.processor, and copied onto the merchant by
+  -- approve_pre_app(). OPTIONAL: it is not in the mandatory-before-submit list
+  -- (docs/design/intake-and-reports.md, A6), so a rep may leave it unset and
+  -- an admin set it on the merchant later.
+  processor text constraint pre_apps_processor_fkey references processors(code),
 
   created_at timestamptz default now(),
   updated_at timestamptz default now()
@@ -8498,13 +8558,16 @@ begin
       pre_app_id_input using errcode = 'PT409';
   end if;
 
+  -- PROCESSOR (20261023130000). Copied as-is, NULL included: the FK on both
+  -- columns means a value the pre-app holds is one the merchant accepts, so
+  -- nothing here can fail on it.
   insert into merchants (agent_id, dba, legal_business_name, status,
                          split_agent_pct, split_company_pct, pre_app_id,
-                         street, city, state, zip)
+                         street, city, state, zip, processor)
   values (pa.agent_id, pa.dba_name, pa.legal_business_name, 'active',
           pa.split_agent_pct, pa.split_company_pct, pa.id,
           nullif(btrim(pa.physical_address), ''), btrim(pa.city),
-          upper(btrim(pa.state)), nullif(btrim(pa.zip), ''))
+          upper(btrim(pa.state)), nullif(btrim(pa.zip), ''), pa.processor)
   returning id into new_merchant_id;
 
   perform set_config('tapswipe.pre_app_transition', 'on', true);
@@ -9707,6 +9770,18 @@ grant select, insert, update on products to authenticated;
 -- product names is not history, and one that is named is refused by
 -- `on delete restrict`.
 grant select, insert, update, delete on brands to authenticated;
+
+-- processors: SELECT and nothing else, for both roles. The list changes only
+-- by migration, so no client verb is backed by any policy and none is
+-- granted -- a write is `permission denied`, not a filtered no-op. The
+-- service role gets SELECT for the residual import functions that will
+-- validate a chosen processor (phase 6-7 of docs/design/intake-and-reports.md);
+-- no Edge Function writes it. No sequence: the key is the code. Revoked to
+-- nothing first: on the local stack the default ACL for role postgres still
+-- gives service_role TRUNCATE/REFERENCES/TRIGGER/MAINTAIN on every new table.
+revoke all on processors from anon, authenticated, service_role;
+grant select on processors to authenticated;
+grant select on processors to service_role;
 
 -- product_compatibility: products' three verbs plus DELETE, which products
 -- deliberately withholds. The difference is not an inconsistency -- see the

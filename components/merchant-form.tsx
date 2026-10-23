@@ -13,6 +13,7 @@ import {
 import { US_STATES, isZip } from "@/lib/masks";
 import { EMPTY } from "@/lib/format";
 import type { OwnerOption } from "@/lib/merchant-owners";
+import type { Processor } from "@/lib/processors";
 import { friendlyDbError } from "@/lib/db-errors";
 import {
   useTypedInput,
@@ -28,6 +29,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ProcessorSelect } from "@/components/processor-select";
 import { Callout } from "@/components/callout";
 
 type FormState = {
@@ -113,11 +115,14 @@ function toPayload(form: FormState) {
 export function MerchantForm({
   merchant,
   owners,
+  processors,
 }: {
   /** Present when editing; absent when creating. */
   merchant?: Merchant;
   /** Who the merchant can belong to: ownerOptions() in lib/merchant-owners.ts. */
   owners: OwnerOption[];
+  /** The processor list, from loadProcessors() in lib/processors.ts. */
+  processors: Processor[];
 }) {
   const isEdit = merchant !== undefined;
   // Required for a NEW merchant, and for one that already has a location
@@ -358,8 +363,10 @@ export function MerchantForm({
 
             <div className="grid gap-2">
               <Label htmlFor="processor">Processor</Label>
-              <Input
+              <ProcessorSelect
                 id="processor"
+                processors={processors}
+                current={merchant?.processor}
                 value={form.processor}
                 onChange={(e) => set("processor", e.target.value)}
               />

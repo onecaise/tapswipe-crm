@@ -4,6 +4,7 @@ import {
   type PreAppOwner,
   type PreAppTerminal,
 } from "@/lib/pre-apps";
+import { PAPER_PROCESSOR_CODES } from "@/lib/processors";
 
 /**
  * The pre-app application as a list of fields, for the printable blank form.
@@ -183,6 +184,15 @@ const BUSINESS_FIELDS = {
     label: "Goods or services sold",
     kind: "long",
     group: "Business type",
+  },
+  // The one list the paper form cannot read from the table, because this page
+  // is static by design; PAPER_PROCESSOR_CODES is pinned to the migration by
+  // tests/unit/processors.test.ts.
+  processor: {
+    label: "Processor",
+    kind: "select",
+    group: "Business type",
+    options: PAPER_PROCESSOR_CODES,
   },
 
   bank_name: { label: "Bank name", kind: "text", group: "Banking and split" },

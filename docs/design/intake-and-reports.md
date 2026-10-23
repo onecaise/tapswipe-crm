@@ -497,8 +497,13 @@ the gap to close first.
 - RLS: admin select; no client write.
 - It is written only by `close_payout_period(period, processor)`: definer, `is_admin()` first,
   audited `close_payout_period`, failing closed. Its own privilege lines.
-- **Recommend** no reopen RPC at first. Reopening a paid month is the dangerous operation, so make
-  it a deliberate migration-level act until it is needed (§9, A8).
+- **Decided (A8, 23 Oct 2026): an admin-only reopen, with a written reason, audited.**
+  `reopen_payout_period(period, processor, reason_input text)` is `security definer`, `is_admin()`
+  first, refuses a blank reason, deletes the closure row, and writes `audit_log`
+  (`reopen_payout_period`), failing closed. The reason is kept on a
+  `payout_period_reopenings(period, processor, reason, reopened_at)` row, because `audit_log` has no
+  detail column. The UI asks for the reason in a text box; "Mark paid" keeps its typed
+  confirmation. Built in phase 9.
 
 **Replace,** inside v3, under the batch lock and the share lock:
 
@@ -954,7 +959,7 @@ Thirteen phases, one prompt and one commit each, with the schema doc edited firs
 | 6 | Import schema | Batches gain `processor`, `period` and replace columns, status `replaced`, and one committed batch per (processor, month). Staging gains `warnings` and the new blocker vocabulary. Ledger gains `processor`, the merge key with processor, and the confirmed-negative-volume column. `payout_period_closures` + `close_payout_period()`. Empty-table assertions. | **R** | `rls/rep-payouts` (merge key, volume CHECK), `rls/import-merge-key` (catalog diff), `rls/batch-status-transitions` (+`replaced`), `rls/commit-residual-import` + `-v2` (fixtures gain processor/period), `rls/acknowledge-residual-skips` + `rls/shared-lines` + `rls/share-corrections` (fixtures), `rls/grants` |
 | 7 | Parser and upload page | Five-header parser (MID, Volume, Residual; Processor and Merchant name ignored); MID → merchant → owner; the two refusals and three warnings; the upload page with processor, month, year and the replace prompt; the review screen's refusal Callout and yes/no blocks; Agent # UI removed. | **R** | `unit/residuals-parse` (mostly rewritten), `unit/residuals-preview` (three flags removed), `unit/payouts` (`reviewImportRows`, blockers, flag labels), `unit/figure-comma` (`COLUMN_HEADERS`), `live/residual-import` (upload → parse half), `e2e/qa/residual-bad-import`, `e2e/qa/residual-import-comma`; fixtures `seed-dev-payouts.mjs` and `e2e/fixtures/seed.ts` (`createCommittableBatch`, `createSkippingBatch`) |
 | 8 | Commit v3 | `commit_residual_import_v3(batch, confirmed[])`: re-resolves the owner, recomputes and enforces confirmations, split 50, residual from the file, shared pair from the file. `commit_residual_import_v2` dropped. The share signer must be the owner, and the merchant owner-change guard is added. | **R** | `rls/commit-residual-import-v2` (deleted, replaced by a v3 file), `rls/merchant-rep-shares` (signer = owner, owner-change refusal), `rls/my-share-partners` (fixtures), `live/residual-import` (commit half, parse-vs-commit parity), `live/rep-share-teardown`, `e2e/payouts-commit`, `e2e/residual-skips` (retired), `e2e/payouts-shares` (fixtures) |
-| 9 | Replace, Mark paid, adjustments | Replace inside v3 (refused once paid or when a correction targets the month), the "Mark paid" button, `delete_payout_period()` replacing the client delete (revokes DELETE), and a general `post_payout_adjustment()` for paid months (§0.5). | **R** | `rls/rep-payouts` (delete tests become RPC tests), `rls/grants` (DELETE revoked), `rls/share-corrections` + `rls/share-correction-posting-period` (posting month now shared with the general RPC), `e2e/payouts-roles` (delete), `e2e/payouts-adjustments` |
+| 9 | Replace, Mark paid, adjustments | Replace inside v3 (refused once paid or when a correction targets the month), the "Mark paid" button with its typed confirmation, an admin-only "Reopen" requiring a written reason (`reopen_payout_period(period, processor, reason)`, definer, `is_admin()` first, audited, fails closed; A8), `delete_payout_period()` replacing the client delete (revokes DELETE), and a general `post_payout_adjustment()` for paid months (§0.5). | **R** | `rls/rep-payouts` (delete tests become RPC tests), `rls/grants` (DELETE revoked), `rls/share-corrections` + `rls/share-correction-posting-period` (posting month now shared with the general RPC), `e2e/payouts-roles` (delete), `e2e/payouts-adjustments` |
 | 10 | Overrides | `merchant_overrides` (`0 < pct ≤ 50` of the full residual), set/end/cancel RPCs, override lines written by v3, the `rep_payout` generated-column branch, the merchant-page override card, statement lines, and the cross-book name read function. 26th `profiles` FK. | **R**, needed before the first imported month any override applies to | `rls/user-imports` (FK count 25 → 26, by name), `rls/shared-lines-rewrite` (generated column), `rls/shared-part` (reused for the debit division), `unit/payouts` (`payoutTotals`, `PAYOUT_ROW_COLUMNS`), `live/rep-share-teardown` + all four teardown lists, `e2e/payouts-rendering` + `e2e/payouts-shares` (statement lines) |
 | 11 | Residual lock and payout UI cleanup | Revoke client UPDATE on `rep_payout_rows`; remove `PayoutFigureCell`, `PayoutBulkSplit`, `SharedResidualControl` and the round-trip copy; drop `set_shared_residual()`; new export header. | **R** (§0.5: not editable from the first import) | `rls/rep-payout-update-grant` (inverted: no UPDATE), `rls/shared-lines` (`set_shared_residual` tests retired), `rls/payout-history-trigger` (no client edit path; trigger kept as backstop), `unit/payout-figure-cell` (deleted), `unit/payouts`, `live/residual-import` (export header, 42501 test inverted), `e2e/payouts-editing` (retired or rewritten), `e2e/payouts-shares`, `e2e/payouts-states`, `e2e/qa/payout-figure-comma` (retired) |
 | 12 | Reports | `rep_payout_summary()` and `merchant_processor_summary()` (both `security invoker`), `/admin/reports` page, admin nav item. | none (after 10) | none existing; `unit/` nav test only if one asserts the Admin group's items |
@@ -1051,7 +1056,7 @@ Each item is what the build will assume unless Owen says otherwise.
 | A5 | Duplicate MID on yes | *Decided:* refuses the import (§0.4). | — |
 | A6 | Processor mismatch details | **[CONFIRM: money]** A merchant with **no** saved processor is not a mismatch and imports silently. A confirmed mismatch does not change the merchant's processor. Processor stays **optional** on the pre-app. | It is not in Owen's mandatory list (§0, item A). The admin sets it on the merchant, and the review screen links there. |
 | A7 | Admin edits after commit | *Decided:* none (§0.5). | — |
-| A8 | Paid months | **[CONFIRM: money]** "Mark paid" is per processor and month, and there is **no reopen** in the app. Reopening is a deliberate migration. | Reopening a paid month is the dangerous operation; making it hard is the point. |
+| A8 | Paid months | **Approved with a change (Owen, 23 Oct 2026):** "Mark paid" is per processor and month and keeps its typed confirmation, **and there is an admin-only "Reopen"** that requires a written reason and is audited. Built in phase 9 (§3.2). | Reopening a paid month is the dangerous operation, so it is deliberate (a reason, typed) and leaves a trail, rather than impossible. |
 | A9 | Unknown-MID alert | The refusal Callout on the review screen is the alert. No notification, no email. | The admin is on that screen when it happens, and email sending does not exist yet. |
 | A10 | Payee changed since last month | **[CONFIRM: money]** Build `payee_changed` as an informational, non-blocking note in phase 7 ("last month this MID paid Ann Ito; now it pays Bo Lee"). | It is the only signal that a merchant reassignment moved money. |
 | A11 | Import window | **[CONFIRM: money]** Not a future month, and not more than 24 months back. | It catches a mistyped year. Adjustments cover anything older. |
@@ -1071,3 +1076,48 @@ Each item is what the build will assume unless Owen says otherwise.
 | A25 | Negative residual (clawback) | **[CONFIRM: money]** Not a "bad number". It imports without a warning, and the override reverses in proportion. | Clawbacks are real (`residual_income` is signed today), and residual > volume cannot be true for a negative residual. |
 | A26 | Inactive vs other | **[CONFIRM: money]** Only `status = 'inactive'` raises the inactive-merchant warning; `'other'` does not. | `inactive` is the only closed state in the vocabulary (as `accounts_in_city` treats it). |
 | A27 | Re-reading after a refusal | Unknown MIDs: the batch stays in review, and "Read again" works once the merchants exist. Repeated MIDs: the file itself is wrong, so the admin abandons it and uploads a fixed file. | Reading the same file again cannot remove a repeat. |
+
+---
+
+## 10. Build notes
+
+### Phase 1: processor vocabulary (23 Oct 2026, branch `intake-and-reports`)
+
+Built: the `processors` table (`20261023130000_processors.sql`), FKs from `merchants.processor` and a
+new `pre_apps.processor`, `approve_pre_app()` copying it, `lib/processors.ts` +
+`components/processor-select.tsx` on the merchant form and the wizard's Business step, the
+processor on the pre-app summary and the blank paper form.
+
+What differed from the plan, and why:
+
+- **The guard refuses rows it would break, not a non-empty table.** A strict "refuse unless
+  `merchants` and `pre_apps` are empty" guard was built first and run: it failed four hermetic
+  suites (`accounts-in-city`, `accounts-in-city-limits`, `merchant-location`,
+  `merchant-location-backfill`; 132 tests skipped as a consequence). Those suites seed a database
+  before replaying later migrations, which is the shape of a real project with data, and every row
+  they seed is valid. The guard therefore refuses when any `merchants.processor` value is outside
+  the list, naming the values. On an empty table that is the same as an empty-table guard.
+  `pre_apps` only gains a nullable column, which changes no row. **Later phases should use the same
+  rule: refuse the rows the change would break, and say which.**
+- **`revoke all` before the grants.** On the local stack, `pg_default_acl` for role `postgres` gives
+  `service_role` TRUNCATE/REFERENCES/TRIGGER/MAINTAIN on every new table, and PGlite has no such
+  default. The migration starts from nothing, so the surface is exactly SELECT for `authenticated`
+  and `service_role` everywhere. Measured on the stack after the fix.
+- **The paper form keeps one copy of the list** (`PAPER_PROCESSOR_CODES`), because that page is
+  static by design. A unit test pins it to the migration and the schema doc.
+
+Found while building, **not fixed** (outside phase 1):
+
+- **A wizard select changed in the first moment after the step loads is reset and autosaved as
+  NULL.** Reproduced on the code *before* this phase (billing type, with phase 1 stashed): the
+  PATCH carried `{"billing_type": null}`. Waiting for the network to settle makes the choice hold
+  (3/3). It was seen in `next dev` only; whether a production build does the same is unverified.
+  `e2e/processor-select.spec.ts` waits for `networkidle` and says why.
+- **CLAUDE.md says the `ensure_rls` backstop "exists on that hosted project only — not in any
+  migration … not in PGlite".** That has been untrue since `20260811150000` adopted it. The rule
+  "do not rely on it" still stands. The practical effect: a migration that forgets
+  `enable row level security` passes every behavioural test here, so `tests/rls/processors.test.ts`
+  pins the line in the migration's text.
+- **The Supabase CLI was found linked to PROD** (`zuvsdkjnfstrjahstsmg`; `npm run guard:linked`
+  refused). Nothing linked was run. Only local commands (`migration up --local`, `psql` inside the
+  local DB container) were used. Relinking to dev is a deliberate action left to Owen.

@@ -27,6 +27,8 @@ import { useAutosave } from "@/hooks/use-autosave";
 import { useRegisterStep } from "@/components/pre-app-wizard-shell";
 import { MaskedInput } from "@/components/masked-input";
 import { StateCombobox } from "@/components/state-combobox";
+import { ProcessorSelect } from "@/components/processor-select";
+import type { Processor } from "@/lib/processors";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -39,9 +41,12 @@ import { Label } from "@/components/ui/label";
 export function BusinessStep({
   preApp,
   canEdit,
+  processors,
 }: {
   preApp: PreApp;
   canEdit: boolean;
+  /** The processor list, from loadProcessors() in lib/processors.ts. */
+  processors: Processor[];
 }) {
   const form = useForm<BusinessStepValues>({
     resolver: zodResolver(businessStepSchema),
@@ -252,6 +257,14 @@ export function BusinessStep({
         />
         <Field label="Goods or services sold" error={errors.goods_sold?.message}>
           <Input {...form.register("goods_sold")} disabled={!canEdit} />
+        </Field>
+        <Field label="Processor" error={errors.processor?.message}>
+          <ProcessorSelect
+            {...form.register("processor")}
+            processors={processors}
+            current={preApp.processor}
+            disabled={!canEdit}
+          />
         </Field>
       </Section>
 
@@ -465,6 +478,7 @@ function toFormValues(preApp: PreApp): BusinessStepValues {
     goods_sold: s(preApp.goods_sold),
     billing_type: preApp.billing_type ?? UNSET,
     bank_name: s(preApp.bank_name),
+    processor: s(preApp.processor),
     split_agent_pct: String(preApp.split_agent_pct),
     est_annual_volume: n(preApp.est_annual_volume),
     est_monthly_volume: n(preApp.est_monthly_volume),

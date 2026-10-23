@@ -64,6 +64,9 @@ export type PreApp = {
   billing_type: "gross" | "net" | null;
   bank_name: string | null;
 
+  /** A processors.code, or null for not set. Optional (memo A6). */
+  processor: string | null;
+
   /**
    * Sales volume, as estimated at application time. All optional, all
    * independent — see docs/tapswipe_crm_schema.sql for why no cross-field rule
