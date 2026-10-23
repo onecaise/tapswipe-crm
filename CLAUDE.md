@@ -101,7 +101,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Not built yet:** My Submissions.
 - **Still starter-kit template:** `README.md` only. Edge Functions: twelve in the repo. Details of both → `docs/claude/project-state.md`.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Sixty-four migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Sixty-five migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 ## Hosted projects and deployment
 
@@ -161,10 +161,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2093 tests, 97 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (229 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2108 tests, 98 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (232 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (313 tests, 6 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (314 tests, 6 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -190,7 +190,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
-Baselines are the counts in the Commands block above (`npm test` 2093 tests / 97 files — every file must load; `test:live` 229; `test:deployed` 29; `test:e2e` 313, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
+Baselines are the counts in the Commands block above (`npm test` 2108 tests / 98 files — every file must load; `test:live` 232; `test:deployed` 29; `test:e2e` 314, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
 
 - Run `npm test` for any schema change; queries must run as `authenticated`, never the owner.
 - PGlite is Postgres 18.3, the stack 17.6 — pin constraint names in assertions, not SQLSTATEs.
@@ -278,7 +278,7 @@ Everything below was moved verbatim out of this file; one line each.
 - `docs/claude/merchant-location.md` — location required for new merchants only, the NOT VALID lesson, format CHECK + guard trigger, `norm_city()`, the four hand-run SQL files, dev's hosted state.
 - `docs/claude/proposals-and-catalog.md` — append-only quotes, column grants, line-item snapshots and the price lock, the catalog loader script, proposals as their own record, the store, brands, the printed proposal.
 - `docs/claude/dashboard-followups-timeline.md` — dashboard filters (invoker, ANDed on policies), follow-ups in two places, the lead timeline.
-- `docs/claude/security-fixes.md` — the Oct 2026 outside-review fixes by phase: merchants admin-only to change, every MID change audited, backfill same-owner rule, owner picker; pre-app children frozen once submitted; anti-framing headers.
+- `docs/claude/security-fixes.md` — the Oct 2026 outside-review fixes by phase: merchants admin-only to change, every MID change audited, backfill same-owner rule, owner picker; pre-app children frozen once submitted; anti-framing headers; npm wrappers refuse `--project-ref`/`--db-url`, env/key gitignores; `accounts_in_city` audited and rate-limited (30/hour).
 - `docs/claude/security-followups.md` — review findings recorded but deliberately not built, each with severity, evidence and a suggested fix.
 - `docs/design/residual-splits.md` — shared-account design memo.
 - `docs/tapswipe_crm_master_plan.md` — product master plan.

@@ -4,6 +4,7 @@ import {
   CITY_FIXTURE,
   PERSONAS,
   publicStackConfig,
+  setCitySearchCount,
   storageStateFor,
 } from "./fixtures/seed";
 
@@ -62,6 +63,8 @@ test.describe("as an agent", () => {
   test.use({ storageState: storageStateFor("agent") });
 
   test.beforeEach(async ({ page }) => {
+    // Every search counts against the rep's 30 an hour; start each test at 0.
+    await setCitySearchCount("agent", 0);
     await page.goto("/dashboard");
     await expect(searchCard(page)).toBeVisible();
   });
@@ -191,6 +194,23 @@ test.describe("as an agent", () => {
     await expect(page.getByTestId("missing-location-count")).toHaveCount(0);
     await page.goto("/admin/merchants/missing-location");
     await expect(page).toHaveURL(/\/dashboard$/);
+  });
+
+  test("at the hourly limit, says so in a sentence and shows no results", async ({ page }) => {
+    await setCitySearchCount("agent", 30);
+    try {
+      const card = searchCard(page);
+      await card.getByLabel("City").fill(c.city);
+      const response = page.waitForResponse(RPC);
+      await card.getByLabel("City").press("Enter");
+      expect((await response).status()).toBe(429);
+      await expect(card).toContainText(
+        /You have reached the limit of 30 city searches an hour\. Try again in (60|59) minutes\./,
+      );
+      await expect(results(page)).toHaveCount(0);
+    } finally {
+      await setCitySearchCount("agent", 0);
+    }
   });
 
   test("a direct RPC call with wildcards or oversized input extracts nothing", async ({ page, request }) => {

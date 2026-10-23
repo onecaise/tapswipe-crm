@@ -8,7 +8,7 @@
  * SQLSTATEs to sentences, and deliberately touches nothing else:
  *
  *  - **Our own RPCs and triggers raise P0001 or PT4xx** (checked: every
- *    `errcode =` in supabase/migrations is PT400/403/404/409/422), and those
+ *    `errcode =` in supabase/migrations is PT400/403/404/409/422/429), and those
  *    messages were written for people. They pass through verbatim. Any other
  *    code does too, unchanged from before.
  *  - **A form's own wording for a code wins** (`overrides`), because some forms

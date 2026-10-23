@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
   ADMIN_ID,
@@ -104,6 +104,14 @@ beforeAll(async () => {
   `);
 }, 120_000);
 
+// Every call writes an audit row and a rep gets 30 an hour (20261023120000,
+// pinned in accounts-in-city-limits.test.ts). This file makes more calls than
+// that on one database, so each test starts with the counter at zero.
+beforeEach(async () => {
+  await asPlatform(db);
+  await db.exec(`delete from audit_log where action like 'accounts_in_city:%'`);
+});
+
 describe("privileges", () => {
   it("is security definer ON PURPOSE, with a pinned search_path", async () => {
     await asPlatform(db);
@@ -112,7 +120,7 @@ describe("privileges", () => {
       `select prosecdef, proconfig from pg_proc where proname = 'accounts_in_city'`,
     );
     expect(f.prosecdef).toBe(true);
-    expect(f.proconfig).toContain("search_path=public");
+    expect(f.proconfig).toEqual(["search_path=public, pg_temp"]);
   });
 
   it("exists exactly once, so a call cannot be ambiguous", async () => {
@@ -394,14 +402,22 @@ describe("the cap", () => {
   });
 });
 
-describe("nothing is written", () => {
-  it("leaves audit_log untouched — neither precedent logs, so neither does this", async () => {
+describe("what is written", () => {
+  it("one audit row per call, rep and admin alike, and nothing else (since 20261023120000)", async () => {
     await asPlatform(db);
     const before = await rows<{ n: number }>(db, `select count(*)::int as n from audit_log`);
     await search(AGENT_ID, "Nashville");
     await search(ADMIN_ID, "Nashville");
     await asPlatform(db);
     const after = await rows<{ n: number }>(db, `select count(*)::int as n from audit_log`);
-    expect(after[0].n).toBe(before[0].n);
+    expect(after[0].n).toBe(before[0].n + 2);
+    const mine = await rows<{ actor_id: string; action: string }>(
+      db,
+      `select actor_id, action from audit_log where action like 'accounts_in_city:%' order by id`,
+    );
+    expect(mine).toEqual([
+      { actor_id: AGENT_ID, action: "accounts_in_city:1" },
+      { actor_id: ADMIN_ID, action: "accounts_in_city:1" },
+    ]);
   });
 });

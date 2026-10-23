@@ -203,6 +203,7 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   reopen_pre_app: "Pre-app reopened",
   read_pre_app_secrets: "Sensitive data viewed",
   submit_pre_app_secrets: "Sensitive data submitted",
+  accounts_in_city: "Accounts searched by city",
 };
 
 /**

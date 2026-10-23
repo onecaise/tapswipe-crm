@@ -3375,3 +3375,41 @@ export async function sharesOn(merchantId: number): Promise<ShareRowSnapshot[]> 
     effective_to: (row.effective_to as string | null) ?? null,
   }));
 }
+
+/**
+ * Sets a persona's accounts_in_city() count for the rolling hour: clears their
+ * `accounts_in_city:*` audit rows, then writes `used` fresh ones.
+ *
+ * Every city search writes one of those rows and a rep gets 30 an hour
+ * (20261023120000), counted from the rows themselves. The local stack keeps
+ * them between runs, so without this the second e2e run inside an hour would
+ * find the agent already at the limit. Service role, because audit_log grants
+ * `authenticated` SELECT only and no policy lets a rep read it.
+ */
+export async function setCitySearchCount(persona: PersonaKey, used: number): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data: profile, error: lookup } = await db
+    .from("profiles")
+    .select("id")
+    .eq("email", PERSONAS[persona].email)
+    .single();
+  if (lookup || !profile) throw new Error(`no profile for ${persona}: ${lookup?.message}`);
+  const { error: cleared } = await db
+    .from("audit_log")
+    .delete()
+    .eq("actor_id", profile.id)
+    .like("action", "accounts_in_city:%");
+  if (cleared) throw cleared;
+  if (used === 0) return;
+  const { error: filled } = await db.from("audit_log").insert(
+    Array.from({ length: used }, () => ({
+      actor_id: profile.id,
+      action: "accounts_in_city:1",
+      table_name: "merchants",
+    })),
+  );
+  if (filled) throw filled;
+}

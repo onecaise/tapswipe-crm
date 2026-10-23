@@ -179,3 +179,41 @@ Tests (20, all hermetic): every wrapper's string starts with the guard and conta
 ### `supabase projects api-keys` advice removed
 
 `.env.example` told people to run `npx supabase projects api-keys --project-ref <ref>` to fill `.env.deployed.local`; so did the error `tests/deployed/helpers/projects.ts` throws when that file is missing. Both now say to copy the publishable key from the dashboard and not to run that command (it prints the service-role key). The two scripts that call it with `--reveal` (`load-hardware-catalog.mjs`, `purge-legacy-documents.mjs`) capture the output and never print it; they are CLAUDE.md's stated exception and were not changed.
+
+## Phase 5 (Medium): `accounts_in_city` audited and rate-limited
+
+**Numbers (Owen, 23 Oct 2026):** at most 5 cities per call, 30 calls per rep per rolling hour, admins exempt from the limit but audited.
+
+### The finding, reproduced — with one correction
+
+`accounts_in_city()` is `security definer` over every rep's book, takes a public city name, and was neither audited nor limited. `tests/rls/accounts-in-city-limits.test.ts` ("reproduced") runs 40 searches as one rep on the schema **before** the fix: all 40 answer and `audit_log` gains nothing.
+
+The correction: the function takes **one** city per call; "100" is the cap on *results* per city, not on cities. So the enumeration is one call per city name, and the cap of 5 per call is already met by the signature. The UI (`components/city-accounts-search.tsx`) sends one city per submit. No multi-city variant was added; one would have to revisit the cap. A test pins the identity arguments to `city text, state text`.
+
+### The fix — `20261023120000_accounts_in_city_audit_and_limit.sql`
+
+Same signature, `create or replace`, grants restated. Schema doc updated first.
+
+- **Audit.** Every answered call inserts one `audit_log` row: `actor_id` = caller, `action = 'accounts_in_city:1'`, `table_name = 'merchants'`, `row_id` null. The number after the colon is the number of cities queried, in the templated-verb form `read_pre_app_secrets:<mode>` already uses, because `audit_log` has no detail column. **The city and the results are not recorded.** Admins are audited. No exception handler. A refused call (inactive, bad input, over the limit) raises, which rolls the whole call back, so it leaves no row and returns nothing. That means failed attempts are invisible to the audit trail; recording them would need an autonomous transaction, which Postgres does not have.
+- **Rate limit.** Non-admins: count the caller's `accounts_in_city:%` rows with `created_at > now() - interval '1 hour'`; at 30, raise **PT429** (HTTP 429 through PostgREST): "You have reached the limit of 30 city searches an hour. Try again in N minutes." N is when the oldest call in the window ages out. **Durable and not client-trusting**: the counter is the audit rows, which `authenticated` cannot insert, delete or even read (SELECT grant, admin-only policy). `pg_advisory_xact_lock(hashtextextended('accounts_in_city:' || uid, 0))` serialises one rep's concurrent calls. Partial index `audit_log_city_search_idx (actor_id, created_at) where action like 'accounts_in_city:%'`.
+- `volatile` (it writes; was `stable`) and `set search_path = public, pg_temp` (was `public`). supabase-js uses POST for RPCs, which PostgREST runs read-write. A `GET /rpc/accounts_in_city` would now fail.
+- App: no change needed. `friendlyDbError` passes PT4xx text through verbatim, so the card shows the sentence. `lib/timeline.ts` gained a label ("Accounts searched by city") for the new action; `lib/db-errors.ts`'s comment lists PT429.
+
+### What checks it
+
+- `tests/rls/accounts-in-city-limits.test.ts` (15): the reproduction; the signature; volatile/definer/search_path and the lock call in the body; the index; one row per call with nothing about the query; admins audited; an empty result still audited; refused calls leave no row; a rep cannot read, delete or forge the rows; 30 then PT429 with the exact sentence and no 31st row; the minutes in the message (10, then "1 minute"); rows older than an hour stop counting; per-rep counting; admin exempt (35 calls) but audited; other audit actions do not count.
+- `tests/rls/accounts-in-city.test.ts`: `search_path` assertion now exact; "nothing is written" flipped to "one audit row per call, rep and admin alike"; a `beforeEach` clears the city-search rows, since that file makes 38 calls on one database.
+- `tests/live/accounts-in-city-limit.test.ts` (3), against the local stack: **40 simultaneous** calls by one rep, exactly 30 answer and 10 get HTTP 429/PT429; an admin's 35 simultaneous calls all answer and are all audited; a rep's API delete of the rows is `permission denied`.
+- `e2e/city-accounts.spec.ts`: a new agent test seeds 30 rows and sees the sentence and no results; every agent test now starts at 0 (`setCitySearchCount()` in `e2e/fixtures/seed.ts`), because the local stack keeps the rows between runs and a second run inside an hour would otherwise hit the limit.
+- **Mutation checks:**
+  - With the limit check disabled, 3 RLS tests fail.
+  - With the audit insert removed, 9 fail.
+  - With the advisory lock removed on the local stack, the live race test fails: 33 of 40 answered.
+  - With the old function restored on the local stack, the new e2e test fails.
+  - Each was restored afterwards and confirmed.
+
+### Not verified
+
+- Nothing ran against a hosted project.
+- The limit's behaviour under PgBouncer transaction pooling. PostgREST talks to Postgres directly on hosted Supabase, and the lock is transaction-scoped, so pooling should not matter, but this was not tested there.
+- Other cross-book definer reads (`check_duplicates()`, `my_share_partners()`) remain unaudited and unlimited. `check_duplicates` takes free-text inputs that could be looped the same way, though its output is narrower. Not in scope; noted for review.

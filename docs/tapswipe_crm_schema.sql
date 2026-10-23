@@ -5329,8 +5329,9 @@ create trigger rep_payout_batches_status_transition
 -- the filter that their own ledger line -- which carries merchant_id -- does
 -- not already say.
 --
--- NOT AUDITED, like accounts_in_city() and check_duplicates(): a read that
--- names the caller's own business.
+-- NOT AUDITED, like check_duplicates(): a read that names the caller's own
+-- business. (accounts_in_city() was in this list until 20261023120000 audited
+-- and rate-limited it; it reads OTHER reps' books from a public input.)
 -- =====================================================================
 
 create or replace function my_share_partners(merchant_id_input int default null)
@@ -9362,10 +9363,43 @@ grant execute on function check_duplicates(
 -- CAP: 100 accounts, ordered by state, dba, id, plus `has_more` when there
 -- were more. Fetches 101 to know, and never says how many more.
 --
--- NOT AUDITED. Neither precedent writes an audit row per call --
--- check_duplicates() and pre_app_secrets_presence() both log nothing -- so
--- there is no existing mechanism to follow, and this function does not invent
--- one. audit_log has no detail column to record the city asked about anyway.
+-- AUDITED AND RATE-LIMITED (20261023120000, security review phase 5). It was
+-- first written unaudited, like check_duplicates(). The review's point: the
+-- input is a public city name, so a rep can loop over a list of US cities and
+-- rebuild the company's merchant list (DBA, legal name, city, state; up to
+-- 100 per city) with nothing recorded. Two controls, both inside this
+-- function, where a client cannot skip them:
+--
+--   AUDIT. Every call that returns an answer writes one audit_log row:
+--   actor_id = the caller, action = 'accounts_in_city:<cities queried>',
+--   table_name = 'merchants', row_id null. The qualifier after the colon is
+--   the number of cities in the call -- always 1, because the function takes
+--   one city -- in the templated-verb form read_pre_app_secrets:<mode> already
+--   uses, since audit_log has no detail column. The city asked about and the
+--   results are NOT recorded. Admins are audited too. The insert has no
+--   exception handler: no audit row, no answer. A call refused for any reason
+--   (inactive caller, bad input, over the limit) raises, which rolls the whole
+--   call back, so it leaves no row -- and returns nothing.
+--
+--   CAP. One city per call, by signature. The cap Owen set is 5 per call; a
+--   one-city function is inside it, and a multi-city variant would have to
+--   revisit this.
+--
+--   RATE LIMIT. A non-admin gets 30 calls per rolling hour. The counter is the
+--   audit rows themselves -- the caller's 'accounts_in_city:%' rows newer than
+--   now() - 1 hour -- so it is durable, survives restarts, needs no new table,
+--   and cannot be reset by a client (authenticated holds SELECT only on
+--   audit_log and no policy lets a rep read, let alone delete, a row). A
+--   pg_advisory_xact_lock keyed on the caller serialises one rep's concurrent
+--   calls, so two at 29 cannot both pass. The 31st call raises PT429 (HTTP
+--   429 through PostgREST) with a sentence the UI shows verbatim, saying how
+--   many minutes until the oldest call in the window ages out. Admins are
+--   exempt from the limit, not from the audit.
+--   audit_log_city_search_idx (partial, on actor_id and created_at) keeps the
+--   count an index range scan.
+--
+-- No longer `stable`: it writes. supabase-js calls RPCs with POST, which
+-- PostgREST runs read-write; a GET call would now be refused.
 --
 -- The parameters are named `city` and `state` because that is the RPC's
 -- public argument list; they collide with the merchants columns, so every
@@ -9375,15 +9409,18 @@ grant execute on function check_duplicates(
 create or replace function accounts_in_city(city text, state text default null)
 returns jsonb
 language plpgsql
-stable
+volatile
 security definer
-set search_path = public
+set search_path = public, pg_temp
 as $$
 declare
   raw_city  text := btrim(coalesce(accounts_in_city.city, ''));
   state_key text := nullif(upper(btrim(coalesce(accounts_in_city.state, ''))), '');
   city_key  text;
   caller_is_admin boolean;
+  recent_calls int;
+  oldest_call timestamptz;
+  wait_minutes int;
   result_rows jsonb;
   more boolean;
 begin
@@ -9406,6 +9443,26 @@ begin
   end if;
 
   caller_is_admin := is_admin();
+
+  if not caller_is_admin then
+    perform pg_advisory_xact_lock(hashtextextended('accounts_in_city:' || auth.uid()::text, 0));
+    select count(*), min(a.created_at)
+      into recent_calls, oldest_call
+      from audit_log a
+     where a.actor_id = auth.uid()
+       and a.action like 'accounts_in_city:%'
+       and a.created_at > now() - interval '1 hour';
+    if recent_calls >= 30 then
+      wait_minutes := greatest(1, ceil(extract(epoch from
+                        (oldest_call + interval '1 hour' - now())) / 60)::int);
+      raise exception 'You have reached the limit of 30 city searches an hour. Try again in % minute%.',
+        wait_minutes, case when wait_minutes = 1 then '' else 's' end
+        using errcode = 'PT429';
+    end if;
+  end if;
+
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (auth.uid(), 'accounts_in_city:1', 'merchants', null);
 
   select coalesce(jsonb_agg(r.row_json order by r.rn) filter (where r.rn <= 100),
                   '[]'::jsonb),
@@ -9447,6 +9504,10 @@ $$;
 
 revoke all on function accounts_in_city(text, text) from public;
 grant execute on function accounts_in_city(text, text) to authenticated, service_role;
+
+-- The rate limit's count: one rep's city-search rows in the last hour.
+create index audit_log_city_search_idx on audit_log (actor_id, created_at)
+  where action like 'accounts_in_city:%';
 
 
 -- =====================================================================
