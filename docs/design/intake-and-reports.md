@@ -1175,3 +1175,73 @@ condition.
 
 Found while building, **not fixed** (outside phase 2): `set_territory()` has the same plain
 `btrim()`, so a tab-padded territory is stored with its tab.
+
+### Phase 3: tax ID to secrets (26 Oct 2026, branch `intake-and-reports`)
+
+Built: `pre_app_tax_secrets` and the drop of `pre_apps.ein_number`, the `pre_apps_ein_type_check`
+CHECK (`'EIN'`/`'SSN'`), the `submit_pre_app()` tax-ID rule and two new columns on
+`pre_app_secrets_presence()` (`20261026140000_pre_app_tax_secrets.sql`); the `tax_id` kind in
+`submit-pre-app-secrets` and `read-pre-app-secrets`; the validator pair `isTaxEin` / `isTaxSsn`
+(`lib/masks.ts`, `_shared/pre-app-secrets.ts`); the EIN type select on the Business step, the tax-ID
+input on the Sensitive data step, the review-step blockers, the summary, and the paper form.
+
+**How "switching the EIN type forces re-entry" is enforced.** The stored row keeps the kind it was
+written with (`tax_id_type`), and nothing counts a row whose kind differs from the pre-app's
+*current* `ein_type`:
+- `submit_pre_app()` requires `exists (… where tax_id_type = pa.ein_type)` and, when only a row of
+  the other kind exists, refuses with "the tax ID on file is an EIN, but EIN type says SSN. Enter
+  the SSN." (PT422);
+- `pre_app_secrets_presence()` reports `tax_id_on_file` against the current type, plus the stored
+  kind, so the review step shows the same sentence;
+- `submit-pre-app-secrets` refuses (400) a `tax_id_type` that differs from the current `ein_type`,
+  read through the caller's client, so a value can never be filed under the wrong kind;
+- the Sensitive data step shows the mismatch and asks for the number of the new kind; saving it
+  upserts over the old row.
+The stale row is **not** deleted when the type changes. A trigger that destroyed ciphertext on a
+select change (an admin toggling a submitted pre-app's type included) is the less conservative
+choice; refusing to count it is enough to force the re-entry.
+
+**Where phase 4 takes over.** The only change to `submit_pre_app()` is one block, checked last,
+after the banking rule; the rest of the body is `20261013132000`'s. Phase 4's
+`pre_app_missing_fields()` should carry it as the `tax_id` code (three labels: no type, none on
+file, wrong kind) and `preAppSubmitBlockers()`'s copy of it retires with the rest of that function.
+
+Where the memo was silent or said otherwise, and what was chosen (conservative side each time):
+
+- **Kind values are `'EIN'`/`'SSN'`**, as §5 and §0.3 say, matching `ein_type`. (The phase 3
+  instruction wrote them lower-case; it also said to use the memo's real values.) Column name
+  `tax_id_type`, as §5.
+- **No stored last-four column.** The other three tables store none; the read function decrypts
+  and slices, so the tax ID does the same.
+- **Validators are stricter than the existing SSN ones.** The instruction assumed the SSN
+  validators refuse all zeros; they do not (`isSsn` is a shape check on both sides). `isTaxEin`
+  refuses all zeros and prefix `00`; the IRS prefix list is not enforced (it changes, and the
+  routing-checksum lesson applies). `isTaxSsn` refuses area 000/666/9xx, group 00, serial 0000.
+  The owner `isSsn` is unchanged — tightening it is a separate decision.
+- **The guard's test is `ein_number is not null`** (the memo's), so a blank string also refuses.
+  The message names pre-app ids, never the number. It also refuses an `ein_type` outside
+  `('EIN','SSN')`, naming the values (they are not secret), rather than rewriting them.
+- **Presence gains two columns, not one:** `tax_id_on_file` (of the current kind) and
+  `tax_id_type_on_file` (the stored kind, plaintext), so the wizard can name the mismatch.
+- **No EIN type → submit refuses** "an EIN type (EIN or SSN) and the tax ID are required"; the
+  function refuses any tax ID until a type is chosen.
+- **The summary / detail page shows the EIN type and no digits at all.** Last four is shown on the
+  Sensitive data step only, as SSNs are today. Putting it on the server-rendered summary would put
+  it in the RSC payload, and calling the decrypting function there would hand an admin the full
+  number on a page phase 5 is meant to mask.
+- **Admin read is full**, exactly as SSN reads are today (phase 5 masks it). Audit verbs unchanged:
+  `read_pre_app_secrets:full|last4`, and `submit_pre_app_secrets:tax_id` for a write.
+- **The paper form:** `ein_type` prints as EIN/SSN tick boxes; one "Tax ID (EIN or SSN, as ticked
+  under EIN type)" box in the Sensitive data section; the completeness checklist gains the tax ID
+  line (9 → 10), since submit now requires it.
+- **`search_path = public`** kept on both rewritten functions, as their existing tests pin; not
+  widened to `public, pg_temp` in this phase (security-followups has that item).
+- **Grants:** `revoke all` from everyone, then `grant all` to `service_role` on the table and
+  sequence — measured on the local stack to equal `pre_app_banking_secrets` exactly.
+- **The secrets step now shows the function's own error** (`edgeFunctionErrorMessage`), not
+  supabase-js's fixed "non-2xx" string, so the 400 for a type mismatch is readable.
+- `isEin` was removed (nothing used it once `ein_number` left the form); its unit assertions moved
+  to `isTaxEin`.
+
+Found while building, **not fixed**: the owner-SSN validator pair accepts `000-00-0000` and other
+never-issued SSNs (shape only).

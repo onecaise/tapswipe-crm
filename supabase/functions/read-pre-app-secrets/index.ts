@@ -2,7 +2,8 @@
 //
 // Two tiers:
 //   admin        -> full plaintext
-//   owning agent -> last four of the SSN and account/routing numbers, and mere
+//   owning agent -> last four of the SSNs, the account/routing numbers and the
+//                   business tax ID (with its kind, EIN or SSN), and mere
 //                   presence for the RP password
 //
 // The RP password is presence-only on purpose, refining the "agent gets last-4"
@@ -92,7 +93,12 @@ export default {
     }
 
     // supabaseAdmin is the only path into these tables.
-    const [{ data: ownerRows }, { data: banking }, { data: terminal }] =
+    const [
+      { data: ownerRows },
+      { data: banking },
+      { data: terminal },
+      { data: taxRow },
+    ] =
       await Promise.all([
         ctx.supabaseAdmin
           .from("pre_app_owners")
@@ -107,6 +113,11 @@ export default {
         ctx.supabaseAdmin
           .from("pre_app_terminal_secrets")
           .select("rp_password_encrypted")
+          .eq("pre_app_id", preAppId)
+          .maybeSingle(),
+        ctx.supabaseAdmin
+          .from("pre_app_tax_secrets")
+          .select("tax_id_type, tax_id_encrypted")
           .eq("pre_app_id", preAppId)
           .maybeSingle(),
       ]);
@@ -175,12 +186,29 @@ export default {
       }
     }
 
+    // The business tax ID: same tiers as an SSN. tax_id_type is the stored
+    // row's kind; the wizard compares it with the pre-app's current ein_type
+    // and asks for the number again when they differ.
+    let taxIdOut: Record<string, unknown> = { on_file: false };
+    if (taxRow) {
+      const row = taxRow as Record<string, string>;
+      const taxId = await decryptSecret(
+        key,
+        row.tax_id_encrypted,
+        secretAad("pre_app_tax_secrets", "tax_id_encrypted", preAppId),
+      );
+      taxIdOut = isAdmin
+        ? { on_file: true, tax_id_type: row.tax_id_type, tax_id: taxId }
+        : { on_file: true, tax_id_type: row.tax_id_type, tax_id_last4: last4(taxId) };
+    }
+
     return new Response(
       JSON.stringify({
         tier: isAdmin ? "full" : "last4",
         owners,
         banking: bankingOut,
         terminal: terminalOut,
+        tax_id: taxIdOut,
       }),
       {
         status: 200,

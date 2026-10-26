@@ -91,14 +91,17 @@ describe("the paper form asks what the wizard asks", () => {
    */
   it("carries the same number of fields per step", () => {
     // 29 since 20261023130000 added pre_apps.processor (phase 1 of
-    // docs/design/intake-and-reports.md).
-    expect(fieldsOf(BUSINESS_SECTION)).toHaveLength(29);
+    // docs/design/intake-and-reports.md); 28 since 20261026140000 dropped
+    // ein_number, whose number now prints as a secret below.
+    expect(fieldsOf(BUSINESS_SECTION)).toHaveLength(28);
     expect(fieldsOf(OWNER_SECTION)).toHaveLength(16);
     expect(fieldsOf(TERMINAL_SECTION)).toHaveLength(24);
     expect(fieldsOf(PROFILE_SECTION)).toHaveLength(8);
-    // SSN is per owner and lives in the owner block; the other three are the
-    // banking pair plus the terminal password.
-    expect(SECRET_FIELDS).toHaveLength(3);
+    // SSN is per owner and lives in the owner block; the other four are the
+    // business tax ID (EIN or SSN, 20261026140000), the banking pair and the
+    // terminal password.
+    expect(SECRET_FIELDS).toHaveLength(4);
+    expect(SECRET_FIELDS.map((field) => field.key)).toContain("tax_id");
   });
 
   it("marks exactly the two fields that are required at entry", () => {
@@ -171,7 +174,8 @@ describe("the completeness checklist", () => {
     // preAppBlockers() produces nine distinct reasons; the paper form reprints
     // them because only two fields are required to SAVE a draft, so the field
     // list alone cannot tell a rep whether the form is finished.
-    expect(PAPER_COMPLETENESS_CHECKLIST).toHaveLength(9);
+    // Ten since 20261026140000 made submit_pre_app() require the tax ID.
+    expect(PAPER_COMPLETENESS_CHECKLIST).toHaveLength(10);
     for (const item of PAPER_COMPLETENESS_CHECKLIST) {
       expect(item.trim()).not.toBe("");
     }

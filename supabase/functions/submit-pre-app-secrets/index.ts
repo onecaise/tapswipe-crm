@@ -1,5 +1,5 @@
-// Encrypts SSN, bank routing/account and the terminal RP password, and stores
-// them in the three *_secrets tables.
+// Encrypts SSN, bank routing/account, the terminal RP password and the
+// business tax ID (EIN or SSN), and stores them in the four *_secrets tables.
 //
 // This is the ONLY write path into those tables. They have RLS enabled with zero
 // policies AND no grant to anon or authenticated, so nothing else can reach them
@@ -71,7 +71,7 @@ export default {
 
     // Resolve every entry to a pre-app THROUGH THE CALLER'S CLIENT, so RLS is
     // what answers. Two different resolutions: an SSN hangs off pre_app_owners,
-    // banking and terminal off pre_apps.
+    // banking, terminal and tax ID off pre_apps.
     const preAppIds = new Set<number>();
     for (const entry of parsed.entries) {
       if (entry.kind === "owner_ssn") {
@@ -99,7 +99,7 @@ export default {
 
     const { data: preApp } = await ctx.supabase
       .from("pre_apps")
-      .select("id, status")
+      .select("id, status, ein_type")
       .eq("id", preAppId)
       .maybeSingle();
     if (!preApp) return json({ error: "Pre-app record not found" }, 404);
@@ -109,6 +109,24 @@ export default {
     const isAdmin = await callerIsAdmin(ctx.supabase);
     if (preApp.status !== "draft" && !isAdmin) {
       return json({ error: "Pre-app is not editable" }, 409);
+    }
+
+    // The tax ID's kind must be the pre-app's CURRENT ein_type, read just now
+    // through the caller's client. That is what makes the stored tax_id_type
+    // trustworthy: it always names the validator that accepted the value, and
+    // a value typed for one kind can never be filed as the other. A rep who
+    // switches the type afterwards finds the stored row no longer counts
+    // (submit_pre_app compares the two) and must enter the number again.
+    for (const entry of parsed.entries) {
+      if (entry.kind === "tax_id" && entry.tax_id_type !== preApp.ein_type) {
+        return json(
+          {
+            error:
+              "tax_id_type must match the pre-app's EIN type. Choose the EIN type on the Business step first.",
+          },
+          400,
+        );
+      }
     }
 
     // ---- privileged section. Nothing above this line used supabaseAdmin. ----
@@ -192,6 +210,30 @@ export default {
           return json({ error: "Could not store the terminal password" }, 500);
         }
         stored.push({ kind: "terminal", fields: ["rp_password"] });
+      }
+
+      if (entry.kind === "tax_id") {
+        const ciphertext = await encryptSecret(
+          key,
+          entry.tax_id,
+          secretAad("pre_app_tax_secrets", "tax_id_encrypted", entry.pre_app_id),
+        );
+        const { error } = await ctx.supabaseAdmin
+          .from("pre_app_tax_secrets")
+          .upsert(
+            {
+              pre_app_id: entry.pre_app_id,
+              tax_id_type: entry.tax_id_type,
+              tax_id_encrypted: ciphertext,
+              key_version: 1,
+            },
+            { onConflict: "pre_app_id" },
+          );
+        if (error) {
+          console.error(`[submit-pre-app-secrets] tax id write: ${error.message}`);
+          return json({ error: "Could not store the tax ID" }, 500);
+        }
+        stored.push({ kind: "tax_id", fields: ["tax_id"] });
       }
     }
 

@@ -19,7 +19,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 
 - **Admin sees every row; an active agent sees only `agent_id = auth.uid()`** — `(agent_id = auth.uid() and is_active_agent()) or is_admin()`. Reuse the two `security definer` helpers; never inline a role lookup. → "Access control" below.
 - **A new table needs RLS *and* explicit grants** (the four-step checklist below); **a new function needs `revoke all … from public` + `grant execute … to authenticated, service_role`** in the same migration. Never grant `anon` anything. **Do not rely on `ensure_rls`.** → below.
-- **The three `*_secrets` tables: zero policies, zero grants, Edge Function only** — including the agent's first submission. Never add a policy or a grant. → "Three tiers" below.
+- **The four `*_secrets` tables: zero policies, zero grants, Edge Function only** — including the agent's first submission. Never add a policy or a grant. → "Three tiers" below.
 - **`security invoker` is the default for RPCs.** `definer` only when the function must reach what the caller may not, and then it owes a hand-written guard first (`is_admin()` / `is_active_agent()`) plus `set search_path`. `search_crm` and `dashboard_counts` must stay invoker (tests assert `prosecdef` false). → `docs/claude/rpcs-profiles-audit.md`.
 - **The cross-book definer functions return redacted shapes, built with `jsonb_build_object` so hidden fields are ABSENT, not null**: `check_duplicates()` (warns only — **must never become a block**), `accounts_in_city()` (equality on `norm_city()` only; never a prefix/autocomplete for non-admins), `my_share_partners()` (party-only for every caller; a rep never sees the partner's share, rate or payout, and gets no access to the partner's merchant). → `docs/claude/rpcs-profiles-audit.md`.
 - **`profiles` has no client write path**: new columns are set only by a `security definer` RPC with `is_admin()` first (`set_user_role`, `set_agent_number`, `set_territory`, `set_manager`, `set_rep_identity`). **`territory`, `manager_id`, `legal_name` and `llc_legal_name` must never appear in a policy**; `role` stays `'agent' | 'admin'`; manager graph is one hop. → `docs/claude/rpcs-profiles-audit.md`.
@@ -36,7 +36,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **Bulk provisioning never hands out a credential**: `provision-user-batch` discards the temporary password unread. **Deactivation is two layers** (ban in GoTrue first, then `profiles.is_active`). `create-user` must delete the `auth.users` row if the `profiles` insert fails. → `docs/claude/user-accounts.md`, "Three tiers" below.
 - **Inline signed URLs are allow-listed by type** (PDF, plain text, three raster images; **never SVG**); everything else is forced to attachment. → `docs/claude/reference-data-and-marketing.md`.
 - **The per-bucket 50 MiB limit is the real upload ceiling**; `config.toml`'s `file_size_limit` limits nothing. Hosted buckets need it set out-of-band. → `docs/claude/edge-functions-and-storage.md`.
-- **The secrets validators exist twice and must change together** (`lib/pre-app-validation.ts` and `_shared/pre-app-secrets.ts`); the residual parser exists **once** — do not create a browser twin. → `docs/claude/edge-functions-and-storage.md`.
+- **The secrets validators exist twice and must change together** (`lib/masks.ts` and `_shared/pre-app-secrets.ts`, tax-ID pair `isTaxEin`/`isTaxSsn` included); the residual parser exists **once** — do not create a browser twin. → `docs/claude/edge-functions-and-storage.md`.
 - **Never show a `functions.invoke()` error's `.message` to a user** — use `lib/edge-functions.ts`. → "Next.js / auth wiring" below.
 - **"Email" on marketing materials sends nothing** and must say so; when sending lands it goes next to that log line. → `docs/claude/reference-data-and-marketing.md`.
 - **`GET /auth/confirm` never verifies a token**: it redirects to the Continue page, and only that page's Server Action (same-origin POST) calls `verifyOtp`. Link types are an allow-list of what the app sends — `recovery` only. → `docs/claude/security-fixes.md`, phase 7.
@@ -59,7 +59,7 @@ RLS decides which **rows** a caller sees. Grants decide whether the caller may t
 1. `agent_id uuid references profiles(id) not null`
 2. `alter table <t> enable row level security`
 3. the four policies above
-4. **explicit grants** — `grant select, insert, update, delete on <t> to authenticated` plus `grant usage on <t>_id_seq to authenticated`, and `grant all on <t> to service_role` if any Edge Function touches it. `20260805210000_revoke_legacy_anon_grants.sql` removed the default privileges that used to auto-grant new tables, precisely so this step can't be skipped by accident. Never grant `anon` anything, and never grant the three `*_secrets` tables to `authenticated`.
+4. **explicit grants** — `grant select, insert, update, delete on <t> to authenticated` plus `grant usage on <t>_id_seq to authenticated`, and `grant all on <t> to service_role` if any Edge Function touches it. `20260805210000_revoke_legacy_anon_grants.sql` removed the default privileges that used to auto-grant new tables, precisely so this step can't be skipped by accident. Never grant `anon` anything, nor a `*_secrets` table to `authenticated`.
 
 **When adding a function**, it needs its own privilege lines in the same migration:
 
@@ -75,8 +75,8 @@ Postgres grants `EXECUTE` to `PUBLIC` on every new function, and `PUBLIC` includ
 ### Three tiers of data access — pick the right one
 
 1. **Normal tables via `supabase-js`** (`merchants`, `leads`, `ghost_sheets`, `pre_apps` + children, `support_tickets`, `notes`, `tasks`, `audit_log`, `rep_payout_rows` + the three other `rep_payout_*` tables, the two `user_import_*` tables, and the reference-data tables `marketing_materials`, `business_documents`, `products`, `brands`, plus `processors`, which no client writes — `docs/claude/reference-data-and-marketing.md`). The legacy `documents` table is SELECT-only for `authenticated` and admits only an admin since 20261013121000. RLS does the enforcement; the client talks to Postgres directly. Note how little of that list is client-*writable*: the payout and user-import tables are read-only to `authenticated` apart from one status update each, because everything that creates their rows runs as service role.
-2. **Secrets tables — Edge Function only.** `pre_app_owner_secrets` (SSN), `pre_app_banking_secrets` (ABA routing / account number), `pre_app_terminal_secrets` (RP password) are locked twice over: RLS enabled with **zero policies**, *and* no grant to `anon` or `authenticated` at all. Either alone denies read and write; both means a policy added by mistake still opens nothing. Values are stored as `bytea` AES ciphertext; only a service-role Edge Function holding the encryption key can touch them. This includes the agent's initial submission — the browser must POST that data to `submit-pre-app-secrets`, never insert it via `supabase-js`. Never add a policy to these tables, and never grant them.
-3. **`commit_residual_import(batch_id_input int)` RPC** — `security definer`, guarded by an explicit `is_admin()`, moves a reviewed batch's staging rows into `rep_payout_rows`. It is an RPC and **not** an eighth Edge Function on purpose: supabase-js has no client-side transaction, so a function would insert ledger rows, delete staging rows and flip the batch status as three round trips with a real window where a period is half-imported. It also sidesteps PostgREST's row cap (`insert … select` has none), gets a fail-closed audit row for free, and keeps `auth.uid()` — so the history rows the merge triggers name the committing admin. **The `coalesce(excluded.<col>, rep_payout_rows.<col>)` on the two money columns is the entire merge rule**: reverse those arguments and every re-import silently clears a month of hand-entered residuals, violating no constraint and raising no error. `tests/rls/commit-residual-import.test.ts` asserts both directions and greps the function body for it.
+2. **Secrets tables — Edge Function only.** `pre_app_owner_secrets` (SSN), `pre_app_banking_secrets` (ABA routing / account number), `pre_app_terminal_secrets` (RP password), `pre_app_tax_secrets` (business tax ID, EIN or SSN; its kind must equal `pre_apps.ein_type`, and the plaintext `pre_apps.ein_number` is dropped, `20261026140000`) are locked twice over: RLS enabled with **zero policies**, *and* no grant to `anon` or `authenticated` at all. Either alone denies read and write; both means a policy added by mistake still opens nothing. Values are stored as `bytea` AES ciphertext; only a service-role Edge Function holding the encryption key can touch them. This includes the agent's initial submission — the browser must POST that data to `submit-pre-app-secrets`, never insert it via `supabase-js`. Never add a policy to these tables, and never grant them.
+3. **`commit_residual_import(batch_id_input int)` RPC** — `security definer`, guarded by an explicit `is_admin()`, moves a reviewed batch's staging rows into `rep_payout_rows`. Why an RPC and not an Edge Function: `docs/claude/payouts-and-teardown.md`. **The `coalesce(excluded.<col>, rep_payout_rows.<col>)` on the two money columns is the entire merge rule**: reverse those arguments and every re-import silently clears a month of hand-entered residuals, violating no constraint and raising no error. `tests/rls/commit-residual-import.test.ts` asserts both directions and greps the function body for it.
 4. **`approve_pre_app(pre_app_id_input int)` RPC** — `security definer` plpgsql that creates a `merchants` row from a pre-app (address and `processor` copied), flips its status to `approved`, and writes `audit_log`. It guards itself with an explicit `is_admin()` check at the top; keep that check if you edit it.
 
 ### Edge Function authentication
@@ -102,7 +102,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Not built yet:** My Submissions.
 - **Still starter-kit template:** `README.md` only. Edge Functions: twelve in the repo. Details of both → `docs/claude/project-state.md`.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Sixty-seven migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Sixty-eight migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 ## Hosted projects and deployment
 
@@ -162,10 +162,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2225 tests, 104 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (248 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2273 tests, 105 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (272 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (325 tests, 6 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (329 tests, 6 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -191,7 +191,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
-Baselines are the counts in the Commands block above (`npm test` 2225 tests / 104 files — every file must load; `test:live` 248; `test:deployed` 29; `test:e2e` 325, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
+Baselines are the counts in the Commands block above (`npm test` 2273 tests / 105 files — every file must load; `test:live` 272; `test:deployed` 29; `test:e2e` 329, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
 
 - Run `npm test` for any schema change; queries must run as `authenticated`, never the owner.
 - PGlite is Postgres 18.3, the stack 17.6 — pin constraint names in assertions, not SQLSTATEs.
@@ -224,7 +224,7 @@ Twelve functions, all registered in `supabase/config.toml` (a function not liste
 | Function | Purpose |
 | --- | --- |
 | `create-user`, `deactivate-user`, `admin-reset-password` | admin user management via `auth.admin` + `profiles`, each writing `audit_log` |
-| `submit-pre-app-secrets`, `read-pre-app-secrets` | encrypt/decrypt the three secrets tables |
+| `submit-pre-app-secrets`, `read-pre-app-secrets` | encrypt/decrypt the four secrets tables |
 | `residual-import-file-url` | admin-only; two modes — creates a `rep_payout_batches` row and signs an upload into `residual-imports`, or signs a download of a batch's stored file |
 | `parse-residual-import` | admin-only; reads a batch's XLSX with SheetJS and stages its rows. **Idempotent** — it clears the batch's staging rows first, which is what makes "resolve an agent number, then read again" one code path rather than two. Also writes the shared-account **preview flags** (`preview_flag` / `preview_note`) — advisory, never blockers; `previewSharedRow()` in `_shared/residuals.ts` mirrors `commit_residual_import_v2`'s plan, and the live suite pins the pair |
 | `export-residuals` | **not admin-only, deliberately.** Reads every row through the *caller-scoped* client, so RLS is the whole authorization story and a rep's export is their own book. Reaching for `supabaseAdmin` anywhere in it — even to join agent names — would silently turn that into the company's, which is the disclosure shape `search_crm` is `security invoker` to avoid. Paginates with `.range()`, because PostgREST's `max_rows` would otherwise export a silent prefix |

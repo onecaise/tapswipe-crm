@@ -173,12 +173,13 @@ const BUSINESS_FIELDS = {
     kind: "date",
     group: "Business type",
   },
-  ein_type: { label: "EIN type", kind: "text", group: "Business type" },
-  ein_number: {
-    label: "EIN",
-    kind: "text",
+  // The number itself is a secret (pre_app_tax_secrets) and prints in the
+  // Sensitive data section, as TAX_ID_FIELD.
+  ein_type: {
+    label: "EIN type",
+    kind: "select",
     group: "Business type",
-    hint: "12-3456789",
+    options: ["EIN", "SSN"],
   },
   goods_sold: {
     label: "Goods or services sold",
@@ -420,7 +421,7 @@ const PROFILE_FIELDS = {
 } satisfies Record<PaperProfileKey, PaperField>;
 
 /* ---------------------------------------------------------------------------
- * Sensitive data — the three *_secrets tables
+ * Sensitive data — the four *_secrets tables
  * ------------------------------------------------------------------------- */
 
 /**
@@ -429,6 +430,15 @@ const PROFILE_FIELDS = {
  * inside each owner block instead of here.
  */
 export const SECRET_FIELDS: readonly PaperFieldEntry[] = [
+  // pre_app_tax_secrets (20261026140000). One box for either kind, because
+  // the kind is the EIN type ticked on the Business section.
+  {
+    key: "tax_id",
+    label: "Tax ID (EIN or SSN, as ticked under EIN type)",
+    kind: "text",
+    group: "Tax ID",
+    hint: "EIN 12-3456789 or SSN 123-45-6789",
+  },
   {
     key: "aba_routing",
     label: "ABA routing number",
@@ -537,6 +547,7 @@ export const PAPER_COMPLETENESS_CHECKLIST: readonly string[] = [
   "One owner holding at least 51%.",
   "A social security number for every owner listed.",
   "Bank routing number and account number — both, they are stored as a pair.",
+  "The tax ID, of the kind ticked under EIN type (EIN or SSN).",
   "Swiped % and keyed % totalling 100, if either is filled in.",
   "Card present % and card not present % totalling 100, if either is filled in.",
   "An agent split; the company split is whatever is left of 100.",

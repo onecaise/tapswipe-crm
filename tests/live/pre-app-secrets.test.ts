@@ -37,6 +37,18 @@ const PLAINTEXT = {
   rpPassword: "terminal-secret-pw",
 };
 
+/**
+ * Business tax IDs (pre_app_tax_secrets, 20261026140000) that no real holder
+ * has: the IRS does not assign EIN prefix 07, and the SSA lists 123-45-6789
+ * as never valid. 1357 is a run no other fixture here contains, so a raw-body
+ * check for it cannot pass or fail by coincidence.
+ */
+const TAX = {
+  ein: "07-1351357",
+  einLast4: "1357",
+  ssn: "123-45-6789",
+};
+
 type Persona = { id: string; token: string };
 
 let owner: Persona;
@@ -606,7 +618,7 @@ describe("after submission", () => {
     ));
     const { error: locationError } = await adminClient()
       .from("pre_apps")
-      .update({ city: "Nashville", state: "TN" })
+      .update({ city: "Nashville", state: "TN", ein_type: "EIN" })
       .eq("id", submittedId);
     if (locationError) throw locationError;
 
@@ -616,6 +628,8 @@ describe("after submission", () => {
         secrets: [
           { kind: "owner_ssn", pre_app_owner_id: submittedOwnerId, ssn: PLAINTEXT.ssn },
           { kind: "banking", pre_app_id: submittedId, aba_routing: PLAINTEXT.routing, account_number: PLAINTEXT.account },
+          // submit_pre_app() requires the tax ID of the chosen kind (20261026140000).
+          { kind: "tax_id", pre_app_id: submittedId, tax_id_type: "EIN", tax_id: TAX.ein },
         ],
       },
       owner.token,
@@ -641,6 +655,17 @@ describe("after submission", () => {
       .select("pre_app_id")
       .eq("pre_app_id", submittedId);
     expect(data).toEqual([]);
+  });
+
+  it("refuses the rep's tax ID with 409 too, and the stored one stays", async () => {
+    const { status } = await invoke(
+      "submit-pre-app-secrets",
+      { secrets: [{ kind: "tax_id", pre_app_id: submittedId, tax_id_type: "EIN", tax_id: "07-2462468" }] },
+      owner.token,
+    );
+    expect(status).toBe(409);
+    const read = await invoke("read-pre-app-secrets", { pre_app_id: submittedId }, owner.token);
+    expect((read.body.tax_id as Record<string, unknown>).tax_id_last4).toBe(TAX.einLast4);
   });
 
   it("refuses the rep's owner edit and owner delete with 409, and the SSN row stays", async () => {
@@ -676,5 +701,187 @@ describe("after submission", () => {
       .eq("id", submittedOwnerId);
     expect(error).toBeNull();
     expect(count).toBe(1);
+  });
+});
+
+/**
+ * The business tax ID (pre_app_tax_secrets, 20261026140000; phase 3 of
+ * docs/design/intake-and-reports.md). Its own pre-app, so nothing above can
+ * make a tier or no-plaintext assertion here pass by accident.
+ */
+describe("the business tax ID", () => {
+  let taxPreAppId: number;
+
+  async function setEinType(type: "EIN" | "SSN" | null) {
+    const { error } = await adminClient()
+      .from("pre_apps")
+      .update({ ein_type: type })
+      .eq("id", taxPreAppId);
+    if (error) throw error;
+  }
+
+  async function storedRows() {
+    const { data } = await adminClient()
+      .from("pre_app_tax_secrets")
+      .select("tax_id_type, tax_id_encrypted, key_version")
+      .eq("pre_app_id", taxPreAppId);
+    return (data ?? []) as Record<string, string | number>[];
+  }
+
+  const submitTax = (tax_id_type: unknown, tax_id: unknown, token = owner.token) =>
+    invoke(
+      "submit-pre-app-secrets",
+      { secrets: [{ kind: "tax_id", pre_app_id: taxPreAppId, tax_id_type, tax_id }] },
+      token,
+    );
+
+  beforeAll(async () => {
+    if (FUNCTIONS_DOWN) return;
+    ({ preAppId: taxPreAppId } = await makePreApp(owner.id, "Tax Live Co"));
+  });
+
+  describe("validation mirrors lib/masks.ts isTaxEin / isTaxSsn", () => {
+    const rejected: [string, "EIN" | "SSN", string][] = [
+      ["an all-zero EIN", "EIN", "00-0000000"],
+      ["an EIN with prefix 00", "EIN", "00-1351357"],
+      ["an eight-digit EIN", "EIN", "07-135135"],
+      ["an undashed EIN", "EIN", "071351357"],
+      ["an SSN-shaped EIN", "EIN", "071-35-1357"],
+      ["an all-zero SSN", "SSN", "000-00-0000"],
+      ["an SSN in area 666", "SSN", "666-35-1357"],
+      ["an SSN in area 9xx (an ITIN)", "SSN", "913-35-1357"],
+      ["an SSN with group 00", "SSN", "123-00-1357"],
+      ["an SSN with serial 0000", "SSN", "123-35-0000"],
+      ["an EIN-shaped SSN", "SSN", "07-1351357"],
+    ];
+
+    for (const [label, type, value] of rejected) {
+      it(`rejects ${label} with 400, without echoing the value, storing nothing`, async () => {
+        await setEinType(type);
+        const { status, body, raw } = await submitTax(type, value);
+        expect(status, raw).toBe(400);
+        expect(String(body.error)).toMatch(/tax_id must be a valid/);
+        expect(raw).not.toContain(value);
+        expect(await storedRows()).toEqual([]);
+      });
+    }
+
+    for (const kind of ["ein", "ITIN", "", null]) {
+      it(`rejects a tax_id_type of ${JSON.stringify(kind)} with 400`, async () => {
+        await setEinType("EIN");
+        const { status, body } = await submitTax(kind, TAX.ein);
+        expect(status).toBe(400);
+        expect(body.error).toBe("tax_id_type must be EIN or SSN");
+        expect(await storedRows()).toEqual([]);
+      });
+    }
+  });
+
+  describe("the kind must be the pre-app's current EIN type", () => {
+    it("refuses any tax ID while no EIN type is chosen", async () => {
+      await setEinType(null);
+      const { status, body, raw } = await submitTax("EIN", TAX.ein);
+      expect(status, raw).toBe(400);
+      expect(String(body.error)).toMatch(/must match the pre-app's EIN type/);
+      expect(raw).not.toContain(TAX.ein);
+      expect(await storedRows()).toEqual([]);
+    });
+
+    it("refuses an SSN when the EIN type says EIN, and the reverse", async () => {
+      await setEinType("EIN");
+      expect((await submitTax("SSN", TAX.ssn)).status).toBe(400);
+      await setEinType("SSN");
+      expect((await submitTax("EIN", TAX.ein)).status).toBe(400);
+      expect(await storedRows()).toEqual([]);
+    });
+  });
+
+  describe("round trip and tiers", () => {
+    beforeAll(async () => {
+      if (FUNCTIONS_DOWN) return;
+      await setEinType("EIN");
+      const write = await submitTax("EIN", TAX.ein);
+      expect(write.status, write.raw).toBe(200);
+      // The write response reports status, never a value.
+      expect(write.raw).not.toContain(TAX.ein);
+      expect(write.body.stored).toEqual([{ kind: "tax_id", fields: ["tax_id"] }]);
+    });
+
+    it("stores ciphertext in the \\x-hex wire form, with the kind and key_version 1", async () => {
+      const [row] = await storedRows();
+      expect(row.tax_id_type).toBe("EIN");
+      expect(row.key_version).toBe(1);
+      const stored = String(row.tax_id_encrypted);
+      expect(stored).toMatch(/^\\x[0-9a-f]+$/);
+      // 12-byte IV + 10-byte plaintext + 16-byte tag.
+      expect(stored.length - 2).toBe(2 * (12 + TAX.ein.length + 16));
+    });
+
+    it("gives the owning rep the kind and the last four only", async () => {
+      const read = await invoke("read-pre-app-secrets", { pre_app_id: taxPreAppId }, owner.token);
+      expect(read.status, read.raw).toBe(200);
+      expect(read.body.tax_id).toEqual({
+        on_file: true,
+        tax_id_type: "EIN",
+        tax_id_last4: TAX.einLast4,
+      });
+      // The strongest form: the full number is nowhere in the body.
+      expect(read.raw).not.toContain(TAX.ein);
+      expect(read.raw).not.toContain(TAX.ein.replace("-", ""));
+    });
+
+    it("gives an admin the full number, as an SSN read works today", async () => {
+      const read = await invoke("read-pre-app-secrets", { pre_app_id: taxPreAppId }, admin.token);
+      expect(read.status, read.raw).toBe(200);
+      expect(read.body.tax_id).toEqual({ on_file: true, tax_id_type: "EIN", tax_id: TAX.ein });
+    });
+
+    it("404s another agent identically to a missing pre-app", async () => {
+      const notYours = await submitTax("EIN", TAX.ein, intruder.token);
+      expect(notYours.status).toBe(404);
+      const read = await invoke("read-pre-app-secrets", { pre_app_id: taxPreAppId }, intruder.token);
+      expect(read.status).toBe(404);
+      expect(read.raw).not.toContain(TAX.einLast4);
+    });
+
+    it("audits the write as submit_pre_app_secrets:tax_id", async () => {
+      const { data } = await adminClient()
+        .from("audit_log")
+        .select("action")
+        .eq("actor_id", owner.id)
+        .eq("row_id", String(taxPreAppId))
+        .eq("action", "submit_pre_app_secrets:tax_id");
+      expect((data ?? []).length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("switching the EIN type after the number was entered", () => {
+    it("leaves the stored EIN uncounted until the SSN is entered, which replaces it", async () => {
+      await setEinType("SSN");
+
+      // The stored row is still an EIN; the read says so, so the wizard can
+      // ask for the SSN, and the presence RPC no longer counts it.
+      const before = await invoke("read-pre-app-secrets", { pre_app_id: taxPreAppId }, owner.token);
+      expect((before.body.tax_id as Record<string, unknown>).tax_id_type).toBe("EIN");
+      const presence = await userClient(owner.token)
+        .rpc("pre_app_secrets_presence", { pre_app_id_input: taxPreAppId })
+        .single();
+      expect(presence.error).toBeNull();
+      expect(presence.data).toMatchObject({ tax_id_on_file: false, tax_id_type_on_file: "EIN" });
+
+      const write = await submitTax("SSN", TAX.ssn);
+      expect(write.status, write.raw).toBe(200);
+
+      const rowsAfter = await storedRows();
+      expect(rowsAfter).toHaveLength(1);
+      expect(rowsAfter[0].tax_id_type).toBe("SSN");
+      const after = await invoke("read-pre-app-secrets", { pre_app_id: taxPreAppId }, owner.token);
+      expect(after.body.tax_id).toEqual({
+        on_file: true,
+        tax_id_type: "SSN",
+        tax_id_last4: TAX.ssn.slice(-4),
+      });
+      expect(after.raw).not.toContain(TAX.ssn);
+    });
   });
 });

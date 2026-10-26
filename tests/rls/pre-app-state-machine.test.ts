@@ -61,6 +61,13 @@ async function fillSubmittable(id: number): Promise<void> {
     values (${id}, decode('0022','hex'), decode('0033','hex'))
     on conflict (pre_app_id) do nothing;
   `);
+  // The tax ID, of the kind ein_type names (20261026140000).
+  await db.exec(`
+    update pre_apps set ein_type = 'EIN' where id = ${id};
+    insert into pre_app_tax_secrets (pre_app_id, tax_id_type, tax_id_encrypted)
+    values (${id}, 'EIN', decode('0055','hex'))
+    on conflict (pre_app_id) do update set tax_id_type = excluded.tax_id_type;
+  `);
   await db.exec(`
     delete from pre_app_business_profile where pre_app_id = ${id};
     insert into pre_app_business_profile

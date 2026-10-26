@@ -4,13 +4,14 @@ import {
   caretForSignificant,
   countSignificant,
   isAccount,
-  isEin,
   isMoney,
   isPercent,
   isPhone,
   isRouting,
   isSsn,
   isState,
+  isTaxEin,
+  isTaxSsn,
   isZip,
   maskAccount,
   maskEin,
@@ -82,8 +83,8 @@ describe("EIN, SSN and ZIP masks", () => {
     expect(maskEin("12")).toBe("12");
     expect(maskEin("123")).toBe("12-3");
     expect(maskEin("123456789")).toBe("12-3456789");
-    expect(isEin("12-3456789")).toBe(true);
-    expect(isEin("12-345678")).toBe(false);
+    expect(isTaxEin("12-3456789")).toBe(true);
+    expect(isTaxEin("12-345678")).toBe(false);
   });
 
   it("formats an SSN as xxx-xx-xxxx", () => {
@@ -107,7 +108,52 @@ describe("EIN, SSN and ZIP masks", () => {
     // The whole point of the split: autosave persists "12-3", the step just
     // won't let the rep leave until it's finished.
     expect(maskEin("12-3")).toBe("12-3");
-    expect(isEin("12-3")).toBe(false);
+    expect(isTaxEin("12-3")).toBe(false);
+  });
+});
+
+/**
+ * The business tax ID validators (20261026140000). Their twin is in
+ * supabase/functions/_shared/pre-app-secrets.ts; tests/live/pre-app-secrets
+ * posts each value refused here and expects the function's 400.
+ *
+ * Accepted values are deliberately ones no real holder has: EIN prefix 07 is
+ * one the IRS does not assign, and 123-45-6789 is an SSN the SSA lists as
+ * never valid.
+ */
+describe("tax ID validators", () => {
+  it("accepts a well-formed EIN, and blank (a draft can hold nothing)", () => {
+    expect(isTaxEin("07-1234567")).toBe(true);
+    expect(isTaxEin("")).toBe(true);
+  });
+
+  it.each([
+    ["all zeros", "00-0000000"],
+    ["prefix 00", "00-1234567"],
+    ["eight digits", "07-123456"],
+    ["no dash", "071234567"],
+    ["SSN-shaped", "071-23-4567"],
+    ["letters", "07-12345AB"],
+  ])("refuses an EIN that is %s", (_label, value) => {
+    expect(isTaxEin(value)).toBe(false);
+  });
+
+  it("accepts a well-formed SSN, and blank", () => {
+    expect(isTaxSsn("123-45-6789")).toBe(true);
+    expect(isTaxSsn("")).toBe(true);
+  });
+
+  it.each([
+    ["all zeros", "000-00-0000"],
+    ["area 000", "000-45-6789"],
+    ["area 666", "666-45-6789"],
+    ["area 9xx (an ITIN, not an SSN)", "912-45-6789"],
+    ["group 00", "123-00-6789"],
+    ["serial 0000", "123-45-0000"],
+    ["no dashes", "123456789"],
+    ["EIN-shaped", "12-3456789"],
+  ])("refuses an SSN that is %s", (_label, value) => {
+    expect(isTaxSsn(value)).toBe(false);
   });
 });
 
@@ -426,6 +472,7 @@ describe("submit blockers mirror the RPC", () => {
       legal_business_name: "Acme Diner LLC",
       city: "Nashville" as string | null,
       state: "TN" as string | null,
+      ein_type: "EIN" as "EIN" | "SSN" | null,
       split_agent_pct: 50,
       split_company_pct: 50,
     },
@@ -433,6 +480,8 @@ describe("submit blockers mirror the RPC", () => {
     profile: null,
     hasBankingSecrets: true,
     ownersMissingSsn: 0,
+    taxIdOnFile: true,
+    taxIdTypeOnFile: "EIN" as "EIN" | "SSN" | null,
   };
 
   it("reports nothing for a complete pre-app", () => {
@@ -478,6 +527,38 @@ describe("submit blockers mirror the RPC", () => {
     expect(
       preAppSubmitBlockers({ ...complete, hasBankingSecrets: false }),
     ).toContain("Banking details have not been submitted.");
+  });
+
+  // submit_pre_app()'s tax-ID rule (20261026140000), case by case. The RPC's
+  // own messages are pinned in tests/rls/pre-app-tax-secrets.test.ts.
+  it("requires an EIN type before the tax ID can count", () => {
+    expect(
+      preAppSubmitBlockers({
+        ...complete,
+        preApp: { ...complete.preApp, ein_type: null },
+        taxIdOnFile: false,
+        taxIdTypeOnFile: null,
+      }),
+    ).toEqual(["Choose an EIN type (EIN or SSN), then enter the tax ID."]);
+  });
+
+  it("requires the tax ID of the chosen kind", () => {
+    expect(
+      preAppSubmitBlockers({ ...complete, taxIdOnFile: false, taxIdTypeOnFile: null }),
+    ).toEqual(["The EIN (tax ID) has not been entered."]);
+  });
+
+  it("asks for the number again when the EIN type changed after it was entered", () => {
+    expect(
+      preAppSubmitBlockers({
+        ...complete,
+        preApp: { ...complete.preApp, ein_type: "SSN" },
+        taxIdOnFile: false,
+        taxIdTypeOnFile: "EIN",
+      }),
+    ).toEqual([
+      "The tax ID on file is an EIN, but EIN type says SSN. Enter the SSN.",
+    ]);
   });
 
   it("checks the two card-mix pairs independently", () => {

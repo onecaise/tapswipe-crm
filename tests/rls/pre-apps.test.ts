@@ -55,6 +55,8 @@ const SECRETS_TABLES = [
   "pre_app_owner_secrets",
   "pre_app_banking_secrets",
   "pre_app_terminal_secrets",
+  // The fourth (20261026140000): the business tax ID.
+  "pre_app_tax_secrets",
 ] as const;
 
 let db: TestDb;

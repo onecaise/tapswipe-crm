@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useId, useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
-import type { PreAppOwner } from "@/lib/pre-apps";
+import { edgeFunctionErrorMessage } from "@/lib/edge-functions";
+import type { PreApp, PreAppOwner } from "@/lib/pre-apps";
 import {
   isAccount,
   isRouting,
@@ -11,6 +12,7 @@ import {
   maskAccount,
   maskRouting,
   maskSsn,
+  taxIdFormat,
 } from "@/lib/masks";
 import { useUnsavedChangesWarning } from "@/hooks/use-unsaved-changes-warning";
 import { MaskedInput } from "@/components/masked-input";
@@ -19,12 +21,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 /**
- * SSN, bank routing/account and the terminal RP password.
+ * SSN, bank routing/account, the terminal RP password and the business tax ID
+ * (an EIN, or an SSN when the Business step's EIN type says so).
  *
  * This step is deliberately unlike every other one:
  *
  *  - **No autosave.** These values cannot be written by supabase-js at all — the
- *    three *_secrets tables have RLS with zero policies and no grant to any
+ *    four *_secrets tables have RLS with zero policies and no grant to any
  *    client role. The only way in is submit-pre-app-secrets, and it is reached by
  *    an explicit button rather than a debounce, so nothing is transmitted until
  *    the rep means it.
@@ -37,7 +40,7 @@ import { Label } from "@/components/ui/label";
  *    and an admin's full reveal never touches the server render at all.
  */
 /**
- * Spread onto the SSN, routing and account inputs (A2). Without them a browser
+ * Spread onto the SSN, tax ID, routing and account inputs (A2). Without them a browser
  * may offer to remember a merchant's SSN and suggest it in some later field,
  * and a phone keyboard autocorrects or capitalises what it takes for a word.
  * `numeric` brings up the digit pad; the masks still allow the dashes.
@@ -69,15 +72,25 @@ type SecretsStatus = {
     account_number_last4?: string;
   };
   terminal: { on_file: boolean; rp_password?: string };
+  tax_id: {
+    on_file: boolean;
+    /** The STORED row's kind, which may differ from the current EIN type. */
+    tax_id_type?: "EIN" | "SSN";
+    tax_id?: string;
+    tax_id_last4?: string;
+  };
 };
 
 export function SecretsStep({
   preAppId,
   owners,
+  einType,
   canEdit,
 }: {
   preAppId: number;
   owners: PreAppOwner[];
+  /** The Business step's choice; picks the tax ID's mask and validator. */
+  einType: PreApp["ein_type"];
   canEdit: boolean;
 }) {
   // Pairs each label with its input (QA-004) — none of these had an accessible name.
@@ -92,6 +105,8 @@ export function SecretsStep({
   const [routing, setRouting] = useState("");
   const [account, setAccount] = useState("");
   const [rpPassword, setRpPassword] = useState("");
+  const [taxId, setTaxId] = useState("");
+  const taxFormat = einType ? taxIdFormat(einType) : null;
 
   // This step has no autosave, so typed values exist only here until Encrypt &
   // save — warn before a reload or close discards them (D-07). The values are
@@ -102,7 +117,8 @@ export function SecretsStep({
     Object.values(ssns).some((value) => value !== "") ||
       routing !== "" ||
       account !== "" ||
-      rpPassword !== "",
+      rpPassword !== "" ||
+      taxId !== "",
   );
 
   const refresh = useCallback(async () => {
@@ -125,8 +141,19 @@ export function SecretsStep({
     void refresh();
   }, [refresh]);
 
-  const entries = buildEntries({ preAppId, ssns, routing, account, rpPassword });
+  const entries = buildEntries({
+    preAppId,
+    ssns,
+    routing,
+    account,
+    rpPassword,
+    einType,
+    taxId,
+  });
+  const taxIdInvalid =
+    taxId !== "" && (taxFormat === null || !taxFormat.isValid(taxId));
   const anyInvalid =
+    taxIdInvalid ||
     Object.values(ssns).some((v) => v !== "" && !isSsn(v)) ||
     (routing !== "" && !isRouting(routing)) ||
     (account !== "" && !isAccount(account)) ||
@@ -143,7 +170,14 @@ export function SecretsStep({
         "submit-pre-app-secrets",
         { body: { secrets: entries } },
       );
-      if (error) throw error;
+      if (error) {
+        // The function's own message (it never echoes a value), not
+        // supabase-js's fixed "non-2xx" string — see lib/edge-functions.ts.
+        setSaveError(
+          await edgeFunctionErrorMessage(error, "Could not save. Nothing was stored."),
+        );
+        return;
+      }
 
       // Cleared immediately. These never live in component state longer than the
       // round trip, and are never read back from the server.
@@ -151,14 +185,11 @@ export function SecretsStep({
       setRouting("");
       setAccount("");
       setRpPassword("");
+      setTaxId("");
       setSavedAt(Date.now());
       await refresh();
-    } catch (err: unknown) {
-      setSaveError(
-        err instanceof Error
-          ? err.message
-          : "Could not save. Nothing was stored.",
-      );
+    } catch {
+      setSaveError("Could not save. Nothing was stored.");
     } finally {
       setSaving(false);
     }
@@ -167,13 +198,47 @@ export function SecretsStep({
   return (
     <div className="flex flex-col gap-8">
       <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
-        These four values are encrypted before they are stored and are held in
+        These values are encrypted before they are stored and are held in
         separate tables that no browser can read or write directly. They are not
         saved as you type — fill in what you have and press{" "}
         <strong>Encrypt &amp; save</strong>.
       </p>
 
       {loadError && <p className="text-sm text-destructive">{loadError}</p>}
+
+      <fieldset className="flex flex-col gap-4">
+        <legend className="font-semibold text-sm">Business tax ID</legend>
+        {einType === null || taxFormat === null ? (
+          <p className="text-sm text-muted-foreground">
+            Choose the EIN type (EIN or SSN) on the Business step first — it
+            decides which number goes here.
+          </p>
+        ) : (
+          <div className="flex max-w-sm flex-col gap-2">
+            <Label htmlFor={`${fieldId}-tax-id`}>
+              {einType === "EIN" ? "EIN" : "SSN (business tax ID)"}
+            </Label>
+            <MaskedInput
+              id={`${fieldId}-tax-id`}
+              {...SENSITIVE_NUMBER_INPUT}
+              mask={taxFormat.mask}
+              placeholder={taxFormat.placeholder}
+              disabled={!canEdit || saving}
+              value={taxId}
+              aria-invalid={taxIdInvalid}
+              onChange={setTaxId}
+            />
+            {taxIdInvalid && (
+              <p className="text-xs text-destructive">
+                {einType === "EIN"
+                  ? "Nine digits, as 12-3456789, not starting 00."
+                  : "Nine digits, as 123-45-6789, in a range the SSA issues."}
+              </p>
+            )}
+            <TaxIdOnFile status={status} einType={einType} />
+          </div>
+        )}
+      </fieldset>
 
       <fieldset className="flex flex-col gap-4">
         <legend className="font-semibold text-sm">Owner SSNs</legend>
@@ -355,6 +420,37 @@ function OnFile({
   );
 }
 
+/**
+ * What is on file for the tax ID, judged against the CURRENT EIN type. A stored
+ * number of the other kind does not count (submit_pre_app() refuses it), so it
+ * is shown as needing re-entry rather than as on file.
+ */
+function TaxIdOnFile({
+  status,
+  einType,
+}: {
+  status: SecretsStatus | null;
+  einType: "EIN" | "SSN";
+}) {
+  const stored = status?.tax_id;
+  if (stored?.on_file && stored.tax_id_type && stored.tax_id_type !== einType) {
+    return (
+      <p className="text-xs text-warning">
+        The tax ID on file is an {stored.tax_id_type}, but EIN type says{" "}
+        {einType}. Enter the {einType}.
+      </p>
+    );
+  }
+  return (
+    <OnFile
+      label={einType}
+      onFile={Boolean(stored?.on_file)}
+      shown={stored?.tax_id ?? stored?.tax_id_last4}
+      tier={status?.tier}
+    />
+  );
+}
+
 /** Only fields the rep actually filled in are sent. */
 function buildEntries({
   preAppId,
@@ -362,12 +458,16 @@ function buildEntries({
   routing,
   account,
   rpPassword,
+  einType,
+  taxId,
 }: {
   preAppId: number;
   ssns: Record<number, string>;
   routing: string;
   account: string;
   rpPassword: string;
+  einType: PreApp["ein_type"];
+  taxId: string;
 }) {
   const entries: Record<string, unknown>[] = [];
   for (const [ownerId, ssn] of Object.entries(ssns)) {
@@ -389,6 +489,15 @@ function buildEntries({
   }
   if (rpPassword) {
     entries.push({ kind: "terminal", pre_app_id: preAppId, rp_password: rpPassword });
+  }
+  // The kind is the CURRENT EIN type; the function refuses any other.
+  if (einType && taxId && taxIdFormat(einType).isValid(taxId)) {
+    entries.push({
+      kind: "tax_id",
+      pre_app_id: preAppId,
+      tax_id_type: einType,
+      tax_id: taxId,
+    });
   }
   return entries;
 }

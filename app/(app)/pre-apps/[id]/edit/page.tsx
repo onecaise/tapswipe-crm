@@ -119,7 +119,12 @@ async function PreAppEditor({
         <ProfileStep preAppId={preApp.id} profile={cardMix} canEdit />
       )}
       {step === "secrets" && (
-        <SecretsStep preAppId={preApp.id} owners={owners} canEdit />
+        <SecretsStep
+          preAppId={preApp.id}
+          owners={owners}
+          einType={preApp.ein_type}
+          canEdit
+        />
       )}
       {step === "review" && (
         <ReviewStep

@@ -65,7 +65,10 @@ export function PreAppSummary({
         <Field label="ZIP">{formatText(preApp.zip)}</Field>
         <Field label="Website">{formatText(preApp.website)}</Field>
         <Field label="Entity type">{formatText(preApp.legal_entity_type)}</Field>
-        <Field label="EIN">{formatText(preApp.ein_number)}</Field>
+        {/* The type only. The tax ID itself is encrypted and is never in this
+            server-rendered summary; its last four show on the Sensitive data
+            step. */}
+        <Field label="EIN type">{formatText(preApp.ein_type)}</Field>
         <Field label="Started">{formatDate(preApp.business_start_date)}</Field>
         <Field label="Goods sold">{formatText(preApp.goods_sold)}</Field>
         <Field label="Processor">{formatText(preApp.processor)}</Field>

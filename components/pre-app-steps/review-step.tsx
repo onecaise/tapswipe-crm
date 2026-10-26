@@ -53,6 +53,10 @@ import { Button } from "@/components/ui/button";
 type SecretsPresence = {
   banking_on_file: boolean;
   owners_missing_ssn: number;
+  /** A tax-id row of the CURRENT ein_type exists (what submit counts). */
+  tax_id_on_file: boolean;
+  /** The stored row's kind, or null; never the number. */
+  tax_id_type_on_file: "EIN" | "SSN" | null;
 };
 
 export function ReviewStep({
@@ -104,6 +108,8 @@ export function ReviewStep({
     profile,
     hasBankingSecrets: presence ? presence.banking_on_file : true,
     ownersMissingSsn: presence ? presence.owners_missing_ssn : 0,
+    taxIdOnFile: presence ? presence.tax_id_on_file : true,
+    taxIdTypeOnFile: presence ? presence.tax_id_type_on_file : null,
   });
 
   const submit = async () => {

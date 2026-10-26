@@ -8,6 +8,7 @@ import { createClient } from "@/lib/supabase/client";
 import {
   BILLING_TYPE_OPTIONS,
   type BusinessStepValues,
+  EIN_TYPE_OPTIONS,
   LEGAL_ENTITY_TYPES,
   SALES_VOLUME_FIELDS,
   UNSET,
@@ -17,7 +18,6 @@ import type { PreApp } from "@/lib/pre-apps";
 import { SALES_VOLUME_GROUP } from "@/lib/pre-app-form-fields";
 import { friendlyDbError } from "@/lib/db-errors";
 import {
-  maskEin,
   maskMoney,
   maskPercent,
   maskPhone,
@@ -241,20 +241,23 @@ export function BusinessStep({
             disabled={!canEdit}
           />
         </Field>
+        {/* The type only. The number is a secret: it is entered on the
+            Sensitive data step, encrypted, and never autosaved. Changing the
+            type after the number was entered means entering it again —
+            submit_pre_app() counts only a stored number of this kind. */}
         <Field label="EIN type" error={errors.ein_type?.message}>
-          <Input {...form.register("ein_type")} disabled={!canEdit} />
+          <select
+            {...form.register("ein_type")}
+            disabled={!canEdit}
+            className="border-input bg-background flex h-9 w-full rounded-md border px-3 py-1 text-base shadow-xs disabled:opacity-50 md:text-sm"
+          >
+            {EIN_TYPE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
         </Field>
-        <MaskedField
-          label="EIN"
-          mask={maskEin}
-          placeholder="12-3456789"
-          error={errors.ein_number?.message}
-          disabled={!canEdit}
-          value={form.watch("ein_number")}
-          onChange={(v) =>
-            form.setValue("ein_number", v, { shouldDirty: true, shouldValidate: true })
-          }
-        />
         <Field label="Goods or services sold" error={errors.goods_sold?.message}>
           <Input {...form.register("goods_sold")} disabled={!canEdit} />
         </Field>
@@ -473,8 +476,7 @@ function toFormValues(preApp: PreApp): BusinessStepValues {
     business_type: s(preApp.business_type),
     sub_business_type: s(preApp.sub_business_type),
     business_start_date: s(preApp.business_start_date),
-    ein_type: s(preApp.ein_type),
-    ein_number: s(preApp.ein_number),
+    ein_type: preApp.ein_type ?? UNSET,
     goods_sold: s(preApp.goods_sold),
     billing_type: preApp.billing_type ?? UNSET,
     bank_name: s(preApp.bank_name),
@@ -509,8 +511,8 @@ function toPayload(
     if (raw === undefined) continue;
     const value = typeof raw === "string" ? raw.trim() : raw;
 
-    if (key === "billing_type") {
-      payload.billing_type = value === UNSET || value === "" ? null : value;
+    if (key === "billing_type" || key === "ein_type") {
+      payload[key] = value === UNSET || value === "" ? null : value;
       continue;
     }
 

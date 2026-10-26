@@ -273,6 +273,16 @@ export async function seed(db: TestDb): Promise<void> {
     ).length > 0;
   const loc = (city: string, state: string) =>
     hasLocation ? `, '${city}', '${state}'` : "";
+  // pre_app_tax_secrets (20261026140000) does not exist on older prefixes
+  // either, so the agent draft's tax-ID stand-in is written only when it does.
+  const hasTaxSecrets =
+    (
+      await rows(
+        db,
+        `select 1 from information_schema.tables
+          where table_schema = 'public' and table_name = 'pre_app_tax_secrets'`,
+      )
+    ).length > 0;
   await db.exec(`
     insert into auth.users (id, email) values
       ('${ADMIN_ID}', 'admin@tapswipe.test'),
@@ -392,13 +402,15 @@ export async function seed(db: TestDb): Promise<void> {
     -- A business address on each, because approve_pre_app() carries it onto
     -- the merchant and refuses a pre-app without a city and state
     -- (20261013130000). The columns are in the initial schema, so this is safe
-    -- against every migration prefix.
+    -- against every migration prefix. The agent's draft also says EIN type
+    -- 'EIN', the kind of the tax-ID stand-in below (submit_pre_app() requires
+    -- the two to match, 20261026140000); ein_type is in the initial schema too.
     insert into pre_apps (agent_id, status, dba_name, legal_business_name,
-                          physical_address, city, state, zip)
+                          physical_address, city, state, zip, ein_type)
     values
-      ('${AGENT_ID}',       'draft',     'Agent Draft App',     'Agent Draft App LLC',     '100 Main St',  'Nashville', 'TN', '37201'),
-      ('${AGENT_ID}',       'submitted', 'Agent Submitted App', 'Agent Submitted App LLC', '200 Broadway', 'Nashville', 'TN', '37203'),
-      ('${OTHER_AGENT_ID}', 'draft',     'Other Draft App',     'Other Draft App LLC',     '9 Beale St',   'Memphis',   'TN', '38103');
+      ('${AGENT_ID}',       'draft',     'Agent Draft App',     'Agent Draft App LLC',     '100 Main St',  'Nashville', 'TN', '37201', 'EIN'),
+      ('${AGENT_ID}',       'submitted', 'Agent Submitted App', 'Agent Submitted App LLC', '200 Broadway', 'Nashville', 'TN', '37203', null),
+      ('${OTHER_AGENT_ID}', 'draft',     'Other Draft App',     'Other Draft App LLC',     '9 Beale St',   'Memphis',   'TN', '38103', null);
 
     select set_config('tapswipe.pre_app_transition', '', true);
 
@@ -439,6 +451,14 @@ export async function seed(db: TestDb): Promise<void> {
     values ((select id from pre_apps where dba_name = 'Agent Draft App'),
             decode('0022', 'hex'), decode('0033', 'hex'));
   `);
+
+  if (hasTaxSecrets) {
+    await db.exec(`
+      insert into pre_app_tax_secrets (pre_app_id, tax_id_type, tax_id_encrypted)
+      values ((select id from pre_apps where dba_name = 'Agent Draft App'),
+              'EIN', decode('0055', 'hex'));
+    `);
+  }
 
   // Third exec, same protocol-limit reason as the second.
   await db.exec(`

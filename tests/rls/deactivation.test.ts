@@ -189,7 +189,7 @@ describe("the gating migration is what introduces the helpers", () => {
     await db.close();
   });
 
-  it("leaves the three secrets tables with zero policies", async () => {
+  it("leaves the four secrets tables with zero policies", async () => {
     const db = await createTestDb();
     await asPlatform(db);
 
@@ -199,13 +199,14 @@ describe("the gating migration is what introduces the helpers", () => {
        from pg_class c
        left join pg_policy p on p.polrelid = c.oid
        where c.relname in (
-         'pre_app_owner_secrets', 'pre_app_banking_secrets', 'pre_app_terminal_secrets'
+         'pre_app_owner_secrets', 'pre_app_banking_secrets', 'pre_app_terminal_secrets',
+         'pre_app_tax_secrets'
        )
        group by c.relname
        order by c.relname`,
     );
 
-    expect(result).toHaveLength(3);
+    expect(result).toHaveLength(4);
     expect(result.every((r) => r.n === 0)).toBe(true);
 
     await db.close();

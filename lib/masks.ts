@@ -56,16 +56,14 @@ export const isPhone = (value: string): boolean =>
   value === "" || /^\d{3}-\d{3}-\d{4}$/.test(value);
 
 // ---------------------------------------------------------------------------
-// EIN — xx-xxxxxxx
+// EIN — xx-xxxxxxx. Its validator is isTaxEin below: since 20261026140000 an
+// EIN is only ever entered as the business tax ID, on the secrets step.
 // ---------------------------------------------------------------------------
 
 export function maskEin(value: string): string {
   const d = digits(value).slice(0, 9);
   return d.length <= 2 ? d : `${d.slice(0, 2)}-${d.slice(2)}`;
 }
-
-export const isEin = (value: string): boolean =>
-  value === "" || /^\d{2}-\d{7}$/.test(value);
 
 // ---------------------------------------------------------------------------
 // SSN — xxx-xx-xxxx. Never stored in a normal column; this formats the input
@@ -81,6 +79,51 @@ export function maskSsn(value: string): string {
 
 export const isSsn = (value: string): boolean =>
   value === "" || /^\d{3}-\d{2}-\d{4}$/.test(value);
+
+// ---------------------------------------------------------------------------
+// Business tax ID — an EIN, or an SSN when pre_apps.ein_type says so. Never
+// stored in a normal column (pre_app_tax_secrets, 20261026140000); these
+// format the input on its way to submit-pre-app-secrets.
+//
+// DUPLICATED in supabase/functions/_shared/pre-app-secrets.ts, which returns
+// the 400. Change both together; tests/live/pre-app-secrets.test.ts posts what
+// these refuse and expects that 400.
+//
+// Stricter than isSsn above (owner SSNs), which checks the shape only:
+//  - EIN: refuses all zeros and the prefix 00, which the IRS never assigns.
+//    The real prefix list is NOT enforced; it changes, and refusing a valid
+//    EIN costs more than the typo it catches (see isRouting below).
+//  - SSN: refuses what the SSA never issues — area 000, 666 or 900-999 (ITINs,
+//    not SSNs), group 00, serial 0000.
+// ---------------------------------------------------------------------------
+
+export const isTaxEin = (value: string): boolean =>
+  value === "" || (/^\d{2}-\d{7}$/.test(value) && !value.startsWith("00"));
+
+export function isTaxSsn(value: string): boolean {
+  if (value === "") return true;
+  const match = /^(\d{3})-(\d{2})-(\d{4})$/.exec(value);
+  if (!match) return false;
+  const [, area, group, serial] = match;
+  return (
+    area !== "000" &&
+    area !== "666" &&
+    !area.startsWith("9") &&
+    group !== "00" &&
+    serial !== "0000"
+  );
+}
+
+/** The tax-ID mask and validator for a pre-app's ein_type. */
+export function taxIdFormat(type: "EIN" | "SSN"): {
+  mask: (value: string) => string;
+  isValid: (value: string) => boolean;
+  placeholder: string;
+} {
+  return type === "EIN"
+    ? { mask: maskEin, isValid: isTaxEin, placeholder: "12-3456789" }
+    : { mask: maskSsn, isValid: isTaxSsn, placeholder: "123-45-6789" };
+}
 
 // ---------------------------------------------------------------------------
 // ZIP — xxxxx or xxxxx-xxxx

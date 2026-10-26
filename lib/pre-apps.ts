@@ -57,8 +57,12 @@ export type PreApp = {
   business_type: string | null;
   sub_business_type: string | null;
   business_start_date: string | null;
-  ein_type: string | null;
-  ein_number: string | null;
+  /**
+   * Which identifier the tax ID is (pre_apps_ein_type_check). The number is in
+   * pre_app_tax_secrets, reached only through the secrets Edge Functions —
+   * the plaintext ein_number column was dropped by 20261026140000.
+   */
+  ein_type: "EIN" | "SSN" | null;
   goods_sold: string | null;
 
   billing_type: "gross" | "net" | null;
@@ -400,6 +404,7 @@ export function preAppSubmitBlockers(input: {
     | "legal_business_name"
     | "city"
     | "state"
+    | "ein_type"
     | "split_agent_pct"
     | "split_company_pct"
   >;
@@ -407,6 +412,12 @@ export function preAppSubmitBlockers(input: {
   profile: PreAppBusinessProfile | null;
   hasBankingSecrets: boolean;
   ownersMissingSsn: number;
+  /**
+   * From pre_app_secrets_presence(): whether a tax-id row OF THE CURRENT
+   * ein_type exists, and the stored row's kind (null when there is none).
+   */
+  taxIdOnFile: boolean;
+  taxIdTypeOnFile: "EIN" | "SSN" | null;
 }): string[] {
   const blockers: string[] = [];
   const { preApp, owners, profile } = input;
@@ -438,6 +449,20 @@ export function preAppSubmitBlockers(input: {
 
   if (!input.hasBankingSecrets) {
     blockers.push("Banking details have not been submitted.");
+  }
+
+  // submit_pre_app()'s tax-ID rule (20261026140000), in its three cases.
+  if (!input.taxIdOnFile) {
+    const type = preApp.ein_type;
+    if (type === null) {
+      blockers.push("Choose an EIN type (EIN or SSN), then enter the tax ID.");
+    } else if (input.taxIdTypeOnFile !== null && input.taxIdTypeOnFile !== type) {
+      blockers.push(
+        `The tax ID on file is an ${input.taxIdTypeOnFile}, but EIN type says ${type}. Enter the ${type}.`,
+      );
+    } else {
+      blockers.push(`The ${type} (tax ID) has not been entered.`);
+    }
   }
 
   if (profile) {

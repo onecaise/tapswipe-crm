@@ -114,6 +114,16 @@ test.describe("the blank application form", () => {
     // number …", so ^ excludes it without excluding the boxes.
     await expect(page.getByText(/^Social security number/)).toHaveCount(2);
   });
+
+  test("asks for the tax ID once, in the sensitive section, beside the EIN type", async ({
+    page,
+  }) => {
+    // The business's tax ID is a secret since 20261026140000: one box in the
+    // Sensitive data section, not a plain field among the business details.
+    await page.goto("/pre-apps/blank-form");
+    await expect(page.getByText(/^Tax ID \(EIN or SSN/)).toHaveCount(1);
+    await expect(page.getByText(/^EIN type/)).toHaveCount(1);
+  });
 });
 
 test.describe("a merchant's printable record", () => {
@@ -149,6 +159,9 @@ test.describe("a merchant's printable record", () => {
     // "complete the record" — which would add a decryption surface, and an
     // audit_log row, to a page built to be photocopied.
     expect(body, "an SSN-shaped value").not.toMatch(/\b\d{3}-\d{2}-\d{4}\b/);
+    // Nor a tax ID: pre_apps.ein_number is gone (20261026140000), and the
+    // number is reachable only through read-pre-app-secrets.
+    expect(body, "an EIN-shaped value").not.toMatch(/\b\d{2}-\d{7}\b/);
     expect(body, "a routing/account-shaped run").not.toMatch(/\b\d{9,17}\b/);
     expect(body.toLowerCase()).not.toContain("routing");
     expect(body.toLowerCase()).not.toContain("social security");

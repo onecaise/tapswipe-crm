@@ -1356,8 +1356,13 @@ create table pre_apps (
   business_type text,
   sub_business_type text,
   business_start_date date,
-  ein_type text,
-  ein_number text,
+  -- Which identifier the business's tax ID is (memo §0.3; 20261026140000).
+  -- Plaintext: it says what the number is, not what it is. The NUMBER lives in
+  -- pre_app_tax_secrets, encrypted -- the plaintext ein_number column that
+  -- used to sit here was dropped by the same migration. submit_pre_app()
+  -- requires a tax-id row whose tax_id_type equals this, so switching the
+  -- type after the number was entered means entering the number again.
+  ein_type text constraint pre_apps_ein_type_check check (ein_type in ('EIN', 'SSN')),
   goods_sold text,
 
   -- banking (non-sensitive half — see pre_app_banking_secrets for the rest)
@@ -1774,6 +1779,33 @@ create table pre_app_terminal_secrets (
 );
 alter table pre_app_terminal_secrets enable row level security;
 -- intentionally zero policies for `authenticated` — service role only
+
+-- The FOURTH secrets table (20261026140000; phase 3 of
+-- docs/design/intake-and-reports.md): the business's tax ID, an EIN or an SSN
+-- according to pre_apps.ein_type. Built exactly as the three above: unique
+-- parent reference, cascade from pre_apps, key_version, RLS with zero
+-- policies, no grant to anon or authenticated, written and read only by the
+-- two secrets Edge Functions (AAD: pre_app_tax_secrets / tax_id_encrypted /
+-- pre_app_id). A rep reads back the last four only.
+--
+-- tax_id_type is plaintext and says which validator accepted the value. It is
+-- written by submit-pre-app-secrets, which refuses one that differs from the
+-- pre-app's current ein_type. It is NOT the SSN of any owner and is never
+-- copied from or to pre_app_owner_secrets, even when the number is the same.
+create table pre_app_tax_secrets (
+  id serial primary key,
+  pre_app_id int references pre_apps(id) on delete cascade not null unique,
+  tax_id_type text not null
+    constraint pre_app_tax_secrets_tax_id_type_check check (tax_id_type in ('EIN', 'SSN')),
+  tax_id_encrypted bytea not null,
+  key_version smallint not null default 1
+);
+alter table pre_app_tax_secrets enable row level security;
+-- intentionally zero policies for `authenticated` — service role only
+revoke all on pre_app_tax_secrets from public, anon, authenticated;
+revoke all on sequence pre_app_tax_secrets_id_seq from public, anon, authenticated;
+grant all on pre_app_tax_secrets to service_role;
+grant all on sequence pre_app_tax_secrets_id_seq to service_role;
 
 -- ---------------------------------------------------------------------
 -- DOCUMENTS — LEGACY, CLOSED. Metadata for per-record uploads (a voided
@@ -8502,6 +8534,7 @@ declare
   bp            pre_app_business_profile;
   owner_count   int;
   control_count int;
+  tax_type_on_file text;
 begin
   select * into pa from pre_apps where id = pre_app_id_input;
   if not found then
@@ -8596,6 +8629,32 @@ begin
   -- submissions for deals that have no terminal.
   if not exists (select 1 from pre_app_banking_secrets where pre_app_id = pa.id) then
     raise exception 'banking details have not been submitted' using errcode = 'PT422';
+  end if;
+
+  -- The business tax ID (20261026140000; phase 3 of
+  -- docs/design/intake-and-reports.md). Existence only, as above: a row in
+  -- pre_app_tax_secrets OF THE CHOSEN KIND. Only submit-pre-app-secrets can
+  -- write that row, and only after the value passed the EIN or SSN validator
+  -- for this type, so the value's validity is the write path's guarantee, not
+  -- this check's. The kind comparison is what makes switching ein_type after
+  -- the number was entered force the number to be entered again. Phase 4
+  -- moves this rule, with every other one, into pre_app_missing_fields().
+  if not exists (
+    select 1 from pre_app_tax_secrets t
+     where t.pre_app_id = pa.id and t.tax_id_type = pa.ein_type
+  ) then
+    if pa.ein_type is null then
+      raise exception 'an EIN type (EIN or SSN) and the tax ID are required'
+        using errcode = 'PT422';
+    end if;
+    select t.tax_id_type into tax_type_on_file
+      from pre_app_tax_secrets t where t.pre_app_id = pa.id;
+    if tax_type_on_file is not null then
+      raise exception 'the tax ID on file is an %, but EIN type says %. Enter the %.',
+        tax_type_on_file, pa.ein_type, pa.ein_type using errcode = 'PT422';
+    end if;
+    raise exception 'the % (tax ID) has not been entered', pa.ein_type
+      using errcode = 'PT422';
   end if;
 
   perform set_config('tapswipe.pre_app_transition', 'on', true);
@@ -8829,8 +8888,19 @@ $$;
 -- being asked to supply, and logging every render of a form step would bury
 -- the reads that matter.
 -- =====================================================================
+-- tax_id_on_file / tax_id_type_on_file (20261026140000): whether a tax-id row
+-- OF THE PRE-APP'S CURRENT ein_type exists -- what submit_pre_app() counts --
+-- and which kind the stored row is, so the wizard can say "the tax ID on file
+-- is an EIN, but EIN type says SSN" instead of a bare "not on file". The kind
+-- is plaintext metadata, never the number. Adding columns changes the return
+-- type, so the migration drops and recreates the function and its grants.
 create or replace function pre_app_secrets_presence(pre_app_id_input int)
-returns table (banking_on_file boolean, owners_missing_ssn int)
+returns table (
+  banking_on_file boolean,
+  owners_missing_ssn int,
+  tax_id_on_file boolean,
+  tax_id_type_on_file text
+)
 language plpgsql
 security definer
 set search_path = public
@@ -8868,7 +8938,12 @@ begin
              select 1 from pre_app_owner_secrets s
               where s.pre_app_owner_id = o.id
            )
-      );
+      ),
+      exists (
+        select 1 from pre_app_tax_secrets t
+         where t.pre_app_id = pa.id and t.tax_id_type = pa.ein_type
+      ),
+      (select t.tax_id_type from pre_app_tax_secrets t where t.pre_app_id = pa.id);
 end;
 $$;
 
@@ -9739,7 +9814,9 @@ create index audit_log_city_search_idx on audit_log (actor_id, created_at)
 --                 RLS by design; this is the grant the Edge Functions
 --                 run on.
 --
--- The three *_secrets tables get NO grant for `authenticated`. Their
+-- The *_secrets tables -- three here, four since pre_app_tax_secrets
+-- (20261026140000), which revokes and grants its own -- get NO grant for
+-- `authenticated`. Their
 -- zero-policy RLS already denies everything, so this is the second lock
 -- on the same door: if someone later adds a policy to one of them (§ the
 -- standing "never add a policy to these tables" rule), the missing grant

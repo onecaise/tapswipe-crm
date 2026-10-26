@@ -1,7 +1,6 @@
 import { z } from "zod";
 
 import {
-  isEin,
   isMoney,
   isPercent,
   isPhone,
@@ -117,8 +116,12 @@ export const businessStepSchema = z.object({
   business_type: text,
   sub_business_type: text,
   business_start_date: isoDate,
-  ein_type: text,
-  ein_number: masked(isEin, "Use 12-3456789"),
+  /**
+   * EIN or SSN: which identifier the business's tax ID is (pre_apps_ein_type_check,
+   * 20261026140000). The NUMBER is not on this step: it is a secret, entered on
+   * the Sensitive data step and never autosaved.
+   */
+  ein_type: z.union([z.literal(UNSET), z.enum(["EIN", "SSN"])]),
   goods_sold: text,
 
   billing_type: z.union([z.literal(UNSET), z.enum(["gross", "net"])]),
@@ -186,6 +189,17 @@ export const SALES_VOLUME_FIELDS = [
   ["est_average_ticket", "Average ticket"],
   ["est_high_ticket", "High ticket"],
 ] as const satisfies readonly (readonly [keyof BusinessStepValues, string])[];
+
+/**
+ * Options for the ein_type select, including the absent case. The values are
+ * pre_apps_ein_type_check's; the number itself is entered on the Sensitive
+ * data step, with the mask this choice selects.
+ */
+export const EIN_TYPE_OPTIONS = [
+  { value: UNSET, label: "—" },
+  { value: "EIN", label: "EIN" },
+  { value: "SSN", label: "SSN" },
+] as const;
 
 /** Options for the billing_type select, including the absent case. */
 export const BILLING_TYPE_OPTIONS = [

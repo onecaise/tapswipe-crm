@@ -31,13 +31,67 @@ export type TerminalEntry = {
   rp_password: string;
 };
 
-export type SecretEntry = OwnerSsnEntry | BankingEntry | TerminalEntry;
+/**
+ * The business's tax ID (pre_app_tax_secrets, 20261026140000): an EIN, or an
+ * SSN when the business files under one. `tax_id_type` must equal the
+ * pre-app's CURRENT ein_type, which the handler reads through the caller's
+ * client — so the stored kind always says which validator accepted the value.
+ */
+export type TaxIdEntry = {
+  kind: "tax_id";
+  pre_app_id: number;
+  tax_id_type: TaxIdType;
+  tax_id: string;
+};
+
+export type SecretEntry = OwnerSsnEntry | BankingEntry | TerminalEntry | TaxIdEntry;
+
+export const TAX_ID_TYPES = ["EIN", "SSN"] as const;
+export type TaxIdType = (typeof TAX_ID_TYPES)[number];
 
 export const isPositiveInt = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value > 0;
 
 export const isSsn = (value: unknown): value is string =>
   typeof value === "string" && /^\d{3}-\d{2}-\d{4}$/.test(value);
+
+/**
+ * A tax ID that is an EIN: 12-3456789, nine digits. Refuses all zeros and the
+ * prefix 00, which the IRS never assigns. The real prefix list is NOT enforced:
+ * it changes, and a valid EIN this form refuses costs more than the typo it
+ * catches (the routing-checksum lesson in lib/masks.ts). Mirrors isTaxEin in
+ * lib/masks.ts.
+ */
+export const isTaxEin = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^\d{2}-\d{7}$/.test(value) &&
+  !value.startsWith("00");
+
+/**
+ * A tax ID that is an SSN: 123-45-6789, nine digits, and none of the patterns
+ * the SSA never issues — area 000, 666 or 900-999 (the 9xx range is ITINs,
+ * which are not SSNs), group 00, serial 0000. All zeros is area 000. Mirrors
+ * isTaxSsn in lib/masks.ts.
+ *
+ * Stricter than isSsn above (owner SSNs), which checks the shape only. Tightening
+ * the owner validator too is a separate decision, not taken in phase 3.
+ */
+export const isTaxSsn = (value: unknown): value is string => {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{3})-(\d{2})-(\d{4})$/.exec(value);
+  if (!match) return false;
+  const [, area, group, serial] = match;
+  return (
+    area !== "000" &&
+    area !== "666" &&
+    !area.startsWith("9") &&
+    group !== "00" &&
+    serial !== "0000"
+  );
+};
+
+export const isTaxIdType = (value: unknown): value is TaxIdType =>
+  typeof value === "string" && (TAX_ID_TYPES as readonly string[]).includes(value);
 
 export const isAccountNumber = (value: unknown): value is string =>
   typeof value === "string" && /^\d{4,17}$/.test(value);
@@ -64,9 +118,9 @@ export type ParseResult =
 /**
  * Validates the request body.
  *
- * A discriminated array rather than one flat object, because the three secrets
+ * A discriminated array rather than one flat object, because the secrets
  * hang off two different parents: an SSN belongs to a `pre_app_owners` row while
- * banking and terminal belong to the `pre_apps` row. A flat body would let a
+ * banking, terminal and the tax ID belong to the `pre_apps` row. A flat body would let a
  * caller pair an owner id from one pre-app with a pre-app id from another, and
  * the function would have to notice. This shape makes each entry state its own
  * parent, and the handler then requires every entry to resolve to the same
@@ -141,6 +195,27 @@ export function parseSecretsBody(body: unknown): ParseResult {
           kind: "terminal",
           pre_app_id: entry.pre_app_id,
           rp_password: entry.rp_password,
+        });
+        break;
+      }
+      case "tax_id": {
+        if (!isPositiveInt(entry.pre_app_id)) {
+          return { ok: false, error: "pre_app_id must be a positive integer" };
+        }
+        if (!isTaxIdType(entry.tax_id_type)) {
+          return { ok: false, error: "tax_id_type must be EIN or SSN" };
+        }
+        if (entry.tax_id_type === "EIN" && !isTaxEin(entry.tax_id)) {
+          return { ok: false, error: "tax_id must be a valid EIN, formatted 12-3456789" };
+        }
+        if (entry.tax_id_type === "SSN" && !isTaxSsn(entry.tax_id)) {
+          return { ok: false, error: "tax_id must be a valid SSN, formatted 123-45-6789" };
+        }
+        entries.push({
+          kind: "tax_id",
+          pre_app_id: entry.pre_app_id,
+          tax_id_type: entry.tax_id_type,
+          tax_id: entry.tax_id as string,
         });
         break;
       }

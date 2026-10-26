@@ -304,13 +304,14 @@ function OwnerBlock({ ordinal }: { ordinal: number }) {
 }
 
 /**
- * Banking and the terminal password.
+ * The business tax ID, banking and the terminal password.
  *
- * Separated from the rest the way the schema separates them — these three
- * values live in their own tables, encrypted, and are the only part of this
- * form that is not ordinary business information.
+ * Separated from the rest the way the schema separates them — these values
+ * live in their own tables, encrypted, and are the only part of this form that
+ * is not ordinary business information.
  */
 function SensitiveSection() {
+  const taxId = SECRET_FIELDS.filter((field) => field.group === "Tax ID");
   const banking = SECRET_FIELDS.filter((field) => field.group === "Banking");
   const terminal = SECRET_FIELDS.filter((field) => field.group === "Terminal");
 
@@ -324,6 +325,22 @@ function SensitiveSection() {
         the rest of the application. Keep this sheet secure until it has been
         entered, then dispose of it appropriately.
       </p>
+
+      <div className="break-inside-avoid">
+        <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Tax ID
+        </h4>
+        <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-3">
+          {taxId.map((field) => (
+            <RuledBox key={field.key} label={field.label} hint={field.hint} />
+          ))}
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">
+          The business&apos;s EIN, or the SSN it files under if EIN type is
+          ticked SSN. Write it here even if it is also an owner&apos;s SSN —
+          the two are stored separately.
+        </p>
+      </div>
 
       <div className="break-inside-avoid">
         <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">

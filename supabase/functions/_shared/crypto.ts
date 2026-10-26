@@ -203,7 +203,8 @@ export function secretAad(
   table:
     | "pre_app_owner_secrets"
     | "pre_app_banking_secrets"
-    | "pre_app_terminal_secrets",
+    | "pre_app_terminal_secrets"
+    | "pre_app_tax_secrets",
   column: string,
   parentId: number,
 ): string {
