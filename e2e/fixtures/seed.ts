@@ -2592,9 +2592,15 @@ export async function clearImportedUsers(
 }
 
 /** The profiles a bulk-import spec created, for asserting what really landed. */
-export async function importedProfiles(
-  emails: string[],
-): Promise<{ email: string; role: string; must_change_password: boolean }[]> {
+export async function importedProfiles(emails: string[]): Promise<
+  {
+    email: string;
+    role: string;
+    must_change_password: boolean;
+    legal_name: string | null;
+    llc_legal_name: string | null;
+  }[]
+> {
   const { apiUrl, serviceKey } = localStackConfig();
   const db = createClient(apiUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -2602,13 +2608,15 @@ export async function importedProfiles(
 
   const { data } = await db
     .from("profiles")
-    .select("email, role, must_change_password")
+    .select("email, role, must_change_password, legal_name, llc_legal_name")
     .in("email", emails);
 
   return (data ?? []) as {
     email: string;
     role: string;
     must_change_password: boolean;
+    legal_name: string | null;
+    llc_legal_name: string | null;
   }[];
 }
 

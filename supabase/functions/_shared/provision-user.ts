@@ -15,8 +15,8 @@
 // This module does NOT authenticate or authorize. Callers are responsible for
 // establishing that the caller is an active admin BEFORE calling provisionUser,
 // through the caller-scoped client, in the house order. The `supabase` argument
-// below is that same caller-scoped client and is used for exactly one read; the
-// `supabaseAdmin` argument bypasses RLS entirely.
+// below is that same caller-scoped client and is used for one read and the
+// set_rep_identity() call; the `supabaseAdmin` argument bypasses RLS entirely.
 
 import {
   findAuthUserByEmail,
@@ -26,12 +26,17 @@ import {
 } from "./admin-users.ts";
 
 /**
- * The minimum surface of the caller-scoped client: one read of profiles.
+ * The minimum surface of the caller-scoped client: one read of profiles, and
+ * the set_rep_identity() RPC.
  *
  * Structural rather than importing SupabaseClient, so this file stays out of the
  * import map — the reason every _shared module here does it this way.
  */
 type CallerClient = {
+  rpc: (
+    fn: string,
+    args?: Record<string, unknown>,
+  ) => PromiseLike<{ error: { message: string } | null }>;
   from: (table: string) => {
     select: (columns: string) => {
       eq: (column: string, value: string) => {
@@ -91,6 +96,15 @@ export type ProvisionInput = {
   role: Role;
   agentNumber: string | null;
   /**
+   * The rep's legal name and LLC legal name (phase 2 of the intake memo), both
+   * optional and normalised with normalizeRepIdentityName below. They are NOT
+   * in the profiles insert: set_rep_identity() is the only write path to those
+   * columns, so they are written through it, as the caller, once the profile
+   * exists. Omitted means null.
+   */
+  legalName?: string | null;
+  llcLegalName?: string | null;
+  /**
    * The account's first password, when the caller has one to set.
    *
    * Present for create-user, where an admin types it and will hand it over
@@ -126,6 +140,13 @@ export type ProvisionResult =
     email: string;
     temporaryPassword: string;
     auditWriteFailed: boolean;
+    /**
+     * Set when the account exists but set_rep_identity() refused or failed —
+     * the names are not stored and an admin has to enter them in Manage Users.
+     * Not a failure of the create: the account is complete, and retrying would
+     * now be a conflict. Null when there was nothing to write or it worked.
+     */
+    identityWriteError: string | null;
   }
   | { outcome: "conflict"; message: string }
   | {
@@ -157,6 +178,16 @@ export function normalizeAgentNumber(value: unknown): string | null {
 }
 
 /**
+ * A legal name or LLC legal name from a form field or a CSV cell: trimmed, and
+ * blank treated as "not given" — both are optional at creation (memo A20).
+ * Shared by create-user and the bulk import so the two cannot disagree about
+ * what a blank means. Length is checked separately, with isRepIdentityName.
+ */
+export function normalizeRepIdentityName(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+/**
  * Creates one account, or finishes one a previous attempt left half-built.
  *
  * The two writes are not one transaction — they cannot be, one is in GoTrue and
@@ -170,7 +201,7 @@ export function normalizeAgentNumber(value: unknown): string | null {
  * bulk import's batch-level resume is built on: a row whose outcome was never
  * recorded is simply provisioned again.
  *
- * @param supabase      CALLER-scoped client. One read, so RLS decides it.
+ * @param supabase      CALLER-scoped client. One read (RLS decides it) and set_rep_identity().
  * @param supabaseAdmin Service-role client. Bypasses RLS; nothing may reach it
  *                      before the caller has been authorized.
  * @param actorId       The verified caller's id, for audit_log. Service-role
@@ -422,6 +453,24 @@ export async function provisionUser(
     newUserId,
   );
 
+  // The rep's legal names, through set_rep_identity() on the CALLER-scoped
+  // client: that RPC is the only write path to the two columns (no insert of
+  // them above, even though the service role could), it re-checks is_admin()
+  // itself, and auth.uid() there is the admin, so its audit row names them.
+  // Skipped when neither was given, so an account created without them writes
+  // no identity audit row.
+  const legalName = input.legalName ?? null;
+  const llcLegalName = input.llcLegalName ?? null;
+  let identityWriteError: string | null = null;
+  if (legalName !== null || llcLegalName !== null) {
+    const { error: identityError } = await supabase.rpc("set_rep_identity", {
+      user_id: newUserId,
+      legal_name: legalName,
+      llc_legal_name: llcLegalName,
+    });
+    if (identityError) identityWriteError = identityError.message;
+  }
+
   return {
     outcome: resumed ? "resumed" : "created",
     userId: newUserId,
@@ -436,5 +485,6 @@ export async function provisionUser(
     // Non-fatal: the account exists either way, and reporting failure for an
     // action that succeeded would be the worse lie. Surfaced so it is not silent.
     auditWriteFailed: auditError !== null,
+    identityWriteError,
   };
 }

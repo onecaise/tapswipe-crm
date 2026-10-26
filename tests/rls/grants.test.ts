@@ -682,6 +682,11 @@ describe("grant surface after all migrations", () => {
     expect(
       await canExecute(db, "anon", "public.set_territory(uuid, text)"),
     ).toBe(false);
+    // Phase 2 of the intake memo: writes the rep's legal names, which gate
+    // pre-app submit and print on the processor's paperwork.
+    expect(
+      await canExecute(db, "anon", "public.set_rep_identity(uuid, text, text)"),
+    ).toBe(false);
 
     const [seq] = await rows<{ ok: boolean }>(
       db,

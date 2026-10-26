@@ -6,6 +6,7 @@ import {
 } from "../../supabase/functions/_shared/user-imports";
 import {
   SKIPPABLE_BLOCKERS,
+  USER_IMPORT_ROW_COLUMNS,
   blockerLabel,
   isBlocking,
   reviewImportRows,
@@ -38,6 +39,9 @@ const ALL_BLOCKERS = [
   "invalid_email",
   "invalid_role",
   "invalid_agent_number",
+  // Phase 2 of the intake memo: a legal name over the 200-character cap.
+  "invalid_legal_name",
+  "invalid_llc_legal_name",
   "duplicate_email_in_file",
   "duplicate_agent_number_in_file",
   "email_exists",
@@ -53,10 +57,14 @@ function row(over: Partial<UserImportRow> = {}): UserImportRow {
     email_raw: "avery@tapswipe.test",
     role_raw: "agent",
     agent_number_raw: null,
+    legal_name_raw: null,
+    llc_legal_name_raw: null,
     full_name: "Avery Agent",
     email: "avery@tapswipe.test",
     role: "agent",
     agent_number: null,
+    legal_name: null,
+    llc_legal_name: null,
     blocker: null,
     error: null,
     outcome: null,
@@ -86,6 +94,31 @@ describe("the browser copy matches the shared module", () => {
   it("has a label for every blocker, so none renders as a raw code", () => {
     for (const blocker of ALL_BLOCKERS) {
       expect(blockerLabel(blocker)).not.toBe(blocker);
+    }
+  });
+
+  it("treats the two identity blockers as blocking, not skippable", () => {
+    // A name over the cap is a file problem: set_rep_identity() would refuse
+    // it after the account exists. The skippable pair is unchanged.
+    for (const blocker of ["invalid_legal_name", "invalid_llc_legal_name"]) {
+      expect(isBlocking(blocker)).toBe(true);
+      expect(sharedIsBlocking(blocker as never)).toBe(true);
+    }
+    expect([...SKIPPABLE_BLOCKERS].sort()).toEqual([
+      "agent_number_taken",
+      "email_exists",
+    ]);
+  });
+
+  it("selects the staged legal names for the review screen", () => {
+    const columns = USER_IMPORT_ROW_COLUMNS.split(", ");
+    for (const column of [
+      "legal_name_raw",
+      "llc_legal_name_raw",
+      "legal_name",
+      "llc_legal_name",
+    ]) {
+      expect(columns).toContain(column);
     }
   });
 });

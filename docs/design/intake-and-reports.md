@@ -1121,3 +1121,57 @@ Found while building, **not fixed** (outside phase 1):
 - **The Supabase CLI was found linked to PROD** (`zuvsdkjnfstrjahstsmg`; `npm run guard:linked`
   refused). Nothing linked was run. Only local commands (`migration up --local`, `psql` inside the
   local DB container) were used. Relinking to dev is a deliberate action left to Owen.
+
+### Phase 2: rep identity (26 Oct 2026, branch `intake-and-reports`)
+
+Built: `profiles.legal_name` + `profiles.llc_legal_name` and `set_rep_identity(user_id, legal_name,
+llc_legal_name)` (`20261026120000_rep_identity.sql`); the two fields on the create-user screen
+(`create-user`), an inline "Legal names" cell on Manage Users with a "can't submit pre-apps yet"
+marker, and two optional CSV columns `Legal name` / `LLC legal name` in the bulk import
+(`stage-user-import`, `provision-user-batch`, staging columns on `user_import_rows`).
+
+**The no-LLC rule (A16), recorded here as decided:** a rep with no LLC has their own legal name (or
+sole-proprietor business name) entered by the admin as the LLC legal name. The LLC field may be
+empty at account creation; it is the phase 4 submit gate, not the account, that requires both.
+Never a placeholder like "N/A", which would print on the processor's paperwork.
+
+Where the memo was silent or said otherwise, and what was chosen (conservative side each time):
+
+- **Blank is refused, not turned into null.** §7.1 says "turns blank into null"; the phase 2
+  instruction said "rejects empty strings". The later, stricter one won: a blank-after-trim string
+  raises PT400. **Null** clears a value (an admin correcting a mistake). Forms and the CSV treat a
+  blank box as "not given" and send null, so the refusal only bites a direct API caller.
+- **"Trim" means ASCII whitespace** (`btrim(x, E' \t\n\r\f\x0b')`). Plain `btrim(x)` strips spaces
+  only; the tests caught `'\tIto LLC'` being stored as typed.
+- **Named CHECKs on both columns** restate the RPC's rules (trimmed, non-blank, ≤ 200), so the
+  service role cannot store what the RPC refuses. Not in the memo; cheap and strictly tighter.
+- **One audit verb, `set_rep_identity`, for set and clear**, written in the same statement with no
+  exception handler (fails closed). No change → no audit row, as `set_territory`.
+- **Self-target allowed** for an admin, as `set_territory`.
+- **The memo's parameter names are kept** (`user_id`, `legal_name`, `llc_legal_name`). They shadow
+  the columns, so every parameter reference in a statement is qualified with the function name.
+- **Create-user and the bulk import write the names through the RPC, on the caller-scoped client,
+  after the profile insert** — not in the service-role insert — so the RPC is the only write path
+  and its audit row names the admin. If that call fails, the account is kept (retrying would now be
+  a conflict) and the failure is surfaced: `identityWriteFailed` on the create-user response and a
+  warning on its success screen; a note in `outcome_detail` on the import row, which the batch page
+  now shows under a created row's badge.
+- **`create-user` returns 400 before creating anything** for a name over 200 characters or a
+  non-text value.
+- **The bulk import blocks an over-long name** with two new blocking codes,
+  `invalid_legal_name` / `invalid_llc_legal_name`; the skippable pair is unchanged.
+- **Manage Users has no `/admin/users/[id]` page** (§7.1 names one). The fields went into an inline
+  cell on the list, the `TerritoryCell` pattern. The marker shows for `role = 'agent'` missing
+  either value, deactivated or not.
+- **There is no downloadable CSV template.** The "template" is the column list on the upload
+  screen, which now names the two columns.
+
+**Where the phase 4 submit rule plugs in:** `pre_app_missing_fields()` returns `rep_identity` when
+`profiles.legal_name` or `profiles.llc_legal_name` is null for `pre_apps.agent_id` (not the caller);
+`submit_pre_app()` refuses on it and copies both into `pre_apps.rep_legal_name` /
+`rep_llc_legal_name`. Because the CHECKs forbid blank, `is null` is the whole test. The wizard's
+Review step reads the same function; Manage Users' marker is the admin-side view of the same
+condition.
+
+Found while building, **not fixed** (outside phase 2): `set_territory()` has the same plain
+`btrim()`, so a tab-padded territory is stored with its tab.

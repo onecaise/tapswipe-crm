@@ -70,6 +70,8 @@ type StagedRow = {
   email: string | null;
   role: string | null;
   agent_number: string | null;
+  legal_name: string | null;
+  llc_legal_name: string | null;
 };
 
 export default {
@@ -255,7 +257,9 @@ export default {
     // ---- The chunk --------------------------------------------------------
     const { data: pending, error: pendingError } = await ctx.supabaseAdmin
       .from("user_import_rows")
-      .select("id, row_number, full_name, email, role, agent_number")
+      .select(
+        "id, row_number, full_name, email, role, agent_number, legal_name, llc_legal_name",
+      )
       .eq("batch_id", batchId)
       .is("outcome", null)
       .is("blocker", null)
@@ -291,6 +295,10 @@ export default {
           email: row.email,
           role: row.role as Role,
           agentNumber: row.agent_number,
+          // Written through set_rep_identity() as the calling admin, inside
+          // provisionUser, once the profile exists. Validated by the parser.
+          legalName: row.legal_name,
+          llcLegalName: row.llc_legal_name,
         });
       } catch (error) {
         // Recorded rather than rethrown, so the rows already done in this chunk
@@ -313,9 +321,17 @@ export default {
         await recordOutcome(ctx.supabaseAdmin, row.id, {
           outcome: result.outcome,
           user_id: result.userId,
-          outcome_detail: result.auditWriteFailed
-            ? "The account was created, but its audit log entry could not be written."
-            : null,
+          // Both notes are non-fatal: the account exists either way. The
+          // identity one tells the admin the legal names still need entering
+          // in Manage Users, rather than letting them look saved.
+          outcome_detail: [
+            result.auditWriteFailed
+              ? "The account was created, but its audit log entry could not be written."
+              : null,
+            result.identityWriteError !== null
+              ? `The account was created, but its legal names were not saved (${result.identityWriteError}). Set them in Manage Users.`
+              : null,
+          ].filter((note) => note !== null).join(" ") || null,
         });
         counts[result.outcome] += 1;
         // result.temporaryPassword is deliberately not read. See the header.

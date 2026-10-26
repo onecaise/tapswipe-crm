@@ -77,9 +77,14 @@ export function UserImportUpload() {
         <p className="mt-1 text-xs text-muted-foreground">
           A CSV with the columns <span className="font-mono">Full name</span> and{" "}
           <span className="font-mono">Email</span>.{" "}
-          <span className="font-mono">Role</span> and{" "}
-          <span className="font-mono">Agent #</span> are optional — a row with no
-          role becomes an agent. Save as CSV from Excel; up to 200 rows per file.
+          <span className="font-mono">Role</span>,{" "}
+          <span className="font-mono">Agent #</span>,{" "}
+          <span className="font-mono">Legal name</span> and{" "}
+          <span className="font-mono">LLC legal name</span> are optional — a row
+          with no role becomes an agent, and a rep without both legal names
+          cannot submit a pre-app until you set them on the users list (no LLC?
+          put their own legal name in both). Save as CSV from Excel; up to 200
+          rows per file.
         </p>
       </div>
 

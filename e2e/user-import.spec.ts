@@ -37,12 +37,14 @@ const stamp = Date.now();
 const NEW_ONE = `e2e-import-a-${stamp}@tapswipe.test`;
 const NEW_TWO = `e2e-import-b-${stamp}@tapswipe.test`;
 
+// The two legal-name columns (phase 2 of the intake memo) are optional: row
+// two leaves them blank, and the LLC name is quoted because it holds a comma.
 const CSV = [
-  "Full name,Email,Role,Agent #",
-  `Import One,${NEW_ONE},agent,`,
-  `Import Two,${NEW_TWO},admin,`,
+  "Full name,Email,Role,Agent #,Legal name,LLC legal name",
+  `Import One,${NEW_ONE},agent,,Import One Legal,"Import One Payments, LLC"`,
+  `Import Two,${NEW_TWO},admin,,,`,
   // A rep who already exists: skipped, and the batch still runs.
-  `Already Here,${PERSONAS.agent.email},agent,`,
+  `Already Here,${PERSONAS.agent.email},agent,,,`,
 ].join("\n");
 
 const ALL_EMAILS = [NEW_ONE, NEW_TWO];
@@ -117,10 +119,24 @@ test("uploads a CSV, reviews it, creates the accounts, and says they cannot sign
   // "cannot sign in yet" claim true rather than a slogan.
   expect(profiles.every((p) => p.must_change_password)).toBe(true);
   expect(profiles.find((p) => p.email === NEW_TWO)?.role).toBe("admin");
+  // The legal names went through set_rep_identity; a blank row stores none.
+  expect(profiles.find((p) => p.email === NEW_ONE)).toMatchObject({
+    legal_name: "Import One Legal",
+    llc_legal_name: "Import One Payments, LLC",
+  });
+  expect(profiles.find((p) => p.email === NEW_TWO)).toMatchObject({
+    legal_name: null,
+    llc_legal_name: null,
+  });
 
   // --- the row table reports each outcome ----------------------------------
   await expect(page.getByText("What happened to each row")).toBeVisible();
   await expect(page.getByText("Skipped").first()).toBeVisible();
+  // The staged legal names are shown next to the other columns, the comma
+  // inside the quoted cell intact.
+  const rowOne = page.getByRole("row", { name: new RegExp(NEW_ONE) });
+  await expect(rowOne.getByText("Import One Legal")).toBeVisible();
+  await expect(rowOne.getByText("Import One Payments, LLC")).toBeVisible();
 });
 
 test("refuses to run while the file still has problems", async ({ page }) => {

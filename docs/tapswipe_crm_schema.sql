@@ -136,6 +136,46 @@ create table profiles (
   -- Users reads all of it anyway, and nothing resolves a rep THROUGH this
   -- column the way the residuals import resolves one through agent_number.
   manager_id uuid references profiles(id) on delete set null,
+  -- The rep's identity for the processor's paperwork (20261026120000; phase 2
+  -- of docs/design/intake-and-reports.md). `legal_name` is the person's real
+  -- legal name (full_name stays the display name, often a nickname);
+  -- `llc_legal_name` is the legal name of the rep's LLC. A rep with no LLC has
+  -- their own legal name (or sole-proprietor business name) entered here by
+  -- the admin -- never a placeholder like "N/A", which would print on the
+  -- processor's forms (memo §9 A16).
+  --
+  -- Nullable: admins and older accounts have none, and both are optional when
+  -- an account is created (A20). The gate is at pre-app SUBMIT, which refuses a
+  -- rep missing either (phase 4, pre_app_missing_fields() -> 'rep_identity'),
+  -- and snapshots both onto the pre-app there.
+  --
+  -- Written ONLY by set_rep_identity() below: admin-only, audited. profiles has
+  -- no UPDATE grant or policy, so no client -- the rep included -- can write
+  -- them directly. Read through the ordinary select policy: a rep sees their
+  -- own two values, an admin sees everyone's, nobody else sees any.
+  --
+  -- NEVER IN A POLICY. Not an access boundary; tests/rls/set-rep-identity
+  -- greps pg_policies for both names.
+  --
+  -- The CHECKs restate set_rep_identity()'s rules so the service role cannot
+  -- store what the RPC would refuse: trimmed, non-blank, at most 200
+  -- characters. Null is "not set yet"; '' is never stored.
+  legal_name text
+    constraint profiles_legal_name_format check (
+      legal_name is null or (
+        legal_name = btrim(legal_name, E' \t\n\r\f\x0b')
+        and legal_name <> ''
+        and length(legal_name) <= 200
+      )
+    ),
+  llc_legal_name text
+    constraint profiles_llc_legal_name_format check (
+      llc_legal_name is null or (
+        llc_legal_name = btrim(llc_legal_name, E' \t\n\r\f\x0b')
+        and llc_legal_name <> ''
+        and length(llc_legal_name) <= 200
+      )
+    ),
   -- When this user last opened the notifications panel behind the topbar bell.
   -- Everything the bell reports is derived from this one comparison: a support
   -- ticket or ghost sheet with created_at greater than this is "new to me".
@@ -763,6 +803,93 @@ revoke all on function set_territory(uuid, text) from public;
 grant execute on function set_territory(uuid, text) to authenticated, service_role;
 revoke all on function set_manager(uuid, uuid) from public;
 grant execute on function set_manager(uuid, uuid) to authenticated, service_role;
+
+-- ---------------------------------------------------------------------
+-- set_rep_identity(user_id uuid, legal_name text, llc_legal_name text)
+--
+-- The only write path to profiles.legal_name and profiles.llc_legal_name
+-- (20261026120000). The set_territory() shape: `security definer`, pinned
+-- search_path, is_admin() first (which already requires is_active).
+--
+-- Sets BOTH columns on every call, so the caller always sends the pair it
+-- wants stored. Per value:
+--   null          -> clears it (an admin correcting a mistaken entry)
+--   text          -> trimmed; blank after trimming is REFUSED (PT400), and so
+--                    is anything over 200 characters. Blank is refused rather
+--                    than turned into null so that '' from a client can never
+--                    be mistaken for "clear"; a caller that means clear sends
+--                    null.
+-- The 200 cap is REP_IDENTITY_MAX_LENGTH in _shared/admin-users.ts; change the
+-- two together (tests/unit/rep-identity.test.ts pins the pair).
+--
+-- Audited as 'set_rep_identity' on 'profiles', one row per call that changes
+-- something, inside the same statement as the update: if the audit insert
+-- fails, the update rolls back with it. No exception handler, on purpose.
+-- No change -> no audit row (`is not distinct from`, as set_territory).
+--
+-- Self-target allowed, as set_territory: an admin who carries a book has an
+-- identity like anyone else.
+-- ---------------------------------------------------------------------
+create or replace function set_rep_identity(
+  user_id uuid,
+  legal_name text,
+  llc_legal_name text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  new_legal text;
+  new_llc text;
+  target profiles;
+begin
+  if not is_admin() then
+    raise exception 'admin only' using errcode = 'PT403';
+  end if;
+
+  new_legal := btrim(set_rep_identity.legal_name, E' \t\n\r\f\x0b');
+  new_llc := btrim(set_rep_identity.llc_legal_name, E' \t\n\r\f\x0b');
+
+  if new_legal = '' then
+    raise exception 'legal name cannot be blank' using errcode = 'PT400';
+  end if;
+  if new_llc = '' then
+    raise exception 'LLC legal name cannot be blank' using errcode = 'PT400';
+  end if;
+  if length(new_legal) > 200 then
+    raise exception 'legal name must be 200 characters or fewer'
+      using errcode = 'PT400';
+  end if;
+  if length(new_llc) > 200 then
+    raise exception 'LLC legal name must be 200 characters or fewer'
+      using errcode = 'PT400';
+  end if;
+
+  select * into target from profiles where id = set_rep_identity.user_id;
+  if not found then
+    raise exception 'user not found' using errcode = 'PT404';
+  end if;
+
+  if target.legal_name is not distinct from new_legal
+     and target.llc_legal_name is not distinct from new_llc then
+    return;
+  end if;
+
+  update profiles
+     set legal_name = new_legal,
+         llc_legal_name = new_llc
+   where id = set_rep_identity.user_id;
+
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (auth.uid(), 'set_rep_identity', 'profiles',
+          set_rep_identity.user_id::text);
+end;
+$$;
+
+revoke all on function set_rep_identity(uuid, text, text) from public;
+grant execute on function set_rep_identity(uuid, text, text) to authenticated, service_role;
 
 -- ---------------------------------------------------------------------
 -- PROCESSORS -- the one processor vocabulary (20261023130000; phase 1 of
@@ -5787,6 +5914,11 @@ create table user_import_rows (
   email_raw text,
   role_raw text,
   agent_number_raw text,
+  -- The two optional rep identity columns ("Legal name", "LLC legal name"),
+  -- added by 20261026120000. provision-user-batch writes them through
+  -- set_rep_identity() after the account exists, never directly.
+  legal_name_raw text,
+  llc_legal_name_raw text,
 
   -- Resolved values, null wherever the raw text could not be resolved --
   -- in which case `blocker` says why.
@@ -5794,19 +5926,22 @@ create table user_import_rows (
   email text,
   role text check (role in ('agent', 'admin')),
   agent_number text,
+  legal_name text,
+  llc_legal_name text,
 
   -- A code so the UI can group and count; `error` carries the prose for
   -- the row itself.
   --
-  -- Six of these BLOCK the batch. The last two -- email_exists and
+  -- Eight of these BLOCK the batch. The last two -- email_exists and
   -- agent_number_taken -- deliberately do NOT: those rows are skipped
   -- and the rest of the file still imports. Accounts are independent of
   -- one another, unlike the rows of one period's ledger, so refusing
   -- forty onboardings because three people already have logins is the
   -- wrong trade. The split lives in isBlocking() in
   -- supabase/functions/_shared/user-imports.ts and lib/user-imports.ts.
-  blocker text check (blocker in (
+  blocker text constraint user_import_rows_blocker_check check (blocker in (
     'missing_name', 'invalid_email', 'invalid_role', 'invalid_agent_number',
+    'invalid_legal_name', 'invalid_llc_legal_name',
     'duplicate_email_in_file', 'duplicate_agent_number_in_file',
     'email_exists', 'agent_number_taken'
   )),

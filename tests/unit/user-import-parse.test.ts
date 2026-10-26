@@ -454,6 +454,8 @@ describe("blockerMessage", () => {
       "invalid_email",
       "invalid_role",
       "invalid_agent_number",
+      "invalid_legal_name",
+      "invalid_llc_legal_name",
       "duplicate_email_in_file",
       "duplicate_agent_number_in_file",
       "email_exists",
@@ -463,5 +465,117 @@ describe("blockerMessage", () => {
     for (const blocker of all) {
       expect(blockerMessage(blocker, {}).length).toBeGreaterThan(0);
     }
+  });
+
+  it("names the 200-character cap for both identity blockers", () => {
+    expect(blockerMessage("invalid_legal_name")).toBe(
+      "Legal name must be 200 characters or fewer.",
+    );
+    expect(blockerMessage("invalid_llc_legal_name")).toBe(
+      "LLC legal name must be 200 characters or fewer.",
+    );
+  });
+});
+
+/**
+ * Phase 2 of docs/design/intake-and-reports.md: two optional columns, "Legal
+ * name" and "LLC legal name", handed to set_rep_identity() once the account
+ * exists. Optional at creation (memo A20); over the cap blocks the row, because
+ * the RPC would refuse it after the account was already made.
+ */
+describe("parseUserImport — rep identity columns", () => {
+  const IDENTITY_HEADER = [...HEADER, "Legal name", "LLC legal name"];
+
+  it("maps both headers, case-insensitively, and keeps them optional", () => {
+    const map = mapHeaders(["Full name", "Email", "LEGAL NAME", "llc legal name"]);
+    expect(map.missing).toEqual([]);
+    expect(map.index.legal_name).toBe(2);
+    expect(map.index.llc_legal_name).toBe(3);
+    expect(map.index.full_name).toBe(0);
+    expect(COLUMN_HEADERS.legal_name).toBe("Legal name");
+    expect(COLUMN_HEADERS.llc_legal_name).toBe("LLC legal name");
+  });
+
+  it("reads both, trimmed, alongside the display name", () => {
+    const result = parseUserImport(
+      csv([
+        IDENTITY_HEADER,
+        ["Ann", "ann@tapswipe.test", "", "", "  Ann Ito ", " Ito Payments LLC"],
+      ]),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const row = result.rows[0];
+    expect(row.full_name).toBe("Ann");
+    expect(row.legal_name).toBe("Ann Ito");
+    expect(row.llc_legal_name).toBe("Ito Payments LLC");
+    expect(row.legal_name_raw).toBe("Ann Ito");
+    expect(row.blockers).toEqual([]);
+  });
+
+  it("reads a quoted LLC name containing a comma", () => {
+    const result = parseUserImport(
+      [
+        IDENTITY_HEADER.join(","),
+        'Ann,ann@tapswipe.test,,,Ann Ito,"Ito Payments, LLC"',
+      ].join("\n"),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.rows[0].llc_legal_name).toBe("Ito Payments, LLC");
+  });
+
+  it("treats blank cells, and absent columns, as not given", () => {
+    const blank = parseUserImport(
+      csv([IDENTITY_HEADER, ["Ann", "ann@tapswipe.test", "", "", "  ", ""]]),
+    );
+    expect(blank.ok).toBe(true);
+    if (blank.ok) {
+      expect(blank.rows[0].legal_name).toBeNull();
+      expect(blank.rows[0].llc_legal_name).toBeNull();
+      expect(blank.rows[0].blockers).toEqual([]);
+    }
+
+    const absent = parseUserImport(csv([HEADER, ["Ann", "ann@tapswipe.test", "", ""]]));
+    expect(absent.ok).toBe(true);
+    if (absent.ok) {
+      expect(absent.rows[0].legal_name).toBeNull();
+      expect(absent.rows[0].llc_legal_name).toBeNull();
+    }
+  });
+
+  it("accepts exactly 200 characters and blocks 201, keeping the raw text", () => {
+    const result = parseUserImport(
+      csv([
+        IDENTITY_HEADER,
+        ["Ann", "ann@tapswipe.test", "", "", "L".repeat(200), "C".repeat(200)],
+        ["Bo", "bo@tapswipe.test", "", "", "L".repeat(201), "Lee LLC"],
+        ["Cy", "cy@tapswipe.test", "", "", "Cy Ng", "C".repeat(201)],
+      ]),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [ann, bo, cy] = result.rows;
+
+    expect(ann.blockers).toEqual([]);
+    expect(ann.legal_name).toHaveLength(200);
+
+    expect(bo.blockers).toEqual(["invalid_legal_name"]);
+    expect(bo.legal_name).toBeNull();
+    expect(bo.legal_name_raw).toHaveLength(201);
+    expect(bo.llc_legal_name).toBe("Lee LLC");
+    expect(isBlocking("invalid_legal_name")).toBe(true);
+
+    expect(cy.blockers).toEqual(["invalid_llc_legal_name"]);
+    expect(cy.llc_legal_name).toBeNull();
+    expect(cy.legal_name).toBe("Cy Ng");
+  });
+
+  it("ranks a missing name above an over-long legal name", () => {
+    expect(pickBlocker(["invalid_legal_name", "missing_name"])).toBe(
+      "missing_name",
+    );
+    expect(
+      pickBlocker(["duplicate_email_in_file", "invalid_llc_legal_name"]),
+    ).toBe("invalid_llc_legal_name");
   });
 });
