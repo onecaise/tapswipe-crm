@@ -284,6 +284,7 @@ Everything below was moved verbatim out of this file; one line each.
 - `docs/claude/security-fixes.md` — the Oct 2026 outside-review fixes, all seven phases: (1) merchants admin-only to change, every MID change audited, backfill same-owner rule, owner picker; (2) pre-app children frozen once submitted; (3) anti-framing and hygiene headers on every route; (4) npm wrappers refuse `--project-ref`/`--db-url`, env/key gitignores, no `api-keys` advice; (5) `accounts_in_city` audited and rate-limited (30/hour); (6) the prod DB password passed in `PGPASSWORD`, never on a command line; (7) login CSRF closed — `GET /auth/confirm` verifies nothing, a Continue page POSTs to a Server Action, `recovery` is the only link type, and the reset email template.
 - `docs/claude/security-followups.md` — review findings recorded but deliberately not built, each with severity, evidence and a suggested fix.
 - `docs/claude/reset-business-data.md` — runbook and design notes for the one-off business-data reset (written there, not moved).
+- `docs/claude/deploy-batch-1.md` — the plan for deploying `intake-and-reports` (Phases 1–5) to dev then prod: migrations and their guards, functions to redeploy, test checklist, failure table (written there, not moved).
 - `docs/design/residual-splits.md` — shared-account design memo.
 - `docs/tapswipe_crm_master_plan.md` — product master plan.
 
