@@ -13,6 +13,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **Never touch the live Supabase projects (dev or prod) without asking first**, and treat `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) as live production. Use the guarded `npm run` wrappers, never trust `npm run db:push -- --db-url <prod>`, and run `scripts/push-prod-migration.ps1 -DryRun` before a prod push. → "Hosted projects and deployment" below.
 - **Never run `npx supabase config push`** and **never run `supabase projects api-keys`** by hand. Set the prod DB password with `Read-Host -AsSecureString`, never a literal. → below.
 - **The service-role key belongs in Edge Function secrets only**; the Next app holds the publishable key only, and `.env.deployed.local` stays publishable-keys-only. → "Next.js / auth wiring" below.
+- **`scripts/reset-business-data.sql`** (one-off, hand-run in the SQL Editor, dry run by default) empties every `public` table but `profiles`. **A new `public` table must join its `keep_tables` or `clear_tables`** or it aborts. Never run it from here. → `docs/claude/reset-business-data.md`.
 - **SheetJS stays pinned to the cdn.sheetjs.com 0.20.3 build**, never `npm:xlsx` (two high-severity advisories). → `docs/claude/payouts-and-teardown.md`.
 
 **Database access control**
@@ -112,7 +113,7 @@ Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + 
 
 **Functions are a separate question from the schema, and a migration push does not carry them.** That is `functions deploy`, which is also the one command where `--project-ref` genuinely exists — so deploying to prod needs no relink and no database password, only a logged-in CLI.
 
-**As of 13 Oct 2026 the repo's functions and prod's are different sets.** `business-document-file-url` (13 Oct 2026) is on no hosted project, and neither are its two migrations or the closure migration `20261013121000`; and the three functions removed that day are still deployed on prod (and dev) until deleted there by name. **Thirteen of the then-fourteen were deployed to prod as of 18 Sep 2026** — `marketing-material-file-url` (2 Oct 2026) is NOT, and neither is the migration behind it; the marketing feature is dev-only until someone deploys both deliberately. The thirteen were each, each `ACTIVE` with `verify_jwt = false`. `stage-user-import` and `provision-user-batch` were deployed by name rather than with a bare `functions deploy`, which would have redeployed the eleven working ones for no reason. Verified two ways, because the CLI's success message is not evidence: `functions list --project-ref` reports thirteen, and an unauthenticated POST to each new one returns **401** from its own `withSupabase` guard — where a slug that does not exist returns **404**. That contrast is the check worth copying; a 401 proves the code is running, while `functions list` only proves a record exists.
+**As of 13 Oct 2026 the repo's functions and prod's are different sets** — which ones, and how a prod deploy is verified (401 from the function vs 404 for a missing slug): `docs/claude/project-state.md`.
 
 So `supabase db push`, `functions deploy` and `migration list --linked` target **dev**; `npm run test:deployed` is the exception — it reads `.env.deployed.local` and checks **every** project named there, dev and prod both, so it is the one command whose target does not depend on the link at all. Wording below that says "production" of the linked project means "the hosted project" and is loose — **dev is what those commands hit, and that looseness is exactly what went wrong once.**
 
@@ -281,6 +282,7 @@ Everything below was moved verbatim out of this file; one line each.
 - `docs/claude/dashboard-followups-timeline.md` — dashboard filters (invoker, ANDed on policies), follow-ups in two places, the lead timeline.
 - `docs/claude/security-fixes.md` — the Oct 2026 outside-review fixes, all seven phases: (1) merchants admin-only to change, every MID change audited, backfill same-owner rule, owner picker; (2) pre-app children frozen once submitted; (3) anti-framing and hygiene headers on every route; (4) npm wrappers refuse `--project-ref`/`--db-url`, env/key gitignores, no `api-keys` advice; (5) `accounts_in_city` audited and rate-limited (30/hour); (6) the prod DB password passed in `PGPASSWORD`, never on a command line; (7) login CSRF closed — `GET /auth/confirm` verifies nothing, a Continue page POSTs to a Server Action, `recovery` is the only link type, and the reset email template.
 - `docs/claude/security-followups.md` — review findings recorded but deliberately not built, each with severity, evidence and a suggested fix.
+- `docs/claude/reset-business-data.md` — runbook and design notes for the one-off business-data reset (written there, not moved).
 - `docs/design/residual-splits.md` — shared-account design memo.
 - `docs/tapswipe_crm_master_plan.md` — product master plan.
 
