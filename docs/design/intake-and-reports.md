@@ -1,10 +1,13 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 2, 23 Oct 2026. Design only, decisions taken.** Nothing here is built. No
-migration, function or page has changed, and nothing has been run against dev or prod.
+Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-3 built locally (§10).** Nothing has
+been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
   below says **Recommend**, §0 is what was decided.
+- Owen's decisions of 28 Oct 2026 (§0b), taken from his real residual file and his current payout
+  report, are also binding and **supersede §0 where they differ**: the split is a per-rep rate, not
+  a constant 50, and the file has six columns. §11 lists the questions still open.
 - §9 lists the remaining defaults this memo assumes. The ones marked **[CONFIRM]** affect money,
   security or what reps can see, and are waiting for Owen's confirmation.
 - §8 is the 13-phase build plan, and §8.4 lists the CLAUDE.md rules each phase must change.
@@ -31,12 +34,13 @@ each phase in §8 edits it before the migration.
 
 ## 0. Owen's decisions (23 Oct 2026), binding
 
-1. **Override is a percent of the FULL residual.** 10% of $100 is $10, taken out of the rep's 50%.
-   - The rep nets 50% minus the override, the recipient gets the override, and the company's 50%
-     never moves.
-   - The percent is in 0.01 steps, with `CHECK (override_pct > 0 and override_pct <= 50)`. On a
-     shared account the limit is the reps' combined share, which is also 50, by
-     `merchant_rep_shares`' own CHECK.
+1. **Override is a percent of the FULL residual.** 10% of $100 is $10, taken out of the rep side.
+   *(Cap and rep side restated by §0b.4-5: the rep side is the merchant's split rate, not 50.)*
+   - The rep nets the merchant's rate minus the override, the recipient gets the override, and the
+     company's share (residual minus the merchant's rate) never moves.
+   - The percent is in 0.01 steps, `> 0`, and **no more than the merchant's split rate** (§0b.5).
+     On a shared account the limit is the reps' combined share, which equals the merchant's rate
+     (§0b.4).
    - It is admin-only, settable only once the pre-app is submitted, and audited.
    - The recipient defaults to the rep's manager (`profiles.manager_id`), and may otherwise be any
      named person.
@@ -70,6 +74,52 @@ each phase in §8 edits it before the migration.
 
 ---
 
+## 0b. Owen's decisions (28 Oct 2026), binding; from his real residual file and payout report
+
+1. **File format: six columns, in this order:** `Processor`, `Merchant Number`, `Merchant Name`,
+   `Income Type`, `Volume`, `Residual`. "Merchant Number" is the MID (earlier revisions called the
+   column "MID"). The parser (phase 7) must:
+   - read `Merchant Number` as **text, never as a number**. Real values are 11 to 12 digits, with
+     different prefixes, and may carry leading zeros; a numeric read loses them, and a 12-digit
+     value read through a float is not guaranteed to survive;
+   - tolerate a leading apostrophe, a BOM, or stray whitespace on header cells;
+   - accept currency formatting in `Volume` and `Residual`: `$76,877.18`, `-$11.76`, commas;
+   - **refuse the whole file** if any row's `Income Type` is anything other than `Residuals`
+     (case-insensitive), listing the offending rows;
+   - compare the `Processor` column with the processor chosen on the upload page. A mismatch is a
+     yes/no warning (`processor_mismatch`, as already decided in §0.4). Real files carry one of the
+     five real processor names; Owen's sample uses a placeholder, so **tests use real names**.
+2. **One merchant per MID.** Several MIDs can share one merchant name: a business with 7 locations is
+   7 merchant records, each with its own MID. No schema change (§2.0).
+3. **Warnings come in bulk.** Rows with zero volume and a small or negative residual are common
+   (monthly fees, clawbacks). The yes/no confirmation is **one per warning type per import**, not
+   per line. The commit still recomputes every warning in the database and refuses any type the
+   admin did not confirm.
+4. **A split rate replaces "fixed 50".**
+   - Each rep profile has a rate: default 50, `CHECK` between 0 and 50, set **only** by a new
+     admin-only, audited, `security definer` function `set_rep_split`, never by a direct update.
+   - The **house profile** (agent code 122) has rate 0: the company keeps 100% of those merchants.
+     Their lines are still produced, with a zero rep amount, so reports show the volume and net.
+   - The rate is **copied onto the pre-app at submit and onto the merchant at approval** (a
+     snapshot). Changing a rep's rate later does not change existing merchants.
+   - An admin can change **one merchant's** rate through an audited function, refused while that
+     merchant has an open share.
+   - A shared account divides the **merchant's rate** between the two reps, with the existing cent
+     rule. The company's share is the residual minus the merchant's rate.
+5. **Override cap.** An override is a percent of the full residual, in 0.01 steps, and cannot exceed
+   the **merchant's rate** (not always 50). Rep shares plus override equal exactly the merchant's
+   rate.
+6. **Phase impact.** Phase 4 gains the rate column, `set_rep_split`, and the copy to pre-app (and to
+   merchant at approval). Phase 8 (commit) uses the merchant's rate. Phase 10 uses the new cap.
+   Phase 12 reads rates. §8.1, §8.3 and §8.4 are updated to match.
+7. **Report 1 columns:** agent code, legal name (the LLC name, or the rep's own legal name if no
+   LLC), full name, sales volume, net residual, agent split, deductions (adjustments), override
+   received, total agent commission. **Total commission is split plus override received.** Not
+   included, because the file does not carry them: transactions, total income, total expense,
+   gross, BPSR, rental, bonus (§7.2).
+
+---
+
 ## Headline decisions (as decided)
 
 1. **The payee is the merchant's owner, found by MID.** The file's MID resolves to
@@ -87,12 +137,14 @@ each phase in §8 edits it before the migration.
    contradictions (processor mismatch, inactive merchant, bad numbers) are stored warnings that the
    admin must confirm. The commit RPC recomputes them and refuses any that were not confirmed. That
    makes "yes" enforced in the database, not just a dialog in the browser.
-6. **The rep split is a constant 50, and residuals are not editable after commit.** The split is
-   fixed at commit, removed from the pre-app wizard and pinned by CHECKs. The file's Residual is
+6. **The rep split is the merchant's split rate (§0b.4), and residuals are not editable after
+   commit.** The rate is set per rep by an admin (`set_rep_split`, default 50, between 0 and 50),
+   snapshotted onto the pre-app at submit and onto the merchant at approval, and read from the
+   merchant at commit. It is removed from the pre-app wizard as an input. The file's Residual is
    the pre-split figure. Client UPDATE on `rep_payout_rows` is revoked entirely. A fix is a replace
    before the month is paid, or an adjustment after.
-7. **Override, precisely.** An override is a percent of the **full residual `R`**, capped at 50, and
-   taken out of the rep side. It is set per merchant by an admin, paid to a **named profile**
+7. **Override, precisely.** An override is a percent of the **full residual `R`**, capped at the
+   merchant's split rate (§0b.5), and taken out of the rep side. It is set per merchant by an admin, paid to a **named profile**
    (defaulting to the owner's `manager_id`), and effective by payout month.
    - The commit writes it as a pair of ledger lines: a debit on the rep(s) and a credit on the
      recipient.
@@ -183,7 +235,7 @@ the drift this repo keeps paying for. Adding a processor becomes one `insert` in
 mapped onto the five codes before the FK could be added. The migration checks and raises on any
 non-matching value.
 
-### C. Rep split fixed at 50; overrides by admin after submit
+### C. Rep split from the rep's rate; overrides by admin after submit
 
 **Today.**
 - `pre_apps.split_agent_pct` and `split_company_pct` are `not null default 50`, with the CHECK
@@ -196,16 +248,34 @@ non-matching value.
   `residual_income` and `rep_split_pct` (`20261014160000`).
 - There is no override concept anywhere.
 
-**Changes.**
-- Pre-apps and merchants get `check (split_agent_pct = 50 and split_company_pct = 50)`. The split
-  input leaves the wizard and becomes read-only text: "Rep 50% · Company 50%".
-- The commit writes `rep_split_pct = 50` on every import line.
+**Changes** (rewritten by §0b.4; there is no constant 50).
+- New `profiles.split_rate_pct numeric(5,2) not null default 50`, `CHECK` between 0 and 50. Set only
+  by `set_rep_split(user_id, rate)`: `security definer`, pinned `search_path`, `is_admin()` first,
+  audited `set_rep_split` in the same statement, failing closed, its own privilege lines. Built
+  exactly like `set_rep_identity`. No UPDATE policy or grant on `profiles`; the column never
+  appears in a policy. Manage Users shows it to admins only, as an inline cell.
+- The **house profile** (agent code 122) is set to 0 by an admin after the migration. No rate is
+  hard-coded in a migration.
+- **Snapshot onto the pre-app at submit.** The existing `pre_apps.split_agent_pct` /
+  `split_company_pct` become the snapshot: `submit_pre_app()` overwrites them with the rep's rate
+  and `100 - rate`, so whatever a draft holds is irrelevant (the price-lock principle: the layer
+  that cannot be skipped writes the value). The rep's split input leaves the wizard; the review
+  step shows the rate read-only. `pre_apps` gains `CHECK (split_agent_pct between 0 and 50)`.
+- **Snapshot onto the merchant at approval.** `approve_pre_app()` already copies both columns;
+  `merchants` gains the same 0-50 CHECK. A later `set_rep_split` changes no existing merchant.
+- **Per-merchant change.** `set_merchant_split(merchant_id, rate)`: admin-only, audited, `security
+  definer`, refused while the merchant has an open or future share (§2.5). The merchant form's
+  split input goes, and client UPDATE on the two split columns is removed, so the function is the
+  only write path. Built in phase 8.
+- The commit writes `rep_split_pct = merchants.split_agent_pct` on every import line, including 0
+  for house merchants (a line with a zero rep amount, kept so reports show volume and net).
 - **Decided (§0.5):** client UPDATE on `rep_payout_rows` is removed altogether, for both
   `residual_income` and `rep_split_pct`.
   - The grant is revoked, and `PayoutBulkSplit` and `PayoutFigureCell` go.
   - "Reps cannot change it" is then true at the grant layer, which cannot be skipped.
-  - Admins cannot change it either. The override is the only lever on the split, and replace or
-    adjustment is the only lever on a residual.
+  - Admins cannot change a committed line either. The split of future months moves only by
+    `set_merchant_split` (or by a new merchant snapshotting a new rep rate); the override is the
+    only lever inside a merchant's rate; replace or adjustment is the only lever on a residual.
 - Overrides are new (§4).
 
 ### D. EIN encrypted and redacted
@@ -281,14 +351,22 @@ Functions extended, and the presence check added.
 - There is no alias list, by design.
 - `Residual income` is the **net** figure; `Rep split` is the round trip of what an admin typed.
 
-**Changes.**
-- Exactly five recognised headers: `Processor` (ignored), `Merchant name` (ignored), `MID`,
-  `Volume`, `Residual`.
-- **Required:** `MID`, `Volume` and `Residual`.
-- **Optional, read and discarded:** `Processor` and `Merchant name`.
-- **Recommend** keeping the merchant name as raw text on the staging row, so the review screen can
-  show "file says *Joe's Pizza*, CRM says *Joe's Pizza LLC*". The ledger's `merchant_name` comes
-  from the CRM merchant's `dba`.
+**Changes** (as decided, §0b.1). Owen's real file has exactly six columns, in this order:
+
+| Column | Read as | Use |
+| --- | --- | --- |
+| `Processor` | text | Compared with the processor chosen at upload; a difference is the `processor_mismatch` warning. |
+| `Merchant Number` | **text, never a number** | The MID. 11 to 12 digits, different prefixes, leading zeros possible. |
+| `Merchant Name` | text | Kept raw on the staging row for the review screen ("file says *Joe's Pizza*, CRM says *Joe's Pizza LLC*"). The ledger's `merchant_name` comes from the CRM merchant's `dba`. |
+| `Income Type` | text | Must be `Residuals` (case-insensitive, trimmed) on every row, or the whole file is refused (`wrong_income_type`), listing the rows. |
+| `Volume` | currency | `$76,877.18`, `-$11.76`, plain numbers, commas. |
+| `Residual` | currency | As Volume. The pre-split figure. |
+
+- All six are required headers. Header cells are matched case- and space-insensitively after
+  stripping a leading BOM, a leading apostrophe (Excel's text marker) and surrounding whitespace.
+- The `Merchant Number` cell is read from the sheet's **formatted text** (SheetJS `w`, or `raw:
+  false`), never its numeric value, so `012345678901` keeps its zero. A cell that is not all digits
+  after trimming (and stripping a leading apostrophe) is `missing_mid` / unreadable.
 - A missing `Residual` or `Volume` **cell** is a blocker, `missing_figure`. Today's blank-means-null
   rule would otherwise commit a line with no payout.
 - The export's round trip ends (§2.6).
@@ -314,7 +392,7 @@ commit never re-resolves `r.agent_id`.
 
 | Piece | Where | Fate |
 | --- | --- | --- |
-| Header set incl. `Period`, `Agent #`, `Average ticket`, `Total cost`, `Rep split`, `Line` | `_shared/residuals.ts:24-94` | **Rebuilt.** The five new headers (§1.G). |
+| Header set incl. `Period`, `Agent #`, `Average ticket`, `Total cost`, `Rep split`, `Line` | `_shared/residuals.ts:24-94` | **Rebuilt.** The six new headers (§1.G, §0b.1). |
 | `parsePeriodCell` (per-row month) | `residuals.ts:348-406` | **Removed from the import path.** The month comes from the batch. The function can stay for tests, or be deleted. |
 | Blocker `unknown_agent` plus the Agent # lookup | `parse-residual-import/index.ts:179-210, 396-401` | **Removed.** |
 | "Unrecognised agent numbers" UI: Assign to a rep / Create the rep | `/payouts/import/[batchId]/page.tsx:221-279`, `reviewImportRows` grouping in `lib/payouts.ts:542-602`, `FIXABLE_BLOCKER` | **Removed.** Replaced by the unknown-MID list (§2.4). |
@@ -330,7 +408,7 @@ commit never re-resolves `r.agent_id`.
 | `skipped_rows`, `skips_acknowledged_at`, `acknowledge_residual_skips()`, `ResidualSkipsNotice` | `20261016120000`, `20261016140000` | **Kept in the schema, no longer written.** Nothing is skipped any more: every row is either refused or committed. The columns stay so the code that reads them keeps working, and the new commit writes `'[]'`. **Recommend** removing the UI in the cleanup phase. Dropping the columns is optional, since there is no hosted data. |
 | `adjustment_rows_ignored`, `isAdjustmentLine`, the `Line` column | `residuals.ts:88-90, 494-501` | **Removed from the parser.** The export is no longer an import format (§2.6), so there is no round trip to protect. The column on batches stays and is written as 0. |
 | Merge key `rep_payout_rows_import_merge_key` (period, agent_id, mid) where import | `20261016160000:108-110` | **Rebuilt** as (period, processor, agent_id, mid) where import. Every `on conflict` still says `where line_kind = 'import'`. |
-| Coalesce merge rule `coalesce(excluded.<col>, rep_payout_rows.<col>)` | both commits | **Retired with the merge.** First import of a (processor, month) is a plain insert, and a second is a replace (§3). Nothing hand-entered exists to preserve, because residual and split now come from the file and the constant. **This removes a rule CLAUDE.md calls binding**, so the phase that does it must also edit CLAUDE.md and `payouts-and-teardown.md`. The test that greps for the coalesce moves with the retired functions. |
+| Coalesce merge rule `coalesce(excluded.<col>, rep_payout_rows.<col>)` | both commits | **Retired with the merge.** First import of a (processor, month) is a plain insert, and a second is a replace (§3). Nothing hand-entered exists to preserve, because residual and split now come from the file and the merchant's rate. **This removes a rule CLAUDE.md calls binding**, so the phase that does it must also edit CLAUDE.md and `payouts-and-teardown.md`. The test that greps for the coalesce moves with the retired functions. |
 | `commit_residual_import(int)` (old, **on prod**) | `20261016160000:131-244` | **Dropped** once the new app is deployed on both projects. Same condition as residual-splits §5.1, which is unchanged. |
 | `commit_residual_import_v2(int)` (**on no hosted project**) | `20261016160000:246-454` | **Dropped in the same migration that adds v3.** No deployed app calls it: nothing from `20261014120000` on is hosted. |
 | `set_shared_residual()` + `SharedResidualControl` | `20261014140000:338-402` | **Retired** in phase 11. The file supplies the residual, so the commit writes `account_residual_income` and both pieces. |
@@ -340,6 +418,15 @@ commit never re-resolves `r.agent_id`.
 | `export-residuals` | `index.ts:159-175` | **Kept as a download, header changed** (§2.6). Still caller-scoped, still never `supabaseAdmin`. |
 | Period delete (`payout-period-delete.tsx`) | client `DELETE … eq(period)` | **Replaced** by an RPC (§3.4). **Existing defect:** it writes no `audit_log` row, though `20260817102000:328` and the schema doc say it does. |
 | Tests and fixtures | §8.3 | Estimate in §8.3. |
+
+### 2.0 Data model: one merchant per MID
+
+A merchant record has exactly one MID (`merchants.mid`, unique where set), and the import resolves
+each file row by MID alone. **Several MIDs may share one merchant name**: a business with 7
+locations is 7 merchant records, one per MID, each with its own owner, processor and split rate.
+Nothing groups them, and nothing needs to: the payee, the rate and any override are per MID. No
+schema change (§0b.2). Report 2 is therefore one row per MID; two rows with the same DBA are two
+locations, not a duplicate.
 
 ### 2.2 New flow
 
@@ -358,20 +445,23 @@ commit never re-resolves `r.agent_id`.
    - Otherwise it creates the batch with `processor`, `period` and `replaces_batch_id`, and signs
      the upload, as today.
 2. **Parse** (`parse-residual-import`, still idempotent, still admin-only, still first sheet only):
-   - Read the five headers and resolve each MID against `merchants.mid`.
+   - Read the six headers (§1.G). Refuse the whole file if any row's `Income Type` is not
+     `Residuals`, listing the rows. Read `Merchant Number` as text and resolve it against
+     `merchants.mid`.
    - Stage one row per file row, with:
      - `merchant_id` and `agent_id`, both from the merchant
-     - `volume` and `residual_income`
-     - `merchant_name_raw` and `processor_raw`
+     - `volume` and `residual_income`, parsed from currency text
+     - `merchant_name_raw`, `processor_raw` and `income_type_raw`
      - `blocker`
      - `warnings text[]`, a new column
      - `preview_flag` / `preview_note`, for the informational flags
 3. **Review screen.**
    - Blocked rows, starting with unknown or repeated MIDs, mean **Commit is disabled**, with the
      list and "Read again".
-   - Otherwise, one confirmation block per warning class present, each listing its rows, with
-     **Yes / No** buttons.
-   - Commit is enabled only when every class present has a Yes. A No on any class means the admin
+   - Otherwise, **one confirmation block per warning type present in the import** (never one per
+     line, §0b.3), each listing its rows (collapsed past the first few, since zero-volume fee and
+     clawback rows are common), with **Yes / No** buttons.
+   - Commit is enabled only when every type present has a Yes. A No on any type means the admin
      abandons the batch or fixes the data and reads again.
 4. **Commit**: `commit_residual_import_v3(batch_id_input int, confirmed_input text[])`
    (§2.3).
@@ -391,9 +481,10 @@ and override edits cannot interleave with a commit. Its own `revoke` / `grant ex
    - This also closes the security follow-up "Block a staged residual row whose merchant's MID
      changed".
 3. **Recompute the warnings** from current data.
-   - If the set of warning **classes** present is not a subset of `confirmed_input`, refuse PT409,
-     naming the unconfirmed classes. A warning that appeared after the review cannot be committed
-     on an old "yes".
+   - If the set of warning **types** present is not a subset of `confirmed_input`, refuse PT409,
+     naming the unconfirmed types. A warning that appeared after the review cannot be committed
+     on an old "yes". Confirmation is per type per import, so one "yes" covers every row of that
+     type, but every row is still recomputed (§0b.3).
    - Store `confirmed_warnings` (jsonb: classes and the row numbers each covered) on the batch.
 4. **Replace.** If `replaces_batch_id` is set, run the replace steps in §3.2 first, in the same
    transaction.
@@ -401,14 +492,17 @@ and override edits cannot interleave with a commit. Its own `revoke` / `grant ex
    - **Unshared** row: an insert with:
      - `agent_id` = owner, `mid`, `merchant_id`, `merchant_name` = `merchants.dba`
      - `processor` = batch processor, `period` = batch period
-     - `volume`, `residual_income` = file Residual, `rep_split_pct = 50`
+     - `volume`, `residual_income` = file Residual,
+       `rep_split_pct = merchants.split_agent_pct` (the merchant's rate, §0b.4; 0 for a house
+       merchant, which still gets its line)
      - `batch_id`, `line_kind = 'import'`
    - A repeated MID never reaches this step: `duplicate_mid` blocks the batch (§0.4). v3 re-checks
      it as a guard, and refuses PT409 if it is present.
    - **Shared** row, where a share covers the batch month: signer and partner lines as v2 builds
-     them, with one change. `account_residual_income` = the file Residual, and both
+     them, with two changes. `account_residual_income` = the file Residual, and both
      `residual_income` pieces come from `shared_part`, **at commit**. v2 left these null and waited
-     for `set_shared_residual`. Volume stays on the signer line only.
+     for `set_shared_residual`. And the two shares divide the **merchant's rate**, not 50 (§2.5).
+     Volume stays on the signer line only.
 6. **Override lines** for every override active in the batch month on a committed merchant (§4.5).
 7. Delete the staging rows and set the status to `committed`, with `committed_at`,
    `row_count = written`, `skipped_rows = '[]'`. Write the audit row
@@ -423,10 +517,11 @@ and override edits cannot interleave with a commit. Its own `revoke` / `grant ex
 | `unknown_mid` | **Blocker; refuses the batch** | `mid_raw` matches no `merchants.mid` (exact text after trim, as today's lookup). | Not confirmable. The review screen's red Callout at the top: "This import is refused. 3 MIDs are not merchants in the CRM: 4400…, 4401…, 4402…. Add them (or correct their MID), then Read again." The screen is the alert (§9, A9). |
 | `duplicate_mid` | **Blocker; refuses the batch** | The same MID appears on more than one row of the file. | Not confirmable. The Callout lists each repeated MID with its sheet rows: "MID 4400… appears on rows 7 and 31. Fix the file and upload it again." |
 | `mid_in_other_batch` | **Blocker** | That MID already has an import line for this month from a *different* processor's committed batch. | Not confirmable. Two processors cannot both pay one MID in one month without double payment, so the admin resolves which file is wrong. |
-| `missing_mid`, `missing_figure`, `unreadable_number` | Blockers | As today, plus a blank Volume or Residual. `unreadable_number` is today's `bad_number`, renamed so that "bad numbers" means only the confirmable warning below. | Not confirmable. |
-| `processor_mismatch` | Warning | `merchants.processor` is set and differs from the batch processor. **A merchant with no processor is not a mismatch** (§9, A6). | The lines are recorded under the **batch's** processor. The merchant's processor is not changed automatically; the review screen links to the merchant. |
+| `wrong_income_type` | **Blocker; refuses the file** | A row's `Income Type` is not `Residuals` (case-insensitive, trimmed) (§0b.1). | Not confirmable. The Callout lists the rows and what each says. |
+| `missing_mid`, `missing_figure`, `unreadable_number` | Blockers | As today, plus a blank Volume or Residual. `unreadable_number` is today's `bad_number`, renamed so that "bad numbers" means only the confirmable warning below. Currency text (`$76,877.18`, `-$11.76`) is readable; anything else is not. | Not confirmable. |
+| `processor_mismatch` | Warning | The row's `Processor` cell differs from the batch processor (§0b.1), **or** `merchants.processor` is set and differs from it. **A merchant with no processor is not a mismatch** (§9, A6). | The lines are recorded under the **batch's** processor. The merchant's processor is not changed automatically; the review screen links to the merchant. |
 | `inactive_merchant` | Warning | `merchants.status = 'inactive'`. `'other'` does not trigger it. | Paid to the owner as normal. |
-| `bad_numbers` | Warning | `volume <= 0`, or `residual > volume`. | Imported as read. **Needs a schema change:** `rep_payout_rows_volume_check` (`volume >= 0`) would refuse a negative volume. It becomes `volume >= 0 or volume_confirmed_negative`, where `volume_confirmed_negative` is a boolean only v3 sets, and only for a row whose `bad_numbers` warning was confirmed. So a negative volume can enter **only** through this path (§0.4), and the column records which lines did. |
+| `bad_numbers` | Warning | `volume <= 0`, or `residual > volume`. Common on real files: zero-volume rows with a small or negative residual are monthly fees and clawbacks (§0b.3), so one "yes" per import covers them all. | Imported as read. **Needs a schema change:** `rep_payout_rows_volume_check` (`volume >= 0`) would refuse a negative volume. It becomes `volume >= 0 or volume_confirmed_negative`, where `volume_confirmed_negative` is a boolean only v3 sets, and only for a row whose `bad_numbers` warning was confirmed. So a negative volume can enter **only** through this path (§0.4), and the column records which lines did. |
 
 The warning codes live in a CHECKed vocabulary on `rep_payout_import_rows.warnings` (each element
 `in (…)`, enforced by a trigger or a CHECK over `array <@`). The rule for each lives **once**, in
@@ -436,9 +531,13 @@ the warnings the parser stored to equal the set v3 demands.
 
 ### 2.5 Shared accounts under the owner rule
 
-The share feature keeps working. Signer and partner divide the 50 in the admin's ratio, the cent
-rule still holds, and the partner still gets no merchant access. One invariant becomes mandatory,
-because "the rep the file names" no longer exists:
+The share feature keeps working. Signer and partner divide **the merchant's split rate** (§0b.4) in
+the admin's ratio, the cent rule still holds, and the partner still gets no merchant access.
+`merchant_rep_shares`' CHECK `primary_rep_pct + secondary_rep_pct = 50.00` becomes "equals the
+merchant's `split_agent_pct`": a CHECK cannot read `merchants`, so `set_merchant_rep_share()`
+enforces it and the CHECK is relaxed to `<= 50` (phase 8). It holds over time because
+`set_merchant_split` is refused while a share is open or future. A house merchant (rate 0) cannot
+be shared. One invariant becomes mandatory, because "the rep the file names" no longer exists:
 
 > **A share's signer is the merchant's owner.** `primary_agent_id = merchants.agent_id` for every
 > month the share covers.
@@ -461,8 +560,8 @@ How shares combine with overrides is in §4.4.
 - The export stays a download of the caller's own lines; RLS scopes it, never the service role.
 - New header: `Period, Processor, Agent #, Agent, MID, Merchant name, Volume, Residual, Rep split,
   Rep payout, Line, Account share`. `Line` gains `Override`.
-- **It is no longer importable**, because the import reads only `Processor, Merchant name, MID,
-  Volume, Residual`.
+- **It is no longer importable**, because the import requires `Processor, Merchant Number, Merchant
+  Name, Income Type, Volume, Residual`.
 - **Recommend** the parser refuse a file carrying `Agent #` or `Rep payout` with "This looks like a
   CRM export, not a processor file". An exported sheet then cannot be re-imported by mistake with
   each shared account's volume counted once per rep.
@@ -558,24 +657,29 @@ What happens to each dependent piece:
 
 ### 4.1 Definition
 
-An override is a **percent of the full account residual `R`**, taken out of the rep side. With rep
-side `T = round_half_away(R × 50 / 100)` and override percent `o`:
+An override is a **percent of the full account residual `R`**, taken out of the rep side. With the
+merchant's split rate `s` (§0b.4, `merchants.split_agent_pct`, 0-50), rep side
+`T = round_half_away(R × s / 100)` and override percent `o`:
 
-| Example: R = $100, o = 10 | Amount |
+| Example: R = $100, s = 50, o = 10 | Amount |
 | --- | --- |
 | Rep side T | $50.00 |
 | Override X | **$10.00**, paid to the recipient |
 | Rep nets | $40.00 |
-| Company | $50.00, unchanged |
+| Company | $50.00 (R − T), unchanged |
 
 The rules:
 
-- **`0 < o ≤ 50`, in 0.01 steps** (`numeric(5,2)`). `o = 50` sends the whole rep side to the
-  recipient and leaves the rep zero, never negative.
-- On a shared account, the cap is the reps' **combined** share. That is always 50, because
-  `merchant_rep_shares` CHECKs `primary_rep_pct + secondary_rep_pct = 50.00`, so one CHECK
-  (`override_pct <= 50`) enforces both. If the rep side ever stops being a constant 50, this CHECK
-  and that one must move together, and a comment on each says so.
+- **`0 < o ≤ s`, in 0.01 steps** (`numeric(5,2)`), §0b.5. `o = s` sends the whole rep side to the
+  recipient and leaves the rep zero, never negative. A house merchant (`s = 0`) cannot carry an
+  override.
+- The table CHECK stays `override_pct > 0 and override_pct <= 50` (the widest any rate can be). The
+  per-merchant cap `o ≤ s` cannot be a CHECK, because it reads `merchants`, so
+  `set_merchant_override()` enforces it, and `set_merchant_split()` refuses a new rate below an open
+  or future override's percent (assumed, §9 A29). v3 re-checks `o ≤ s` per row and refuses PT409
+  as a backstop.
+- On a shared account, the cap is the reps' **combined** share, which equals `s` (§2.5). Rep shares
+  plus override equal exactly `s`.
 - **Recipient:** a named active profile. It defaults to the owner's `profiles.manager_id`,
   prefilled in the form but editable. It may not be a party to the account: refusing the owner or
   either share party keeps the arithmetic meaningful.
@@ -589,8 +693,9 @@ create table merchant_overrides (
   id serial primary key,
   merchant_id  int  not null references merchants(id) on delete restrict,
   recipient_id uuid not null references profiles(id),          -- 26th profiles FK
-  -- % of the FULL residual, taken from the rep side. <= 50 because the rep side is 50
-  -- (and a shared account's two rep shares total 50: merchant_rep_shares_check). Move together.
+  -- % of the FULL residual, taken from the rep side. <= 50 because no split rate exceeds 50
+  -- (profiles/pre_apps/merchants CHECKs). The real cap, <= the merchant's split_agent_pct, is
+  -- enforced by set_merchant_override() and re-checked by commit v3. Move together.
   override_pct numeric(5,2) not null check (override_pct > 0 and override_pct <= 50),
   effective_from date not null check (extract(day from effective_from) = 1),
   effective_to   date check (effective_to is null or (extract(day from effective_to) = 1
@@ -652,26 +757,30 @@ create table merchant_overrides (
 
 For a merchant in month M:
 - `R` is the file residual
-- `T = round_half_away(R × 50 / 100)` is the rep side, exactly today's `rep_payout` expression
-- `o` is the override percent, with `o ≤ 50`
+- `s` is the merchant's split rate, `0 ≤ s ≤ 50`
+- `T = round_half_away(R × s / 100)` is the rep side, today's `rep_payout` expression with
+  `rep_split_pct = s`
+- `o` is the override percent, with `o ≤ s`
 
-1. **Override total.** `X = round_half_away(R × o / 100)` in cents. Because `o ≤ 50` and the
+1. **Override total.** `X = round_half_away(R × o / 100)` in cents. Because `o ≤ s` and the
    rounding is monotone and odd, `|X| ≤ |T|`, and `X` has the sign of `R`. In a clawback month
    (`R < 0`) the recipient gives back their cut in the same proportion.
 2. **Unshared:** one debit line on the owner, `−X`, and one credit line on the recipient, `+X`.
    The owner nets `T − X`.
-3. **Shared** (signer `a`, partner `b`, `a + b = 50`):
-   - The debit is divided the way the payout is: `x_p = shared_part(X, b, 50)` and `x_s = X − x_p`.
+3. **Shared** (signer `a`, partner `b`, `a + b = s`):
+   - The debit is divided the way the payout is: `x_p = shared_part(X, b, s)` and `x_s = X − x_p`.
    - So the signer has a debit of `−x_s`, the partner a debit of `−x_p`, and the recipient one
      credit of `+X`.
    - The signer absorbs the odd cent, as in residual-splits §4.
 4. **Invariants**, tested exhaustively the way `shared_part` is: every R from −$100 to $100 by the
-   cent, × o ∈ {0.01, 5, 10, 33.33, 49.99, 50}, × the splits 25+25, 40+10, 0.01+49.99. Each
-   assertion is shown non-vacuous by reverting the formula.
-   - signer net + partner net + recipient credit = `T` exactly, so the company's 50% never moves
+   cent, × s ∈ {50, 46, 30, 0.01}, × o ∈ {0.01, 5, 10, 33.33, 49.99, 50} where `o ≤ s`, × the
+   splits of `s` (for 50: 25+25, 40+10, 0.01+49.99). Each assertion is shown non-vacuous by
+   reverting the formula.
+   - signer net + partner net + recipient credit = `T` exactly, so the company's `R − T` never
+     moves
    - debits + credit = 0
    - `f(−R) = −f(R)`
-   - `o = 50` gives the rep side exactly zero net
+   - `o = s` gives the rep side exactly zero net
    - no rep's net has the opposite sign to their own share of `T`
 5. The override lines carry the batch's `batch_id`, so a replace deletes and rebuilds them with the
    import lines (§3.2 step 3).
@@ -682,11 +791,12 @@ For rep `P` and month `M`:
 
 | Report column | Computation |
 | --- | --- |
-| Earned after split | `sum(rep_payout)` over `P`'s **import** lines, for both unshared lines and either side of a share. |
-| Override on their accounts, and the $ subtracted | `−sum(override_amount)` over `P`'s **debit** override lines. Shown as a positive "$10.00 subtracted", with the percent, merchant and recipient in a detail row. |
-| Overrides received | `sum(override_amount)` over `P`'s **credit** lines (§9, A4d **[CONFIRM]**). |
-| Adjustments | `sum(rep_payout)` over `P`'s adjustment lines posted in `M`. |
-| **Total agent commission** | `sum(rep_payout)` over every line `P` has in `M`, which equals earned − subtracted + received + adjustments. Because it is the same sum every existing page uses, the report can never disagree with the statement. |
+| Earned after split | `sum(rep_payout)` over `P`'s **import** lines, for both unshared lines and either side of a share. Each line used its merchant's rate (§0b.4); a house merchant's line contributes 0. |
+| Override on their accounts, and the $ subtracted | `−sum(override_amount)` over `P`'s **debit** override lines, with the percent, merchant and recipient in a detail row. |
+| **Agent split** (Report 1) | Earned after split minus the override subtracted: what `P` keeps from their own merchants. |
+| Overrides received | `sum(override_amount)` over `P`'s **credit** lines (§0b.7: a Report 1 column). |
+| Deductions (adjustments) | `sum(rep_payout)` over `P`'s adjustment lines posted in `M`. |
+| **Total agent commission** | **Agent split + overrides received** (§0b.7, as Owen decided). Whether deductions are also subtracted is open (§11, Q4): until answered, the page shows deductions in their own column and a test pins that `total + deductions = sum(rep_payout)` over every line `P` has in `M`, so the report and the statement reconcile on the screen. |
 
 ---
 
@@ -830,7 +940,9 @@ table) checks
 - **Secrets:** a tax-id row of the chosen type (§5), and a banking row. **Not** the RP password.
 - **Rep identity:** the pre-app's rep (`pre_apps.agent_id`, not the caller, so an admin submitting
   on a rep's behalf is held to the same rule) has both `legal_name` and `llc_legal_name` set on
-  their profile (§0.6, §7). They are snapshotted onto the pre-app by the submit.
+  their profile (§0.6, §7). They are snapshotted onto the pre-app by the submit, together with the
+  rep's split rate (§0b.4, `profiles.split_rate_pct` → `pre_apps.split_agent_pct`). The rate always
+  has a value (default 50), so it is never a missing item.
 - **Kept:** the card-mix pair totals.
 
 **Country.** Today it is free text with no default.
@@ -899,17 +1011,23 @@ table(...)` is `security invoker`, so RLS scopes it exactly as it does `/payouts
 admin-only. If a rep ever called the function, they would get their own rows only, which is the
 `dashboard_counts` / `search_crm` property. A test asserts `prosecdef = false`.
 
+Columns, in Owen's order (§0b.7). Per rep, per month (`rep_payout_rows.period`):
+
 | Column | Source |
 | --- | --- |
 | Agent code | `profiles.agent_number` (still unique and admin-set; no longer used by the import) |
-| Legal name | `profiles.llc_legal_name` (§9, A17) |
-| Rep name | `profiles.legal_name`, falling back to `full_name` |
-| Month and year | `rep_payout_rows.period` |
-| Total sales volume | `sum(volume)` over the rep's import lines that month. On a shared account, volume is on the **signer's line only** (residual-splits Q4), so the partner shows none for it. Whether a partner should count the account's volume is a question (§9, A18). |
-| Amount earned after split | §4.5 "Earned after split" |
-| Override on their accounts, and the $ subtracted | §4.5, with the percent and the recipient in a detail row |
-| Overrides received | §4.5 (recommended extra column) |
-| Total agent commission | §4.5: the sum of every line |
+| Legal name | `profiles.llc_legal_name`, which holds the rep's own legal name when there is no LLC (A16) |
+| Full name | `profiles.full_name` |
+| Sales volume | `sum(volume)` over the rep's import lines that month. On a shared account, volume is on the **signer's line only** (residual-splits Q4), so the partner shows none for it (§9, A18). |
+| Net residual | `sum(residual_income)` over the rep's import lines (the pre-split figure; on a shared account, the rep's piece) |
+| Agent split | §4.5 "Agent split": earned at the merchants' rates, minus overrides taken from the rep's accounts |
+| Deductions (adjustments) | §4.5 |
+| Override received | §4.5 |
+| Total agent commission | **Agent split + override received** (§0b.7; §11 Q4 on deductions) |
+
+The rep's split rate is read from the lines (`rep_split_pct`, the merchant's rate at commit), never
+from `profiles.split_rate_pct`, which may have changed since. **Not included**, because the file
+does not carry them (§0b.7): transactions, total income, total expense, gross, BPSR, rental, bonus.
 
 **Report 2: merchants by processor.** `merchant_processor_summary(period_from, period_to)` is also
 an invoker function.
@@ -918,7 +1036,8 @@ an invoker function.
 - Volume is the sum of import-line volume, so the signer's line only.
 - Residual is the sum of the **account** residual: `account_residual_income` on the primary line of
   a shared account, `residual_income` on an unshared line. The partner's piece is not added again.
-- Optionally a rep-side column and a company-share column, since both are derivable.
+- Optionally a rep-side column and a company-share column, since both are derivable (company share
+  = residual − rep side at the merchant's rate; 100% for a house merchant).
 - One row per merchant per processor, with a totals row per processor.
 - Admin sees every merchant, by RLS.
 
@@ -954,15 +1073,15 @@ Thirteen phases, one prompt and one commit each, with the schema doc edited firs
 | 1 | Processor vocabulary | `processors` reference table and seed, FK from `merchants.processor` and new `pre_apps.processor`, `approve_pre_app()` copies it, one `<ProcessorSelect>` on the merchant form and the wizard. | **P** | `rls/grants` (new table's grants), `rls/pre-app-state-machine` (approve copies processor), `rls/merchants` + `rls/merchants-admin-only-writes` (FK refusal on free text), `e2e/merchant-owner` (form field) |
 | 2 | Rep identity | `profiles.legal_name` + `llc_legal_name`, admin-only `set_rep_identity()` with audit, on the create-user screen, Manage Users and the bulk user import. | **P** | `live/manage-users` + `live/user-provision` (create-user fields), `unit/user-import-parse` + `unit/user-import-lib` (two CSV columns, `isBlocking` pair), `rls/user-imports` (staging columns), `e2e/user-import` |
 | 3 | Tax id to secrets | `pre_app_tax_secrets` (EIN or SSN by `tax_id_type`, zero policies/grants), drop `pre_apps.ein_number`, `ein_type in ('EIN','SSN')`, the `tax_id` kind in both secrets functions with the validator pair, presence gains `tax_id_on_file`. | **P** | `rls/grants` + `rls/pre-app-secrets-presence` (fourth table), `rls/pre-apps` (column gone, type CHECK), `live/pre-app-secrets` (+tax-id rejects, round trip, last-four, type mismatch), `unit/pre-app-logic` (EIN mask now secrets-side), `unit/pre-app-form-fields` (`SECRET_FIELDS`), `e2e/qa/pre-app-sensitive-inputs`, `e2e/print` (still no secrets) |
-| 4 | Required fields and split lock | `pre_app_missing_fields()` used by `submit_pre_app()` and the review step, snapshot of rep identity onto the pre-app, the `split_* = 50` and `country = 'US'` CHECKs, the wizard's required markers and step badges, the split input removed, the paper checklist generated. | **P** | `rls/pre-app-state-machine` (submit-validation block rewritten; `makeSubmittable()` must fill every field), `rls/pre-app-children-draft-only` + `rls/pre-app-secrets-presence` (fixtures that submit), `rls/pre-apps` (split), `unit/pre-app-logic` ("blockers mirror the RPC" retired), `unit/pre-app-location`, `unit/pre-app-form-fields` (checklist count 9 → generated), `e2e/pre-app-wizard`, `e2e/qa/pre-app-labels`, `e2e/merchant-location` (submits a pre-app) |
+| 4 | Required fields and split rate | `pre_app_missing_fields()` used by `submit_pre_app()` and the review step; snapshot of rep identity **and the rep's split rate** onto the pre-app at submit (approval already copies `split_*` to the merchant); `profiles.split_rate_pct` (default 50, CHECK 0-50) with admin-only audited `set_rep_split()` and an admin-only Manage Users cell; `split_agent_pct` 0-50 CHECKs on pre-apps and merchants; `country = 'US'`; the wizard's required markers and step badges; the split input removed; the paper checklist generated. | **P** | `rls/pre-app-state-machine` (submit-validation block rewritten; `makeSubmittable()` must fill every field; approval copies the snapshot rate), `rls/pre-app-children-draft-only` + `rls/pre-app-secrets-presence` (fixtures that submit), `rls/pre-apps` (split), `rls/grants` (`set_rep_split` privileges), `unit/pre-app-logic` ("blockers mirror the RPC" retired), `unit/pre-app-location`, `unit/pre-app-form-fields` (checklist count → generated), `live/manage-users` (rate cell), `e2e/pre-app-wizard`, `e2e/qa/pre-app-labels`, `e2e/merchant-location` (submits a pre-app) |
 | 5 | Pre-app visibility | `PreAppSummary` shows every stored field to both roles; a masked Sensitive data section on the detail page; admin per-field reveal with its own audit tier (the security follow-up). | **P** | `live/pre-app-secrets` (read tiers: default last-four for admins too), `e2e/qa/pre-app-sensitive-inputs`, `e2e/print` |
 | 6 | Import schema | Batches gain `processor`, `period` and replace columns, status `replaced`, and one committed batch per (processor, month). Staging gains `warnings` and the new blocker vocabulary. Ledger gains `processor`, the merge key with processor, and the confirmed-negative-volume column. `payout_period_closures` + `close_payout_period()`. Empty-table assertions. | **R** | `rls/rep-payouts` (merge key, volume CHECK), `rls/import-merge-key` (catalog diff), `rls/batch-status-transitions` (+`replaced`), `rls/commit-residual-import` + `-v2` (fixtures gain processor/period), `rls/acknowledge-residual-skips` + `rls/shared-lines` + `rls/share-corrections` (fixtures), `rls/grants` |
-| 7 | Parser and upload page | Five-header parser (MID, Volume, Residual; Processor and Merchant name ignored); MID → merchant → owner; the two refusals and three warnings; the upload page with processor, month, year and the replace prompt; the review screen's refusal Callout and yes/no blocks; Agent # UI removed. | **R** | `unit/residuals-parse` (mostly rewritten), `unit/residuals-preview` (three flags removed), `unit/payouts` (`reviewImportRows`, blockers, flag labels), `unit/figure-comma` (`COLUMN_HEADERS`), `live/residual-import` (upload → parse half), `e2e/qa/residual-bad-import`, `e2e/qa/residual-import-comma`; fixtures `seed-dev-payouts.mjs` and `e2e/fixtures/seed.ts` (`createCommittableBatch`, `createSkippingBatch`) |
-| 8 | Commit v3 | `commit_residual_import_v3(batch, confirmed[])`: re-resolves the owner, recomputes and enforces confirmations, split 50, residual from the file, shared pair from the file. `commit_residual_import_v2` dropped. The share signer must be the owner, and the merchant owner-change guard is added. | **R** | `rls/commit-residual-import-v2` (deleted, replaced by a v3 file), `rls/merchant-rep-shares` (signer = owner, owner-change refusal), `rls/my-share-partners` (fixtures), `live/residual-import` (commit half, parse-vs-commit parity), `live/rep-share-teardown`, `e2e/payouts-commit`, `e2e/residual-skips` (retired), `e2e/payouts-shares` (fixtures) |
+| 7 | Parser and upload page | Six-header parser (§1.G: Processor, Merchant Number, Merchant Name, Income Type, Volume, Residual); Merchant Number read as text; BOM/apostrophe/whitespace-tolerant headers; currency-formatted figures; whole-file refusal on a non-`Residuals` Income Type; file Processor vs chosen processor as the `processor_mismatch` warning; MID → merchant → owner; the refusals and three warnings, confirmed once per type per import; the upload page with processor, month, year and the replace prompt; the review screen's refusal Callout and yes/no blocks; Agent # UI removed. Tests use real processor names. | **R** | `unit/residuals-parse` (mostly rewritten), `unit/residuals-preview` (three flags removed), `unit/payouts` (`reviewImportRows`, blockers, flag labels), `unit/figure-comma` (`COLUMN_HEADERS`), `live/residual-import` (upload → parse half), `e2e/qa/residual-bad-import`, `e2e/qa/residual-import-comma`; fixtures `seed-dev-payouts.mjs` and `e2e/fixtures/seed.ts` (`createCommittableBatch`, `createSkippingBatch`) |
+| 8 | Commit v3 | `commit_residual_import_v3(batch, confirmed[])`: re-resolves the owner, recomputes and enforces confirmations, **split = the merchant's rate** (house merchants at 0 still get a line), residual from the file, shared pair from the file. `commit_residual_import_v2` dropped. The share signer must be the owner, the two shares total the merchant's rate, and the merchant owner-change guard is added. `set_merchant_split()` (admin-only, audited, refused while a share is open or future) replaces the merchant form's split input, and client UPDATE on the merchant split columns is removed. | **R** | `rls/commit-residual-import-v2` (deleted, replaced by a v3 file), `rls/merchant-rep-shares` (signer = owner, owner-change refusal, shares total the rate), `rls/merchants-admin-only-writes` (split columns RPC-only), `rls/my-share-partners` (fixtures), `e2e/merchant-owner` (split input gone), `live/residual-import` (commit half, parse-vs-commit parity), `live/rep-share-teardown`, `e2e/payouts-commit`, `e2e/residual-skips` (retired), `e2e/payouts-shares` (fixtures) |
 | 9 | Replace, Mark paid, adjustments | Replace inside v3 (refused once paid or when a correction targets the month), the "Mark paid" button with its typed confirmation, an admin-only "Reopen" requiring a written reason (`reopen_payout_period(period, processor, reason)`, definer, `is_admin()` first, audited, fails closed; A8), `delete_payout_period()` replacing the client delete (revokes DELETE), and a general `post_payout_adjustment()` for paid months (§0.5). | **R** | `rls/rep-payouts` (delete tests become RPC tests), `rls/grants` (DELETE revoked), `rls/share-corrections` + `rls/share-correction-posting-period` (posting month now shared with the general RPC), `e2e/payouts-roles` (delete), `e2e/payouts-adjustments` |
-| 10 | Overrides | `merchant_overrides` (`0 < pct ≤ 50` of the full residual), set/end/cancel RPCs, override lines written by v3, the `rep_payout` generated-column branch, the merchant-page override card, statement lines, and the cross-book name read function. 26th `profiles` FK. | **R**, needed before the first imported month any override applies to | `rls/user-imports` (FK count 25 → 26, by name), `rls/shared-lines-rewrite` (generated column), `rls/shared-part` (reused for the debit division), `unit/payouts` (`payoutTotals`, `PAYOUT_ROW_COLUMNS`), `live/rep-share-teardown` + all four teardown lists, `e2e/payouts-rendering` + `e2e/payouts-shares` (statement lines) |
+| 10 | Overrides | `merchant_overrides` (`0 < pct ≤` the merchant's rate, of the full residual; table CHECK ≤ 50, the per-merchant cap in the RPC and v3), set/end/cancel RPCs, `set_merchant_split` refusing a rate below an open override, override lines written by v3, the `rep_payout` generated-column branch, the merchant-page override card, statement lines, and the cross-book name read function. 26th `profiles` FK. | **R**, needed before the first imported month any override applies to | `rls/user-imports` (FK count 25 → 26, by name), `rls/shared-lines-rewrite` (generated column), `rls/shared-part` (reused for the debit division), `unit/payouts` (`payoutTotals`, `PAYOUT_ROW_COLUMNS`), `live/rep-share-teardown` + all four teardown lists, `e2e/payouts-rendering` + `e2e/payouts-shares` (statement lines) |
 | 11 | Residual lock and payout UI cleanup | Revoke client UPDATE on `rep_payout_rows`; remove `PayoutFigureCell`, `PayoutBulkSplit`, `SharedResidualControl` and the round-trip copy; drop `set_shared_residual()`; new export header. | **R** (§0.5: not editable from the first import) | `rls/rep-payout-update-grant` (inverted: no UPDATE), `rls/shared-lines` (`set_shared_residual` tests retired), `rls/payout-history-trigger` (no client edit path; trigger kept as backstop), `unit/payout-figure-cell` (deleted), `unit/payouts`, `live/residual-import` (export header, 42501 test inverted), `e2e/payouts-editing` (retired or rewritten), `e2e/payouts-shares`, `e2e/payouts-states`, `e2e/qa/payout-figure-comma` (retired) |
-| 12 | Reports | `rep_payout_summary()` and `merchant_processor_summary()` (both `security invoker`), `/admin/reports` page, admin nav item. | none (after 10) | none existing; `unit/` nav test only if one asserts the Admin group's items |
+| 12 | Reports | `rep_payout_summary()` (Owen's nine columns, §7.2; the rate read from each line's `rep_split_pct`) and `merchant_processor_summary()` (both `security invoker`), `/admin/reports` page, admin nav item. | none (after 10) | none existing; `unit/` nav test only if one asserts the Admin group's items |
 | 13 | Docs and the old commit | CLAUDE.md, `docs/claude/*`, `RESIDUALS_SPEC.md` addendum, a docs-index line for this memo, and `commit_residual_import(int)` dropped once the new app is on dev and prod. | after deploy | `rls/commit-residual-import` (deleted with the function), `unit/claude-md` (index) |
 
 ### 8.2 Size and order notes
@@ -980,8 +1099,27 @@ Thirteen phases, one prompt and one commit each, with the schema doc edited firs
   - `rls/commit-residual-import-v2` (32)
   - `unit/residuals-preview` (23)
 - About as many new ones arrive. Of those, the exhaustive cent-rule grids for overrides (§4.4) are
-  single SQL statements, not hundreds of cases.
-- The hermetic baseline (2138 / 100 files) moves in every phase from 1 to 11.
+  single SQL statements, not hundreds of cases; the rate dimension (§0b.4) multiplies the grid's
+  cases, not its statements.
+- The split rate (§0b.4) adds, by phase:
+  - **4:** about 25-35 new tests: `set_rep_split` (admin-only, audit row, bounds 0 and 50 and
+    outside them, grants, no client UPDATE path, never in a policy), the submit snapshot (rate and
+    `100 − rate`, a draft's own value overwritten, a later rate change leaving a submitted pre-app
+    and an approved merchant unchanged), the 0-50 CHECKs, and the Manage Users cell (admin-only).
+    Tests that read the wizard's split input (`e2e/pre-app-wizard`, `unit/pre-app-logic`'s split
+    sum) change or go.
+  - **8:** v3 at rates 50, 46, 0 (house line with a zero rep amount), shares totalling the
+    merchant's rate, `set_merchant_split` (audited, refused with a share open). Every v3 fixture
+    states its merchant's rate.
+  - **10:** the cap at the merchant's rate rather than 50; `set_merchant_split` refusing a rate
+    below an open override.
+  - **12:** a report row per rate, and the house profile's zero-commission row.
+- The six-column file format (§0b.1) rewrites essentially all of `unit/residuals-parse` (as already
+  counted) and adds about 15 cases: MID as text (leading zero, 12 digits), header BOM / apostrophe /
+  whitespace, currency figures, the Income Type refusal listing rows, and the file-processor
+  mismatch.
+- The hermetic baseline (2138 / 100 files at the memo's writing) moves in every phase from 1 to
+  12.
 
 ### 8.4 CLAUDE.md rules that must change, and when
 
@@ -993,6 +1131,10 @@ Thirteen phases, one prompt and one commit each, with the schema doc edited firs
 | "**The three `*_secrets` tables: zero policies, zero grants, Edge Function only**", and Three tiers §2 | **Four** tables, naming `pre_app_tax_secrets`; same lock-twice rule | 3 |
 | "The secrets validators exist twice" (and `docs/claude/edge-functions-and-storage.md`) | The pair now includes the tax-id validators (EIN or SSN by type) | 3 |
 | `docs/claude/merchant-location.md`: "`submit_pre_app()` now refuses the same…" | The location rule now lives in `pre_app_missing_fields()`, which `submit_pre_app()` calls | 4 |
+| "`profiles` has no client write path: new columns are set only by … (`set_user_role`, …, `set_rep_identity`)" | **Add `set_rep_split`**; `split_rate_pct` never in a policy (§0b.4). Same in `docs/claude/rpcs-profiles-audit.md` | 4 |
+| `approve_pre_app` description (Three tiers §4) / pre-app docs | `submit_pre_app()` snapshots the rep's rate into `pre_apps.split_agent_pct` (overwriting the draft's value); approval copies it to the merchant; a later rate change touches neither | 4 |
+| `docs/claude/security-fixes.md` phase 1 / the merchants write rule ("merchants admin-only to change") | **The merchant split columns are written only by `set_merchant_split()`** (audited, refused while a share is open or future); no client UPDATE on them, admin included | 8 |
+| `payouts-and-teardown.md` / residual-splits: "the two shares total 50" (`merchant_rep_shares` CHECK) | The two shares total **the merchant's rate**, enforced by `set_merchant_rep_share()` | 8 |
 | `docs/claude/rpcs-profiles-audit.md`: "`profiles.agent_number` … is the only join between a processor's residual report and this database" | **No longer true.** The MID is the join, and `agent_number` is a display code only | 7 |
 | Edge Functions table: `residual-import-file-url` and `parse-residual-import` rows ("resolve an agent number, then read again", preview flags) | Upload takes processor and month; parse resolves MID → owner; refusals and warnings replace the agent-number flow | 7 |
 | `docs/claude/payouts-and-teardown.md`: "`volume` and `average_ticket` are `check >= 0` because a negative there is a parse error" | A negative volume is allowed only on a line whose confirmed `bad_numbers` warning set `volume_confirmed_negative` | 6 |
@@ -1002,6 +1144,8 @@ Thirteen phases, one prompt and one commit each, with the schema doc edited firs
 | `payouts-and-teardown.md`: batch status guard "only `review -> abandoned`" | Unchanged for clients; `replaced` added as a definer-only status | 9 |
 | `payouts-and-teardown.md` / `rpcs-profiles-audit.md`: "`audit_log` per committed batch and per deleted period" | Now true: the period delete is an audited RPC. **Record the defect it fixes** (no audit row was ever written) | 9 |
 | `payouts-and-teardown.md`: "twenty-five columns reference `profiles(id)`" and the four teardown lists | Twenty-six; all four lists gain `merchant_overrides` | 10 |
+| Overrides (new rule) | An override is `≤` the merchant's rate, enforced in `set_merchant_override()` and re-checked by v3; the table CHECK (`≤ 50`) is only the outer bound | 10 |
+| Reports (new rule) | Report 1 reads each line's `rep_split_pct`, never `profiles.split_rate_pct` | 12 |
 | "**A column that must be immutable is a GRANT…** `rep_payout_rows.residual_income` + `rep_split_pct` only" | `rep_payout_rows`: **no client UPDATE at all** | 11 |
 | `payouts-and-teardown.md`: the shared-accounts-on-screens paragraph (`SharedResidualControl`, `PayoutBulkSplit` partner filter, `PayoutFigureCell`) | Those controls are gone; shared lines are filled from the file at commit | 11 |
 | `docs/claude/project-state.md` routes list | Add `/admin/reports` | 12 |
@@ -1047,7 +1191,7 @@ Each item is what the build will assume unless Owen says otherwise.
 | A1 | Processor spellings | Exactly `TSYS`, `Red Fynn`, `PayBright`, `Netevia HQ`, `Square`; code = label. More are added by migration. | As Owen wrote them; a table row is cheap to fix. |
 | A2 | EIN type values | *Decided:* `EIN` or `SSN` (§0.3). | — |
 | A3 | Owner address | *Decided:* one, the home address, required (§0.2). | — |
-| A4a | Percent of what | *Decided:* of the full residual, ≤ 50 (§0.1). | — |
+| A4a | Percent of what | *Decided:* of the full residual, ≤ the merchant's split rate (§0.1, §0b.5). | — |
 | A4b | Settable between submit and approval? | **[CONFIRM: money]** No. The override is set on the merchant, which exists from approval, and the RPC refuses a merchant whose pre-app is not submitted or approved. | Nothing can be paid before a merchant and MID exist, so no month is missed. Storing it on the pre-app as well would be a second home for the same fact. |
 | A4c | Does the rep see who receives it? | **[CONFIRM: rep visibility]** Yes. The rep's line reads "Override 10% of residual · −$10.00 · to Dana Cole". The recipient sees the merchant name as plain text, with no link and no access. | A deduction with no stated payee reads as an error. This mirrors the shared-account rule, where each party sees the other's name. |
 | A4d | "Overrides received" column in Report 1 | **[CONFIRM: money]** Yes, as a separate column, included in Total agent commission. | Without it, a manager's total understates what they are paid. |
@@ -1065,17 +1209,20 @@ Each item is what the build will assume unless Owen says otherwise.
 | A14 | Non-US merchants | None. `country = 'US'` for business and owners. | `state` is already two-letter US; relax both together if this changes. |
 | A15 | Who sets rep identity | *Decided:* admin only (§0.6). | — |
 | A16 | Rep with no LLC | The admin enters the rep's own legal name (or sole-proprietor business name) as the LLC legal name. Blank is not accepted for submit. | §0.6 requires both fields. A placeholder like "N/A" would print on the processor's paperwork. |
-| A17 | Report "legal name" / "rep name" | Legal name = `llc_legal_name`; rep name = `legal_name` (falling back to `full_name`). | Matches how the two new fields were described. |
+| A17 | Report "legal name" / "rep name" | *Decided (§0b.7):* Legal name = `llc_legal_name` (the rep's own legal name when there is no LLC, A16); Full name = `full_name`. | — |
 | A18 | Shared-account volume in Report 1 | **[CONFIRM: money]** On the signer's row only; the partner's row shows none for that account. Report 2 counts it once. | Adding it to both would double the company's total volume when summed. |
-| A19 | File headers | Exactly `Processor`, `Merchant name`, `MID`, `Volume`, `Residual`, matched case- and space-insensitively as today. Only MID, Volume and Residual are required. A `Processor` cell that differs from the chosen processor is ignored. | §0, item G says Processor is ignored for now. A real sample file per processor should be checked before phase 7. |
+| A19 | File headers | *Decided (§0b.1):* the six columns `Processor`, `Merchant Number`, `Merchant Name`, `Income Type`, `Volume`, `Residual`, all required, matched case- and space-insensitively after stripping a BOM or leading apostrophe. A `Processor` cell that differs from the chosen processor is the `processor_mismatch` warning, no longer ignored. | Owen's real file. A real file per processor should still be checked before phase 7 (the sample's Processor column is a placeholder). |
 | A20 | Identity fields at account creation | Optional at creation (create-user, bulk import); required only to submit a pre-app. | Admin accounts and bulk-imported reps may not have them yet. The gate is where Owen put it. |
-| A21 | Split exceptions | **[CONFIRM: money]** None. Every import line is 50%, and no admin can change it. | §0.5 plus requirement C. The override is the only lever. |
+| A21 | Split exceptions | *Decided (§0b.4):* the rate is per rep (default 50, 0-50, `set_rep_split`), snapshotted per merchant, and changeable per merchant by `set_merchant_split` (refused while a share is open). The house profile is 0. | — |
 | A22 | Shares under the owner rule | **[CONFIRM: money]** The share's signer must be the merchant's owner. Moving a merchant with an open or future share is refused until the share is ended. | The file no longer names a rep, so the owner is the only possible signer. A silent change of signer would move money. |
 | A23 | Adjustment after a paid month | **[CONFIRM: money]** A general `post_payout_adjustment(rep, MID, month adjusted, amount, note)`: admin-only, audited, posting to the open month like a share correction. Built in phase 9. | §0.5 makes the adjustment line the only fix after payment, so it has to exist before the first paid month needs one. |
 | A24 | Admin view of secrets | **[CONFIRM: security]** Admins also get masked values by default, with a per-field Show, audited as a reveal. Reps never see a full value. | Closes the "admins see full SSNs as soon as the step opens" follow-up, and makes the audit row distinguish a look from a glance. |
 | A25 | Negative residual (clawback) | **[CONFIRM: money]** Not a "bad number". It imports without a warning, and the override reverses in proportion. | Clawbacks are real (`residual_income` is signed today), and residual > volume cannot be true for a negative residual. |
 | A26 | Inactive vs other | **[CONFIRM: money]** Only `status = 'inactive'` raises the inactive-merchant warning; `'other'` does not. | `inactive` is the only closed state in the vocabulary (as `accounts_in_city` treats it). |
-| A27 | Re-reading after a refusal | Unknown MIDs: the batch stays in review, and "Read again" works once the merchants exist. Repeated MIDs: the file itself is wrong, so the admin abandons it and uploads a fixed file. | Reading the same file again cannot remove a repeat. |
+| A27 | Re-reading after a refusal | Unknown MIDs: the batch stays in review, and "Read again" works once the merchants exist. Repeated MIDs or a wrong Income Type: the file itself is wrong, so the admin abandons it and uploads a fixed file. | Reading the same file again cannot remove a repeat. |
+| A28 | Sharing a house merchant | **[CONFIRM: money]** Refused: a merchant at rate 0 has no rep side to divide. | Two shares of 0 pay nobody and only add lines. |
+| A29 | Lowering a merchant's rate below its open override | **[CONFIRM: money]** `set_merchant_split` refuses it, naming the override; the admin ends or changes the override first. | Otherwise the override would exceed the rate (§0b.5) and the rep's net would go negative. |
+| A30 | Rate precision | `numeric(5,2)`, 0.00-50.00 in 0.01 steps, matching `split_agent_pct` and the override. | The existing columns already have that type; Bruce Rozar's ~46% effective rate (§11) may be a blend, not a single rate. |
 
 ---
 
@@ -1245,3 +1392,23 @@ Where the memo was silent or said otherwise, and what was chosen (conservative s
 
 Found while building, **not fixed**: the owner-SSN validator pair accepts `000-00-0000` and other
 never-issued SSNs (shape only).
+
+---
+
+## 11. Open questions (28 Oct 2026)
+
+Waiting on Owen. None blocks phase 4: the rate column defaults to 50 and every real rate is entered
+by an admin after the migration.
+
+1. **Reps who are not at 50.** Names and rates, to be entered by an admin with `set_rep_split` once
+   phase 4 is deployed. The house profile (agent code 122) is set to 0 the same way. No rate is
+   hard-coded in a migration.
+2. **Does any rep ever exceed 50?** The CHECKs (profile, pre-app, merchant) and the override's outer
+   bound all stop at 50. A rep above 50 would mean relaxing all of them together.
+3. **Bruce Rozar's effective rate is about 46%.** That suggests his merchants are at different
+   rates (some below 50), or an override or adjustment is netting against a 50% split. Which one
+   decides whether his profile rate is 50 with a few merchants changed by `set_merchant_split`, or
+   a lower profile rate.
+4. **Report 1 total and deductions.** Owen's rule is "total commission = agent split + override
+   received". Should deductions (adjustments) also be subtracted? Until answered the report shows
+   them in their own column and pins `total + deductions = sum of every line` (§4.5).
