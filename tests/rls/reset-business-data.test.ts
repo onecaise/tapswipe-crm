@@ -110,6 +110,8 @@ describe("dry run (as shipped)", () => {
     );
     expect(error).toMatch(/^DRY RUN: rolled back, nothing was changed\. Every check passed\./);
     expect(error).toMatch(/\n {2}profiles: 3 -> 3\n/);
+    expect(error).toMatch(/\n {2}processors: 5 -> 5\n/);
+    expect(error).toMatch(/\n {2}pre_app_tax_secrets: 1 -> 0\n/);
     expect(error).toMatch(/\n {2}auth\.users: 3 -> 3\n/);
     expect(error).toMatch(/\n {2}leads: 2 -> 0\n/);
     expect(error).toMatch(/\n {2}brands: 1 -> 0\n/);
@@ -128,10 +130,13 @@ describe("commit", () => {
       db,
       `select relname as t from pg_class where relnamespace = 'public'::regnamespace and relkind = 'r'`,
     );
-    expect(tables.length).toBe(33);
+    // 35 since the intake-and-reports merge: processors (kept) and
+    // pre_app_tax_secrets (cleared).
+    expect(tables.length).toBe(35);
     for (const { t } of tables) {
       const n = await count(db, t);
       if (t === "profiles") expect(n, t).toBe(3);
+      else if (t === "processors") expect(n, t).toBe(5);
       else if (t === "audit_log") expect(n, t).toBe(1);
       else expect(n, t).toBe(0);
     }
@@ -144,9 +149,36 @@ describe("commit", () => {
     expect(marker).toEqual({ id: 1, actor_id: null, action: "business_data_reset" });
 
     // The grid: one row per kept and cleared table, plus auth.users and storage.
-    expect(grid.length).toBe(1 + 1 + 32 + 1);
+    expect(grid.length).toBe(2 + 1 + 33 + 1);
     expect(grid.find((r) => r.table_name === "brands")?.status).toBe("cleared");
     expect(grid.find((r) => r.table_name === "profiles")?.status).toBe("kept, unchanged");
+    expect(grid.find((r) => r.table_name === "processors")?.status).toBe("kept, unchanged");
+    expect(grid.find((r) => r.table_name === "pre_app_tax_secrets")?.status).toBe("cleared");
+  });
+
+  it("keeps processors' five rows exactly, and the new pre-app tax secrets go", async () => {
+    const before = await rows<{ code: string; label: string; sort_order: number }>(
+      db,
+      `select code, label, sort_order from processors order by code`,
+    );
+    expect(before.map((r) => r.code)).toEqual(["Netevia HQ", "PayBright", "Red Fynn", "Square", "TSYS"]);
+    expect(await count(db, "pre_app_tax_secrets")).toBe(1);
+
+    await db.exec(await script({ commit: true }));
+
+    expect(
+      await rows(db, `select code, label, sort_order from processors order by code`),
+    ).toEqual(before);
+    expect(await count(db, "pre_app_tax_secrets")).toBe(0);
+    expect(await count(db, "merchants")).toBe(0);
+
+    // And the kept list still works as a foreign-key target afterwards.
+    await asUser(db, ADMIN);
+    await db.exec(
+      `insert into merchants (agent_id, dba, city, state, processor) values ('${AGENT}', 'M', 'Nashville', 'TN', 'Square')`,
+    );
+    await asPlatform(db);
+    expect(await count(db, "merchants")).toBe(1);
   });
 
   it("restarts the id sequences, and the app's own inserts work afterwards", async () => {
@@ -211,12 +243,16 @@ describe("scripts/reset-business-data-counts.sql", () => {
     const before = await snapshot(db);
     const pre = await counts();
     expect(await snapshot(db)).toEqual(before);
-    expect(Object.keys(pre).length).toBe(33 + 2);
-    expect(pre).toMatchObject({ leads: 2, profiles: 3, "auth.users": 3, "storage.objects": null });
+    expect(Object.keys(pre).length).toBe(35 + 2);
+    expect(pre).toMatchObject({
+      leads: 2, profiles: 3, processors: 5, pre_app_tax_secrets: 1, "auth.users": 3, "storage.objects": null,
+    });
 
     await db.exec(await script({ commit: true }));
     const post = await counts();
-    expect(post).toMatchObject({ leads: 0, brands: 0, audit_log: 1, profiles: 3, "auth.users": 3 });
+    expect(post).toMatchObject({
+      leads: 0, brands: 0, pre_app_tax_secrets: 0, audit_log: 1, profiles: 3, processors: 5, "auth.users": 3,
+    });
   });
 });
 
@@ -267,6 +303,18 @@ describe("every guard fails the run and rolls back", () => {
       create trigger zz_edit_profile before truncate on leads for each statement execute function zz_edit_profile();
     `);
     await refuses(await script({ commit: true }), /profiles changed during the run \(count 3, was 3\)/);
+  });
+
+  it("a processor changes mid-run (a kept table other than profiles)", async () => {
+    await db.exec(`
+      create function zz_edit_processor() returns trigger language plpgsql as $$
+      begin update processors set label = 'Moved' where code = 'Square'; return null; end $$;
+      create trigger zz_edit_processor before truncate on leads for each statement execute function zz_edit_processor();
+    `);
+    await refuses(
+      await script({ commit: true }),
+      /kept table public\.processors changed during the run \(count 5, was 5\)/,
+    );
   });
 
   it("auth.users changes mid-run", async () => {

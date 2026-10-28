@@ -109,6 +109,7 @@ describe("reset-business-data.sql on the local stack", () => {
     const { ok, out, err } = psql(`
       begin;
       ${SEED}
+      create temp table zz_processors as select * from processors;
       create temp table zz_kept as
         select 'u' as k, id, md5(u::text) as h from auth.users u
         union all select 'p', id, md5(p::text) from profiles p;
@@ -117,9 +118,14 @@ describe("reset-business-data.sql on the local stack", () => {
          and (xpath('/row/n/text()', query_to_xml(format('select count(*) as n from public.%I', relname), false, true, '')))[1]::text::int = 0;
       ${script({ commit: true, emails: ["reset-admin@tapswipe.test", "reset-agent@tapswipe.test"] })}
       select 'NONZERO', relname from pg_class c
-       where relnamespace = 'public'::regnamespace and relkind = 'r' and relname not in ('profiles', 'audit_log')
+       where relnamespace = 'public'::regnamespace and relkind = 'r' and relname not in ('profiles', 'processors', 'audit_log')
          and (xpath('/row/n/text()', query_to_xml(format('select count(*) as n from public.%I', relname), false, true, '')))[1]::text::int <> 0;
       select 'AUDIT', id, coalesce(actor_id::text, 'null'), action from audit_log;
+      select 'PROCESSORS', string_agg(code, ',' order by code) from processors;
+      select 'PROCESSORS_DIFF', count(*) from (
+        (select * from zz_processors except select * from processors)
+        union all (select * from processors except select * from zz_processors)) d;
+      select 'TAX_SECRETS', count(*) from pre_app_tax_secrets;
       select 'KEPT_DIFF', count(*) from (
         (select * from zz_kept except
            (select 'u', id, md5(u::text) from auth.users u union all select 'p', id, md5(p::text) from profiles p))
@@ -153,10 +159,15 @@ describe("reset-business-data.sql on the local stack", () => {
     expect(tagged(out, "NONZERO")).toEqual([]);
     expect(tagged(out, "AUDIT")).toEqual([["1", "null", "business_data_reset"]]);
     expect(tagged(out, "KEPT_DIFF")).toEqual([["0"]]);
+    expect(tagged(out, "PROCESSORS")).toEqual([["Netevia HQ,PayBright,Red Fynn,Square,TSYS"]]);
+    expect(tagged(out, "PROCESSORS_DIFF")).toEqual([["0"]]);
+    expect(tagged(out, "TAX_SECRETS")).toEqual([["0"]]);
     expect(tagged(out, "LEAD")).toEqual([["1"]]);
     for (const [t, min] of tagged(out, "MINID")) expect(min, t).toBe("1");
     // The script's own result grid came back too.
     expect(out).toMatch(/^profiles\|\d+\|\d+\|kept, unchanged$/m);
+    expect(out).toMatch(/^processors\|5\|5\|kept, unchanged$/m);
+    expect(out).toMatch(/^pre_app_tax_secrets\|1\|0\|cleared$/m);
     expect(out).toMatch(/^storage\.objects\|\d+\|\d+\|NOT touched: delete these files by hand$/m);
   });
 
@@ -176,7 +187,7 @@ describe("reset-business-data.sql on the local stack", () => {
     expect(run.err).toMatch(/DRY RUN: rolled back/);
     const after = psql(SNAPSHOT);
     expect(tagged(after.out, "SNAP")).toEqual(tagged(before.out, "SNAP"));
-    expect(tagged(before.out, "SNAP").length).toBeGreaterThan(33);
+    expect(tagged(before.out, "SNAP").length).toBeGreaterThan(35);
   });
 
   it.each([
@@ -202,6 +213,16 @@ describe("reset-business-data.sql on the local stack", () => {
       sql: () => script({ commit: true }),
       error: /profiles changed during the run/,
     },
+    {
+      name: "a processor changed mid-run",
+      setup: `
+        create function public.zz_edit_processor() returns trigger language plpgsql as $$
+        begin update processors set label = 'Moved' where code = 'Square'; return null; end $$;
+        create trigger zz_edit_processor before truncate on leads
+          for each statement execute function public.zz_edit_processor();`,
+      sql: () => script({ commit: true }),
+      error: /kept table public\.processors changed during the run/,
+    },
   ])("guard: $name fails the run", ({ setup, sql, error }) => {
     const before = psql(SNAPSHOT);
     const run = psql(`begin;\n${SEED}\n${setup}\n${sql()}\nrollback;`);
@@ -218,7 +239,9 @@ describe("reset-business-data.sql on the local stack", () => {
     expect(names).toContain("auth.users");
     expect(names).toContain("storage.objects");
     expect(names).toContain("profiles");
-    expect(names.length).toBe(33 + 2);
+    expect(names).toContain("processors");
+    expect(names).toContain("pre_app_tax_secrets");
+    expect(names.length).toBe(35 + 2);
     const inventory = psql(INVENTORY);
     expect(inventory.ok).toBe(true);
     expect(tagged(psql(SNAPSHOT).out, "SNAP")).toEqual(tagged(before.out, "SNAP"));

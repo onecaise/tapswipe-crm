@@ -5,7 +5,7 @@
 -- so a table added later shows up without editing this file), plus auth.users
 -- and storage.objects. Counts only: no column is read.
 --
--- Expected after a committed reset: profiles and auth.users as before,
+-- Expected after a committed reset: profiles, processors (5) and auth.users as before,
 -- audit_log 1 (the 'business_data_reset' marker), every other public table 0,
 -- storage.objects as before until the files are deleted by hand.
 --

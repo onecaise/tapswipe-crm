@@ -1,7 +1,9 @@
 -- Reset business data — SUPABASE SQL EDITOR, one-off, dev and prod alike.
 --
--- Empties every table in `public` EXCEPT `profiles`, and leaves auth.users and
--- profiles byte-for-byte unchanged. Reference data (brands, products,
+-- Empties every table in `public` EXCEPT `profiles` and `processors`, and
+-- leaves auth.users and both kept tables byte-for-byte unchanged. `processors`
+-- is the fixed list of five processors that merchants and pre-apps point at
+-- (20261023130000): configuration, not business data. Other reference data (brands, products,
 -- product_compatibility, marketing_materials, marketing_material_events,
 -- business_documents) is cleared too. Schema, functions, policies and grants
 -- are not touched. Nothing in auth.* or storage.* is touched.
@@ -39,7 +41,7 @@
 --      audit_log, SELECT on auth.users. The SQL Editor's `postgres` role owns
 --      these tables; anyone else is refused before anything happens.
 --   4. expected_emails, if any: each must be in auth.users AND profiles.
---   5. Snapshot auth.users and profiles: count plus an md5 per row, by id.
+--   5. Snapshot auth.users and every kept table: count plus an md5 per row.
 --   6. ONE `truncate ... restart identity`, WITHOUT cascade. Postgres refuses
 --      it outright if any table outside the list references one inside it, so
 --      a foreign key from a kept table can never be silently cascaded through.
@@ -49,7 +51,7 @@
 --   7. One marker row in audit_log: action 'business_data_reset', actor NULL
 --      (the editor has no auth.uid()). So audit_log ends at exactly 1 row.
 --   8. Re-check: every cleared table at 0 (audit_log at 1), auth.users and
---      profiles snapshots identical, storage.objects count unchanged.
+--      every kept table's snapshot identical, storage.objects count unchanged.
 --   9. Dry run: raise with the counts (rolls back). Commit: store the counts
 --      for the trailing SELECT.
 --
@@ -73,12 +75,14 @@ declare
   expected_emails text[]  := array[]::text[];  -- <<< optional, e.g. array['a@x.com','b@y.com']
   -- ===================================================================
 
-  keep_tables constant text[] := array['profiles'];
+  -- processors: reference data the schema itself seeds (five rows), kept.
+  keep_tables constant text[] := array['profiles', 'processors'];
   clear_tables constant text[] := array[
     -- sales pipeline
     'leads', 'ghost_sheets', 'merchants',
     'pre_apps', 'pre_app_owners', 'pre_app_terminal', 'pre_app_business_profile',
     'pre_app_owner_secrets', 'pre_app_banking_secrets', 'pre_app_terminal_secrets',
+    'pre_app_tax_secrets',
     -- record-level activity
     'notes', 'tasks', 'support_tickets', 'support_ticket_replies', 'bug_reports',
     'documents', 'audit_log',
@@ -106,6 +110,9 @@ declare
   users_after    text;
   profiles_before text;
   profiles_after  text;
+  kept_before    jsonb := '{}'::jsonb;
+  kept_after     jsonb := '{}'::jsonb;
+  digest         text;
   storage_before bigint;
   storage_after  bigint;
   i              int;
@@ -181,6 +188,11 @@ begin
     into users_before from auth.users u;
   select count(*) || ':' || coalesce(md5(string_agg(p.id::text || '=' || md5(p::text), ',' order by p.id)), '')
     into profiles_before from public.profiles p;
+  foreach t in array keep_tables loop
+    execute format('select count(*) || '':'' || coalesce(md5(string_agg(md5(x::text), '','' order by md5(x::text))), '''') from public.%I x', t)
+      into digest;
+    kept_before := kept_before || jsonb_build_object(t, digest);
+  end loop;
 
   foreach t in array present || keep_tables loop
     execute format('select count(*) from public.%I', t) into n;
@@ -226,6 +238,15 @@ begin
     raise exception 'reset-business-data: profiles changed during the run (count %, was %)',
       split_part(profiles_after, ':', 1), split_part(profiles_before, ':', 1);
   end if;
+  foreach t in array keep_tables loop
+    execute format('select count(*) || '':'' || coalesce(md5(string_agg(md5(x::text), '','' order by md5(x::text))), '''') from public.%I x', t)
+      into digest;
+    kept_after := kept_after || jsonb_build_object(t, digest);
+    if kept_after -> t is distinct from kept_before -> t then
+      raise exception 'reset-business-data: kept table public.% changed during the run (count %, was %)',
+        t, split_part(kept_after ->> t, ':', 1), split_part(kept_before ->> t, ':', 1);
+    end if;
+  end loop;
   if to_regclass('storage.objects') is not null then
     execute 'select count(*) from storage.objects' into storage_after;
     if storage_after is distinct from storage_before then

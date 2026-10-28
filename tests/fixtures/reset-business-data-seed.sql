@@ -1,6 +1,9 @@
 -- Fixture for scripts/reset-business-data.sql: at least one row in EVERY table
 -- that script clears, plus three accounts in auth.users + profiles that it must
--- leave byte-for-byte alone. Used by both harnesses:
+-- leave byte-for-byte alone. processors, the other kept table, already holds
+-- its five rows from 20261023130000; merchant 1 points at one of them, so the
+-- reset truncates a table with a foreign key INTO a kept table. Used by both
+-- harnesses:
 --
 --   tests/rls/reset-business-data.test.ts   PGlite (auth.users is the shim)
 --   tests/live/reset-business-data.test.ts  the local stack, inside a
@@ -54,11 +57,13 @@ insert into pre_app_banking_secrets (pre_app_id, aba_routing_encrypted, account_
   ((select id from pre_apps where dba_name = 'Reset App 1'), decode('00bb', 'hex'), decode('00cc', 'hex'));
 insert into pre_app_terminal_secrets (pre_app_id, rp_password_encrypted) values
   ((select id from pre_apps where dba_name = 'Reset App 1'), decode('00dd', 'hex'));
+insert into pre_app_tax_secrets (pre_app_id, tax_id_type, tax_id_encrypted) values
+  ((select id from pre_apps where dba_name = 'Reset App 1'), 'EIN', decode('00ee', 'hex'));
 
-insert into merchants (agent_id, mid, dba, status, city, state, pre_app_id) values
+insert into merchants (agent_id, mid, dba, status, city, state, pre_app_id, processor) values
   ('a0000000-0000-4000-8000-000000000002', 'RST-MID-1', 'Reset Merchant 1', 'active', 'Nashville', 'TN',
-   (select id from pre_apps where dba_name = 'Reset App 1')),
-  ('a0000000-0000-4000-8000-000000000003', 'RST-MID-2', 'Reset Merchant 2', 'active', 'Memphis',   'TN', null);
+   (select id from pre_apps where dba_name = 'Reset App 1'), 'TSYS'),
+  ('a0000000-0000-4000-8000-000000000003', 'RST-MID-2', 'Reset Merchant 2', 'active', 'Memphis',   'TN', null, null);
 
 -- Legacy documents: the key must match agent/owner_type/owner_id/<name>.
 insert into documents (agent_id, owner_type, owner_id, doc_type, file_key, file_name)

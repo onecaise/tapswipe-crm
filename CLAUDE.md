@@ -13,7 +13,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **Never touch the live Supabase projects (dev or prod) without asking first**, and treat `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) as live production. Use the guarded `npm run` wrappers, never trust `npm run db:push -- --db-url <prod>`, and run `scripts/push-prod-migration.ps1 -DryRun` before a prod push. → "Hosted projects and deployment" below.
 - **Never run `npx supabase config push`** and **never run `supabase projects api-keys`** by hand. Set the prod DB password with `Read-Host -AsSecureString`, never a literal. → below.
 - **The service-role key belongs in Edge Function secrets only**; the Next app holds the publishable key only, and `.env.deployed.local` stays publishable-keys-only. → "Next.js / auth wiring" below.
-- **`scripts/reset-business-data.sql`** (one-off, hand-run in the SQL Editor, dry run by default) empties every `public` table but `profiles`. **A new `public` table must join its `keep_tables` or `clear_tables`** or it aborts. Never run it from here. → `docs/claude/reset-business-data.md`.
+- **`scripts/reset-business-data.sql`** (one-off, hand-run in the SQL Editor, dry run by default) empties every `public` table but `profiles` and `processors`. **A new `public` table must join its `keep_tables` or `clear_tables`** or it aborts. Never run it from here. → `docs/claude/reset-business-data.md`.
 - **SheetJS stays pinned to the cdn.sheetjs.com 0.20.3 build**, never `npm:xlsx` (two high-severity advisories). → `docs/claude/payouts-and-teardown.md`.
 
 **Database access control**
@@ -163,8 +163,8 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2364 tests, 108 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (278 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2381 tests, 109 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (287 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
 npm run test:e2e       # Playwright, real browser against the app on the local stack (338 tests, 6 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
@@ -192,7 +192,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
-Baselines are the counts in the Commands block above (`npm test` 2364 tests / 108 files — every file must load; `test:live` 278; `test:deployed` 29; `test:e2e` 338, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
+Baselines are the counts in the Commands block above (`npm test` 2381 tests / 109 files — every file must load; `test:live` 287; `test:deployed` 29; `test:e2e` 338, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
 
 - Run `npm test` for any schema change; queries must run as `authenticated`, never the owner.
 - PGlite is Postgres 18.3, the stack 17.6 — pin constraint names in assertions, not SQLSTATEs.
