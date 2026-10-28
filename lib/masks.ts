@@ -77,8 +77,13 @@ export function maskSsn(value: string): string {
   return `${d.slice(0, 3)}-${d.slice(3, 5)}-${d.slice(5)}`;
 }
 
-export const isSsn = (value: string): boolean =>
-  value === "" || /^\d{3}-\d{2}-\d{4}$/.test(value);
+/**
+ * An owner's SSN. Since phase 4, the same rule as isTaxSsn below: the shape,
+ * and none of the patterns the SSA never issues (area 000, 666, 900-999;
+ * group 00; serial 0000). It used to check the shape only, so 000-00-0000
+ * was accepted. DUPLICATED as isSsn in _shared/pre-app-secrets.ts.
+ */
+export const isSsn = (value: string): boolean => isTaxSsn(value);
 
 // ---------------------------------------------------------------------------
 // Business tax ID — an EIN, or an SSN when pre_apps.ein_type says so. Never
@@ -89,7 +94,7 @@ export const isSsn = (value: string): boolean =>
 // the 400. Change both together; tests/live/pre-app-secrets.test.ts posts what
 // these refuse and expects that 400.
 //
-// Stricter than isSsn above (owner SSNs), which checks the shape only:
+// The rules (the owner SSN, isSsn above, uses the SSN one since phase 4):
 //  - EIN: refuses all zeros and the prefix 00, which the IRS never assigns.
 //    The real prefix list is NOT enforced; it changes, and refusing a valid
 //    EIN costs more than the typo it catches (see isRouting below).

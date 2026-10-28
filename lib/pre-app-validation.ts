@@ -108,7 +108,8 @@ export const businessStepSchema = z.object({
     .string()
     .min(1, "Pick a state from the list")
     .refine(isState, { message: "Pick a state from the list" }),
-  country: text,
+  // country is not a field: it is fixed to US (pre_apps_country_us, memo
+  // A14) and the step shows it as text.
   zip: masked(isZip, "12345 or 12345-6789"),
 
   state_incorporated: masked(isState, "Pick a state from the list"),
@@ -134,17 +135,9 @@ export const businessStepSchema = z.object({
    */
   processor: text,
 
-  /**
-   * Only the agent's share is entered; the company's is derived as 100 minus
-   * it and the two are written together.
-   *
-   * That is not cosmetic. `pre_apps_split_sums_to_100` is a table check, so
-   * saving one column on its own — which is exactly what a dirty-field autosave
-   * would do — raises 23514 the moment the pair stops totalling 100. Deriving
-   * the other half makes an invalid intermediate state unreachable rather than
-   * merely unlikely.
-   */
-  split_agent_pct: masked(isPercent, "0 to 100"),
+  // No split field: the rep's rate is set by an admin on their profile
+  // (set_rep_split) and copied onto the pre-app by submit_pre_app() (memo
+  // §0b.4). No client may write the split (pre_apps_guard_transitions).
 
   /**
    * Sales volume — four optional dollar amounts.
@@ -248,7 +241,6 @@ export const ownerRowSchema = z.object({
   home_address: text,
   home_city: text,
   home_state: masked(isState, "Pick a state from the list"),
-  home_country: text,
   home_zip: masked(isZip, "12345 or 12345-6789"),
 });
 
@@ -349,8 +341,8 @@ export type TerminalStepValues = z.infer<typeof terminalStepSchema>;
 /**
  * Per-field format only. The two pair totals are NOT enforced here: they are a
  * submission rule, not a formatting one, so a draft with 60/30 has to remain
- * saveable while still being flagged. `preAppSubmitBlockers` and
- * `submit_pre_app` are where the pairs are checked.
+ * saveable while still being flagged. pre_app_missing_fields() is where the
+ * pairs are checked, for submit_pre_app() and the review step alike.
  */
 export const profileStepSchema = z.object({
   card_swiped_pct: masked(isPercent, "0 to 100"),

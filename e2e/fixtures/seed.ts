@@ -3421,3 +3421,75 @@ export async function setCitySearchCount(persona: PersonaKey, used: number): Pro
   );
   if (filled) throw filled;
 }
+
+/**
+ * Phase 4 (docs/design/intake-and-reports.md §6): what pre_app_missing_fields()
+ * returns for a pre-app, and what submit_pre_app() says, both AS THE AGENT
+ * persona -- the function's caller guard admits the owner or an admin, never
+ * the service role. Signed in with the publishable key, persistSession false
+ * and no signOut (the stampAdminTimelineEdits note: a global signOut would
+ * revoke the session auth.setup.ts stored).
+ */
+async function agentSession(): Promise<SupabaseClient> {
+  const { apiUrl, publishableKey } = publicStackConfig();
+  const asAgent = createClient(apiUrl, publishableKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { error } = await asAgent.auth.signInWithPassword({
+    email: PERSONAS.agent.email,
+    password: E2E_PASSWORD,
+  });
+  if (error) throw new Error(`agent sign-in: ${error.message}`);
+  return asAgent;
+}
+
+export type MissingItem = { code: string; step: string; label: string; owner_id?: number };
+
+export async function missingFieldsAsAgent(preAppId: number): Promise<MissingItem[]> {
+  const asAgent = await agentSession();
+  const { data, error } = await asAgent.rpc("pre_app_missing_fields", {
+    pre_app_id_input: preAppId,
+  });
+  if (error) throw new Error(`pre_app_missing_fields: ${error.message}`);
+  return data as MissingItem[];
+}
+
+/** submit_pre_app() as the agent: null on success, else its error. */
+export async function submitAsAgent(
+  preAppId: number,
+): Promise<{ message: string; details: string | null } | null> {
+  const asAgent = await agentSession();
+  const { error } = await asAgent.rpc("submit_pre_app", { pre_app_id_input: preAppId });
+  return error ? { message: error.message, details: error.details ?? null } : null;
+}
+
+/** A persona's profiles.split_rate_pct, read as the service role. */
+export async function personaSplitRate(persona: PersonaKey): Promise<number> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await db
+    .from("profiles")
+    .select("split_rate_pct")
+    .eq("email", PERSONAS[persona].email)
+    .single();
+  if (error || !data) throw new Error(`split rate: ${error?.message}`);
+  return Number(data.split_rate_pct);
+}
+
+/**
+ * Puts a persona's rate back, as the service role (the fixture's own repair,
+ * not the app's path: the app writes it only through set_rep_split()).
+ */
+export async function restorePersonaSplitRate(persona: PersonaKey, rate: number): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { error } = await db
+    .from("profiles")
+    .update({ split_rate_pct: rate })
+    .eq("email", PERSONAS[persona].email);
+  if (error) throw new Error(`restore split rate: ${error.message}`);
+}

@@ -28,9 +28,8 @@ import { Label } from "@/components/ui/label";
  * it. A single six-column total would reject every honestly-filled form.
  *
  * The totals are shown live but do not block the step: a draft with 60/30 has to
- * remain saveable. `submit_pre_app` is where the pairs are enforced, and
- * `preAppSubmitBlockers` mirrors it so the rep sees the same wording before
- * spending a round trip.
+ * remain saveable. The pairs are codes in pre_app_missing_fields(), which
+ * submit_pre_app() refuses with and the review step lists.
  */
 export function ProfileStep({
   preAppId,

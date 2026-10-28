@@ -17,12 +17,7 @@ import {
 import type { PreApp } from "@/lib/pre-apps";
 import { SALES_VOLUME_GROUP } from "@/lib/pre-app-form-fields";
 import { friendlyDbError } from "@/lib/db-errors";
-import {
-  maskMoney,
-  maskPercent,
-  maskPhone,
-  maskZip,
-} from "@/lib/masks";
+import { maskMoney, maskPhone, maskZip } from "@/lib/masks";
 import { useAutosave } from "@/hooks/use-autosave";
 import { useRegisterStep } from "@/components/pre-app-wizard-shell";
 import { MaskedInput } from "@/components/masked-input";
@@ -42,11 +37,17 @@ export function BusinessStep({
   preApp,
   canEdit,
   processors,
+  repSplitRate,
 }: {
   preApp: PreApp;
   canEdit: boolean;
   /** The processor list, from loadProcessors() in lib/processors.ts. */
   processors: Processor[];
+  /**
+   * The pre-app's rep's current profiles.split_rate_pct, shown on a draft;
+   * null when it could not be read. A submitted pre-app shows its snapshot.
+   */
+  repSplitRate: number | null;
 }) {
   const form = useForm<BusinessStepValues>({
     resolver: zodResolver(businessStepSchema),
@@ -91,17 +92,20 @@ export function BusinessStep({
   useRegisterStep(autosave, form.formState.isValid);
 
   const errors = form.formState.errors;
-  const agentSplit = form.watch("split_agent_pct");
-  const companySplit = deriveCompanySplit(agentSplit);
+  // A draft shows the rate it will be submitted at; after submit, the
+  // snapshot (memo §0b.4). Neither is editable here.
+  const shownRate =
+    preApp.status === "draft" ? repSplitRate : preApp.split_agent_pct;
 
   return (
     <form className="flex flex-col gap-8">
       <Section title="Business">
-        <Field label="DBA name" error={errors.dba_name?.message}>
+        <Field label="DBA name" required error={errors.dba_name?.message}>
           <Input {...form.register("dba_name")} disabled={!canEdit} />
         </Field>
         <Field
           label="Legal business name"
+          required
           error={errors.legal_business_name?.message}
         >
           <Input
@@ -114,6 +118,7 @@ export function BusinessStep({
         </Field>
         <MaskedField
           label="Contact phone"
+          required
           mask={maskPhone}
           placeholder="615-555-1234"
           error={errors.contact_phone?.message}
@@ -162,13 +167,13 @@ export function BusinessStep({
       </Section>
 
       <Section title="Address">
-        <Field label="Street address" error={errors.physical_address?.message}>
+        <Field label="Street address" required error={errors.physical_address?.message}>
           <Input {...form.register("physical_address")} disabled={!canEdit} />
         </Field>
-        <Field label="City" error={errors.city?.message}>
+        <Field label="City" required error={errors.city?.message}>
           <Input {...form.register("city")} disabled={!canEdit} />
         </Field>
-        <Field label="State" error={errors.state?.message}>
+        <Field label="State" required error={errors.state?.message}>
           <StateCombobox
             value={form.watch("state")}
             disabled={!canEdit}
@@ -180,6 +185,7 @@ export function BusinessStep({
         </Field>
         <MaskedField
           label="ZIP"
+          required
           mask={maskZip}
           placeholder="37201"
           error={errors.zip?.message}
@@ -189,14 +195,16 @@ export function BusinessStep({
             form.setValue("zip", v, { shouldDirty: true, shouldValidate: true })
           }
         />
-        <Field label="Country" error={errors.country?.message}>
-          <Input {...form.register("country")} disabled={!canEdit} />
-        </Field>
+        {/* Fixed, not a field: only US merchants are supported, and the
+            column holds 'US' and nothing else (pre_apps_country_us, memo
+            A14). Relaxing it means relaxing the two-letter state rule too. */}
+        <ReadOnlyValue label="Country" value="United States" />
       </Section>
 
       <Section title="Business type">
         <Field
           label="Entity type"
+          required
           htmlFor="legal-entity-type"
           error={errors.legal_entity_type?.message}
         >
@@ -212,7 +220,7 @@ export function BusinessStep({
             ))}
           </datalist>
         </Field>
-        <Field label="State incorporated" error={errors.state_incorporated?.message}>
+        <Field label="State incorporated" required error={errors.state_incorporated?.message}>
           <StateCombobox
             value={form.watch("state_incorporated")}
             disabled={!canEdit}
@@ -225,7 +233,7 @@ export function BusinessStep({
             }
           />
         </Field>
-        <Field label="Business type" error={errors.business_type?.message}>
+        <Field label="Business type" required error={errors.business_type?.message}>
           <Input {...form.register("business_type")} disabled={!canEdit} />
         </Field>
         <Field label="Sub type" error={errors.sub_business_type?.message}>
@@ -245,7 +253,7 @@ export function BusinessStep({
             Sensitive data step, encrypted, and never autosaved. Changing the
             type after the number was entered means entering it again —
             submit_pre_app() counts only a stored number of this kind. */}
-        <Field label="EIN type" error={errors.ein_type?.message}>
+        <Field label="EIN type" required error={errors.ein_type?.message}>
           <select
             {...form.register("ein_type")}
             disabled={!canEdit}
@@ -272,7 +280,7 @@ export function BusinessStep({
       </Section>
 
       <Section title="Banking and split">
-        <Field label="Bank name" error={errors.bank_name?.message}>
+        <Field label="Bank name" required error={errors.bank_name?.message}>
           <Input {...form.register("bank_name")} disabled={!canEdit} />
         </Field>
         <Field label="Billing type" error={errors.billing_type?.message}>
@@ -288,37 +296,26 @@ export function BusinessStep({
             ))}
           </select>
         </Field>
-        <MaskedField
-          label="Agent split %"
-          mask={maskPercent}
-          placeholder="50"
-          error={errors.split_agent_pct?.message}
-          disabled={!canEdit}
-          value={form.watch("split_agent_pct")}
-          onChange={(v) =>
-            form.setValue("split_agent_pct", v, {
-              shouldDirty: true,
-              shouldValidate: true,
-            })
+        {/* Not entered here (memo §0b.4). The rate is the rep's, set by an
+            admin on their profile, and submit_pre_app() copies it onto the
+            pre-app; no client can write the split columns. */}
+        <ReadOnlyValue
+          label="Rep split"
+          value={
+            shownRate === null
+              ? "—"
+              : `Rep ${formatRate(shownRate)}% · Company ${formatRate(100 - shownRate)}%`
+          }
+          hint={
+            preApp.status === "draft"
+              ? "The rep's rate, set by an admin. It is copied onto the application when it is submitted."
+              : "Copied from the rep's rate when this was submitted."
           }
         />
-        <div className="flex flex-col gap-1">
-          <span className="text-xs uppercase tracking-wide text-muted-foreground">
-            Company split %
-          </span>
-          {/* Derived, not entered. pre_apps_split_sums_to_100 is a table check,
-              so writing one column alone — which is what a dirty-field autosave
-              does — would raise 23514 the moment the pair stopped totalling 100.
-              Deriving the other half makes that state unreachable. */}
-          <span className="text-sm">{companySplit ?? "—"}</span>
-          <span className="text-xs text-muted-foreground">
-            Derived, always 100 minus the agent split.
-          </span>
-        </div>
       </Section>
 
-      {/* Estimates, and treated as such: nothing here is required and no two
-          of these figures are checked against each other. See the note in
+      {/* Estimates, but required at submit and above zero (memo A13). No two
+          of these figures are checked against each other; see the note in
           businessStepSchema for why that is deliberate. */}
       <Section title={SALES_VOLUME_GROUP}>
         {SALES_VOLUME_FIELDS.map(([name, label]) => (
@@ -354,12 +351,15 @@ function Section({
 function Field({
   label,
   htmlFor,
+  required,
   error,
   children,
 }: {
   label: string;
   /** For a field whose control is not its only child (the datalist one). */
   htmlFor?: string;
+  /** Required at submit (pre_app_missing_fields); saving a draft never is. */
+  required?: boolean;
   error?: string;
   children: React.ReactNode;
 }) {
@@ -378,11 +378,51 @@ function Field({
       : children;
   return (
     <div className="flex flex-col gap-2">
-      <Label htmlFor={childId}>{label}</Label>
+      <Label htmlFor={childId}>
+        {label}
+        {required && <RequiredMark />}
+      </Label>
       {control}
       {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
+}
+
+/**
+ * The required marker. aria-hidden, so the field's accessible name stays its
+ * label ("City", not "City *"); the requirement itself is enforced and listed
+ * by pre_app_missing_fields() on the review step.
+ */
+function RequiredMark() {
+  return (
+    <span aria-hidden="true" className="text-muted-foreground" title="Required to submit">
+      *
+    </span>
+  );
+}
+
+/** A fixed value shown where a field would be: not an input, not autosaved. */
+function ReadOnlyValue({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <span className="text-sm font-medium leading-none">{label}</span>
+      <span className="text-sm">{value}</span>
+      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+    </div>
+  );
+}
+
+/** 50 -> "50", 46.5 -> "46.5": a numeric(5,2) without trailing zeros. */
+function formatRate(rate: number): string {
+  return String(Number(rate.toFixed(2)));
 }
 
 /**
@@ -406,7 +446,7 @@ function MoneyField({
   disabled?: boolean;
 }) {
   return (
-    <Field label={label} error={error}>
+    <Field label={label} required error={error}>
       <MaskedInput
         mask={maskMoney}
         value={form.watch(name) as string}
@@ -422,6 +462,7 @@ function MoneyField({
 
 function MaskedField({
   label,
+  required,
   mask,
   value,
   onChange,
@@ -430,6 +471,7 @@ function MaskedField({
   disabled,
 }: {
   label: string;
+  required?: boolean;
   mask: (value: string) => string;
   value: string;
   onChange: (value: string) => void;
@@ -438,7 +480,7 @@ function MaskedField({
   disabled?: boolean;
 }) {
   return (
-    <Field label={label} error={error}>
+    <Field label={label} required={required} error={error}>
       <MaskedInput
         mask={mask}
         value={value}
@@ -469,7 +511,6 @@ function toFormValues(preApp: PreApp): BusinessStepValues {
     physical_address: s(preApp.physical_address),
     city: s(preApp.city),
     state: s(preApp.state),
-    country: s(preApp.country),
     zip: s(preApp.zip),
     state_incorporated: s(preApp.state_incorporated),
     legal_entity_type: s(preApp.legal_entity_type),
@@ -481,7 +522,6 @@ function toFormValues(preApp: PreApp): BusinessStepValues {
     billing_type: preApp.billing_type ?? UNSET,
     bank_name: s(preApp.bank_name),
     processor: s(preApp.processor),
-    split_agent_pct: String(preApp.split_agent_pct),
     est_annual_volume: n(preApp.est_annual_volume),
     est_monthly_volume: n(preApp.est_monthly_volume),
     est_average_ticket: n(preApp.est_average_ticket),
@@ -516,27 +556,13 @@ function toPayload(
       continue;
     }
 
-    if (key === "split_agent_pct") {
-      // Written as a pair, or the sum-to-100 check rejects it. An unparseable
-      // or out-of-range entry is omitted entirely rather than nulled: these
-      // columns are NOT NULL, and dropping the key preserves the last good
-      // value instead of failing the whole save.
-      const agent = Number(value);
-      if (value === "" || Number.isNaN(agent) || agent < 0 || agent > 100) {
-        continue;
-      }
-      payload.split_agent_pct = agent;
-      payload.split_company_pct = Number((100 - agent).toFixed(2));
-      continue;
-    }
-
     if (MONEY_KEYS.has(key)) {
       // These are numeric columns, so the fallthrough below would PATCH a raw
       // string — and a transient "1e" would reach PostgREST as a 22P02 that
       // sticks the indicator on "Save failed" with nothing naming the field.
       //
-      // Blank clears the column, which is legal here: unlike the split, these
-      // are nullable and "not known" is a real answer. Anything unparseable is
+      // Blank clears the column, which is legal here: these are nullable and
+      // "not known" is a real answer while drafting (submit requires > 0). Anything unparseable is
       // omitted entirely, preserving the last good figure rather than wiping it
       // mid-keystroke. SPEC.md §6.1.
       if (value === "") {
@@ -552,14 +578,6 @@ function toPayload(
   }
 
   return payload;
-}
-
-function deriveCompanySplit(agentSplit: string): string | null {
-  const agent = Number(agentSplit);
-  if (agentSplit.trim() === "" || Number.isNaN(agent) || agent < 0 || agent > 100) {
-    return null;
-  }
-  return String(Number((100 - agent).toFixed(2)));
 }
 
 /** Turns the errors this step can actually provoke into something actionable. */

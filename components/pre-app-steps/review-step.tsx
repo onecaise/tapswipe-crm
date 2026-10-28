@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangleIcon,
@@ -17,8 +17,9 @@ import {
   type PreAppOwner,
   type PreAppStatus,
   type PreAppTerminal,
-  preAppSubmitBlockers,
+  PRE_APP_STEP_LABELS,
 } from "@/lib/pre-apps";
+import type { PreAppMissingItem } from "@/lib/pre-app-required";
 import { Callout } from "@/components/callout";
 import { PreAppSummary } from "@/components/pre-app-summary";
 import { Button } from "@/components/ui/button";
@@ -26,91 +27,48 @@ import { Button } from "@/components/ui/button";
 /**
  * The last step: what still blocks submission, and the button that submits.
  *
- * `submit_pre_app` is the authority and this step never pretends otherwise.
- * `preAppSubmitBlockers` mirrors the RPC's rules so the rep can see what is
- * missing without spending a round trip, but the button stays clickable whenever
- * the list is empty and whatever the RPC says on failure is shown verbatim. If
- * the two ever disagree, the RPC wins and the rep sees why.
+ * The list is pre_app_missing_fields() (20261028120000), fetched by the page
+ * through the RPC: the SAME function submit_pre_app() calls and refuses with.
+ * There is no browser-side copy of the rule any more (preAppSubmitBlockers
+ * was retired in phase 4), so the list here and the refusal cannot disagree.
+ * It covers the secrets too -- existence and kind only, the function never
+ * names a ciphertext column -- so nothing here calls a decrypting function
+ * (the read-pre-app-secrets lesson: it returned plaintext to build a
+ * checklist and wrote an audit row per render).
  *
- * Two facts the blocker list needs live in tables the browser cannot read:
- * whether banking ciphertext exists, and how many owners still have no SSN. The
- * `*_secrets` tables have no grant to `authenticated` and no policy, by design,
- * so both come from the `pre_app_secrets_presence` RPC, which answers with
- * `exists`/`count` and never names a ciphertext column.
- *
- * NOT `read-pre-app-secrets`, which is the obvious-looking choice and was the
- * first attempt here. That function decrypts: pointed at an admin it returned
- * full plaintext to the browser to populate a checklist, and it audits every
- * read, so merely opening this tab wrote an audit_log row claiming a full SSN
- * read that no human performed. The trail exists to answer "who looked at an
- * SSN" and form renders would bury the answer.
- *
- * When the RPC fails this does NOT invent blockers and does NOT disable the
- * button. It says the two rules could not be checked and lets the rep try:
- * `submit_pre_app` enforces both server-side regardless, so the worst case is an
- * error message instead of a silent, unexplained dead end.
+ * When the call failed (missing is null) this does NOT invent blockers and
+ * does NOT disable the button: it says the list could not be loaded and lets
+ * the rep try, because submit_pre_app() enforces the same list regardless.
  */
-type SecretsPresence = {
-  banking_on_file: boolean;
-  owners_missing_ssn: number;
-  /** A tax-id row of the CURRENT ein_type exists (what submit counts). */
-  tax_id_on_file: boolean;
-  /** The stored row's kind, or null; never the number. */
-  tax_id_type_on_file: "EIN" | "SSN" | null;
-};
-
 export function ReviewStep({
   preApp,
   owners,
   profile,
   terminal,
   isAdmin,
+  missing,
+  rep,
 }: {
   preApp: PreApp;
   owners: PreAppOwner[];
   profile: PreAppBusinessProfile | null;
   terminal: PreAppTerminal | null;
   isAdmin: boolean;
+  /** pre_app_missing_fields(), or null when it could not be read. */
+  missing: PreAppMissingItem[] | null;
+  /** The pre-app's rep (not the viewer), or null when unreadable. */
+  rep: {
+    full_name: string;
+    legal_name: string | null;
+    llc_legal_name: string | null;
+    split_rate_pct: number;
+  } | null;
 }) {
   const router = useRouter();
-  const [presence, setPresence] = useState<SecretsPresence | null>(null);
-  const [presenceFailed, setPresenceFailed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadPresence = useCallback(async () => {
-    // Nothing below draft status is submittable, so there is no checklist to
-    // build and no reason to make the call. Guarded here rather than by an early
-    // return in render, because hooks run either way.
-    if (preApp.status !== "draft") return;
-    setPresenceFailed(false);
-    const supabase = createClient();
-    // `returns table (...)` arrives as an array of one row.
-    const { data, error: rpcError } = await supabase
-      .rpc("pre_app_secrets_presence", { pre_app_id_input: preApp.id })
-      .maybeSingle();
-    if (rpcError || !data) {
-      setPresenceFailed(true);
-      return;
-    }
-    setPresence(data as SecretsPresence);
-  }, [preApp.id, preApp.status]);
-
-  useEffect(() => {
-    void loadPresence();
-  }, [loadPresence]);
-
-  // Optimistic when presence is unknown, so an unreachable RPC cannot
-  // manufacture a blocker the rep has no way to clear.
-  const blockers = preAppSubmitBlockers({
-    preApp,
-    owners,
-    profile,
-    hasBankingSecrets: presence ? presence.banking_on_file : true,
-    ownersMissingSsn: presence ? presence.owners_missing_ssn : 0,
-    taxIdOnFile: presence ? presence.tax_id_on_file : true,
-    taxIdTypeOnFile: presence ? presence.tax_id_type_on_file : null,
-  });
+  const blockers = missing ?? [];
 
   const submit = async () => {
     setSubmitting(true);
@@ -146,6 +104,7 @@ export function ReviewStep({
   }
 
   const ready = blockers.length === 0;
+  const rate = rep ? Number(rep.split_rate_pct) : null;
 
   return (
     <div className="flex flex-col gap-6">
@@ -167,6 +126,24 @@ export function ReviewStep({
         cardMix={profile}
       />
 
+      {/* What submit_pre_app() will copy onto the application from the
+          rep's profile (memo §7.1, §0b.4). Read-only: an admin sets all
+          three in Manage Users. */}
+      <div className="flex flex-col gap-1 text-sm" data-testid="rep-snapshot">
+        <span>
+          Submitted by{" "}
+          <strong>{rep?.legal_name ?? rep?.full_name ?? "—"}</strong>
+          {rep?.llc_legal_name && <> · {rep.llc_legal_name}</>}
+        </span>
+        <span className="text-muted-foreground">
+          Rep split{" "}
+          {rate === null
+            ? "—"
+            : `${Number(rate.toFixed(2))}% · Company ${Number((100 - rate).toFixed(2))}%`}
+          , copied from the rep&rsquo;s profile when this is submitted.
+        </span>
+      </div>
+
       <div className="border-t pt-6" />
 
       {ready ? (
@@ -182,28 +159,32 @@ export function ReviewStep({
               ? "One thing is missing before this can be submitted:"
               : `${blockers.length} things are missing before this can be submitted:`}
           </p>
-          <ul className="flex flex-col gap-1 pl-6">
+          <ul className="flex flex-col gap-1 pl-6" aria-label="Missing before submit">
             {blockers.map((blocker) => (
               <li
-                key={blocker}
+                key={`${blocker.code}:${blocker.owner_id ?? ""}`}
+                data-code={blocker.code}
                 className="list-disc text-sm text-muted-foreground"
               >
-                {blocker}
+                {blocker.label}{" "}
+                <span className="text-xs">
+                  ({PRE_APP_STEP_LABELS[blocker.step]})
+                </span>
               </li>
             ))}
           </ul>
         </div>
       )}
 
-      {presenceFailed && (
+      {missing === null && (
         <Callout tone="warning" className="flex items-start gap-2">
           <AlertTriangleIcon size={16} className="mt-0.5 shrink-0" />
           <span>
-            Could not check the SSN and banking rules — those two are not
-            included in the list above. Submitting still enforces them.{" "}
+            Could not load the list of what is still missing. Submitting
+            checks everything regardless.{" "}
             <button
               type="button"
-              onClick={() => void loadPresence()}
+              onClick={() => router.refresh()}
               className="underline underline-offset-2"
             >
               Try again

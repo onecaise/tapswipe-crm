@@ -271,6 +271,13 @@ export function SecretsStep({
                       setSsns((prev) => ({ ...prev, [owner.id]: v }))
                     }
                   />
+                  {/* The shape alone is not enough since phase 4: isSsn also
+                      refuses numbers the SSA never issues (000-00-0000). */}
+                  {ssns[owner.id] && !isSsn(ssns[owner.id]) && (
+                    <p className="text-xs text-destructive">
+                      Nine digits, as 123-45-6789, in a range the SSA issues.
+                    </p>
+                  )}
                   <OnFile
                     label="SSN"
                     onFile={Boolean(onFile?.ssn_on_file)}

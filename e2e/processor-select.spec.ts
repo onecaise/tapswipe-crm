@@ -33,6 +33,9 @@ test.describe("as a rep", () => {
     // loaded value and autosaved as NULL. Waiting for the network to settle
     // makes it hold, 3/3. Recorded as a pre-existing defect in the phase 1
     // notes of docs/design/intake-and-reports.md; this spec is not about it.
+    // Fixed in phase 4 (the shell holds the step disabled until hydration);
+    // e2e/qa/wizard-early-select.spec.ts is the regression test. The wait
+    // stays, because this spec is still not about it.
     await page.waitForLoadState("networkidle");
 
     expect(await optionLabels(page)).toEqual(EXPECTED);

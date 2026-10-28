@@ -19,7 +19,7 @@ import {
  */
 const MANAGE_USERS_QUERY = `
   select id, full_name, email, agent_number, territory, legal_name,
-         llc_legal_name, role, is_active, must_change_password, created_at
+         llc_legal_name, split_rate_pct, role, is_active, must_change_password, created_at
   from profiles
   order by created_at asc
 `;

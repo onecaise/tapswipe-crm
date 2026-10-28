@@ -74,9 +74,10 @@ export type PaperFieldEntry = PaperField & { key: string };
  * ------------------------------------------------------------------------- */
 
 /**
- * `split_company_pct` is excluded on purpose: the wizard derives it as
- * 100 minus the agent split and shows it read-only, so it is not a question to
- * ask on paper.
+ * Excluded on purpose, as not questions to ask on paper: the split
+ * (`split_agent_pct` / `split_company_pct`) and the rep's legal names are
+ * snapshotted from the rep's profile by submit_pre_app() (memo §0b.4, §7.1),
+ * and `country` is fixed to United States (memo A14).
  */
 type PaperBusinessKey = Exclude<
   keyof PreApp,
@@ -88,7 +89,11 @@ type PaperBusinessKey = Exclude<
   | "decline_reason"
   | "created_at"
   | "updated_at"
+  | "split_agent_pct"
   | "split_company_pct"
+  | "rep_legal_name"
+  | "rep_llc_legal_name"
+  | "country"
 >;
 
 /**
@@ -145,7 +150,6 @@ const BUSINESS_FIELDS = {
     group: "Address",
     hint: "12345 or 12345-6789",
   },
-  country: { label: "Country", kind: "text", group: "Address" },
 
   legal_entity_type: {
     label: "Entity type",
@@ -203,12 +207,6 @@ const BUSINESS_FIELDS = {
     group: "Banking and split",
     options: ["Gross", "Net"],
   },
-  split_agent_pct: {
-    label: "Agent split %",
-    kind: "percent",
-    group: "Banking and split",
-    hint: "the company split is 100 minus this",
-  },
 
   /**
    * Sales volume. The hint carries the unit on every one of them: on screen a
@@ -244,7 +242,8 @@ const BUSINESS_FIELDS = {
  * Owners — writes to `pre_app_owners`, one row per owner
  * ------------------------------------------------------------------------- */
 
-type PaperOwnerKey = Exclude<keyof PreAppOwner, "id" | "pre_app_id">;
+/** `home_country` is fixed to United States (memo A14), not a question. */
+type PaperOwnerKey = Exclude<keyof PreAppOwner, "id" | "pre_app_id" | "home_country">;
 
 const OWNER_FIELDS = {
   owner_name: { label: "Name", kind: "text", group: "Owner" },
@@ -282,7 +281,6 @@ const OWNER_FIELDS = {
     group: "Home address",
     hint: "12345 or 12345-6789",
   },
-  home_country: { label: "Home country", kind: "text", group: "Home address" },
 } satisfies Record<PaperOwnerKey, PaperField>;
 
 /* ---------------------------------------------------------------------------
@@ -533,22 +531,12 @@ export const PROFILE_SECTION: PaperSection = {
 export const PAPER_OWNER_BLOCKS = 2;
 
 /**
- * The submission blockers, copied from `preAppBlockers()` in lib/pre-apps.ts.
+ * The submission checklist the paper form prints. Only `dba_name` and
+ * `legal_business_name` are required to *save* a draft, so "which boxes must
+ * be filled in" is not answerable from the field list alone.
  *
- * Only `dba_name` and `legal_business_name` are required to *save* a draft, so
- * "which boxes must be filled in" is not answerable from the field list alone —
- * this is the real completeness test, and the paper form prints it as a
- * checklist so a rep can tell before leaving whether the form is finished.
+ * Generated from the codes of pre_app_missing_fields() in
+ * lib/pre-app-required.ts (phase 4), so it cannot lag the database again, as
+ * the hand-written list that used to sit here did (it lacked city and state).
  */
-export const PAPER_COMPLETENESS_CHECKLIST: readonly string[] = [
-  "A DBA name.",
-  "A legal business name.",
-  "At least one owner.",
-  "One owner holding at least 51%.",
-  "A social security number for every owner listed.",
-  "Bank routing number and account number — both, they are stored as a pair.",
-  "The tax ID, of the kind ticked under EIN type (EIN or SSN).",
-  "Swiped % and keyed % totalling 100, if either is filled in.",
-  "Card present % and card not present % totalling 100, if either is filled in.",
-  "An agent split; the company split is whatever is left of 100.",
-] as const;
+export { PAPER_COMPLETENESS_CHECKLIST } from "@/lib/pre-app-required";

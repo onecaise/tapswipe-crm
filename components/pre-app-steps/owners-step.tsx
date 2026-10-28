@@ -182,6 +182,13 @@ export function OwnersStep({
 
   return (
     <div className="flex flex-col gap-6">
+      {fields.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          Every field marked * is required for every owner before this
+          application can be submitted.
+        </p>
+      )}
+
       {fields.length === 0 && (
         <p className="rounded-md border border-dashed p-6 text-sm text-muted-foreground">
           No owners yet. At least one owner holding 51% or more is required
@@ -330,9 +337,12 @@ export function OwnersStep({
                 })
               }
             />
-            <Field label="Home country" error={errors.owners?.[index]?.home_country?.message}>
-              <Input {...form.register(`owners.${index}.home_country`)} disabled={!canEdit} />
-            </Field>
+            {/* Fixed, not a field: the column holds 'US' and nothing else
+                (pre_app_owners_home_country_us, memo A14). */}
+            <div className="flex flex-col gap-2">
+              <span className="text-sm font-medium leading-none">Home country</span>
+              <span className="text-sm">United States</span>
+            </div>
           </div>
         </fieldset>
       ))}
@@ -394,7 +404,14 @@ function Field({
       : children;
   return (
     <div className="flex flex-col gap-2">
-      <Label htmlFor={childId}>{label}</Label>
+      <Label htmlFor={childId}>
+        {label}
+        {/* Every owner field is required at submit (pre_app_missing_fields).
+            aria-hidden keeps the accessible name the bare label. */}
+        <span aria-hidden="true" className="text-muted-foreground" title="Required to submit">
+          *
+        </span>
+      </Label>
       {control}
       {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
@@ -450,7 +467,6 @@ function toFormRow(owner: PreAppOwner): OwnerRowValues {
     home_address: s(owner.home_address),
     home_city: s(owner.home_city),
     home_state: s(owner.home_state),
-    home_country: s(owner.home_country),
     home_zip: s(owner.home_zip),
   };
 }

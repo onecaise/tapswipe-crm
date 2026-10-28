@@ -80,6 +80,11 @@ test("the tax ID goes only to the secrets function, and comes back as the last f
   await expect(input).toHaveAttribute("inputmode", "numeric");
   await expect(page.getByText("EIN: not on file.")).toBeVisible();
 
+  // pressSequentially does not wait for an input to be enabled, and since
+  // phase 4 the wizard holds its controls disabled until it has hydrated
+  // (components/pre-app-wizard-shell.tsx); typed earlier, the digits would
+  // go nowhere.
+  await expect(input).toBeEnabled();
   await input.pressSequentially(EIN_DIGITS);
   await expect(input).toHaveValue(EIN);
   await page.getByRole("button", { name: "Encrypt & save" }).click();
@@ -115,6 +120,7 @@ test("switching the EIN type after the number was entered asks for it again", as
   await setEinType(id, "EIN");
   await page.goto(`/pre-apps/${id}/edit?step=secrets`);
   const ein = page.getByRole("textbox", { name: "EIN", exact: true });
+  await expect(ein).toBeEnabled();
   await ein.pressSequentially(EIN_DIGITS);
   await page.getByRole("button", { name: "Encrypt & save" }).click();
   await expect(page.getByText("EIN: on file — ····1357.")).toBeVisible();

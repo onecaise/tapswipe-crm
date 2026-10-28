@@ -52,9 +52,6 @@ export type TaxIdType = (typeof TAX_ID_TYPES)[number];
 export const isPositiveInt = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value > 0;
 
-export const isSsn = (value: unknown): value is string =>
-  typeof value === "string" && /^\d{3}-\d{2}-\d{4}$/.test(value);
-
 /**
  * A tax ID that is an EIN: 12-3456789, nine digits. Refuses all zeros and the
  * prefix 00, which the IRS never assigns. The real prefix list is NOT enforced:
@@ -73,8 +70,7 @@ export const isTaxEin = (value: unknown): value is string =>
  * which are not SSNs), group 00, serial 0000. All zeros is area 000. Mirrors
  * isTaxSsn in lib/masks.ts.
  *
- * Stricter than isSsn above (owner SSNs), which checks the shape only. Tightening
- * the owner validator too is a separate decision, not taken in phase 3.
+ * Also the owner-SSN rule (isSsn below), since phase 4.
  */
 export const isTaxSsn = (value: unknown): value is string => {
   if (typeof value !== "string") return false;
@@ -89,6 +85,13 @@ export const isTaxSsn = (value: unknown): value is string => {
     serial !== "0000"
   );
 };
+
+/**
+ * An owner's SSN: the isTaxSsn rule (phase 4). It used to check the shape
+ * only, so 000-00-0000 was accepted. Mirrors isSsn in lib/masks.ts;
+ * tests/live/pre-app-secrets.test.ts posts what that refuses and expects 400.
+ */
+export const isSsn = (value: unknown): value is string => isTaxSsn(value);
 
 export const isTaxIdType = (value: unknown): value is TaxIdType =>
   typeof value === "string" && (TAX_ID_TYPES as readonly string[]).includes(value);
@@ -154,7 +157,7 @@ export function parseSecretsBody(body: unknown): ParseResult {
           return { ok: false, error: "pre_app_owner_id must be a positive integer" };
         }
         if (!isSsn(entry.ssn)) {
-          return { ok: false, error: "ssn must be formatted 123-45-6789" };
+          return { ok: false, error: "ssn must be a valid SSN, formatted 123-45-6789" };
         }
         entries.push({
           kind: "owner_ssn",

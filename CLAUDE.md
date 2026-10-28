@@ -22,10 +22,10 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **The four `*_secrets` tables: zero policies, zero grants, Edge Function only** — including the agent's first submission. Never add a policy or a grant. → "Three tiers" below.
 - **`security invoker` is the default for RPCs.** `definer` only when the function must reach what the caller may not, and then it owes a hand-written guard first (`is_admin()` / `is_active_agent()`) plus `set search_path`. `search_crm` and `dashboard_counts` must stay invoker (tests assert `prosecdef` false). → `docs/claude/rpcs-profiles-audit.md`.
 - **The cross-book definer functions return redacted shapes, built with `jsonb_build_object` so hidden fields are ABSENT, not null**: `check_duplicates()` (warns only — **must never become a block**), `accounts_in_city()` (equality on `norm_city()` only; never a prefix/autocomplete for non-admins), `my_share_partners()` (party-only for every caller; a rep never sees the partner's share, rate or payout, and gets no access to the partner's merchant). → `docs/claude/rpcs-profiles-audit.md`.
-- **`profiles` has no client write path**: new columns are set only by a `security definer` RPC with `is_admin()` first (`set_user_role`, `set_agent_number`, `set_territory`, `set_manager`, `set_rep_identity`). **`territory`, `manager_id`, `legal_name` and `llc_legal_name` must never appear in a policy**; `role` stays `'agent' | 'admin'`; manager graph is one hop. → `docs/claude/rpcs-profiles-audit.md`.
+- **`profiles` has no client write path**: new columns are set only by a `security definer` RPC with `is_admin()` first (`set_user_role`, `set_agent_number`, `set_territory`, `set_manager`, `set_rep_identity`, `set_rep_split`). **`territory`, `manager_id`, `legal_name`, `llc_legal_name` and `split_rate_pct` must never appear in a policy**; `role` stays `'agent' | 'admin'`; manager graph is one hop. → `docs/claude/rpcs-profiles-audit.md`.
 - **`log_cross_agent_change()` fails closed on purpose** — never wrap its audit insert in an exception handler. A new table must have **every verb** audited somewhere. `audit_log` has no insert policy and `authenticated` holds `select` only. → `docs/claude/rpcs-profiles-audit.md`.
 - **A column that must be immutable is a GRANT, not a policy.** Column-level UPDATE grants: `quotes.status` only; `rep_payout_rows.residual_income` + `rep_split_pct` only; `rep_payout_batches.status` only (and a trigger admits only `review -> abandoned`). `notes` has no UPDATE at either layer. → `docs/claude/proposals-and-catalog.md`, `docs/claude/payouts-and-teardown.md`.
-- **Any column the client supplies and no policy reads is unvalidated** (the `documents.file_key` lesson). Fix it at the layer that cannot be skipped: the price lock trigger `snapshot_quote_line_item()` overwrites every snapshot column; `enforce_quote_version()` assigns versions and refuses foreign groups; the browser sends only `product_id` and `quantity`. → `docs/claude/edge-functions-and-storage.md`, `docs/claude/proposals-and-catalog.md`.
+- **Any column the client supplies and no policy reads is unvalidated** (the `documents.file_key` lesson). Fix it at the layer that cannot be skipped: the price lock trigger `snapshot_quote_line_item()` overwrites every snapshot column; `enforce_quote_version()` assigns versions and refuses foreign groups; the browser sends only `product_id` and `quantity`; only `submit_pre_app()` writes a pre-app's split and rep names, from the profile. → `docs/claude/edge-functions-and-storage.md`, `docs/claude/proposals-and-catalog.md`, `docs/claude/rpcs-profiles-audit.md`.
 - **The commit RPC's merge rule is `coalesce(excluded.<col>, rep_payout_rows.<col>)`** — reversing the arguments silently wipes hand-entered residuals. Every `on conflict` on `rep_payout_rows` must say `where line_kind = 'import'`. → "Three tiers" below, `docs/claude/payouts-and-teardown.md`.
 - **The legacy `documents` table and bucket are closed** (SELECT for admin only, no client write, its three functions removed). Do not reopen them. → `docs/claude/notes-tasks-documents.md`.
 
@@ -102,7 +102,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Not built yet:** My Submissions.
 - **Still starter-kit template:** `README.md` only. Edge Functions: twelve in the repo. Details of both → `docs/claude/project-state.md`.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Sixty-eight migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Sixty-nine migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 ## Hosted projects and deployment
 
@@ -162,10 +162,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2273 tests, 105 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (272 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2364 tests, 108 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (278 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (329 tests, 6 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (338 tests, 6 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -191,7 +191,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
-Baselines are the counts in the Commands block above (`npm test` 2273 tests / 105 files — every file must load; `test:live` 272; `test:deployed` 29; `test:e2e` 329, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
+Baselines are the counts in the Commands block above (`npm test` 2364 tests / 108 files — every file must load; `test:live` 278; `test:deployed` 29; `test:e2e` 338, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
 
 - Run `npm test` for any schema change; queries must run as `authenticated`, never the owner.
 - PGlite is Postgres 18.3, the stack 17.6 — pin constraint names in assertions, not SQLSTATEs.
@@ -205,7 +205,7 @@ Baselines are the counts in the Commands block above (`npm test` 2273 tests / 10
 
 `tsconfig.json` excludes `supabase`; `eslint.config.mjs` ignores `supabase/**`, `.next/**`, `next-env.d.ts`. Don't re-include them. `supabase/functions` is Deno and resolves imports through per-function `deno.json` maps that Node/TS cannot see (the Deno language server checks it instead, per `.vscode/settings.json`), and `supabase/.temp` is CLI scratch — `supabase start` writes a minified bundle there that alone produced 186 lint errors.
 
-**`allowImportingTsExtensions: true` is in `tsconfig.json` because of those Deno files, and the reason is not obvious.** Excluding `supabase` from tsconfig's ROOTS does not exclude it from type-checking: a file reached by an `import` is checked anyway, and the unit suites deliberately import `_shared/{residuals,user-imports}.ts` so the parsing rules can be tested under vitest with no Deno. That was harmless while those modules imported nothing — but Deno *requires* the `.ts` extension on a relative import, so the moment one `_shared` module imported another, `npx tsc --noEmit` failed with `TS5097`. The flag is legal here only because `noEmit` is already set. The alternative was giving each browser-side module its own copy of the validators, which is the drift the sharing exists to prevent.
+**`allowImportingTsExtensions: true` in `tsconfig.json` is load-bearing** (the unit suites import `_shared` modules, and Deno requires `.ts` extensions); why, in `docs/claude/edge-functions-and-storage.md`.
 
 ## Definition of done
 

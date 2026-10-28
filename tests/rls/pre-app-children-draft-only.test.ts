@@ -11,6 +11,7 @@ import {
   rows,
   type TestDb,
 } from "../helpers/db";
+import { makeSubmittable } from "../helpers/pre-app-submittable";
 
 /**
  * Security fix, phase 2 (docs/claude/security-fixes.md): a pre-app's child
@@ -48,16 +49,27 @@ async function preAppId(target: TestDb, dba: string): Promise<number> {
 }
 
 /**
- * The agent's seeded draft, made submittable (its minority owner gets an SSN
- * stand-in) and submitted through the real RPC, as the rep.
+ * The agent's seeded draft, made submittable and submitted through the real
+ * RPC, as the rep. On a schema with pre_app_missing_fields() (phase 4) that
+ * means every required field, with the seeded owners KEPT (the writes below
+ * name them); on an older prefix, the old rule: an SSN stand-in for the
+ * minority owner.
  */
 async function submittedByRep(target: TestDb): Promise<number> {
   const id = await preAppId(target, "Agent Draft App");
   await asPlatform(target);
-  await target.exec(`
-    insert into pre_app_owner_secrets (pre_app_owner_id, ssn_encrypted)
-    values ((select id from pre_app_owners where owner_name = 'Ben Minor'), decode('0044', 'hex'));
-  `);
+  const [{ phase4 }] = await rows<{ phase4: boolean }>(
+    target,
+    `select to_regprocedure('public.pre_app_missing_fields(int)') is not null as phase4`,
+  );
+  if (phase4) {
+    await makeSubmittable(target, id, { keepOwners: true });
+  } else {
+    await target.exec(`
+      insert into pre_app_owner_secrets (pre_app_owner_id, ssn_encrypted)
+      values ((select id from pre_app_owners where owner_name = 'Ben Minor'), decode('0044', 'hex'));
+    `);
+  }
   await asUser(target, AGENT_ID);
   await target.query(`select submit_pre_app(${id})`);
   await asPlatform(target);

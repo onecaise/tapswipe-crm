@@ -1,6 +1,6 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-3 built locally (§10).** Nothing has
+Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-4 built locally (§10).** Nothing has
 been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
@@ -262,7 +262,7 @@ non-matching value.
   that cannot be skipped writes the value). The rep's split input leaves the wizard; the review
   step shows the rate read-only. `pre_apps` gains `CHECK (split_agent_pct between 0 and 50)`.
 - **Snapshot onto the merchant at approval.** `approve_pre_app()` already copies both columns;
-  `merchants` gains the same 0-50 CHECK. A later `set_rep_split` changes no existing merchant.
+  `merchants` gains the same 0-50 CHECK in phase 8 (§10, phase 4 notes). A later `set_rep_split` changes no existing merchant.
 - **Per-merchant change.** `set_merchant_split(merchant_id, rate)`: admin-only, audited, `security
   definer`, refused while the merchant has an open or future share (§2.5). The merchant form's
   split input goes, and client UPDATE on the two split columns is removed, so the function is the
@@ -1073,11 +1073,11 @@ Thirteen phases, one prompt and one commit each, with the schema doc edited firs
 | 1 | Processor vocabulary | `processors` reference table and seed, FK from `merchants.processor` and new `pre_apps.processor`, `approve_pre_app()` copies it, one `<ProcessorSelect>` on the merchant form and the wizard. | **P** | `rls/grants` (new table's grants), `rls/pre-app-state-machine` (approve copies processor), `rls/merchants` + `rls/merchants-admin-only-writes` (FK refusal on free text), `e2e/merchant-owner` (form field) |
 | 2 | Rep identity | `profiles.legal_name` + `llc_legal_name`, admin-only `set_rep_identity()` with audit, on the create-user screen, Manage Users and the bulk user import. | **P** | `live/manage-users` + `live/user-provision` (create-user fields), `unit/user-import-parse` + `unit/user-import-lib` (two CSV columns, `isBlocking` pair), `rls/user-imports` (staging columns), `e2e/user-import` |
 | 3 | Tax id to secrets | `pre_app_tax_secrets` (EIN or SSN by `tax_id_type`, zero policies/grants), drop `pre_apps.ein_number`, `ein_type in ('EIN','SSN')`, the `tax_id` kind in both secrets functions with the validator pair, presence gains `tax_id_on_file`. | **P** | `rls/grants` + `rls/pre-app-secrets-presence` (fourth table), `rls/pre-apps` (column gone, type CHECK), `live/pre-app-secrets` (+tax-id rejects, round trip, last-four, type mismatch), `unit/pre-app-logic` (EIN mask now secrets-side), `unit/pre-app-form-fields` (`SECRET_FIELDS`), `e2e/qa/pre-app-sensitive-inputs`, `e2e/print` (still no secrets) |
-| 4 | Required fields and split rate | `pre_app_missing_fields()` used by `submit_pre_app()` and the review step; snapshot of rep identity **and the rep's split rate** onto the pre-app at submit (approval already copies `split_*` to the merchant); `profiles.split_rate_pct` (default 50, CHECK 0-50) with admin-only audited `set_rep_split()` and an admin-only Manage Users cell; `split_agent_pct` 0-50 CHECKs on pre-apps and merchants; `country = 'US'`; the wizard's required markers and step badges; the split input removed; the paper checklist generated. | **P** | `rls/pre-app-state-machine` (submit-validation block rewritten; `makeSubmittable()` must fill every field; approval copies the snapshot rate), `rls/pre-app-children-draft-only` + `rls/pre-app-secrets-presence` (fixtures that submit), `rls/pre-apps` (split), `rls/grants` (`set_rep_split` privileges), `unit/pre-app-logic` ("blockers mirror the RPC" retired), `unit/pre-app-location`, `unit/pre-app-form-fields` (checklist count → generated), `live/manage-users` (rate cell), `e2e/pre-app-wizard`, `e2e/qa/pre-app-labels`, `e2e/merchant-location` (submits a pre-app) |
+| 4 | Required fields and split rate | `pre_app_missing_fields()` used by `submit_pre_app()` and the review step; snapshot of rep identity **and the rep's split rate** onto the pre-app at submit (approval already copies `split_*` to the merchant); `profiles.split_rate_pct` (default 50, CHECK 0-50) with admin-only audited `set_rep_split()` and an admin-only Manage Users cell; `split_agent_pct` 0-50 CHECK on pre-apps (the merchants one moved to phase 8, §10); `country = 'US'`; the wizard's required markers and step badges; the split input removed; the paper checklist generated. | **P** | `rls/pre-app-state-machine` (submit-validation block rewritten; `makeSubmittable()` must fill every field; approval copies the snapshot rate), `rls/pre-app-children-draft-only` + `rls/pre-app-secrets-presence` (fixtures that submit), `rls/pre-apps` (split), `rls/grants` (`set_rep_split` privileges), `unit/pre-app-logic` ("blockers mirror the RPC" retired), `unit/pre-app-location`, `unit/pre-app-form-fields` (checklist count → generated), `live/manage-users` (rate cell), `e2e/pre-app-wizard`, `e2e/qa/pre-app-labels`, `e2e/merchant-location` (submits a pre-app) |
 | 5 | Pre-app visibility | `PreAppSummary` shows every stored field to both roles; a masked Sensitive data section on the detail page; admin per-field reveal with its own audit tier (the security follow-up). | **P** | `live/pre-app-secrets` (read tiers: default last-four for admins too), `e2e/qa/pre-app-sensitive-inputs`, `e2e/print` |
 | 6 | Import schema | Batches gain `processor`, `period` and replace columns, status `replaced`, and one committed batch per (processor, month). Staging gains `warnings` and the new blocker vocabulary. Ledger gains `processor`, the merge key with processor, and the confirmed-negative-volume column. `payout_period_closures` + `close_payout_period()`. Empty-table assertions. | **R** | `rls/rep-payouts` (merge key, volume CHECK), `rls/import-merge-key` (catalog diff), `rls/batch-status-transitions` (+`replaced`), `rls/commit-residual-import` + `-v2` (fixtures gain processor/period), `rls/acknowledge-residual-skips` + `rls/shared-lines` + `rls/share-corrections` (fixtures), `rls/grants` |
 | 7 | Parser and upload page | Six-header parser (§1.G: Processor, Merchant Number, Merchant Name, Income Type, Volume, Residual); Merchant Number read as text; BOM/apostrophe/whitespace-tolerant headers; currency-formatted figures; whole-file refusal on a non-`Residuals` Income Type; file Processor vs chosen processor as the `processor_mismatch` warning; MID → merchant → owner; the refusals and three warnings, confirmed once per type per import; the upload page with processor, month, year and the replace prompt; the review screen's refusal Callout and yes/no blocks; Agent # UI removed. Tests use real processor names. | **R** | `unit/residuals-parse` (mostly rewritten), `unit/residuals-preview` (three flags removed), `unit/payouts` (`reviewImportRows`, blockers, flag labels), `unit/figure-comma` (`COLUMN_HEADERS`), `live/residual-import` (upload → parse half), `e2e/qa/residual-bad-import`, `e2e/qa/residual-import-comma`; fixtures `seed-dev-payouts.mjs` and `e2e/fixtures/seed.ts` (`createCommittableBatch`, `createSkippingBatch`) |
-| 8 | Commit v3 | `commit_residual_import_v3(batch, confirmed[])`: re-resolves the owner, recomputes and enforces confirmations, **split = the merchant's rate** (house merchants at 0 still get a line), residual from the file, shared pair from the file. `commit_residual_import_v2` dropped. The share signer must be the owner, the two shares total the merchant's rate, and the merchant owner-change guard is added. `set_merchant_split()` (admin-only, audited, refused while a share is open or future) replaces the merchant form's split input, and client UPDATE on the merchant split columns is removed. | **R** | `rls/commit-residual-import-v2` (deleted, replaced by a v3 file), `rls/merchant-rep-shares` (signer = owner, owner-change refusal, shares total the rate), `rls/merchants-admin-only-writes` (split columns RPC-only), `rls/my-share-partners` (fixtures), `e2e/merchant-owner` (split input gone), `live/residual-import` (commit half, parse-vs-commit parity), `live/rep-share-teardown`, `e2e/payouts-commit`, `e2e/residual-skips` (retired), `e2e/payouts-shares` (fixtures) |
+| 8 | Commit v3 | `commit_residual_import_v3(batch, confirmed[])`: re-resolves the owner, recomputes and enforces confirmations, **split = the merchant's rate** (house merchants at 0 still get a line), residual from the file, shared pair from the file. `commit_residual_import_v2` dropped. The share signer must be the owner, the two shares total the merchant's rate, and the merchant owner-change guard is added. `set_merchant_split()` (admin-only, audited, refused while a share is open or future) replaces the merchant form's split input, and client UPDATE on the merchant split columns is removed. The merchants `split_agent_pct` 0-50 CHECK (deferred from phase 4) lands here, after the hermetic fixture's 55/60/70 merchants are rewritten. | **R** | `rls/commit-residual-import-v2` (deleted, replaced by a v3 file), `rls/merchant-rep-shares` (signer = owner, owner-change refusal, shares total the rate), `rls/merchants-admin-only-writes` (split columns RPC-only), `rls/my-share-partners` (fixtures), `e2e/merchant-owner` (split input gone), `live/residual-import` (commit half, parse-vs-commit parity), `live/rep-share-teardown`, `e2e/payouts-commit`, `e2e/residual-skips` (retired), `e2e/payouts-shares` (fixtures) |
 | 9 | Replace, Mark paid, adjustments | Replace inside v3 (refused once paid or when a correction targets the month), the "Mark paid" button with its typed confirmation, an admin-only "Reopen" requiring a written reason (`reopen_payout_period(period, processor, reason)`, definer, `is_admin()` first, audited, fails closed; A8), `delete_payout_period()` replacing the client delete (revokes DELETE), and a general `post_payout_adjustment()` for paid months (§0.5). | **R** | `rls/rep-payouts` (delete tests become RPC tests), `rls/grants` (DELETE revoked), `rls/share-corrections` + `rls/share-correction-posting-period` (posting month now shared with the general RPC), `e2e/payouts-roles` (delete), `e2e/payouts-adjustments` |
 | 10 | Overrides | `merchant_overrides` (`0 < pct ≤` the merchant's rate, of the full residual; table CHECK ≤ 50, the per-merchant cap in the RPC and v3), set/end/cancel RPCs, `set_merchant_split` refusing a rate below an open override, override lines written by v3, the `rep_payout` generated-column branch, the merchant-page override card, statement lines, and the cross-book name read function. 26th `profiles` FK. | **R**, needed before the first imported month any override applies to | `rls/user-imports` (FK count 25 → 26, by name), `rls/shared-lines-rewrite` (generated column), `rls/shared-part` (reused for the debit division), `unit/payouts` (`payoutTotals`, `PAYOUT_ROW_COLUMNS`), `live/rep-share-teardown` + all four teardown lists, `e2e/payouts-rendering` + `e2e/payouts-shares` (statement lines) |
 | 11 | Residual lock and payout UI cleanup | Revoke client UPDATE on `rep_payout_rows`; remove `PayoutFigureCell`, `PayoutBulkSplit`, `SharedResidualControl` and the round-trip copy; drop `set_shared_residual()`; new export header. | **R** (§0.5: not editable from the first import) | `rls/rep-payout-update-grant` (inverted: no UPDATE), `rls/shared-lines` (`set_shared_residual` tests retired), `rls/payout-history-trigger` (no client edit path; trigger kept as backstop), `unit/payout-figure-cell` (deleted), `unit/payouts`, `live/residual-import` (export header, 42501 test inverted), `e2e/payouts-editing` (retired or rewritten), `e2e/payouts-shares`, `e2e/payouts-states`, `e2e/qa/payout-figure-comma` (retired) |
@@ -1392,6 +1392,96 @@ Where the memo was silent or said otherwise, and what was chosen (conservative s
 
 Found while building, **not fixed**: the owner-SSN validator pair accepts `000-00-0000` and other
 never-issued SSNs (shape only).
+
+
+### Phase 4: required fields, split rate, country (28 Oct 2026, branch `intake-and-reports`)
+
+Built (`20261028120000_pre_app_required_fields.sql`):
+- `pre_app_missing_fields(pre_app_id)` returns every missing item at once as
+  `[{code, step, label, owner_id?}]`; 40 stable codes, listed in
+  `lib/pre-app-required.ts` and pinned to the SQL body by
+  `tests/unit/pre-app-required.test.ts`. It absorbs the location rule, the owner
+  rules, card mix, banking and the phase 3 tax-ID block (`tax_id`, three labels).
+- `submit_pre_app()` refuses with the whole list (PT422; the labels in the
+  message, the codes in DETAIL), then snapshots `rep_legal_name`,
+  `rep_llc_legal_name` and the rep's rate into `split_agent_pct` /
+  `split_company_pct`. Its body now names no secrets table at all.
+- `profiles.split_rate_pct` (default 50, CHECK 0-50) and `set_rep_split(user_id,
+  rate)`, the `set_rep_identity()` shape; an admin-only "Split" cell on Manage
+  Users.
+- `pre_apps_guard_transitions` refuses any write of the split or the two name
+  snapshots outside the state-machine flag (an admin's included); on INSERT they
+  must be the defaults.
+- `pre_apps.country` and `pre_app_owners.home_country`: not null, default `'US'`,
+  CHECK `= 'US'`; shown as fixed text in the wizard.
+- The wizard: the review step shows the function's list (fetched by the page
+  through the RPC); `preAppSubmitBlockers()` is gone; step links carry "· N
+  missing"; required fields carry an `aria-hidden` `*`; the split input is
+  replaced by the rep's rate, read-only.
+- The owner `isSsn` on both sides is now `isTaxSsn`.
+- The paper checklist is generated from the code list (24 lines; it had 10 and
+  lacked city and state).
+
+Where the memo was silent or said otherwise, and what was chosen (conservative
+side each time):
+- **The snapshot columns are the existing `split_agent_pct` / `split_company_pct`**,
+  not a new column: `approve_pre_app()` already copies them, so the merchant
+  snapshot at approval needed no change.
+- **The snapshot is enforced by the guard trigger, admin included**, rather than
+  by revoking column grants (a column-grant list on `pre_apps` would have to name
+  every other column and drift with each new one).
+- **The merchants 0-50 CHECK is deferred to phase 8** (with `set_merchant_split`),
+  although §1.C/§8.1 put it here: nothing reads the merchant split until v3, the
+  merchant form still edits it, and the shared hermetic fixture seeds 55/60/70
+  merchants that a dozen suites rely on. Phase 8 must add it.
+- **A NULL country is filled with `'US'` by the migration** (with the state flag
+  on), on drafts and submitted pre-apps alike: it is the only value the column
+  can now hold, and leaving it null would strand a draft with an item nobody can
+  fix. A non-null value other than `'US'` refuses the migration, naming it.
+- **`rep_identity` still needs both names**, so the A16 fallback
+  (`coalesce(llc_legal_name, legal_name)`) in the snapshot is written down but
+  unreachable through submit; A16 is the admin entering the rep's own name in
+  both fields, which is what the tests exercise.
+- **The labels are neutral** ("The rep's legal name and LLC legal name are not
+  on their profile yet…") rather than §7.1's "Your…", because an admin submitting
+  on a rep's behalf reads the same list.
+- **Owner percent owned must be above zero; ZIPs must be 12345 or 12345-6789;
+  ID state and home state must be two letters** — the wizard's own formats.
+- **`pre_app_secrets_presence()` is kept** (no caller left in the app; tests and
+  the definer-function audit still read it). Dropping it is a cleanup-phase
+  choice.
+- **New functions pin `search_path = public, pg_temp`** (§6); the rewritten
+  `submit_pre_app()` and guard keep `public`, which their tests pin.
+- **`set_rep_split` refuses more than two decimals** instead of letting
+  `numeric(5,2)` round silently.
+- **Step badges refresh on navigation**, not keystroke by keystroke.
+- **The Agent # agent code 122 house rate is not set by the migration** (an
+  admin does it, §11).
+
+Not done here:
+- **The reset script (`scripts/reset-business-data.sql`) is not on this branch.**
+  It lives on the unmerged `reset-business-data` branch (`d6d248b`, `90d6242`),
+  and its `keep_tables` is `profiles` only. When it is merged, `processors` must
+  join `keep_tables`, and `pre_app_tax_secrets` `clear_tables` next to the other
+  three secrets tables. Phase 4 adds no table.
+
+The wizard bug from phase 1 (a select changed straight after a step loads is
+reset and autosaved as empty) **reproduces on a production build** (`next build`
++ `next start` against the local stack, env from `.env.development.local`; no
+hosted project reachable from the bundle): 4 of 27 runs of
+`e2e/qa/wizard-early-select.spec.ts` lost the choice ("net" chosen, "—" shown),
+against 2 of 3 on `next dev`. Cause: the step is server-rendered and usable
+before hydration; react-hook-form's `register()` ref writes the loaded value
+back as it registers, and React's replay of the early change event then
+autosaves that reset value. Fix: the shell holds the step's controls in a
+`<fieldset disabled>` until it has hydrated (`useSyncExternalStore`, server
+snapshot false). After the fix, 27 of 27 pass on a rebuilt production build.
+Consequence for specs: `pressSequentially` does not wait for an input to be
+enabled, so `e2e/qa/pre-app-tax-id.spec.ts` now waits for `toBeEnabled()` first.
+
+Found while building, not fixed: the Supabase CLI is still linked to PROD
+(`supabase/.temp/linked-project.json`), as phase 1 found; nothing linked was
+run. Local service versions therefore follow prod's `.temp` files.
 
 ---
 

@@ -237,30 +237,50 @@ describe("pre_apps commission split", () => {
     expect(result[0]).toEqual({ a: "50.00", c: "50.00" });
   });
 
-  it("accepts a 100/0 split, for a sale the CEO is on", async () => {
-    await asUser(db, AGENT_ID);
-
-    await db.exec(
-      `update pre_apps set split_agent_pct = 100, split_company_pct = 0
-       where id = ${agentDraftId}`,
-    );
-
-    const result = await rows<{ a: string }>(
-      db,
-      `select split_agent_pct::text as a from pre_apps where id = ${agentDraftId}`,
-    );
-    expect(result[0].a).toBe("100.00");
-  });
-
-  it("rejects a split that does not total 100", async () => {
+  // Phase 4 (20261028120000, memo §0b.4) replaced "the rep types the split"
+  // with "submit_pre_app() copies the rep's rate". These two tests used to
+  // prove a rep could save 100/0 (the CEO-on-the-sale case, now the house
+  // profile's rate of 0, Company 100) and that a pair not totalling 100 was
+  // refused. The first is now refused outright; the second still holds, and
+  // is reached on the state machine's own path, the only one left that
+  // writes the split.
+  it("refuses a rep writing the split on their own draft, even a valid one", async () => {
     await asUser(db, AGENT_ID);
 
     await expect(
       db.exec(
-        `update pre_apps set split_agent_pct = 60, split_company_pct = 50
+        `update pre_apps set split_agent_pct = 40, split_company_pct = 60
          where id = ${agentDraftId}`,
       ),
-    ).rejects.toThrow(/pre_apps_split_sums_to_100/);
+    ).rejects.toThrow(/set by submit_pre_app\(\) from the rep's profile/);
+
+    await asPlatform(db);
+    const result = await rows<{ a: string }>(
+      db,
+      `select split_agent_pct::text as a from pre_apps where id = ${agentDraftId}`,
+    );
+    expect(result[0].a).toBe("50.00");
+  });
+
+  it("rejects a split that does not total 100, and a rep side over 50", async () => {
+    await asPlatform(db);
+    await db.exec(`select set_config('tapswipe.pre_app_transition', 'on', false)`);
+    try {
+      await expect(
+        db.exec(
+          `update pre_apps set split_agent_pct = 40, split_company_pct = 50
+           where id = ${agentDraftId}`,
+        ),
+      ).rejects.toThrow(/pre_apps_split_sums_to_100/);
+      await expect(
+        db.exec(
+          `update pre_apps set split_agent_pct = 100, split_company_pct = 0
+           where id = ${agentDraftId}`,
+        ),
+      ).rejects.toThrow(/pre_apps_split_agent_pct_range/);
+    } finally {
+      await db.exec(`select set_config('tapswipe.pre_app_transition', '', false)`);
+    }
   });
 });
 

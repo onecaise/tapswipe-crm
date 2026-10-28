@@ -363,6 +363,28 @@ describe("submit-pre-app-secrets validation mirrors lib/masks.ts", () => {
     expect(raw).not.toContain("123456789");
   });
 
+  // Phase 4: the owner SSN takes the tax-ID SSN rule (isSsn = isTaxSsn on
+  // both sides). Before, the shape alone passed, so 000-00-0000 was stored.
+  for (const [label, ssn] of [
+    ["an all-zero SSN", "000-00-0000"],
+    ["an SSN in area 000", "000-45-6789"],
+    ["an SSN in area 666", "666-45-6789"],
+    ["an SSN in area 9xx (an ITIN)", "912-45-6789"],
+    ["an SSN with group 00", "123-00-6789"],
+    ["an SSN with serial 0000", "123-45-0000"],
+  ] as const) {
+    it(`rejects ${label} for an owner with 400, without echoing it`, async () => {
+      const { status, body, raw } = await invoke(
+        "submit-pre-app-secrets",
+        { secrets: [{ kind: "owner_ssn", pre_app_owner_id: ownerRowId, ssn }] },
+        owner.token,
+      );
+      expect(status, raw).toBe(400);
+      expect(String(body.error)).toBe("ssn must be a valid SSN, formatted 123-45-6789");
+      expect(raw).not.toContain(ssn);
+    });
+  }
+
   it("accepts a nine-digit routing number", async () => {
     const { status, raw } = await invoke(
       "submit-pre-app-secrets",
@@ -616,11 +638,38 @@ describe("after submission", () => {
       owner.id,
       "Submitted Live Co",
     ));
-    const { error: locationError } = await adminClient()
+    // Every item pre_app_missing_fields() requires (phase 4, 20261028120000),
+    // apart from the secrets, which go through the function below.
+    const service = adminClient();
+    const { error: locationError } = await service
       .from("pre_apps")
-      .update({ city: "Nashville", state: "TN", ein_type: "EIN" })
+      .update({
+        city: "Nashville", state: "TN", zip: "37201", ein_type: "EIN",
+        contact_phone: "615-555-0100", physical_address: "100 Main St",
+        legal_entity_type: "LLC", state_incorporated: "TN", business_type: "Retail",
+        bank_name: "First Bank", est_annual_volume: 1200000, est_monthly_volume: 100000,
+        est_average_ticket: 45, est_high_ticket: 900,
+      })
       .eq("id", submittedId);
     if (locationError) throw locationError;
+    const { error: ownerFieldsError } = await service
+      .from("pre_app_owners")
+      .update({
+        title: "Owner", dob: "1980-01-02", home_phone: "615-555-0101",
+        id_type: "Driver license", id_number: "D1234567", id_state: "TN",
+        id_issue_date: "2020-01-01", id_expiration_date: "2030-01-01",
+        home_address: "1 Home Rd", home_city: "Nashville", home_state: "TN",
+        home_zip: "37203", length_of_ownership: "5 years",
+      })
+      .eq("id", submittedOwnerId);
+    if (ownerFieldsError) throw ownerFieldsError;
+    // The rep's legal names, which an admin sets (set_rep_identity); the
+    // service role stands in for that admin here.
+    const { error: identityError } = await service
+      .from("profiles")
+      .update({ legal_name: "Live Owner Legal", llc_legal_name: "Live Owner LLC" })
+      .eq("id", owner.id);
+    if (identityError) throw identityError;
 
     const secrets = await invoke(
       "submit-pre-app-secrets",

@@ -14,6 +14,7 @@ import {
   seed,
   type TestDb,
 } from "../helpers/db";
+import { makeSubmittable as makeSubmittableShared } from "../helpers/pre-app-submittable";
 
 /**
  * pre_app_tax_secrets -- the business tax ID (an EIN, or an SSN used as one) as
@@ -64,16 +65,14 @@ async function idOf(dba: string): Promise<number> {
   return row.id;
 }
 
-/** The seeded agent draft, made submittable apart from whatever a test removes. */
+/**
+ * The seeded agent draft, made submittable apart from whatever a test removes:
+ * since phase 4, every item of pre_app_missing_fields() (the shared helper).
+ * Leaves the session as the platform owner, as the old helper did.
+ */
 async function makeSubmittable(id: number): Promise<void> {
+  await makeSubmittableShared(db, id, { keepOwners: true });
   await asPlatform(db);
-  // Ben Minor has no SSN in the seed; every owner needs one to submit.
-  await db.exec(`
-    insert into pre_app_owner_secrets (pre_app_owner_id, ssn_encrypted)
-    select o.id, decode('0044', 'hex') from pre_app_owners o
-     where o.pre_app_id = ${id}
-       and not exists (select 1 from pre_app_owner_secrets s where s.pre_app_owner_id = o.id);
-  `);
 }
 
 async function statusOf(id: number): Promise<string> {
@@ -268,6 +267,16 @@ describe("ein_type and the dropped column", () => {
   });
 });
 
+// Since phase 4 (20261028120000) the rule is the 'tax_id' code of
+// pre_app_missing_fields(), and submit_pre_app() refuses with the whole list:
+// the label is inside the message, the code in DETAIL. The three cases and
+// their wording are unchanged apart from the leading capital.
+function refusesWith(error: { code?: string; message: string; detail?: string } | null, label: string) {
+  expect(error?.code).toBe("PT422");
+  expect(error?.message).toContain(label);
+  expect(JSON.parse(error?.detail ?? "[]")).toEqual(["tax_id"]);
+}
+
 describe("submit_pre_app requires the tax ID of the chosen kind", () => {
   it("submits when the stored kind matches ein_type", async () => {
     await makeSubmittable(draftId);
@@ -281,8 +290,7 @@ describe("submit_pre_app requires the tax ID of the chosen kind", () => {
     await db.exec(`delete from pre_app_tax_secrets where pre_app_id = ${draftId}`);
     await asUser(db, AGENT_ID);
     const error = await failure(db, `select submit_pre_app(${draftId})`);
-    expect(error?.code).toBe("PT422");
-    expect(error?.message).toBe("the EIN (tax ID) has not been entered");
+    refusesWith(error, "The EIN (tax ID) has not been entered.");
     expect(await statusOf(draftId)).toBe("draft");
   });
 
@@ -291,8 +299,7 @@ describe("submit_pre_app requires the tax ID of the chosen kind", () => {
     await asUser(db, AGENT_ID);
     await db.exec(`update pre_apps set ein_type = null where id = ${draftId}`);
     const error = await failure(db, `select submit_pre_app(${draftId})`);
-    expect(error?.code).toBe("PT422");
-    expect(error?.message).toBe("an EIN type (EIN or SSN) and the tax ID are required");
+    refusesWith(error, "Choose an EIN type (EIN or SSN), then enter the tax ID.");
     expect(await statusOf(draftId)).toBe("draft");
   });
 
@@ -303,10 +310,7 @@ describe("submit_pre_app requires the tax ID of the chosen kind", () => {
     await asUser(db, AGENT_ID);
     await db.exec(`update pre_apps set ein_type = 'SSN' where id = ${draftId}`);
     const error = await failure(db, `select submit_pre_app(${draftId})`);
-    expect(error?.code).toBe("PT422");
-    expect(error?.message).toBe(
-      "the tax ID on file is an EIN, but EIN type says SSN. Enter the SSN.",
-    );
+    refusesWith(error, "The tax ID on file is an EIN, but EIN type says SSN. Enter the SSN.");
     expect(await statusOf(draftId)).toBe("draft");
 
     // Entering the SSN (the Edge Function's upsert, stood in for here) clears it.
@@ -325,12 +329,12 @@ describe("submit_pre_app requires the tax ID of the chosen kind", () => {
     await db.exec(`delete from pre_app_tax_secrets where pre_app_id = ${draftId}`);
     await asUser(db, ADMIN_ID);
     const error = await failure(db, `select submit_pre_app(${draftId})`);
-    expect(error?.message).toBe("the EIN (tax ID) has not been entered");
+    refusesWith(error, "The EIN (tax ID) has not been entered.");
   });
 
   it("checks existence and kind only: no *_encrypted column is named", async () => {
     await asPlatform(db);
-    for (const fn of ["submit_pre_app", "pre_app_secrets_presence"]) {
+    for (const fn of ["pre_app_missing_fields", "pre_app_secrets_presence"]) {
       const [{ def }] = await rows<{ def: string }>(
         db,
         `select pg_get_functiondef(p.oid) as def from pg_proc p where p.proname = '${fn}'`,

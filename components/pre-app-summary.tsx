@@ -74,10 +74,28 @@ export function PreAppSummary({
         <Field label="Processor">{formatText(preApp.processor)}</Field>
         <Field label="Bank">{formatText(preApp.bank_name)}</Field>
         <Field label="Billing">{formatText(preApp.billing_type)}</Field>
+        {/* The split and the rep's legal names are snapshotted from the
+            rep's profile at submit (memo §0b.4, §7.1). A draft's columns hold
+            only the defaults, so printing them would show a 50/50 that may
+            never apply. */}
         <Field label="Split (agent / company)">
-          {formatPct(preApp.split_agent_pct)} /{" "}
-          {formatPct(preApp.split_company_pct)}
+          {preApp.status === "draft" ? (
+            "Set from the rep's rate at submit"
+          ) : (
+            <>
+              {formatPct(preApp.split_agent_pct)} /{" "}
+              {formatPct(preApp.split_company_pct)}
+            </>
+          )}
         </Field>
+        {preApp.status !== "draft" && (
+          <>
+            <Field label="Rep legal name">{formatText(preApp.rep_legal_name)}</Field>
+            <Field label="Rep LLC legal name">
+              {formatText(preApp.rep_llc_legal_name)}
+            </Field>
+          </>
+        )}
         {agentName && <Field label="Agent">{formatText(agentName)}</Field>}
       </Section>
 

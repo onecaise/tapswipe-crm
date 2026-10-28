@@ -45,7 +45,8 @@ export type PreApp = {
   physical_address: string | null;
   city: string | null;
   state: string | null;
-  country: string | null;
+  /** Always "US": fixed, not editable (pre_apps_country_us, memo A14). */
+  country: string;
   zip: string | null;
   phone_number: string | null;
   fax_number: string | null;
@@ -82,8 +83,20 @@ export type PreApp = {
   est_average_ticket: number | null;
   est_high_ticket: number | null;
 
+  /**
+   * The rep's split rate, snapshotted from profiles.split_rate_pct by
+   * submit_pre_app() (memo §0b.4), with the company's share as 100 minus it.
+   * A draft carries the defaults (50/50); no client writes either
+   * (pre_apps_guard_transitions, 20261028120000).
+   */
   split_agent_pct: number;
   split_company_pct: number;
+  /**
+   * The rep's legal name and LLC legal name, snapshotted from the rep's
+   * profile by submit_pre_app() (memo §7.1). Null on a draft.
+   */
+  rep_legal_name: string | null;
+  rep_llc_legal_name: string | null;
 
   created_at: string | null;
   updated_at: string | null;
@@ -106,7 +119,8 @@ export type PreAppOwner = {
   home_address: string | null;
   home_city: string | null;
   home_state: string | null;
-  home_country: string | null;
+  /** Always "US" (pre_app_owners_home_country_us, memo A14). */
+  home_country: string;
   home_zip: string | null;
 };
 
@@ -325,7 +339,6 @@ export type PreAppLeadDefaults = {
   | "physical_address"
   | "city"
   | "state"
-  | "country"
   | "zip"
   | "phone_number"
   | "email_address"
@@ -344,7 +357,6 @@ export function preAppDefaultsFromLead(
     | "address"
     | "city"
     | "state"
-    | "country"
     | "zip"
     | "website"
   >,
@@ -359,7 +371,6 @@ export function preAppDefaultsFromLead(
     physical_address: clean(lead.address),
     city: clean(lead.city),
     state: lead.state ? matchState(lead.state) : null,
-    country: clean(lead.country),
     zip: mapped(lead.zip, maskZip),
     // Carried as typed, with no normalising. `pre_apps.website` has no format
     // rule and neither does `leads.website`, so the only thing a mask here
@@ -381,112 +392,4 @@ function mapped(
 ): string | null {
   const trimmed = clean(value);
   return trimmed === null ? null : (clean(mask(trimmed)) ?? null);
-}
-
-/**
- * The reasons this pre-app cannot be submitted yet, in plain language.
- *
- * A deliberate mirror of `submit_pre_app`'s rules, kept so the rep sees what is
- * missing before spending a round trip on it. **The RPC is the authority** —
- * this list only pre-empts it, and the submit action still shows whatever the
- * RPC says. Any rule here that the RPC does not enforce is a field the rep
- * cannot submit for no visible reason; any rule the RPC enforces that is missing
- * here is an error they cannot act on. Change the two together.
- *
- * Card mix is two independent pairs and nothing else: swiped+keyed and
- * present+not-present. moto and internet are informational — captured,
- * displayed, never constrained.
- */
-export function preAppSubmitBlockers(input: {
-  preApp: Pick<
-    PreApp,
-    | "dba_name"
-    | "legal_business_name"
-    | "city"
-    | "state"
-    | "ein_type"
-    | "split_agent_pct"
-    | "split_company_pct"
-  >;
-  owners: Pick<PreAppOwner, "percent_owned">[];
-  profile: PreAppBusinessProfile | null;
-  hasBankingSecrets: boolean;
-  ownersMissingSsn: number;
-  /**
-   * From pre_app_secrets_presence(): whether a tax-id row OF THE CURRENT
-   * ein_type exists, and the stored row's kind (null when there is none).
-   */
-  taxIdOnFile: boolean;
-  taxIdTypeOnFile: "EIN" | "SSN" | null;
-}): string[] {
-  const blockers: string[] = [];
-  const { preApp, owners, profile } = input;
-
-  if (preApp.dba_name.trim() === "") blockers.push("A DBA name is required.");
-  if (preApp.legal_business_name.trim() === "") {
-    blockers.push("A legal business name is required.");
-  }
-  // submit_pre_app()'s location rule (20261013132000), in the same words a
-  // rep can act on. The RPC also checks the city's length and letters; the
-  // business step's own validation stops those before they reach here.
-  if (!preApp.city?.trim() || !/^[A-Z]{2}$/.test(preApp.state?.trim().toUpperCase() ?? "")) {
-    blockers.push("A business city and state are required.");
-  }
-
-  if (owners.length === 0) {
-    blockers.push("Add at least one owner.");
-  } else if (!owners.some((o) => (o.percent_owned ?? 0) >= 51)) {
-    blockers.push("One owner must hold at least 51% ownership.");
-  }
-
-  if (input.ownersMissingSsn > 0) {
-    blockers.push(
-      input.ownersMissingSsn === 1
-        ? "One owner has no SSN on file."
-        : `${input.ownersMissingSsn} owners have no SSN on file.`,
-    );
-  }
-
-  if (!input.hasBankingSecrets) {
-    blockers.push("Banking details have not been submitted.");
-  }
-
-  // submit_pre_app()'s tax-ID rule (20261026140000), in its three cases.
-  if (!input.taxIdOnFile) {
-    const type = preApp.ein_type;
-    if (type === null) {
-      blockers.push("Choose an EIN type (EIN or SSN), then enter the tax ID.");
-    } else if (input.taxIdTypeOnFile !== null && input.taxIdTypeOnFile !== type) {
-      blockers.push(
-        `The tax ID on file is an ${input.taxIdTypeOnFile}, but EIN type says ${type}. Enter the ${type}.`,
-      );
-    } else {
-      blockers.push(`The ${type} (tax ID) has not been entered.`);
-    }
-  }
-
-  if (profile) {
-    const { card_swiped_pct, card_keyed_pct } = profile;
-    if (
-      (card_swiped_pct !== null || card_keyed_pct !== null) &&
-      (card_swiped_pct ?? 0) + (card_keyed_pct ?? 0) !== 100
-    ) {
-      blockers.push("Swiped and keyed percentages must total 100.");
-    }
-    const { card_present_pct, card_not_present_pct } = profile;
-    if (
-      (card_present_pct !== null || card_not_present_pct !== null) &&
-      (card_present_pct ?? 0) + (card_not_present_pct ?? 0) !== 100
-    ) {
-      blockers.push(
-        "Card-present and card-not-present percentages must total 100.",
-      );
-    }
-  }
-
-  if (preApp.split_agent_pct + preApp.split_company_pct !== 100) {
-    blockers.push("Agent and company splits must total 100.");
-  }
-
-  return blockers;
 }
