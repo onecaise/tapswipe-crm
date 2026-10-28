@@ -1,10 +1,11 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-4 built locally (§10).** Nothing has
+Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-5 built locally (§10).** Nothing has
 been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
   below says **Recommend**, §0 is what was decided.
+- Owen's later answers of 28 Oct 2026 (§0c) close two §11 questions (deductions, the 50 cap).
 - Owen's decisions of 28 Oct 2026 (§0b), taken from his real residual file and his current payout
   report, are also binding and **supersede §0 where they differ**: the split is a per-rep rate, not
   a constant 50, and the file has six columns. §11 lists the questions still open.
@@ -117,6 +118,16 @@ each phase in §8 edits it before the migration.
    received, total agent commission. **Total commission is split plus override received.** Not
    included, because the file does not carry them: transactions, total income, total expense,
    gross, BPSR, rental, bonus (§7.2).
+
+---
+
+## 0c. Owen's answers (28 Oct 2026, later), binding
+
+1. **Deductions on Report 1 are shown but NOT subtracted** from Total Agent Commission, which stays
+   agent split + override received (§0b.7). The column is labelled so a reader cannot take it as
+   part of the total: **"Deductions (info only, not in total)"**. Closes §11 Q4.
+2. **50 is the maximum rep rate.** The 0-50 limit stays on the profile, pre-app and merchant rates
+   and on the override's outer bound. Closes §11 Q2.
 
 ---
 
@@ -795,8 +806,8 @@ For rep `P` and month `M`:
 | Override on their accounts, and the $ subtracted | `−sum(override_amount)` over `P`'s **debit** override lines, with the percent, merchant and recipient in a detail row. |
 | **Agent split** (Report 1) | Earned after split minus the override subtracted: what `P` keeps from their own merchants. |
 | Overrides received | `sum(override_amount)` over `P`'s **credit** lines (§0b.7: a Report 1 column). |
-| Deductions (adjustments) | `sum(rep_payout)` over `P`'s adjustment lines posted in `M`. |
-| **Total agent commission** | **Agent split + overrides received** (§0b.7, as Owen decided). Whether deductions are also subtracted is open (§11, Q4): until answered, the page shows deductions in their own column and a test pins that `total + deductions = sum(rep_payout)` over every line `P` has in `M`, so the report and the statement reconcile on the screen. |
+| Deductions (adjustments), for information | `sum(rep_payout)` over `P`'s adjustment lines posted in `M`. **Shown, not subtracted** (§0c.1). |
+| **Total agent commission** | **Agent split + overrides received** (§0b.7). Deductions are **not** subtracted (§0c.1): they sit in their own column, labelled as not included in the total, and a test pins that `total + deductions = sum(rep_payout)` over every line `P` has in `M`, so the report and the statement reconcile on the screen. |
 
 ---
 
@@ -1021,9 +1032,9 @@ Columns, in Owen's order (§0b.7). Per rep, per month (`rep_payout_rows.period`)
 | Sales volume | `sum(volume)` over the rep's import lines that month. On a shared account, volume is on the **signer's line only** (residual-splits Q4), so the partner shows none for it (§9, A18). |
 | Net residual | `sum(residual_income)` over the rep's import lines (the pre-split figure; on a shared account, the rep's piece) |
 | Agent split | §4.5 "Agent split": earned at the merchants' rates, minus overrides taken from the rep's accounts |
-| Deductions (adjustments) | §4.5 |
+| Deductions (adjustments), not included in the total | §4.5; the header reads "Deductions (info only, not in total)" (§0c.1) |
 | Override received | §4.5 |
-| Total agent commission | **Agent split + override received** (§0b.7; §11 Q4 on deductions) |
+| Total agent commission | **Agent split + override received** (§0b.7); deductions not subtracted (§0c.1) |
 
 The rep's split rate is read from the lines (`rep_split_pct`, the merchant's rate at commit), never
 from `profiles.split_rate_pct`, which may have changed since. **Not included**, because the file
@@ -1483,6 +1494,76 @@ Found while building, not fixed: the Supabase CLI is still linked to PROD
 (`supabase/.temp/linked-project.json`), as phase 1 found; nothing linked was
 run. Local service versions therefore follow prod's `.temp` files.
 
+### Phase 5: pre-app visibility and secret reveal (28 Oct 2026, branch `intake-and-reports`)
+
+Built (`20261028140000_pre_app_secret_reveal.sql`):
+- `read-pre-app-secrets` answers every **default read** with the masked tier, admin included: last
+  four of each owner SSN, the tax ID (with its stored kind), routing and account; presence only
+  for the RP password, which the default read no longer decrypts. Audited `read_pre_app_secrets:last4`
+  for everyone. There is no `full` tier.
+- A **reveal** names one field (`owner_ssn` + owner, `aba_routing`, `account_number`,
+  `rp_password`, `tax_id`). Admin only: the role check runs before any record is looked up, so a
+  rep gets one identical 403 for every id. Then the pre-app and owner through the caller's client
+  (404), the ciphertext's existence ("Not on file", 404, no audit), then
+  `record_pre_app_secret_reveal()` through the caller's client, and only then the decrypt. An RPC
+  error returns 500 with no value; the limit returns 429 with the function's sentence.
+- `record_pre_app_secret_reveal(pre_app_id, field, owner_id)`: `security definer`, `is_admin()`
+  first, one `audit_log` row per call naming the admin (`actor_id`), the pre-app (`row_id`), the
+  field (`read_pre_app_secrets:reveal:<field>`, owner SSNs `…:owner_ssn:<owner id>`) and the time
+  (`created_at`); no exception handler; 30 per admin per rolling hour under a per-admin advisory
+  lock, with a partial index, exactly the `accounts_in_city()` shape.
+- The detail page's **Sensitive data** section (`components/pre-app-sensitive-data.tsx`):
+  client-fetched, masked for both roles, a per-field Show/Hide for an admin. The wizard's
+  Sensitive data step shows last four only, to everyone (no Show there).
+- `PreAppSummary` shows every stored column of `pre_apps` and its three children, pinned by a
+  render test whose fixtures are typed `satisfies <RowType>`.
+- The edit rule: **no gap found, no rule changed.** The guard trigger refuses a rep's parent
+  edit at submitted, approved and declined; deletes are admin-only; the children guard and the
+  secrets function's 409 cover the rest; an admin edits parent and children at every status but
+  never `status` directly. `tests/rls/pre-app-edit-rules.test.ts` pins what was not pinned at
+  every status.
+
+Where the memo was silent, and what was chosen (conservative side each time):
+- **The audit row and the limit are a SQL function, not an insert from the Edge Function**, so the
+  count and the insert are one atomic step per admin, and the reveal's audit row is written
+  through the caller's own client (the admin is `auth.uid()`, not a value the function passes).
+- **30 reveals per admin per rolling hour.** No admin action was rate-limited before
+  (`accounts_in_city` exempts admins), so "the same way" is the same mechanism and the same
+  number. A pre-app needs about five to eight reveals to key into a processor portal, so 30 an
+  hour is four to six pre-apps; Owen may want it raised.
+- **Re-mask after 30 seconds**, and at once on a pathname change, a hidden tab, pagehide and
+  beforeprint; Hide masks one field at once.
+- **The audit action names the owner for an SSN** (`…:owner_ssn:<owner id>`), beyond the memo's
+  `reveal:<field>`, so the trail says whose SSN.
+- **Routing and account are separate fields**, so revealing one does not reveal the other.
+- **The RP password stays presence-only on the default read for admins too**, and is revealable.
+- **A rep's reveal is 403, not 404**, and the same 403 for any id (the check precedes the lookup),
+  so it is no id oracle.
+- **Not on file is a 404 with no audit row**: nothing was revealed.
+- **The default read still writes `read_pre_app_secrets:last4` on every detail-page view**, rep
+  and admin, as the wizard step did; the trail now separates a glance from a look.
+- **Print pages stay without any secret**, not even last four: the merchant print page and the
+  paper form have no data path to them, which is stricter than "masked". The detail page, if
+  printed from the browser, prints the masked form (`print:hidden` on the value, a masked twin
+  for print, and beforeprint masks the state).
+- **The owners' ID-document fields (`id_number` etc.) are shown to both roles**: they are plain
+  columns, not secrets-table fields, and the instruction was "every field but the secrets".
+- **Summary metadata shown:** the lead it came from, date submitted, created and last updated.
+  Not shown as fields: `status` (the badge) and `decline_reason` (the page's callout).
+
+Found while building:
+- **Next 16 with `cacheComponents` keeps the route just left in the document, hidden (React
+  `<Activity>`), with its state.** Unmounting is therefore not what clears a revealed value on
+  navigation; the pathname effect's cleanup is. Removing that one effect left the value in the
+  hidden DOM, and on screen again after Back (e2e revert proof). Any later component that holds
+  something sensitive in state needs the same cleanup.
+- The routing input's placeholder is `021000021`, the routing number most fixtures use, so a
+  "nowhere in the HTML" check on the secrets step must use another number.
+- A PostgREST bulk insert whose rows differ in keys sends NULL for a missing column rather than its
+  default (a test bug here, not an app bug).
+- The guard's message reads "a approved pre-app" (existing grammar, not changed).
+- The Supabase CLI is still linked to PROD, as phases 1 and 4 found; nothing linked was run.
+
 ---
 
 ## 11. Open questions (28 Oct 2026)
@@ -1493,12 +1574,11 @@ by an admin after the migration.
 1. **Reps who are not at 50.** Names and rates, to be entered by an admin with `set_rep_split` once
    phase 4 is deployed. The house profile (agent code 122) is set to 0 the same way. No rate is
    hard-coded in a migration.
-2. **Does any rep ever exceed 50?** The CHECKs (profile, pre-app, merchant) and the override's outer
-   bound all stop at 50. A rep above 50 would mean relaxing all of them together.
+2. ~~Does any rep ever exceed 50?~~ **Closed (§0c.2): no.** 50 is the maximum; the 0-50 CHECKs stay.
 3. **Bruce Rozar's effective rate is about 46%.** That suggests his merchants are at different
    rates (some below 50), or an override or adjustment is netting against a 50% split. Which one
    decides whether his profile rate is 50 with a few merchants changed by `set_merchant_split`, or
    a lower profile rate.
-4. **Report 1 total and deductions.** Owen's rule is "total commission = agent split + override
-   received". Should deductions (adjustments) also be subtracted? Until answered the report shows
-   them in their own column and pins `total + deductions = sum of every line` (§4.5).
+4. ~~Report 1 total and deductions.~~ **Closed (§0c.1): not subtracted.** Total = agent split +
+   override received; deductions have their own column, labelled "info only, not in total", and
+   the test still pins `total + deductions = sum of every line` (§4.5).

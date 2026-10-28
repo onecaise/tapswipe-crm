@@ -9213,6 +9213,106 @@ revoke all on function pre_app_secrets_presence(int) from public;
 grant execute on function pre_app_secrets_presence(int) to authenticated, service_role;
 
 -- =====================================================================
+-- PRE-APP SECRET REVEAL — Tier 2 (20261028140000; phase 5 of
+-- docs/design/intake-and-reports.md, §1.E and A24). The audit row and the
+-- rate limit behind an admin's per-field "Show".
+--
+-- Since this migration read-pre-app-secrets answers EVERY default read --
+-- rep and admin alike -- with last four (presence only for the RP password).
+-- A full value leaves the Edge Function only on a request naming ONE field
+-- (`reveal`), only for an admin, and only after this function has returned.
+-- So the trail separates a glance (read_pre_app_secrets:last4) from a look.
+--
+-- Why SQL and not an insert from the Edge Function: the count and the insert
+-- must be one atomic step per admin (pg_advisory_xact_lock), exactly as
+-- accounts_in_city() counts a rep's searches, and audit_log has no insert
+-- policy for anyone to borrow.
+--
+--   * is_admin() first: a rep, a deactivated admin and anon are refused before
+--     anything is counted or written.
+--   * One audit_log row per reveal: actor_id the admin, row_id the pre-app,
+--     created_at the time, and the field in the action --
+--       read_pre_app_secrets:reveal:<field>
+--       read_pre_app_secrets:reveal:owner_ssn:<pre_app_owner_id>
+--     No exception handler (fails closed): no row, no value.
+--   * 30 reveals per admin per rolling hour (PT429 on the 31st, with a
+--     showable message). Default reads do not count.
+--   * It names no *_secrets table and decrypts nothing -- the key lives only
+--     in the Edge Function -- so an admin calling it directly can only write an
+--     audit row against themselves.
+-- =====================================================================
+create function record_pre_app_secret_reveal(
+  pre_app_id_input int,
+  field_input text,
+  pre_app_owner_id_input int default null
+)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  recent_reveals int;
+  oldest_reveal timestamptz;
+  wait_minutes int;
+begin
+  if not is_admin() then
+    raise exception 'Only an admin can reveal a full value.' using errcode = 'PT403';
+  end if;
+
+  if field_input is null
+     or field_input not in ('owner_ssn', 'aba_routing', 'account_number', 'rp_password', 'tax_id') then
+    raise exception 'Unknown secret field.' using errcode = '22023';
+  end if;
+  if (field_input = 'owner_ssn') <> (pre_app_owner_id_input is not null) then
+    raise exception 'An owner is named for an owner SSN, and only for one.' using errcode = '22023';
+  end if;
+
+  if not exists (select 1 from pre_apps where id = pre_app_id_input) then
+    raise exception 'pre-app not found' using errcode = 'PT404';
+  end if;
+  if pre_app_owner_id_input is not null and not exists (
+    select 1 from pre_app_owners
+     where id = pre_app_owner_id_input and pre_app_id = pre_app_id_input
+  ) then
+    raise exception 'pre-app not found' using errcode = 'PT404';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended('reveal_pre_app_secret:' || auth.uid()::text, 0));
+  select count(*), min(a.created_at)
+    into recent_reveals, oldest_reveal
+    from audit_log a
+   where a.actor_id = auth.uid()
+     and a.action like 'read_pre_app_secrets:reveal:%'
+     and a.created_at > now() - interval '1 hour';
+  if recent_reveals >= 30 then
+    wait_minutes := greatest(1, ceil(extract(epoch from
+                      (oldest_reveal + interval '1 hour' - now())) / 60)::int);
+    raise exception 'You have reached the limit of 30 reveals an hour. Try again in % minute%.',
+      wait_minutes, case when wait_minutes = 1 then '' else 's' end
+      using errcode = 'PT429';
+  end if;
+
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (
+    auth.uid(),
+    'read_pre_app_secrets:reveal:' || field_input
+      || coalesce(':' || pre_app_owner_id_input::text, ''),
+    'pre_apps',
+    pre_app_id_input::text
+  );
+end;
+$$;
+
+revoke all on function record_pre_app_secret_reveal(int, text, int) from public;
+grant execute on function record_pre_app_secret_reveal(int, text, int) to authenticated, service_role;
+
+-- The rate limit's count: one admin's reveal rows in the last hour.
+create index audit_log_secret_reveal_idx on audit_log (actor_id, created_at)
+  where action like 'read_pre_app_secrets:reveal:%';
+
+-- =====================================================================
 -- GHOST SHEET CONVERSION — Tier 2. Plain function, NOT security definer:
 -- the caller owns both rows, so letting their own RLS scope the reads and
 -- writes is safer than re-implementing the ownership check by hand. One

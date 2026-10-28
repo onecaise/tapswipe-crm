@@ -39,6 +39,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **The per-bucket 50 MiB limit is the real upload ceiling**; `config.toml`'s `file_size_limit` limits nothing. Hosted buckets need it set out-of-band. → `docs/claude/edge-functions-and-storage.md`.
 - **The secrets validators exist twice and must change together** (`lib/masks.ts` and `_shared/pre-app-secrets.ts`, tax-ID pair `isTaxEin`/`isTaxSsn` included); the residual parser exists **once** — do not create a browser twin. → `docs/claude/edge-functions-and-storage.md`.
 - **Never show a `functions.invoke()` error's `.message` to a user** — use `lib/edge-functions.ts`. → "Next.js / auth wiring" below.
+- **`read-pre-app-secrets` returns last four to everyone, admin included.** A full value leaves only on a one-field `reveal`: admin-only, audited first by `record_pre_app_secret_reveal()` (fails closed, 30/hour), shown client-side and never printed. → `docs/claude/edge-functions-and-storage.md`.
 - **"Email" on marketing materials sends nothing** and must say so; when sending lands it goes next to that log line. → `docs/claude/reference-data-and-marketing.md`.
 - **`GET /auth/confirm` never verifies a token**: it redirects to the Continue page, and only that page's Server Action (same-origin POST) calls `verifyOtp`. Link types are an allow-list of what the app sends — `recovery` only. → `docs/claude/security-fixes.md`, phase 7.
 - **Nothing is invented on the printed proposal** (`PROPOSAL_TERMS` empty by default; no phone; no stale contact) and print routes return **404, never 403**. → `docs/claude/proposals-and-catalog.md`.
@@ -103,7 +104,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Not built yet:** My Submissions.
 - **Still starter-kit template:** `README.md` only. Edge Functions: twelve in the repo. Details of both → `docs/claude/project-state.md`.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Sixty-nine migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Seventy migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 ## Hosted projects and deployment
 
@@ -130,7 +131,7 @@ postgresql://postgres.zuvsdkjnfstrjahstsmg@aws-0-us-west-2.pooler.supabase.com:5
 
 Port 5432, not 6543: transaction mode breaks a migration partway through. Both projects are `us-west-2`, so dev's pooler host is prod's too.
 
-**`aws-0`, not `aws-1` — this file said `aws-1` until 18 Sep 2026 and that was never verified.** `aws-0` is what actually authenticated against prod, twice, in the diagnostic and the push. Both hostnames resolve to real, distinct Supabase pooler IPs and both accept TCP on 5432, so nothing about DNS or a port check will tell you which is right. The wrong one fails as `Tenant or user not found`, which reads exactly like a bad password and will send you off rotating a credential that was fine. `scripts/prod-state.ps1` and its two callers all use `aws-0` and print the alternate as a hint on failure.
+**Pooler host is `aws-0`, never `aws-1`:** the wrong one fails as `Tenant or user not found`, which reads like a bad password. History: `docs/claude/project-state.md`.
 
 **Don't hand-build that URL — use the scripts.** `scripts/diag-prod-trigger.ps1` reads prod's state read-only and says whether it matches the repo; `scripts/push-prod-migration.ps1` applies what is pending and verifies the result against the catalog. Both take the password from `$env:SUPABASE_DB_PASSWORD` (set it with `Read-Host -AsSecureString`, never a literal assignment — PSReadLine's sensitive-input filter catches the word "password" but *not* a credential embedded in a URL, which is how three of them ended up in shell history), both redact it out of everything they print, and both write a log to `scripts/logs/` because the answer has to outlive the terminal. Run the push with `-DryRun` first.
 
@@ -163,10 +164,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2381 tests, 109 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (287 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2545 tests, 113 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (313 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (338 tests, 6 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (346 tests, 6 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -192,7 +193,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
-Baselines are the counts in the Commands block above (`npm test` 2381 tests / 109 files — every file must load; `test:live` 287; `test:deployed` 29; `test:e2e` 338, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
+Baselines are the counts in the Commands block above (`npm test` 2545 tests / 113 files — every file must load; `test:live` 313; `test:deployed` 29; `test:e2e` 346, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
 
 - Run `npm test` for any schema change; queries must run as `authenticated`, never the owner.
 - PGlite is Postgres 18.3, the stack 17.6 — pin constraint names in assertions, not SQLSTATEs.

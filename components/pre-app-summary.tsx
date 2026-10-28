@@ -12,6 +12,7 @@ import { SALES_VOLUME_GROUP } from "@/lib/pre-app-form-fields";
 import {
   formatClockTime,
   formatDate,
+  formatDateTime,
   formatMoney,
   formatPct,
   formatText,
@@ -58,16 +59,25 @@ export function PreAppSummary({
         <Field label="Contact">{formatText(preApp.contact_name)}</Field>
         <Field label="Contact phone">{formatText(preApp.contact_phone)}</Field>
         <Field label="Business phone">{formatText(preApp.phone_number)}</Field>
+        <Field label="Fax">{formatText(preApp.fax_number)}</Field>
         <Field label="Email">{formatText(preApp.email_address)}</Field>
         <Field label="Address">{formatText(preApp.physical_address)}</Field>
         <Field label="City">{formatText(preApp.city)}</Field>
         <Field label="State">{formatText(preApp.state)}</Field>
         <Field label="ZIP">{formatText(preApp.zip)}</Field>
+        <Field label="Country">{formatText(preApp.country)}</Field>
         <Field label="Website">{formatText(preApp.website)}</Field>
         <Field label="Entity type">{formatText(preApp.legal_entity_type)}</Field>
+        <Field label="State incorporated">
+          {formatText(preApp.state_incorporated)}
+        </Field>
+        <Field label="Business type">{formatText(preApp.business_type)}</Field>
+        <Field label="Sub-business type">
+          {formatText(preApp.sub_business_type)}
+        </Field>
         {/* The type only. The tax ID itself is encrypted and is never in this
-            server-rendered summary; its last four show on the Sensitive data
-            step. */}
+            server-rendered summary; its last four are fetched client-side by
+            the Sensitive data section (components/pre-app-sensitive-data.tsx). */}
         <Field label="EIN type">{formatText(preApp.ein_type)}</Field>
         <Field label="Started">{formatDate(preApp.business_start_date)}</Field>
         <Field label="Goods sold">{formatText(preApp.goods_sold)}</Field>
@@ -97,6 +107,12 @@ export function PreAppSummary({
           </>
         )}
         {agentName && <Field label="Agent">{formatText(agentName)}</Field>}
+        <Field label="From lead">
+          {preApp.lead_id === null ? formatText(null) : `#${preApp.lead_id}`}
+        </Field>
+        <Field label="Date submitted">{formatDateTime(preApp.date_submitted)}</Field>
+        <Field label="Created">{formatDateTime(preApp.created_at)}</Field>
+        <Field label="Last updated">{formatDateTime(preApp.updated_at)}</Field>
       </Section>
 
       {/* Rendered from the same list the wizard maps, so a field added there
@@ -129,9 +145,26 @@ export function PreAppSummary({
                 <Field label="Ownership">
                   {formatPct(owner.percent_owned)}
                 </Field>
+                <Field label="Length of ownership">
+                  {formatText(owner.length_of_ownership)}
+                </Field>
                 <Field label="Home phone">{formatText(owner.home_phone)}</Field>
                 <Field label="Date of birth">{formatDate(owner.dob)}</Field>
+                <Field label="Home address">{formatText(owner.home_address)}</Field>
+                <Field label="Home city">{formatText(owner.home_city)}</Field>
                 <Field label="Home state">{formatText(owner.home_state)}</Field>
+                <Field label="Home ZIP">{formatText(owner.home_zip)}</Field>
+                <Field label="Home country">{formatText(owner.home_country)}</Field>
+                {/* The ID document fields are plain columns, not secrets: shown
+                    to the rep and the admin alike (phase 5). The SSN is not
+                    here; it is in the Sensitive data section, masked. */}
+                <Field label="ID type">{formatText(owner.id_type)}</Field>
+                <Field label="ID number">{formatText(owner.id_number)}</Field>
+                <Field label="ID state">{formatText(owner.id_state)}</Field>
+                <Field label="ID issued">{formatDate(owner.id_issue_date)}</Field>
+                <Field label="ID expires">
+                  {formatDate(owner.id_expiration_date)}
+                </Field>
               </dl>
             ))}
           </div>
@@ -151,6 +184,10 @@ export function PreAppSummary({
         </Field>
         <Field label="MOTO">{formatPct(cardMix?.moto_pct)}</Field>
         <Field label="Internet">{formatPct(cardMix?.internet_pct)}</Field>
+        <Field label="Test product type">
+          {formatText(cardMix?.test_product_type)}
+        </Field>
+        <Field label="Profile notes">{formatText(cardMix?.notes)}</Field>
       </Section>
     </>
   );

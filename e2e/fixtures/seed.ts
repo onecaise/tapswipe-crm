@@ -3493,3 +3493,146 @@ export async function restorePersonaSplitRate(persona: PersonaKey, rate: number)
     .eq("email", PERSONAS[persona].email);
   if (error) throw new Error(`restore split rate: ${error.message}`);
 }
+
+/** The DBA of the phase 5 reveal spec's draft, so the next run can find and clear it. */
+export const SECRETS_DRAFT_PREFIX = "E2E Secrets Draft";
+
+/**
+ * Phase 5 (docs/design/intake-and-reports.md §1.E): a DRAFT pre-app in the
+ * `agent` persona's book with every secret on file -- one owner SSN, routing
+ * and account, the RP password and an EIN -- written the only way a secret is
+ * ever written, through submit-pre-app-secrets as the rep. Earlier drafts from
+ * this helper are deleted first, with the audit rows that name them.
+ *
+ * The values are numbers no real holder has (EIN prefix 07 is unassigned;
+ * the SSN is in a range the SSA issues but chosen for its distinct digits).
+ */
+export const SECRETS_FIXTURE = {
+  ownerName: "E2E Secrets Owner",
+  ssn: "234-56-7813",
+  // Not 021000021: that is the routing input placeholder, so it is in every
+  // secrets-step page by design and a "nowhere in the HTML" check would trip.
+  routing: "011401533",
+  account: "000555123498",
+  rpPassword: "e2e-rp-Pw-8842",
+  ein: "07-2468135",
+} as const;
+
+/**
+ * Deletes every draft secretsPreApp() made (the secrets cascade with the
+ * pre-app), and the audit rows that name them. Called before each new one and
+ * from the spec's afterAll, so no secrets-bearing draft outlives the run.
+ */
+export async function clearSecretsDrafts(): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data: old } = await db
+    .from("pre_apps")
+    .select("id")
+    .like("dba_name", `${SECRETS_DRAFT_PREFIX}%`);
+  const oldIds = (old ?? []).map((row) => String(row.id));
+  if (oldIds.length === 0) return;
+  const { error: clearError } = await db
+    .from("pre_apps")
+    .delete()
+    .like("dba_name", `${SECRETS_DRAFT_PREFIX}%`);
+  if (clearError) throw new Error(`clear secrets drafts: ${clearError.message}`);
+  await db.from("audit_log").delete().eq("table_name", "pre_apps").in("row_id", oldIds);
+}
+
+export async function secretsPreApp(): Promise<{ id: number; ownerId: number }> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data: agent, error: agentError } = await db
+    .from("profiles")
+    .select("id")
+    .eq("email", PERSONAS.agent.email)
+    .single();
+  if (agentError || !agent) throw new Error(`agent profile: ${agentError?.message}`);
+
+  await clearSecretsDrafts();
+
+  const { data: preApp, error } = await db
+    .from("pre_apps")
+    .insert({
+      agent_id: agent.id,
+      dba_name: `${SECRETS_DRAFT_PREFIX} ${Date.now()}`,
+      legal_business_name: `${SECRETS_DRAFT_PREFIX} LLC`,
+      city: "Nashville",
+      state: "TN",
+      ein_type: "EIN",
+    })
+    .select("id")
+    .single();
+  if (error || !preApp) throw new Error(`secrets draft: ${error?.message}`);
+  const { data: owner, error: ownerError } = await db
+    .from("pre_app_owners")
+    .insert({ pre_app_id: preApp.id, owner_name: SECRETS_FIXTURE.ownerName, percent_owned: 100 })
+    .select("id")
+    .single();
+  if (ownerError || !owner) throw new Error(`secrets owner: ${ownerError?.message}`);
+
+  const asAgent = await agentSession();
+  const { error: writeError } = await asAgent.functions.invoke("submit-pre-app-secrets", {
+    body: {
+      secrets: [
+        { kind: "owner_ssn", pre_app_owner_id: owner.id, ssn: SECRETS_FIXTURE.ssn },
+        {
+          kind: "banking",
+          pre_app_id: preApp.id,
+          aba_routing: SECRETS_FIXTURE.routing,
+          account_number: SECRETS_FIXTURE.account,
+        },
+        { kind: "terminal", pre_app_id: preApp.id, rp_password: SECRETS_FIXTURE.rpPassword },
+        { kind: "tax_id", pre_app_id: preApp.id, tax_id_type: "EIN", tax_id: SECRETS_FIXTURE.ein },
+      ],
+    },
+  });
+  if (writeError) throw new Error(`submit-pre-app-secrets: ${writeError.message}`);
+  return { id: preApp.id as number, ownerId: owner.id as number };
+}
+
+/** The reveal audit rows naming one pre-app, oldest first, read as the service role. */
+export async function revealAuditRows(
+  preAppId: number,
+): Promise<{ actor_id: string; action: string }[]> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await db
+    .from("audit_log")
+    .select("actor_id, action")
+    .eq("table_name", "pre_apps")
+    .eq("row_id", String(preAppId))
+    .like("action", "read_pre_app_secrets:reveal:%")
+    .order("id");
+  if (error) throw new Error(`reveal audit rows: ${error.message}`);
+  return (data ?? []) as { actor_id: string; action: string }[];
+}
+
+/**
+ * Clears the e2e admin's reveal rows, so the 30-an-hour limit
+ * (record_pre_app_secret_reveal, 20261028140000) never trips across runs.
+ */
+export async function clearAdminReveals(): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data: admin } = await db
+    .from("profiles")
+    .select("id")
+    .eq("email", PERSONAS.admin.email)
+    .single();
+  if (!admin) return;
+  await db
+    .from("audit_log")
+    .delete()
+    .eq("actor_id", admin.id)
+    .like("action", "read_pre_app_secrets:reveal:%");
+}

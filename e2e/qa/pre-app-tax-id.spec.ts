@@ -107,12 +107,21 @@ test("the tax ID goes only to the secrets function, and comes back as the last f
   expect(page.url()).not.toContain(EIN_DIGITS.slice(-4));
   expect(seen.console.filter((line) => line.includes(EIN) || line.includes(EIN_DIGITS))).toEqual([]);
 
-  // The pre-app detail page shows the type only, never a digit of the number.
+  // The pre-app detail page: the type in the summary, and since phase 5 the
+  // last four in the Sensitive data section -- fetched client-side, so the
+  // server's HTML still holds no digit of the number, and the full number is
+  // nowhere.
   await page.goto(`/pre-apps/${id}`);
   await expect(page.getByText("EIN type", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Sensitive data" }).getByText("····1357", { exact: true }),
+  ).toBeVisible();
   const detail = await page.content();
   expect(detail).not.toContain(EIN);
-  expect(detail).not.toContain("1357");
+  expect(detail).not.toContain(EIN_DIGITS);
+  const raw = await (await page.request.get(`/pre-apps/${id}`)).text();
+  expect(raw).not.toContain(EIN);
+  expect(raw).not.toContain("1357");
 });
 
 test("switching the EIN type after the number was entered asks for it again", async ({ page }) => {

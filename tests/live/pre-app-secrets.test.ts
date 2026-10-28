@@ -1,4 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
   adminClient,
@@ -105,6 +108,31 @@ async function makePreApp(agentId: string, dba: string) {
     .single();
   if (ownerError) throw ownerError;
   return { preAppId: preApp.id as number, ownerRowId: ownerRow.id as number };
+}
+
+const CONTAINER = `supabase_db_${/^project_id\s*=\s*"([^"]+)"/m.exec(
+  readFileSync("supabase/config.toml", "utf8"),
+)![1]}`;
+
+/**
+ * One psql session as `postgres` in the local DB container (the
+ * tests/live/reset-business-data.test.ts helper): only the audit-failure test
+ * uses it, to make the reveal's audit insert fail for real.
+ */
+function psql(sql: string): { ok: boolean; out: string; err: string } {
+  const r = spawnSync(
+    "docker",
+    ["exec", "-i", CONTAINER, "psql", "-U", "postgres", "-d", "postgres", "-X", "-q", "-A", "-t",
+     "-v", "ON_ERROR_STOP=1"],
+    { input: sql, encoding: "utf8", env: { ...process.env, MSYS_NO_PATHCONV: "1" }, timeout: 120_000 },
+  );
+  if (r.error) throw r.error;
+  return { ok: r.status === 0, out: r.stdout, err: r.stderr };
+}
+
+/** An admin's one-field reveal (phase 5). */
+function reveal(id: number, field: Record<string, unknown>, token = admin.token) {
+  return invoke("read-pre-app-secrets", { pre_app_id: id, reveal: field }, token);
 }
 
 /** True only when functions are down and ALLOW_SKIPPED_FUNCTION_TESTS=1: every test here then skips. */
@@ -434,7 +462,10 @@ describe("submit-pre-app-secrets validation mirrors lib/masks.ts", () => {
 });
 
 describe("encryption round trip", () => {
-  it("stores all four values and reads them back as plaintext for an admin", async () => {
+  // Since phase 5 (A24) an admin's default read is masked too; the round trip
+  // is proven one field at a time through reveal, which is the only way a
+  // full value leaves the function now.
+  it("stores all four values, and an admin reads each back in full by revealing it", async () => {
     const write = await invoke(
       "submit-pre-app-secrets",
       {
@@ -462,15 +493,13 @@ describe("encryption round trip", () => {
       admin.token,
     );
     expect(read.status, read.raw).toBe(200);
-    expect(read.body.tier).toBe("full");
+    expect(read.body.tier).toBe("last4");
 
-    const owners = read.body.owners as Record<string, unknown>[];
-    expect(owners[0].ssn).toBe(PLAINTEXT.ssn);
-    const banking = read.body.banking as Record<string, unknown>;
-    expect(banking.aba_routing).toBe(PLAINTEXT.routing);
-    expect(banking.account_number).toBe(PLAINTEXT.account);
-    const terminal = read.body.terminal as Record<string, unknown>;
-    expect(terminal.rp_password).toBe(PLAINTEXT.rpPassword);
+    expect((await reveal(preAppId, { field: "owner_ssn", pre_app_owner_id: ownerRowId })).body.value)
+      .toBe(PLAINTEXT.ssn);
+    expect((await reveal(preAppId, { field: "aba_routing" })).body.value).toBe(PLAINTEXT.routing);
+    expect((await reveal(preAppId, { field: "account_number" })).body.value).toBe(PLAINTEXT.account);
+    expect((await reveal(preAppId, { field: "rp_password" })).body.value).toBe(PLAINTEXT.rpPassword);
   });
 
   it("stores bytea in the \\x-hex wire form, of the documented length", async () => {
@@ -516,14 +545,7 @@ describe("encryption round trip", () => {
     expect(count).toBe(1);
     expect(data).toHaveLength(1);
 
-    const read = await invoke(
-      "read-pre-app-secrets",
-      { pre_app_id: preAppId },
-      admin.token,
-    );
-    expect((read.body.banking as Record<string, unknown>).aba_routing).toBe(
-      corrected,
-    );
+    expect((await reveal(preAppId, { field: "aba_routing" })).body.value).toBe(corrected);
   });
 });
 
@@ -592,6 +614,8 @@ describe("read-pre-app-secrets tiering", () => {
 });
 
 describe("every access is audited", () => {
+  // The admin's default read is the masked tier since phase 5, so it is
+  // recorded as last4; a reveal has its own action (below).
   it("records the reader, with the tier and a real actor_id", async () => {
     await invoke("read-pre-app-secrets", { pre_app_id: preAppId }, admin.token);
 
@@ -608,7 +632,7 @@ describe("every access is audited", () => {
     // actor_id being correct is the point: a service-role connection has no
     // auth.uid(), so a function that forgot to pass it would store NULL.
     expect(row!.actor_id).toBe(admin.id);
-    expect(row!.action).toBe("read_pre_app_secrets:full");
+    expect(row!.action).toBe("read_pre_app_secrets:last4");
     expect(row!.row_id).toBe(String(preAppId));
   });
 
@@ -879,10 +903,16 @@ describe("the business tax ID", () => {
       expect(read.raw).not.toContain(TAX.ein.replace("-", ""));
     });
 
-    it("gives an admin the full number, as an SSN read works today", async () => {
+    // Phase 5 (A24): the admin's default read is masked like the rep's; the
+    // full number comes only from a reveal of this one field.
+    it("gives an admin the last four too, and the full number only by reveal", async () => {
       const read = await invoke("read-pre-app-secrets", { pre_app_id: taxPreAppId }, admin.token);
       expect(read.status, read.raw).toBe(200);
-      expect(read.body.tax_id).toEqual({ on_file: true, tax_id_type: "EIN", tax_id: TAX.ein });
+      expect(read.body.tax_id).toEqual({ on_file: true, tax_id_type: "EIN", tax_id_last4: TAX.einLast4 });
+      expect(read.raw).not.toContain(TAX.ein);
+      const shown = await reveal(taxPreAppId, { field: "tax_id" });
+      expect(shown.status, shown.raw).toBe(200);
+      expect(shown.body).toEqual({ field: "tax_id", tax_id_type: "EIN", value: TAX.ein });
     });
 
     it("404s another agent identically to a missing pre-app", async () => {
@@ -931,6 +961,333 @@ describe("the business tax ID", () => {
         tax_id_last4: TAX.ssn.slice(-4),
       });
       expect(after.raw).not.toContain(TAX.ssn);
+    });
+  });
+});
+
+/**
+ * Phase 5 (docs/design/intake-and-reports.md §1.E, A24): every default read is
+ * masked, admin included, and an admin sees a full value only by revealing ONE
+ * field. record_pre_app_secret_reveal() (20261028140000) writes the audit row
+ * and enforces 30 reveals per admin per hour before anything is decrypted.
+ *
+ * Its own fully-populated pre-app, so no other block's writes can make an
+ * assertion here pass by accident.
+ */
+describe("admin reveal, one field at a time", () => {
+  let revealPreAppId: number;
+  let revealOwnerId: number;
+  let emptyPreAppId: number;
+  const VALUES = {
+    ssn: "234-56-7891",
+    routing: "021000021",
+    account: "000987654321",
+    rpPassword: "reveal-rp-secret",
+    ein: "07-2462468",
+  };
+  /** Every full value, for "nowhere in this body" checks. */
+  const ALL = Object.values(VALUES);
+
+  async function revealRows(id = revealPreAppId) {
+    const { data } = await adminClient()
+      .from("audit_log")
+      .select("actor_id, action, row_id, created_at")
+      .eq("row_id", String(id))
+      .like("action", "read_pre_app_secrets:reveal:%")
+      .order("id");
+    return (data ?? []) as Record<string, string>[];
+  }
+
+  async function clearAdminReveals() {
+    await adminClient()
+      .from("audit_log")
+      .delete()
+      .eq("actor_id", admin.id)
+      .like("action", "read_pre_app_secrets:reveal:%");
+  }
+
+  beforeAll(async () => {
+    if (FUNCTIONS_DOWN) return;
+    ({ preAppId: revealPreAppId, ownerRowId: revealOwnerId } = await makePreApp(
+      owner.id,
+      "Reveal Live Co",
+    ));
+    ({ preAppId: emptyPreAppId } = await makePreApp(owner.id, "Reveal Empty Co"));
+    const { error } = await adminClient()
+      .from("pre_apps")
+      .update({ ein_type: "EIN" })
+      .eq("id", revealPreAppId);
+    if (error) throw error;
+    const write = await invoke(
+      "submit-pre-app-secrets",
+      {
+        secrets: [
+          { kind: "owner_ssn", pre_app_owner_id: revealOwnerId, ssn: VALUES.ssn },
+          { kind: "banking", pre_app_id: revealPreAppId, aba_routing: VALUES.routing, account_number: VALUES.account },
+          { kind: "terminal", pre_app_id: revealPreAppId, rp_password: VALUES.rpPassword },
+          { kind: "tax_id", pre_app_id: revealPreAppId, tax_id_type: "EIN", tax_id: VALUES.ein },
+        ],
+      },
+      owner.token,
+    );
+    expect(write.status, write.raw).toBe(200);
+  });
+
+  // The limit counts every reveal this admin made in the last hour, including
+  // the blocks above; each test here starts from none.
+  beforeEach(async () => {
+    if (FUNCTIONS_DOWN) return;
+    await clearAdminReveals();
+  });
+
+  describe("the default read is masked for everyone", () => {
+    it("gives the rep the last four of every secret, presence for the password, and no full value", async () => {
+      const read = await invoke("read-pre-app-secrets", { pre_app_id: revealPreAppId }, owner.token);
+      expect(read.status, read.raw).toBe(200);
+      expect(read.body).toEqual({
+        tier: "last4",
+        owners: [{ pre_app_owner_id: revealOwnerId, owner_name: "Live Owner", ssn_on_file: true, ssn_last4: "7891" }],
+        banking: { on_file: true, aba_routing_last4: "0021", account_number_last4: "4321" },
+        terminal: { on_file: true },
+        tax_id: { on_file: true, tax_id_type: "EIN", tax_id_last4: "2468" },
+      });
+      for (const value of ALL) expect(read.raw).not.toContain(value);
+      expect(read.raw).not.toContain(VALUES.ein.replace("-", ""));
+      expect(read.raw).not.toContain(VALUES.ssn.replace(/-/g, ""));
+    });
+
+    it("gives an admin exactly the rep's masked body, and writes no reveal row", async () => {
+      const rep = await invoke("read-pre-app-secrets", { pre_app_id: revealPreAppId }, owner.token);
+      const asAdmin = await invoke("read-pre-app-secrets", { pre_app_id: revealPreAppId }, admin.token);
+      expect(asAdmin.status, asAdmin.raw).toBe(200);
+      expect(asAdmin.body).toEqual(rep.body);
+      for (const value of ALL) expect(asAdmin.raw).not.toContain(value);
+      expect(await revealRows()).toEqual([]);
+    });
+  });
+
+  describe("a reveal returns one value and writes one audit row", () => {
+    const cases: [string, () => Record<string, unknown>, string, () => string][] = [
+      ["an owner SSN", () => ({ field: "owner_ssn", pre_app_owner_id: revealOwnerId }), VALUES.ssn,
+        () => `read_pre_app_secrets:reveal:owner_ssn:${revealOwnerId}`],
+      ["the routing number", () => ({ field: "aba_routing" }), VALUES.routing, () => "read_pre_app_secrets:reveal:aba_routing"],
+      ["the account number", () => ({ field: "account_number" }), VALUES.account, () => "read_pre_app_secrets:reveal:account_number"],
+      ["the RP password", () => ({ field: "rp_password" }), VALUES.rpPassword, () => "read_pre_app_secrets:reveal:rp_password"],
+      ["the tax ID", () => ({ field: "tax_id" }), VALUES.ein, () => "read_pre_app_secrets:reveal:tax_id"],
+    ];
+
+    for (const [label, field, value, action] of cases) {
+      it(`reveals ${label}, and nothing else, naming the admin, the pre-app and the field`, async () => {
+        const before = Date.now();
+        const shown = await reveal(revealPreAppId, field());
+        expect(shown.status, shown.raw).toBe(200);
+        expect(shown.body.value).toBe(value);
+        expect(shown.body.field).toBe(field().field);
+        // No other secret rides along with the one asked for.
+        for (const other of ALL.filter((v) => v !== value)) expect(shown.raw).not.toContain(other);
+
+        const rows = await revealRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0].actor_id).toBe(admin.id);
+        expect(rows[0].action).toBe(action());
+        expect(rows[0].row_id).toBe(String(revealPreAppId));
+        expect(new Date(rows[0].created_at).getTime()).toBeGreaterThanOrEqual(before - 60_000);
+      });
+    }
+
+    it("writes one row per reveal: the same field twice is two rows", async () => {
+      await reveal(revealPreAppId, { field: "tax_id" });
+      await reveal(revealPreAppId, { field: "tax_id" });
+      expect((await revealRows()).map((r) => r.action)).toEqual([
+        "read_pre_app_secrets:reveal:tax_id",
+        "read_pre_app_secrets:reveal:tax_id",
+      ]);
+    });
+
+    it("sets Cache-Control: no-store on a reveal", async () => {
+      const { apiUrl, anonKey } = getStackConfig();
+      const res = await fetch(`${apiUrl}/functions/v1/read-pre-app-secrets`, {
+        method: "POST",
+        headers: { apikey: anonKey, Authorization: `Bearer ${admin.token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ pre_app_id: revealPreAppId, reveal: { field: "account_number" } }),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+    });
+  });
+
+  describe("a rep cannot reveal", () => {
+    it("refuses the owning rep with 403, returning no value and writing no row", async () => {
+      for (const field of [
+        { field: "owner_ssn", pre_app_owner_id: revealOwnerId },
+        { field: "aba_routing" },
+        { field: "account_number" },
+        { field: "rp_password" },
+        { field: "tax_id" },
+      ]) {
+        const asRep = await reveal(revealPreAppId, field, owner.token);
+        expect(asRep.status, asRep.raw).toBe(403);
+        expect(asRep.body).toEqual({ error: "Only an admin can reveal a full value" });
+        for (const value of ALL) expect(asRep.raw).not.toContain(value);
+      }
+      const { data } = await adminClient()
+        .from("audit_log")
+        .select("id")
+        .eq("actor_id", owner.id)
+        .like("action", "read_pre_app_secrets:reveal:%");
+      expect(data).toEqual([]);
+    });
+
+    it("gives another rep, a missing pre-app and the owner the same 403 (no id oracle)", async () => {
+      const notYours = await reveal(revealPreAppId, { field: "tax_id" }, intruder.token);
+      const missing = await reveal(MISSING_ID, { field: "tax_id" }, intruder.token);
+      const own = await reveal(revealPreAppId, { field: "tax_id" }, owner.token);
+      expect(notYours.status).toBe(403);
+      expect(notYours.body).toEqual(missing.body);
+      expect(notYours.body).toEqual(own.body);
+    });
+
+    it("refuses a deactivated caller before the role check", async () => {
+      const r = await reveal(deactivatedPreAppId, { field: "tax_id" }, deactivated.token);
+      expect(r.status).toBe(403);
+      expect(r.body).toEqual({ error: "Account is not active" });
+    });
+
+    it("refuses an unauthenticated reveal with 401", async () => {
+      const r = await invoke("read-pre-app-secrets", { pre_app_id: revealPreAppId, reveal: { field: "tax_id" } });
+      expect(r.status).toBe(401);
+    });
+
+    it("cannot be reached through the SQL function either: a rep calling it is refused", async () => {
+      const { error } = await userClient(owner.token).rpc("record_pre_app_secret_reveal", {
+        pre_app_id_input: revealPreAppId,
+        field_input: "tax_id",
+      });
+      expect(error?.code).toBe("PT403");
+    });
+  });
+
+  describe("malformed or impossible reveals", () => {
+    const bad: [string, () => Record<string, unknown>][] = [
+      ["an unknown field", () => ({ field: "ssn" })],
+      ["a field that is not a string", () => ({ field: 1 })],
+      ["an owner SSN with no owner", () => ({ field: "owner_ssn" })],
+      ["an owner id on a pre-app field", () => ({ field: "tax_id", pre_app_owner_id: revealOwnerId })],
+      ["an extra member", () => ({ field: "tax_id", all: true })],
+      ["a list of fields", () => ({ field: ["tax_id", "aba_routing"] })],
+    ];
+    for (const [label, field] of bad) {
+      it(`refuses ${label} with 400, revealing nothing`, async () => {
+        const r = await reveal(revealPreAppId, field());
+        expect(r.status, r.raw).toBe(400);
+        for (const value of ALL) expect(r.raw).not.toContain(value);
+        expect(await revealRows()).toEqual([]);
+      });
+    }
+
+    it("refuses a reveal that is not an object with 400", async () => {
+      const r = await invoke("read-pre-app-secrets", { pre_app_id: revealPreAppId, reveal: "tax_id" }, admin.token);
+      expect(r.status).toBe(400);
+    });
+
+    it("404s an owner from another pre-app, without revealing their SSN", async () => {
+      const r = await reveal(revealPreAppId, { field: "owner_ssn", pre_app_owner_id: ownerRowId });
+      expect(r.status).toBe(404);
+      expect(r.raw).not.toContain(PLAINTEXT.ssn);
+      expect(await revealRows()).toEqual([]);
+    });
+
+    it("404s a field that is not on file, and writes no row", async () => {
+      const r = await reveal(emptyPreAppId, { field: "account_number" });
+      expect(r.status).toBe(404);
+      expect(r.body).toEqual({ error: "Not on file" });
+      expect(await revealRows(emptyPreAppId)).toEqual([]);
+    });
+  });
+
+  describe("no audit row, no value", () => {
+    it("returns 500 and no value when the audit write fails, and nothing is recorded", async () => {
+      const install = psql(`
+        create function public.zz_fail_reveal_audit() returns trigger language plpgsql as $$
+        begin raise exception 'audit store unavailable'; end $$;
+        create trigger zz_fail_reveal_audit before insert on public.audit_log
+          for each row when (new.action like 'read_pre_app_secrets:reveal:%')
+          execute function public.zz_fail_reveal_audit();`);
+      expect(install.ok, install.err).toBe(true);
+      try {
+        for (const field of [
+          { field: "tax_id" },
+          { field: "owner_ssn", pre_app_owner_id: revealOwnerId },
+          { field: "rp_password" },
+        ]) {
+          const r = await reveal(revealPreAppId, field);
+          expect(r.status, r.raw).toBe(500);
+          expect(r.body).toEqual({ error: "Could not record the access" });
+          for (const value of ALL) expect(r.raw).not.toContain(value);
+        }
+      } finally {
+        const drop = psql(`
+          drop trigger if exists zz_fail_reveal_audit on public.audit_log;
+          drop function if exists public.zz_fail_reveal_audit();`);
+        expect(drop.ok, drop.err).toBe(true);
+      }
+      expect(await revealRows()).toEqual([]);
+      // And the same request works once the store is back.
+      expect((await reveal(revealPreAppId, { field: "tax_id" })).body.value).toBe(VALUES.ein);
+    });
+  });
+
+  describe("rate limit: 30 reveals per admin per rolling hour", () => {
+    afterEach(async () => {
+      if (FUNCTIONS_DOWN) return;
+      await clearAdminReveals();
+    });
+
+    it("refuses the 31st with 429 and the function's sentence, revealing nothing and recording nothing", async () => {
+      // 30 reveals in the last hour, written as the function would, so the
+      // test does not decrypt thirty times to get there.
+      const { error } = await adminClient().from("audit_log").insert(
+        Array.from({ length: 30 }, () => ({
+          actor_id: admin.id,
+          action: "read_pre_app_secrets:reveal:tax_id",
+          table_name: "pre_apps",
+          row_id: String(emptyPreAppId),
+        })),
+      );
+      if (error) throw error;
+
+      const r = await reveal(revealPreAppId, { field: "tax_id" });
+      expect(r.status, r.raw).toBe(429);
+      expect(String(r.body.error)).toMatch(/^You have reached the limit of 30 reveals an hour\. Try again in \d+ minutes?\.$/);
+      for (const value of ALL) expect(r.raw).not.toContain(value);
+      expect(await revealRows()).toEqual([]);
+
+      // Default reads are not limited: the masked view still works.
+      const masked = await invoke("read-pre-app-secrets", { pre_app_id: revealPreAppId }, admin.token);
+      expect(masked.status).toBe(200);
+    });
+
+    it("allows the 30th, and counts only the last hour", async () => {
+      const old = new Date(Date.now() - 61 * 60_000).toISOString();
+      const row = {
+        actor_id: admin.id,
+        action: "read_pre_app_secrets:reveal:aba_routing",
+        table_name: "pre_apps",
+        row_id: String(emptyPreAppId),
+      };
+      // Two inserts, not one: a bulk insert whose rows differ in keys sends
+      // NULL for a missing column rather than its default (PostgREST), which
+      // would leave the 29 recent rows with no created_at.
+      const recent = await adminClient().from("audit_log").insert(Array.from({ length: 29 }, () => row));
+      if (recent.error) throw recent.error;
+      const stale = await adminClient()
+        .from("audit_log")
+        .insert(Array.from({ length: 5 }, () => ({ ...row, created_at: old })));
+      if (stale.error) throw stale.error;
+      const thirtieth = await reveal(revealPreAppId, { field: "aba_routing" });
+      expect(thirtieth.status, thirtieth.raw).toBe(200);
+      expect(thirtieth.body.value).toBe(VALUES.routing);
+      expect((await reveal(revealPreAppId, { field: "aba_routing" })).status).toBe(429);
     });
   });
 });

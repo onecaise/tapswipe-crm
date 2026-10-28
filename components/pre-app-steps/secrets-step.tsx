@@ -5,6 +5,7 @@ import { useCallback, useEffect, useId, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { edgeFunctionErrorMessage } from "@/lib/edge-functions";
 import type { PreApp, PreAppOwner } from "@/lib/pre-apps";
+import { maskedLast4, type SecretsStatus } from "@/lib/pre-app-secrets";
 import {
   isAccount,
   isRouting,
@@ -36,8 +37,10 @@ import { Label } from "@/components/ui/label";
  *    value.
  *  - **Status is fetched client-side.** Deliberate: a server-rendered secret ends
  *    up in the RSC payload, which means it is in the HTML and in browser memory
- *    for the life of the page. Fetching here keeps even the last-4 out of that,
- *    and an admin's full reveal never touches the server render at all.
+ *    for the life of the page. Fetching here keeps even the last-4 out of that.
+ *  - **Last four for everyone, admin included** (phase 5, memo A24). There is no
+ *    full value on this step at all; an admin reveals one field at a time on the
+ *    pre-app's detail page (components/pre-app-sensitive-data.tsx).
  */
 /**
  * Spread onto the SSN, tax ID, routing and account inputs (A2). Without them a browser
@@ -54,32 +57,6 @@ const SENSITIVE_NUMBER_INPUT = {
   autoCapitalize: "off",
   inputMode: "numeric",
 } as const;
-
-type SecretsStatus = {
-  tier: "full" | "last4";
-  owners: {
-    pre_app_owner_id: number;
-    owner_name: string | null;
-    ssn_on_file: boolean;
-    ssn?: string;
-    ssn_last4?: string;
-  }[];
-  banking: {
-    on_file: boolean;
-    aba_routing?: string;
-    account_number?: string;
-    aba_routing_last4?: string;
-    account_number_last4?: string;
-  };
-  terminal: { on_file: boolean; rp_password?: string };
-  tax_id: {
-    on_file: boolean;
-    /** The STORED row's kind, which may differ from the current EIN type. */
-    tax_id_type?: "EIN" | "SSN";
-    tax_id?: string;
-    tax_id_last4?: string;
-  };
-};
 
 export function SecretsStep({
   preAppId,
@@ -281,8 +258,7 @@ export function SecretsStep({
                   <OnFile
                     label="SSN"
                     onFile={Boolean(onFile?.ssn_on_file)}
-                    shown={onFile?.ssn ?? onFile?.ssn_last4}
-                    tier={status?.tier}
+                    last4={onFile?.ssn_last4}
                   />
                 </div>
               );
@@ -312,10 +288,7 @@ export function SecretsStep({
             <OnFile
               label="Routing"
               onFile={Boolean(status?.banking.on_file)}
-              shown={
-                status?.banking.aba_routing ?? status?.banking.aba_routing_last4
-              }
-              tier={status?.tier}
+              last4={status?.banking.aba_routing_last4}
             />
           </div>
           <div className="flex flex-col gap-2">
@@ -333,11 +306,7 @@ export function SecretsStep({
             <OnFile
               label="Account"
               onFile={Boolean(status?.banking.on_file)}
-              shown={
-                status?.banking.account_number ??
-                status?.banking.account_number_last4
-              }
-              tier={status?.tier}
+              last4={status?.banking.account_number_last4}
             />
           </div>
         </div>
@@ -369,11 +338,7 @@ export function SecretsStep({
               removes most of its entropy, unlike four digits of an account
               number. */}
           <p className="text-xs text-muted-foreground">
-            {status?.terminal.on_file
-              ? status.terminal.rp_password
-                ? `On file: ${status.terminal.rp_password}`
-                : "On file."
-              : "Not on file."}
+            {status?.terminal.on_file ? "On file." : "Not on file."}
           </p>
         </div>
       </fieldset>
@@ -408,21 +373,18 @@ export function SecretsStep({
 function OnFile({
   label,
   onFile,
-  shown,
-  tier,
+  last4,
 }: {
   label: string;
   onFile: boolean;
-  shown?: string;
-  tier?: "full" | "last4";
+  last4?: string;
 }) {
   if (!onFile) {
     return <p className="text-xs text-muted-foreground">{label}: not on file.</p>;
   }
   return (
     <p className="text-xs text-muted-foreground">
-      {label}: on file
-      {shown ? (tier === "full" ? ` — ${shown}` : ` — ····${shown}`) : ""}.
+      {label}: on file{last4 ? ` — ${maskedLast4(last4)}` : ""}.
     </p>
   );
 }
@@ -452,8 +414,7 @@ function TaxIdOnFile({
     <OnFile
       label={einType}
       onFile={Boolean(stored?.on_file)}
-      shown={stored?.tax_id ?? stored?.tax_id_last4}
-      tier={status?.tier}
+      last4={stored?.tax_id_last4}
     />
   );
 }

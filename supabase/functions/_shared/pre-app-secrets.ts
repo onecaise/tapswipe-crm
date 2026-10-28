@@ -230,6 +230,60 @@ export function parseSecretsBody(body: unknown): ParseResult {
   return { ok: true, entries };
 }
 
+/**
+ * The fields an admin can reveal one at a time through read-pre-app-secrets
+ * (phase 5, memo §1.E / A24). The same list is record_pre_app_secret_reveal()'s
+ * vocabulary (20261028140000), which writes the audit row naming the field.
+ */
+export const REVEAL_FIELDS = [
+  "owner_ssn",
+  "aba_routing",
+  "account_number",
+  "rp_password",
+  "tax_id",
+] as const;
+export type RevealField = (typeof REVEAL_FIELDS)[number];
+
+export type RevealRequest =
+  | { field: "owner_ssn"; pre_app_owner_id: number }
+  | { field: Exclude<RevealField, "owner_ssn"> };
+
+export type RevealParseResult =
+  | { ok: true; reveal: RevealRequest | null }
+  | { ok: false; error: string };
+
+/**
+ * The optional `reveal` member of a read request. Absent (or null) is the
+ * default masked read. Present, it names exactly one field, and an owner SSN
+ * names exactly one owner; anything else is a 400, never a guess.
+ */
+export function parseRevealRequest(body: Record<string, unknown>): RevealParseResult {
+  const raw = body.reveal;
+  if (raw === undefined || raw === null) return { ok: true, reveal: null };
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, error: "reveal must be an object" };
+  }
+  const reveal = raw as Record<string, unknown>;
+  const field = reveal.field;
+  if (typeof field !== "string" || !(REVEAL_FIELDS as readonly string[]).includes(field)) {
+    return { ok: false, error: "reveal.field must be one of " + REVEAL_FIELDS.join(", ") };
+  }
+  const extra = Object.keys(reveal).filter((k) => k !== "field" && k !== "pre_app_owner_id");
+  if (extra.length > 0) {
+    return { ok: false, error: "reveal takes only field and pre_app_owner_id" };
+  }
+  if (field === "owner_ssn") {
+    if (!isPositiveInt(reveal.pre_app_owner_id)) {
+      return { ok: false, error: "reveal.pre_app_owner_id must be a positive integer" };
+    }
+    return { ok: true, reveal: { field, pre_app_owner_id: reveal.pre_app_owner_id } };
+  }
+  if (reveal.pre_app_owner_id !== undefined) {
+    return { ok: false, error: "reveal.pre_app_owner_id is only for owner_ssn" };
+  }
+  return { ok: true, reveal: { field: field as Exclude<RevealField, "owner_ssn"> } };
+}
+
 type RpcClient = {
   rpc: (
     fn: string,

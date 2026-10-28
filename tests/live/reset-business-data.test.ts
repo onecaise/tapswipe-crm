@@ -167,7 +167,9 @@ describe("reset-business-data.sql on the local stack", () => {
     // The script's own result grid came back too.
     expect(out).toMatch(/^profiles\|\d+\|\d+\|kept, unchanged$/m);
     expect(out).toMatch(/^processors\|5\|5\|kept, unchanged$/m);
-    expect(out).toMatch(/^pre_app_tax_secrets\|1\|0\|cleared$/m);
+    // At least the seed's row before (the local DB may also hold e2e drafts
+    // with a tax ID), and none after.
+    expect(out).toMatch(/^pre_app_tax_secrets\|[1-9]\d*\|0\|cleared$/m);
     expect(out).toMatch(/^storage\.objects\|\d+\|\d+\|NOT touched: delete these files by hand$/m);
   });
 
