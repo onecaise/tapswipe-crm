@@ -104,8 +104,8 @@ async function BatchReview({
   const rows = (rowData ?? []) as PayoutImportRow[];
   const review = reviewImportRows(rows);
 
-  // Advisory notes (shared accounts, a changed payee): a flagged row is still
-  // ready, and the commit recomputes all of it from the data then.
+  // Advisory notes (a changed payee, a share that does not cover the month):
+  // a flagged row is still ready, and the commit recomputes everything then.
   const flagged = rows.filter((row) => row.preview_flag !== null);
 
   const reviewers =
@@ -287,8 +287,9 @@ async function BatchReview({
                   : "grid gap-3 sm:grid-cols-2"
               }
             >
-              {/* What commit_residual_import_v2 returned: written and
-                  skipped, read back from the batch so a reload agrees. */}
+              {/* What the commit recorded on the batch, read back so a reload
+                  agrees. v3 skips nothing; a skip count is only on a batch
+                  an earlier commit wrote. */}
               <StatCard
                 label={
                   batch.status === "committed"
@@ -398,9 +399,9 @@ async function BatchReview({
                 </span>
               </h2>
               <p className="text-xs text-muted-foreground">
-                None of these stops the import. They say what committing will
-                do with a row on a shared account, or that a MID now pays a
-                different rep than last month, as the data stands now.
+                None of these stops the import. They say that a MID now pays a
+                different rep than last month, or that its shared-account split
+                does not cover this month, as the data stands now.
               </p>
               <ul className="flex flex-col gap-2">
                 {flagged.map((row) => (

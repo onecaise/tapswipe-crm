@@ -415,7 +415,9 @@ describe("merchant split must total 100", () => {
 
   it("accepts a pair totalling 100", async () => {
     await asUser(db, ADMIN_ID);
-    await db.exec(insertSplit("55", "45"));
+    // 45, not the 55 this used: an agent rate above 50 is refused since
+    // 20261030160000 (merchants_split_zero_to_fifty).
+    await db.exec(insertSplit("45", "55"));
 
     await asPlatform(db);
     const [m] = await rows<{ a: string; c: string }>(
@@ -423,7 +425,7 @@ describe("merchant split must total 100", () => {
       `select split_agent_pct::text as a, split_company_pct::text as c
          from merchants where dba = 'Split Test'`,
     );
-    expect([m.a, m.c]).toEqual(["55.00", "45.00"]);
+    expect([m.a, m.c]).toEqual(["45.00", "55.00"]);
   });
 
   it("rejects a pair that does not total 100", async () => {
@@ -460,13 +462,21 @@ describe("merchant split must total 100", () => {
       `select id from merchants where dba = 'Agent Active Co'`,
     );
 
-    // Seeded 60/40, so raising the agent half alone takes it to 110. NOT VALID
+    // Seeded 50/50, so raising the agent half alone takes it to 90. NOT VALID
     // skips the initial scan but still binds every later write, including
     // writes to rows that predate the constraint — which is the whole point.
+    //
+    // Since 20261030160000 a direct split UPDATE is refused before any CHECK
+    // runs (guard_merchant_split_and_owner; set_merchant_split is the only
+    // write path), so this runs under the flag that function sets, to reach
+    // the constraint this test is about. The guard is pinned in
+    // tests/rls/commit-residual-import-v3.test.ts.
     await asUser(db, ADMIN_ID);
     await expect(
-      db.exec(`update merchants set split_agent_pct = 70 where id = ${m.id}`),
+      db.exec(`select set_config('tapswipe.merchant_split_write', 'on', false);
+               update merchants set split_agent_pct = 40 where id = ${m.id}`),
     ).rejects.toThrow(/merchants_split_totals_100/);
+    await db.exec(`select set_config('tapswipe.merchant_split_write', '', false)`);
   });
 
   it("is NOT VALID, so rows written before it are left alone", async () => {

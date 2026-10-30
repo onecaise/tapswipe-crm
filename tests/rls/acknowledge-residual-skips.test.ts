@@ -5,6 +5,7 @@ import {
   AGENT_ID,
   asPlatform,
   asUser,
+  commitV3,
   createTestDb,
   insertBatch,
   migrationsBefore,
@@ -14,6 +15,7 @@ import {
   resetData,
   rows,
   seedPayouts,
+  stageForCommit,
   type PayoutFixtures,
   type TestDb,
 } from "../helpers/db";
@@ -87,16 +89,6 @@ async function stageOne(db: TestDb, agentId: string, agentNumber: string): Promi
   return id;
 }
 
-async function commitV2(db: TestDb, batchId: number): Promise<{ written: number; skipped: number }> {
-  await asUser(db, ADMIN_ID);
-  const [{ result }] = await rows<{ result: { written: number; skipped: number } }>(
-    db,
-    `select commit_residual_import_v2(${batchId}) as result`,
-  );
-  await asPlatform(db);
-  return result;
-}
-
 async function acknowledge(db: TestDb, caller: string | null, batchId: number): Promise<string> {
   await asUser(db, caller);
   try {
@@ -124,26 +116,37 @@ const ackAudits = (db: TestDb) =>
   count(db, `select count(*) from audit_log where action = '${ACK}'`);
 
 /**
- * A committed batch with one skipped row: the partner named on a shared MID
- * and month (v2's partner_named), plus a committed batch that skipped nothing.
+ * A committed batch with one skipped row, as commit_residual_import_v2 left
+ * one (v2's partner_named), plus a batch committed through v3, which skips
+ * nothing.
+ *
+ * Until 20261030160000 the skipped batch was made by committing through v2.
+ * v2 is dropped there and v3 never skips (a row is committed or the import is
+ * refused), so a skip record now exists only on a batch an earlier commit
+ * wrote; it is planted here in exactly v2's shape, which is what the
+ * acknowledgement and its screen still have to handle.
  */
 async function scenario(db: TestDb): Promise<{ skippedBatch: number; cleanBatch: number; fx: PayoutFixtures }> {
   await resetData(db);
   const fx = await seedPayouts(db);
   await addPartner(db);
-  await asUser(db, ADMIN_ID);
-  await db.query(
-    `select set_merchant_rep_share((select id from merchants where mid = 'MID-AGENT-2'),
-       '${AGENT_ID}', '${PARTNER_ID}', 40, 10, '${PAYOUT_PERIOD}')`,
-  );
   await asPlatform(db);
 
-  const skippedBatch = await stageOne(db, PARTNER_ID, PARTNER_NUMBER);
-  expect(await commitV2(db, skippedBatch)).toEqual({ written: 0, skipped: 1 });
+  const skippedBatch = await insertBatch(db, {
+    status: "committed",
+    fileName: "v2-skipped.xlsx",
+    extra: {
+      committed_at: "now()",
+      row_count: "1",
+      skipped_rows: `'[{"row_number": 2, "period": "${PAYOUT_PERIOD}", "mid": "MID-AGENT-2", "agent_number": null, "reason": "partner_named"}]'`,
+    },
+  });
 
-  const cleanBatch = await stageOne(db, OTHER_AGENT_ID, "9902");
-  // MID-AGENT-2 under a third rep: share_not_applied, imported as ordinary.
-  expect(await commitV2(db, cleanBatch)).toEqual({ written: 1, skipped: 0 });
+  const cleanBatch = await insertBatch(db);
+  await stageForCommit(db, cleanBatch, [{ mid: "MID-AGENT-2" }]);
+  // MID-AGENT-2 is an inactive Square merchant: both warnings, confirmed.
+  expect(await commitV3(db, cleanBatch, ["inactive_merchant", "processor_mismatch"])).toMatchObject({ written: 1 });
+  expect((await batchState(db, cleanBatch)).skipped).toBe(0);
 
   await db.exec(`delete from audit_log`);
   return { skippedBatch, cleanBatch, fx };

@@ -325,12 +325,17 @@ export async function seed(db: TestDb): Promise<void> {
                                  'Agent Sheet Converted', 'Cal Convert', '555-0103', 'Already promoted.', 'converted'),
       ('${OTHER_AGENT_ID}', null, 'Other Sheet Open',     'Oli Other',  '555-0201', 'Other agent notes.', 'open');
 
+    -- Every agent rate is 50 (they were 60, 55, 50 and 70): 20261030160000's
+    -- merchants_split_zero_to_fifty refuses anything over 50, and refuses to
+    -- run over a merchant outside it. 50 because the share suites divide these
+    -- merchants 40 + 10, 30 + 20 and 25 + 25, and a share must total its
+    -- merchant's rate; tests about another rate make their own merchant.
     insert into merchants (agent_id, mid, dba, legal_business_name, status, processor, split_agent_pct, split_company_pct${hasLocation ? ", city, state" : ""})
     values
-      ('${AGENT_ID}',       'MID-AGENT-1', 'Agent Active Co',   'Agent Active Co LLC',   'active',   'TSYS',  60.00, 40.00${loc("Nashville", "TN")}),
-      ('${AGENT_ID}',       'MID-AGENT-2', 'Agent Inactive Co', 'Agent Inactive Co LLC', 'inactive', 'Square', 55.00, 45.00${loc("Nashville", "TN")}),
+      ('${AGENT_ID}',       'MID-AGENT-1', 'Agent Active Co',   'Agent Active Co LLC',   'active',   'TSYS',  50.00, 50.00${loc("Nashville", "TN")}),
+      ('${AGENT_ID}',       'MID-AGENT-2', 'Agent Inactive Co', 'Agent Inactive Co LLC', 'inactive', 'Square', 50.00, 50.00${loc("Nashville", "TN")}),
       ('${OTHER_AGENT_ID}', 'MID-OTHER-1', 'Other Active Co',   'Other Active Co LLC',   'active',   'TSYS',  50.00, 50.00${loc("Nashville", "TN")}),
-      ('${OTHER_AGENT_ID}', 'MID-OTHER-2', 'Other Other Co',    'Other Other Co LLC',    'other',    'PayBright', 70.00, 30.00${loc("Memphis", "TN")});
+      ('${OTHER_AGENT_ID}', 'MID-OTHER-2', 'Other Other Co',    'Other Other Co LLC',    'other',    'PayBright', 50.00, 50.00${loc("Memphis", "TN")});
 
     -- Documents. owner_id is resolved by lookup rather than a hardcoded serial.
     -- One per agent against a merchant, plus one against a lead, so the
@@ -599,9 +604,13 @@ export const PAYOUT_PERIOD_PRIOR = "2026-06-01";
  * relative to now -- the review batch last month, the committed one the month
  * before -- because a batch month must sit inside the import window
  * (guard_payout_batch_period), which moves; a fixed month would start failing
- * in two years. The STAGED and ledger rows keep PAYOUT_PERIOD: the commit is
- * still v2, which takes a row's month from the row (phase 8's v3 takes it from
- * the batch, and these fixtures move with it).
+ * in two years. The STAGED and ledger rows keep PAYOUT_PERIOD, deliberately:
+ * the only commit that takes this review batch as seeded is the old
+ * commit_residual_import(int), which files a row by its own month and whose
+ * tests (tests/rls/commit-residual-import.test.ts) merge into the seeded
+ * ledger lines; both go in phase 13. commit_residual_import_v3 refuses a
+ * staged row whose month is not its batch's, so every v3 caller stages its
+ * own rows at the batch's month with stageForCommit().
  */
 export const SEED_BATCH_PROCESSOR = "TSYS";
 
@@ -722,6 +731,53 @@ export async function insertBatch(
      values (${Object.values(columns).join(", ")}) returning id`,
   );
   return id;
+}
+
+/**
+ * Stages rows on a batch the way parse-residual-import leaves them for
+ * commit_residual_import_v3 (20261030160000): at the BATCH's month, the file's
+ * Processor cell the batch's processor, Income Type "Residuals", and the payee
+ * and merchant resolved from merchants by MID as they stand now. As the owner.
+ * Volume and residual default to 1000.00 and 100.00 (no warning).
+ */
+export async function stageForCommit(
+  db: TestDb,
+  batchId: number,
+  staged: { mid: string; volume?: string; residual?: string }[],
+): Promise<void> {
+  await asPlatform(db);
+  for (const [i, row] of staged.entries()) {
+    await db.exec(`
+      insert into rep_payout_import_rows
+        (batch_id, row_number, mid_raw, merchant_name_raw, processor_raw, income_type_raw,
+         period, agent_id, merchant_id, volume, residual_income)
+      select b.id, ${i + 2}, '${row.mid}', 'File name', b.processor, 'Residuals',
+             b.period, m.agent_id, m.id, ${row.volume ?? "1000.00"}, ${row.residual ?? "100.00"}
+        from rep_payout_batches b
+        left join merchants m on m.mid = '${row.mid}'
+       where b.id = ${batchId}`);
+  }
+}
+
+/** commit_residual_import_v3 as the admin; returns its jsonb. */
+export async function commitV3(
+  db: TestDb,
+  batchId: number,
+  confirmed: string[] = [],
+): Promise<Record<string, number>> {
+  await asUser(db, ADMIN_ID);
+  try {
+    const list = confirmed.length === 0
+      ? "'{}'::text[]"
+      : `array[${confirmed.map((c) => `'${c}'`).join(", ")}]`;
+    const [{ result }] = await rows<{ result: Record<string, number> }>(
+      db,
+      `select commit_residual_import_v3(${batchId}, ${list}) as result`,
+    );
+    return result;
+  } finally {
+    await asPlatform(db);
+  }
 }
 
 /** Whether a column exists, for a fixture that runs at more than one schema version. */

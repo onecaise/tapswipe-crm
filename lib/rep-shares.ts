@@ -60,10 +60,16 @@ export function parseRepPct(raw: string): number | null {
 /**
  * Why a signer + partner pair cannot be saved, as a sentence, or null when it
  * can. The same rule the RPCs enforce (each above 0, hundredths at most,
- * totalling 50) -- a courtesy so the form can refuse before the round trip;
- * set_merchant_rep_share() and post_share_correction() are the boundary.
+ * totalling `total`) -- a courtesy so the form can refuse before the round
+ * trip; set_merchant_rep_share() and post_share_correction() are the boundary.
+ * `total` is the MERCHANT's rate for a new share (20261030160000) and 50 for a
+ * correction, whose shares are a ratio typed out of 50.
  */
-export function shareSplitProblem(signer: string, partner: string): string | null {
+export function shareSplitProblem(
+  signer: string,
+  partner: string,
+  total: number = REP_SIDE_PCT,
+): string | null {
   if (signer.trim() === "" || partner.trim() === "") {
     return "Enter both shares.";
   }
@@ -72,8 +78,9 @@ export function shareSplitProblem(signer: string, partner: string): string | nul
   if (a === null || b === null) {
     return "Each share is a number above 0 with at most two decimals, like 40 or 33.33.";
   }
-  if (a + b !== REP_SIDE_PCT * 100) {
-    return `The two shares must add up to ${REP_SIDE_PCT}. These add up to ${formatHundredths(a + b)}.`;
+  const whole = Math.round(total * 100);
+  if (a + b !== whole) {
+    return `The two shares must add up to ${formatHundredths(whole)}. These add up to ${formatHundredths(a + b)}.`;
   }
   return null;
 }
@@ -86,13 +93,18 @@ export function formatHundredths(hundredths: number): string {
 /**
  * The live line under the inputs: "Company 50% · Signer 40% · Partner 10%".
  * A side that is not a valid figure yet shows as "?" rather than a guess.
+ * `total` is the rep side being divided; the company keeps 100 minus it.
  */
-export function shareSummary(signer: string, partner: string): string {
+export function shareSummary(
+  signer: string,
+  partner: string,
+  total: number = REP_SIDE_PCT,
+): string {
   const show = (raw: string) => {
     const value = parseRepPct(raw);
     return value === null ? "?" : `${formatHundredths(value)}%`;
   };
-  return `Company ${REP_SIDE_PCT}% · Signer ${show(signer)} · Partner ${show(partner)}`;
+  return `Company ${formatHundredths(10000 - Math.round(total * 100))}% · Signer ${show(signer)} · Partner ${show(partner)}`;
 }
 
 /** `<input type="month">` value ("2026-08") to a period ("2026-08-01"). */

@@ -4,28 +4,23 @@ import {
   monthLabel,
   monthsBefore,
   payeeChangedNote,
-  previewSharedRow,
   previewUnsharedRow,
   previousPayees,
   shareCovering,
-  sharePreviewNote,
   unsharedPreviewNote,
   type LastMonthLine,
-  type PreviewLedgerLine,
   type PreviewShare,
 } from "../../supabase/functions/_shared/residuals";
 
 /**
- * The shared-account preview flags parse-residual-import stores on each staged
+ * The shared-account preview notes parse-residual-import stores on each staged
  * row (phase 4b of docs/design/residual-splits.md, §7).
  *
- * previewSharedRow() mirrors the plan CASE in commit_residual_import_v2, which
- * is the authority. Since phase 7 of docs/design/intake-and-reports.md the
- * row's rep is the merchant's OWNER (the file names no rep), so "the file
- * names the partner" now reads "the owner is the partner"; the plan is v2's,
- * unchanged, and these flags retire with v2 in phase 8. This file pins the branches one at a time; the live suite
- * (tests/live/residual-import.test.ts) runs one file through both and requires
- * the flags to predict exactly what v2 skipped.
+ * v2's three share flags (share_not_applied, partner_named, line_not_shared)
+ * and their tests went with v2 in phase 8 of docs/design/intake-and-reports.md:
+ * under v3 a share's signer is the merchant's owner and the commit pays the
+ * pair directly, so none can happen. What stays: shareCovering, the
+ * share_not_in_force note and payee_changed.
  */
 
 const SIGNER = "signer";
@@ -52,8 +47,6 @@ const row = (agentId: string | null, over: Partial<{ period: string | null; mid:
   ...over,
 });
 
-const flag = (r: ReturnType<typeof row>, ledger: PreviewLedgerLine[] = [], shares = [SHARE]) =>
-  previewSharedRow(r, shares, ledger)?.flag ?? null;
 
 describe("shareCovering", () => {
   it("covers [from, to): the first month in, the last month out", () => {
@@ -73,103 +66,15 @@ describe("shareCovering", () => {
   });
 });
 
-describe("previewSharedRow", () => {
-  it("flags nothing on a MID no share covers", () => {
-    expect(flag(row(THIRD, { mid: "MID-2" }))).toBeNull();
-    expect(flag(row(SIGNER, { period: SEP }))).toBeNull();
-    expect(flag(row(SIGNER), [], [])).toBeNull();
-  });
-
-  it("flags nothing on the signer's row when the keys are clear: that is the shared case", () => {
-    expect(flag(row(SIGNER))).toBeNull();
-  });
-
-  it("flags the signer's row clean against the share's own lines (a re-import)", () => {
-    const own: PreviewLedgerLine[] = [
-      { period: JUL, mid: "MID-1", agentId: SIGNER, repShareId: 7, shareRole: "primary" },
-      { period: JUL, mid: "MID-1", agentId: PARTNER, repShareId: 7, shareRole: "secondary" },
-    ];
-    expect(flag(row(SIGNER), own)).toBeNull();
-  });
-
-  it("partner_named: the owner is the partner", () => {
-    expect(flag(row(PARTNER))).toBe("partner_named");
-  });
-
-  it("share_not_applied: the owner is outside the pair", () => {
-    expect(flag(row(THIRD))).toBe("share_not_applied");
-  });
-
-  it.each<[string, PreviewLedgerLine]>([
-    ["an unshared signer line", { period: JUL, mid: "MID-1", agentId: SIGNER, repShareId: null, shareRole: null }],
-    ["an unshared partner line", { period: JUL, mid: "MID-1", agentId: PARTNER, repShareId: null, shareRole: null }],
-    ["another share's line", { period: JUL, mid: "MID-1", agentId: SIGNER, repShareId: 99, shareRole: "primary" }],
-    ["this share in the wrong role", { period: JUL, mid: "MID-1", agentId: SIGNER, repShareId: 7, shareRole: "secondary" }],
-  ])("line_not_shared: the signer's row when a key holds %s", (_label, line) => {
-    expect(flag(row(SIGNER), [line])).toBe("line_not_shared");
-  });
-
-  it("ignores ledger lines in another month, on another MID, or for a third rep", () => {
-    const lines: PreviewLedgerLine[] = [
-      { period: AUG, mid: "MID-1", agentId: SIGNER, repShareId: null, shareRole: null },
-      { period: JUL, mid: "MID-2", agentId: SIGNER, repShareId: null, shareRole: null },
-      { period: JUL, mid: "MID-1", agentId: THIRD, repShareId: null, shareRole: null },
-    ];
-    expect(flag(row(SIGNER), lines)).toBeNull();
-  });
-
-  it("never flags a blocked or unresolved row", () => {
-    expect(flag(row(PARTNER, { blocked: true }))).toBeNull();
-    expect(flag(row(null))).toBeNull();
-    expect(flag(row(PARTNER, { period: null }))).toBeNull();
-    expect(flag(row(PARTNER, { mid: null }))).toBeNull();
-  });
-});
-
-describe("sharePreviewNote", () => {
-  const context = {
-    mid: "MID-1",
-    period: JUL,
-    signerName: "Ann Ito",
-    partnerName: "Bo Lee",
-    ownerName: "Cy Day",
-  };
-
-  it("says a share was not applied, and for whom the row imports", () => {
-    expect(sharePreviewNote({ flag: "share_not_applied", share: SHARE }, context)).toBe(
-      "Share Ann Ito / Bo Lee not applied to MID MID-1 for July 2026: the merchant's owner, Cy Day, is not the share's signer. This row imports as an ordinary line for Cy Day.",
-    );
-    expect(sharePreviewNote({ flag: "partner_named", share: SHARE }, context)).toContain(
-      "the merchant's owner is the partner",
-    );
-  });
-
-  it("says a skipped row will be skipped", () => {
-    for (const f of ["partner_named", "line_not_shared"] as const) {
-      expect(sharePreviewNote({ flag: f, share: SHARE }, context)).toContain("This row will be skipped");
-    }
-  });
-
+describe("monthLabel", () => {
   it("labels months", () => {
     expect(monthLabel("2026-01-01")).toBe("January 2026");
     expect(monthLabel("2026-12-01")).toBe("December 2026");
   });
 });
 
-describe("previewSharedRow ignores adjustment lines (20261016160000)", () => {
-  it("does not take an adjustment on the signer's key for a foreign line", () => {
-    const lines: PreviewLedgerLine[] = [
-      { period: JUL, mid: "MID-1", agentId: SIGNER, repShareId: null, shareRole: null, lineKind: "adjustment" },
-      { period: JUL, mid: "MID-1", agentId: PARTNER, repShareId: null, shareRole: null, lineKind: "adjustment" },
-    ];
-    expect(flag(row(SIGNER), lines)).toBeNull();
-    // The same lines as import lines are foreign, as before.
-    expect(flag(row(SIGNER), lines.map((l) => ({ ...l, lineKind: "import" })))).toBe("line_not_shared");
-  });
-});
-
 describe("previewUnsharedRow (phase 5): share_not_in_force", () => {
-  it("is silent where a share covers the month (previewSharedRow speaks there)", () => {
+  it("is silent where a share covers the month (the commit pays the pair there)", () => {
     expect(previewUnsharedRow(row(THIRD), [SHARE])).toBeNull();
   });
 

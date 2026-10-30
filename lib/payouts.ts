@@ -196,7 +196,11 @@ export type PayoutBatch = {
   row_count: number;
   uploaded_at: string | null;
   committed_at: string | null;
-  /** What commit_residual_import_v2 did not apply, in sheet-row order. */
+  /**
+   * What commit_residual_import_v2 did not apply, in sheet-row order. v3
+   * (20261030160000) skips nothing and writes [], so only a batch an earlier
+   * commit wrote carries one.
+   */
   skipped_rows: SkippedRow[];
   /** Null while skipped rows are still owed a review. */
   skips_acknowledged_at: string | null;
@@ -251,10 +255,10 @@ export function skipsOwed(batch: Pick<PayoutBatch, "status" | "skipped_rows" | "
 }
 
 /**
- * What the batch wrote. v2 returns {written, skipped} with written + skipped =
- * the staged rows, and row_count is the staged count, so the figure the commit
- * returned survives a reload. For a batch committed by the old function
- * skipped_rows is [] and this is row_count, which is what that returned.
+ * The file rows the batch imported. row_count is the staged count; v2
+ * recorded what it skipped, so its rows written were row_count less those. v3
+ * and the old function skip nothing (skipped_rows is []), so this is
+ * row_count. (v3's partner lines are extra LINES, not extra file rows.)
  */
 export function rowsWritten(batch: Pick<PayoutBatch, "row_count" | "skipped_rows">): number {
   return batch.row_count - batch.skipped_rows.length;
@@ -347,8 +351,9 @@ export function warningQuestion(warning: string): string {
 /**
  * Whether the commit may be offered: every warning TYPE present in the import
  * has a yes (memo §0b.3). One answer per type, never per line; a no, or a type
- * not yet answered, keeps the commit closed. Advisory in this phase, because the
- * commit is still v2: v3 (phase 8) is what refuses an unconfirmed type.
+ * not yet answered, keeps the commit closed. The yes answers go to
+ * commit_residual_import_v3, which recomputes the warnings and refuses any
+ * type not among them: the database enforces this, not the page.
  */
 export function warningsConfirmed(
   present: readonly string[],

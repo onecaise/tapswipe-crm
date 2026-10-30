@@ -1,6 +1,6 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-7 built locally (§10).** Nothing has
+Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-8 built locally (§10).** Nothing has
 been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
@@ -1786,6 +1786,106 @@ Found while building:
 - Fixtures that seed a ledger line and re-import it must give both the same processor, since the
   processor joined the merge key. `seedPayouts()` now tags its lines TSYS, and the two
   duplicate-key tests copy the seeded line's processor.
+
+### Phase 8: commit v3 (30 Oct 2026, branch `intake-residuals`)
+
+Built (`20261030160000_commit_v3.sql`; Edge Function `parse-residual-import` and
+`_shared/residuals.ts` changed, the share flags only):
+- **`commit_residual_import_v3(batch_id_input int, confirmed_input text[])`** returns
+  `{written, rows, shared, overrides, replaced_lines}`. Definer, `search_path = public, pg_temp`,
+  `is_admin()` first, its own revoke/grant lines (anon has no EXECUTE; a rep meets PT403). One
+  transaction: batch `for update`, an advisory lock on the processor-month, the share lock, `for
+  share` on every merchant the file names. Refuses (PT409, listing what it found) a batch not in
+  review, without a month, beside a committed batch for its processor-month, with no rows or a
+  blocked row; a row read for another month, a blank/repeated/unknown MID, a wrong Income Type, a
+  missing figure, an owner or MID changed since the read, a merchant with no rate, a MID already
+  in the month, and a covering share whose signer is not the owner or whose shares do not total
+  the rate. Recomputes the three warnings and refuses any type not confirmed (DETAIL = the codes).
+  Plain inserts, never a merge. `rep_split_pct` = the merchant's rate; the house at 0 still gets
+  its line. A shared row is the signer's and the partner's line, pieces by `shared_part`, at
+  commit. `volume_confirmed_negative` exactly where volume < 0. `skipped_rows = '[]'`,
+  `confirmed_warnings` kept on the batch, one `commit_residual_import` audit row.
+- **`commit_residual_import_v2` dropped.** `commit_residual_import(int)` stays (phase 13).
+- **The merchant's rate**: `merchants_split_zero_to_fifty` (validated; NULL/NULL or 0-50 with
+  the company half 100 minus it), `set_merchant_split(merchant_id, rate)` (the `set_rep_split`
+  shape, audited, refused while a share is live), and `guard_merchant_split_and_owner()` refusing
+  every other UPDATE of the two columns, and moving a merchant with a live share. The merchant
+  form's split input is gone; the merchant page has an admin Split control
+  (`components/merchant-split-cell.tsx`).
+- **Shares under the owner rule**: `set_merchant_rep_share()` refuses a signer who is not the
+  owner, a merchant with no rate or at 0 (A28), and shares that do not total the rate; the
+  table's and the ledger snapshot's `= 50` CHECKs are relaxed to `<= 50`.
+- **The app**: the commit button calls v3 with the types answered yes; the review page's notes
+  copy updated. The merchant page's share card holds a new share to the merchant's rate (its
+  client check and "Company N%" line; `lib/rep-shares.ts` takes the total), and says the signer is
+  the owner; the correction form keeps its ratio out of 50. The signer select is unchanged: the
+  RPC refuses anyone but the owner with a sentence the card shows.
+- **The parser**: v2's three share flags (`share_not_applied`, `partner_named`,
+  `line_not_shared`) and `previewSharedRow` / `sharePreviewNote` removed (§2.1); `share_not_in_force`
+  and `payee_changed` stay.
+- Tests: new `tests/rls/commit-residual-import-v3.test.ts` (each refusal, each unconfirmed
+  warning, the owner-changed and MID-moved cases, no merge, the money grid at 0, 30, 45 and 50 and
+  eight share splits across odd-cent residuals including exact half-cent ties, the marker, the
+  audit row, grants, the rate CHECK, `set_merchant_split`, the move refusal, the migration's
+  refusal and pass, and eight mutation proofs that each remove one protection from a copy of v3
+  and watch its case go through). `tests/rls/commit-residual-import-v2.test.ts` deleted with v2.
+
+Where the memo was silent, and what was chosen (the conservative side each time):
+- **An owner changed between Read and Commit is refused, never re-paid** (§2.3 step 2 says
+  refuse; followed). So is a MID moved to another merchant, and a staged payee that is not the
+  owner. The review screen does not show it as a blocker; the commit's sentence says "Read it
+  again".
+- **A MID that already has an import line in the month refuses, whatever its processor** —
+  including a legacy NULL-processor line or one with no committed batch beside it. Stricter than
+  `mid_in_other_batch` (which the parser still shows); it is what "never merge" needs.
+- **A merchant with no rate refuses** (hand-made merchants have none, and the form no longer
+  sets one). No rate is invented.
+- **`confirmed_input`**: NULL means none; an unknown code is 22023; a yes to a type not present is
+  accepted and not recorded. `confirmed_warnings` holds the types PRESENT and their sheet rows
+  (`{}` when none).
+- **Who committed is the audit row** (`actor_id`), when is `committed_at`. No `committed_by`
+  column: it would be the 26th `profiles` FK and a fifth entry in every teardown list.
+- **`merchant_name` is the merchant's `dba`**, falling back to the file's name if the merchant has
+  none. `average_ticket` / `total_cost` are copied from staging (the parser writes neither).
+- **The result also returns `rows`** (file rows) beside `written` (lines), and `overrides: 0`,
+  `replaced_lines: 0` so phases 9 and 10 only fill them in.
+- **Overrides plug in at v3's step 6**, after the import lines and before the batch closes, from
+  the same merchant rows; nothing about the rep amount changes.
+- **The split guard is a trigger, not a column grant** (the phase 4 `pre_apps` precedent: a grant
+  list on `merchants` would drift). It guards UPDATE only: `approve_pre_app()` inserts the
+  snapshot, and a hand-made merchant starts with none.
+- **"Live share"** (refuses `set_merchant_split` and an owner move): open-ended, or ending after
+  the latest month with an import line for that merchant — any month if it has none. A future
+  share counts.
+- **`set_merchant_split`**: PT400 for a bad rate (as `set_rep_split`), a same-value call is a no-op
+  with no audit row, the share lock taken.
+- **The merchants CHECK carries the company half** (`= 100 - rate`); `merchants_split_totals_100`
+  stays NOT VALID, untouched. The migration refuses, by id, any merchant outside the new CHECK.
+- **The hermetic fixture's merchants are all 50 now** (were 60, 55, 50, 70), because the share
+  suites divide them 40 + 10, 30 + 20 and 25 + 25 and a share must total its merchant's rate.
+  Rate-specific tests make their own merchants.
+- **`seedPayouts()`'s staged rows keep their month** (not the batch's): only the old
+  `commit_residual_import(int)` commits that batch as seeded, and its tests merge into the seeded
+  ledger lines; both go in phase 13. Every v3 caller stages with the new `stageForCommit()` at
+  the batch's month. The e2e fixtures (`createCommittableBatch`, the new `createSharedBatch`) now
+  stage at the batch's month, against real merchants with a rate.
+- **`post_share_correction()` is unchanged**: its shares are a ratio typed out of 50 and applied to
+  the signer's payout, which holds at any rate.
+- **The skipped-row acknowledgement is kept** (`acknowledge_residual_skips()`,
+  `ResidualSkipsNotice`): v3 writes `[]` and nothing new is ever skipped, so it only serves a batch
+  v2 committed; §2.1 leaves the UI to the cleanup phase. What was removed for the v3 path: the
+  skip itself, the share preview flags that predicted it, and `createSkippingBatch` (replaced by
+  `plantLegacySkips`, which plants v2's exact record so the kept UI stays tested).
+- **The preview-flag CHECK still allows the retired flags** (rows staged before; cleanup phase),
+  and `lib/payouts.ts` keeps their labels for the same rows.
+- **`set_merchant_rep_share` keeps `search_path = public`** (rewritten, not new); every function
+  this phase creates pins `public, pg_temp`.
+
+Not done here, for later phases:
+- **Phase 9**: the replace inside v3 (it refuses a committed processor-month today, naming it).
+- **Phase 10**: override lines at step 6; `set_merchant_split` refusing a rate below an open
+  override (A29).
+- **Cleanup**: drop the retired flags from the CHECK, the skip UI and its columns.
 
 ---
 

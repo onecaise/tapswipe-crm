@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  batchConfirmations,
   commitEvidence,
   createCommittableBatch,
   storageStateFor,
@@ -9,10 +10,11 @@ import {
 /**
  * Committing an import, and committing it exactly once.
  *
- * The RPC's own guards are asserted in tests/rls (47 tests, including the
- * sequential double-commit). What these add is the click: that the UI cannot
- * produce a second commit, and that a committed batch reports itself honestly
- * afterwards.
+ * The RPC's own guards are asserted in tests/rls/commit-residual-import-v3.test.ts
+ * (including the sequential double-commit). What these add is the click: that
+ * the UI cannot produce a second commit, that a committed batch reports itself
+ * honestly afterwards, and that the review screen's Yes reaches the database
+ * (v3 refuses a warning type it was not given).
  *
  * Each spec creates its OWN batch, because a commit is destructive to its batch —
  * sharing one would make the second spec depend on the first not having run.
@@ -35,8 +37,8 @@ test("commits a clean batch and lands on its commit result", async ({ page }) =>
   await page.getByRole("button", { name: /commit 3 rows/i }).click();
   await page.getByRole("button", { name: "Commit import" }).click();
 
-  // commit_residual_import_v2 returns {written, skipped}; the button lands on
-  // the batch, whose committed page reports them, read back from the batch.
+  // The button lands on the batch, whose committed page reports what was
+  // imported, read back from the batch.
   await expect(page).toHaveURL(new RegExp(`/payouts/import/${batchId}$`));
   await expect(
     page.locator('[data-slot="stat-card"]').filter({ hasText: "Rows imported" }),
@@ -52,6 +54,31 @@ test("commits a clean batch and lands on its commit result", async ({ page }) =>
     status: "committed",
     stagingLeft: 0,
   });
+});
+
+test("a Yes on the review screen is what lets the commit through", async ({ page }) => {
+  // The first row is a zero-volume fee line: the bad_numbers warning.
+  const batchId = await createCommittableBatch("2027-09", 2, { badNumbers: true });
+  await page.goto(`/payouts/import/${batchId}`);
+
+  const block = page.getByRole("group", {
+    name: "Volume is zero or less, or the residual is more than the volume",
+  });
+  await expect(block).toContainText("Row 2");
+  // No commit until the type is answered.
+  await expect(page.getByRole("button", { name: /commit 2 rows/i })).toHaveCount(0);
+  await block.getByRole("button", { name: "Yes" }).click();
+
+  await page.getByRole("button", { name: /commit 2 rows/i }).click();
+  await page.getByRole("button", { name: "Commit import" }).click();
+  await expect(
+    page.locator('[data-slot="stat-card"]').filter({ hasText: "Rows imported" }),
+  ).toContainText("2");
+
+  // v3 recomputed the warning and accepted it only because the button sent
+  // the Yes; the batch keeps what was confirmed, with its row.
+  expect(await batchConfirmations(batchId)).toEqual({ bad_numbers: [2] });
+  expect(await commitEvidence(batchId)).toMatchObject({ auditRows: 1, ledgerRows: 2, status: "committed" });
 });
 
 test("a double-click commits exactly once", async ({ page }) => {

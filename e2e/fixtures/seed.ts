@@ -2363,11 +2363,9 @@ const E2E_BATCH_PROCESSORS = ["Square", "PayBright", "Netevia HQ", "Red Fynn", "
  *
  * Every new batch needs both since 20261030140000, inside the import window
  * (this UTC month and the 24 before it), and a committed one must be the only
- * committed batch for its pair -- on a database the live suite shares. The
- * fixtures' STAGED rows keep their own months (2027-2028, chosen to be clear of
- * everything else): the commit is still v2, which files a row by its own
- * month, so the batch's month is only a free slot here. Phase 8's v3 takes the
- * month from the batch, and these fixtures move with it then.
+ * committed batch for its pair -- on a database the live suite shares. Since
+ * phase 8 the commit (v3) takes the month from the BATCH and refuses a staged
+ * row read for any other, so the fixtures stage every row at this slot's month.
  */
 export async function freeBatchSlot(
   db: SupabaseClient,
@@ -2390,30 +2388,75 @@ export async function freeBatchSlot(
 /**
  * Removes earlier runs' batches of this file name, with their staged rows,
  * ledger lines and audit rows (FK order), so reruns cannot fill every
- * processor-month freeBatchSlot has to offer.
+ * processor-month freeBatchSlot has to offer. Merchants whose MID starts with
+ * `midPrefix` go too, after the lines that name them.
  */
-async function clearBatchesNamed(db: SupabaseClient, fileName: string): Promise<void> {
+async function clearBatchesNamed(
+  db: SupabaseClient,
+  fileName: string,
+  midPrefix?: string,
+): Promise<void> {
   const { data: old } = await db.from("rep_payout_batches").select("id").eq("file_name", fileName);
   const ids = (old ?? []).map((b) => b.id as number);
-  if (ids.length === 0) return;
-  const { error: linesError } = await db.from("rep_payout_rows").delete().in("batch_id", ids);
-  if (linesError) throw new Error(`old lines: ${linesError.message}`);
-  await db.from("rep_payout_import_rows").delete().in("batch_id", ids);
-  await db.from("audit_log").delete().eq("table_name", "rep_payout_batches").in("row_id", ids.map(String));
-  const { error } = await db.from("rep_payout_batches").delete().in("id", ids);
-  if (error) throw new Error(`old batches: ${error.message}`);
+  if (ids.length > 0) {
+    const { error: linesError } = await db.from("rep_payout_rows").delete().in("batch_id", ids);
+    if (linesError) throw new Error(`old lines: ${linesError.message}`);
+    await db.from("rep_payout_import_rows").delete().in("batch_id", ids);
+    await db.from("audit_log").delete().eq("table_name", "rep_payout_batches").in("row_id", ids.map(String));
+    const { error } = await db.from("rep_payout_batches").delete().in("id", ids);
+    if (error) throw new Error(`old batches: ${error.message}`);
+  }
+  if (midPrefix !== undefined) {
+    const { data: merchants } = await db.from("merchants").select("id").like("mid", `${midPrefix}%`);
+    const merchantIds = (merchants ?? []).map((m) => m.id as number);
+    if (merchantIds.length > 0) {
+      await db.from("rep_payout_rows").delete().in("merchant_id", merchantIds);
+      await db.from("merchant_rep_shares").delete().in("merchant_id", merchantIds);
+      const { error } = await db.from("merchants").delete().in("id", merchantIds);
+      if (error) throw new Error(`old merchants: ${error.message}`);
+    }
+  }
 }
 
 /**
- * A clean batch staged and ready to commit, for the commit specs.
+ * A merchant for a fixture batch's row: owned by `agentId`, at `rate`, with
+ * no saved processor (never a processor_mismatch, memo A6).
+ */
+async function fixtureMerchant(
+  db: SupabaseClient,
+  agentId: string,
+  mid: string,
+  dba: string,
+  rate = 50,
+): Promise<number> {
+  const { data, error } = await db
+    .from("merchants")
+    .insert({
+      agent_id: agentId, mid, dba, status: "active", city: "Nashville", state: "TN",
+      split_agent_pct: rate, split_company_pct: 100 - rate,
+    })
+    .select("id")
+    .single();
+  if (error || !data) throw new Error(`fixture merchant ${mid}: ${error?.message}`);
+  return data.id as number;
+}
+
+/**
+ * A clean batch staged and ready to commit, for the commit specs: `rowCount`
+ * rows, each on its own merchant (owned by the e2e agent, rate 50), staged at
+ * the batch's month as parse-residual-import leaves them. `label` names the
+ * file (one per spec, so reruns clear their own). `badNumbers` makes the first
+ * row a zero-volume fee line, the bad_numbers warning the review screen asks
+ * about once.
  *
  * Returned rather than created in a fixture, because a commit is destructive to
  * its own batch: each commit spec needs its own, and reusing one would make the
  * second spec depend on the first having not run.
  */
 export async function createCommittableBatch(
-  agentPeriod: string,
+  label: string,
   rowCount = 3,
+  options: { badNumbers?: boolean } = {},
 ): Promise<number> {
   const { apiUrl, serviceKey } = localStackConfig();
   const db = createClient(apiUrl, serviceKey, {
@@ -2429,15 +2472,17 @@ export async function createCommittableBatch(
   )?.id;
   if (!adminId || !agentId) throw new Error("Run seedE2E() first.");
 
-  await clearBatchesNamed(db, `e2e-${agentPeriod}.xlsx`);
+  const prefix = `E2E-COMMIT-${label}-`;
+  await clearBatchesNamed(db, `e2e-${label}.xlsx`, prefix);
+  const slot = await freeBatchSlot(db);
   const { data: batch, error: batchError } = await db
     .from("rep_payout_batches")
     .insert({
       imported_by: adminId,
-      file_key: `e2e/${agentPeriod}.xlsx`,
-      file_name: `e2e-${agentPeriod}.xlsx`,
+      file_key: `e2e/${label}.xlsx`,
+      file_name: `e2e-${label}.xlsx`,
       status: "review",
-      ...(await freeBatchSlot(db)),
+      ...slot,
     })
     .select("id")
     .single();
@@ -2446,19 +2491,26 @@ export async function createCommittableBatch(
   }
 
   const batchId = batch.id as number;
-  const staged = Array.from({ length: rowCount }, (_, i) => ({
-    batch_id: batchId,
-    row_number: i + 1,
-    mid_raw: `E2E-COMMIT-${batchId}-${i + 1}`,
-    merchant_name_raw: `E2E Commit Merchant ${i + 1}`,
-    period: firstOfMonth(agentPeriod),
-    agent_id: agentId,
-    volume: 1000 * (i + 1),
-    average_ticket: 10,
-    total_cost: 50,
-    residual_income: 200 * (i + 1),
-    rep_split_pct: 55,
-  }));
+  const staged = [];
+  for (let i = 0; i < rowCount; i += 1) {
+    const mid = `${prefix}${batchId}-${i + 1}`;
+    const merchantId = await fixtureMerchant(db, agentId, mid, `E2E Commit Merchant ${i + 1}`);
+    const fee = options.badNumbers === true && i === 0;
+    staged.push({
+      batch_id: batchId,
+      row_number: i + 2,
+      mid_raw: mid,
+      merchant_name_raw: `E2E Commit Merchant ${i + 1}`,
+      processor_raw: slot.processor,
+      income_type_raw: "Residuals",
+      period: slot.period,
+      agent_id: agentId,
+      merchant_id: merchantId,
+      volume: fee ? 0 : 1000 * (i + 1),
+      residual_income: fee ? -4.95 : 200 * (i + 1),
+      warnings: fee ? ["bad_numbers"] : [],
+    });
+  }
 
   const { error: rowsError } = await db
     .from("rep_payout_import_rows")
@@ -2466,6 +2518,21 @@ export async function createCommittableBatch(
   if (rowsError) throw new Error(`staging: ${rowsError.message}`);
 
   return batchId;
+}
+
+/** What a commit recorded as confirmed on its batch (20261030160000), as the service role. */
+export async function batchConfirmations(batchId: number): Promise<unknown> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await db
+    .from("rep_payout_batches")
+    .select("confirmed_warnings")
+    .eq("id", batchId)
+    .single();
+  if (error) throw new Error(`batch ${batchId}: ${error.message}`);
+  return data.confirmed_warnings;
 }
 
 /** Counts that prove a commit happened exactly once. */
@@ -2915,25 +2982,21 @@ export async function preAppLocation(
 }
 
 /**
- * A batch whose commit SKIPS a row, for the phase 4b commit-result and
- * skipped-rows Callout specs (docs/design/residual-splits.md §5.4).
+ * A review batch with a SHARED account in it, for the commit-result spec
+ * (phase 8 of docs/design/intake-and-reports.md): merchant E2E-V3SHARE-<label>
+ * owned by the e2e agent at rate 50, shared 40 (the agent, its owner and so
+ * the signer) / 10 (agent2) from the batch's month, plus an unshared merchant
+ * of the agent's. Two staged rows at the batch's month, as parse-residual-
+ * import leaves them. v3 commits the shared row as the pair and the other as
+ * one line: three lines, nothing skipped.
  *
- * In `period` (YYYY-MM, one per spec so no two specs' Callouts share a period
- * page): merchant E2E-SKIP-<period> carries a share with the e2e agent as
- * signer and agent2 as partner. Three staged rows, as parse-residual-import
- * would leave them:
- *
- *   row 2  the signer on the shared MID       -> the shared pair
- *   row 3  the PARTNER on the shared MID      -> skipped (partner_named),
- *          carrying the preview flag and note the parser would write
- *   row 4  the signer on an unshared MID      -> an ordinary line
- *
- * So committing writes 2 and skips 1. Everything from an earlier run of the
- * same period is cleared first, in FK order -- including committed batches,
- * whose unreviewed Callouts would otherwise stack on the period page.
+ * Until phase 8 this was createSkippingBatch, whose partner row v2 skipped.
+ * Under the owner rule that row cannot exist (the file names no rep, and the
+ * signer is the owner), so a skip record now comes only from plantLegacySkips.
  */
-export async function createSkippingBatch(period: string): Promise<{
+export async function createSharedBatch(label: string): Promise<{
   batchId: number;
+  period: string;
   sharedMid: string;
   plainMid: string;
 }> {
@@ -2942,72 +3005,36 @@ export async function createSkippingBatch(period: string): Promise<{
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  const sharedMid = `E2E-SKIP-${period}`;
-  const plainMid = `E2E-SKIP-PLAIN-${period}`;
-  const fileName = `e2e-skips-${period}.xlsx`;
-  const month = firstOfMonth(period);
+  const prefix = `E2E-V3SHARE-${label}`;
+  const sharedMid = `${prefix}-SHARED`;
+  const plainMid = `${prefix}-PLAIN`;
+  const fileName = `e2e-v3-shared-${label}.xlsx`;
 
   const { data: reps, error: repsError } = await db
     .from("profiles")
     .select("id, email")
     .in("email", [PERSONAS.admin.email, PERSONAS.agent.email, PERSONAS.agent2.email]);
   if (repsError || (reps ?? []).length !== 3) {
-    throw new Error(`skip reps: ${repsError?.message ?? "personas missing; run seedE2E() first"}`);
+    throw new Error(`shared batch reps: ${repsError?.message ?? "personas missing; run seedE2E() first"}`);
   }
   const idOf = (address: string) => reps!.find((rep) => rep.email === address)!.id as string;
   const adminId = idOf(PERSONAS.admin.email);
   const signerId = idOf(PERSONAS.agent.email);
   const partnerId = idOf(PERSONAS.agent2.email);
 
-  // ---- Clear an earlier run, in FK order. ----
-  const { data: oldBatches } = await db
-    .from("rep_payout_batches")
-    .select("id")
-    .eq("file_name", fileName);
-  const oldBatchIds = (oldBatches ?? []).map((b) => b.id as number);
-  const { error: oldLinesError } = await db
-    .from("rep_payout_rows")
-    .delete()
-    .in("mid", [sharedMid, plainMid]);
-  if (oldLinesError) throw new Error(`old lines: ${oldLinesError.message}`);
-  if (oldBatchIds.length > 0) {
-    await db
-      .from("audit_log")
-      .delete()
-      .eq("table_name", "rep_payout_batches")
-      .in("row_id", oldBatchIds.map(String));
-    const { error } = await db.from("rep_payout_batches").delete().in("id", oldBatchIds);
-    if (error) throw new Error(`old batches: ${error.message}`);
-  }
-  const { data: oldMerchants } = await db.from("merchants").select("id").eq("mid", sharedMid);
-  for (const old of oldMerchants ?? []) {
-    await db.from("merchant_rep_shares").delete().eq("merchant_id", old.id);
-    const { error } = await db.from("merchants").delete().eq("id", old.id);
-    if (error) throw new Error(`old merchant: ${error.message}`);
-  }
+  await clearBatchesNamed(db, fileName, prefix);
 
-  // ---- Plant. ----
-  const { data: merchant, error: merchantError } = await db
-    .from("merchants")
-    .insert({
-      agent_id: signerId,
-      mid: sharedMid,
-      dba: `E2E Shared ${period} Co`,
-      status: "active",
-      city: "Nashville",
-      state: "TN",
-    })
-    .select("id")
-    .single();
-  if (merchantError || !merchant) throw new Error(`merchant: ${merchantError?.message}`);
+  const slot = await freeBatchSlot(db);
+  const sharedId = await fixtureMerchant(db, signerId, sharedMid, `E2E Shared ${label} Co`);
+  const plainId = await fixtureMerchant(db, signerId, plainMid, `E2E Plain ${label} Co`);
 
   const { error: shareError } = await db.from("merchant_rep_shares").insert({
-    merchant_id: merchant.id,
+    merchant_id: sharedId,
     primary_agent_id: signerId,
     secondary_agent_id: partnerId,
     primary_rep_pct: 40,
     secondary_rep_pct: 10,
-    effective_from: month,
+    effective_from: slot.period,
   });
   if (shareError) throw new Error(`share: ${shareError.message}`);
 
@@ -3018,8 +3045,8 @@ export async function createSkippingBatch(period: string): Promise<{
       file_key: `e2e/${fileName}`,
       file_name: fileName,
       status: "review",
-      row_count: 3,
-      ...(await freeBatchSlot(db)),
+      row_count: 2,
+      ...slot,
     })
     .select("id")
     .single();
@@ -3028,44 +3055,95 @@ export async function createSkippingBatch(period: string): Promise<{
 
   const base = {
     batch_id: batchId,
-    period: month,
+    period: slot.period,
+    processor_raw: slot.processor,
+    income_type_raw: "Residuals",
+    agent_id: signerId,
     volume: 1000,
-    average_ticket: 10,
-    total_cost: 50,
+    residual_income: 100,
   };
   const { error: rowsError } = await db.from("rep_payout_import_rows").insert([
-    {
-      ...base,
-      row_number: 2,
-      agent_id: signerId,
-      agent_number_raw: PERSONAS.agent.agentNumber,
-      mid_raw: sharedMid,
-      merchant_name_raw: `E2E Shared ${period} Co`,
-      merchant_id: merchant.id,
-    },
-    {
-      ...base,
-      row_number: 3,
-      agent_id: partnerId,
-      agent_number_raw: PERSONAS.agent2.agentNumber,
-      mid_raw: sharedMid,
-      merchant_name_raw: `E2E Shared ${period} Co`,
-      merchant_id: merchant.id,
-      preview_flag: "partner_named",
-      preview_note: `MID ${sharedMid} is shared by ${PERSONAS.agent.fullName} / ${PERSONAS.agent2.fullName}, and the file names the partner. This row will be skipped: a shared account is imported on the signer's row.`,
-    },
-    {
-      ...base,
-      row_number: 4,
-      agent_id: signerId,
-      agent_number_raw: PERSONAS.agent.agentNumber,
-      mid_raw: plainMid,
-      merchant_name_raw: `E2E Plain ${period} Co`,
-    },
+    { ...base, row_number: 2, mid_raw: sharedMid, merchant_name_raw: `E2E Shared ${label} Co`, merchant_id: sharedId },
+    { ...base, row_number: 3, mid_raw: plainMid, merchant_name_raw: `E2E Plain ${label} Co`, merchant_id: plainId },
   ]);
   if (rowsError) throw new Error(`staging: ${rowsError.message}`);
 
-  return { batchId, sharedMid, plainMid };
+  return { batchId, period: slot.period, sharedMid, plainMid };
+}
+
+/**
+ * A committed batch carrying a skip record in exactly the shape
+ * commit_residual_import_v2 wrote one (phase 4b of
+ * docs/design/residual-splits.md, §5.4): one partner row skipped, in `period`
+ * (YYYY-MM, one per spec so no two specs' Callouts share a period page), plus
+ * the signer's ordinary line in that period so a rep's page has a row to show.
+ * v3 never skips, so this is the only way a skip record exists from phase 8 on;
+ * the Callout and its review stay until the cleanup phase removes them, and
+ * this is what keeps them tested. Clears an earlier run's first.
+ */
+export async function plantLegacySkips(period: string): Promise<{
+  batchId: number;
+  sharedMid: string;
+}> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const sharedMid = `E2E-SKIP-${period}`;
+  const fileName = `e2e-skips-${period}.xlsx`;
+  const month = firstOfMonth(period);
+
+  const { data: reps, error: repsError } = await db
+    .from("profiles")
+    .select("id, email")
+    .in("email", [PERSONAS.admin.email, PERSONAS.agent.email]);
+  if (repsError || (reps ?? []).length !== 2) {
+    throw new Error(`skip reps: ${repsError?.message ?? "personas missing; run seedE2E() first"}`);
+  }
+  const idOf = (address: string) => reps!.find((rep) => rep.email === address)!.id as string;
+
+  await clearBatchesNamed(db, fileName, sharedMid);
+  await db.from("rep_payout_rows").delete().eq("mid", sharedMid);
+
+  const { data: batch, error: batchError } = await db
+    .from("rep_payout_batches")
+    .insert({
+      imported_by: idOf(PERSONAS.admin.email),
+      file_key: `e2e/${fileName}`,
+      file_name: fileName,
+      status: "committed",
+      committed_at: new Date().toISOString(),
+      row_count: 2,
+      skipped_rows: [
+        {
+          row_number: 3,
+          period: month,
+          mid: sharedMid,
+          agent_number: PERSONAS.agent2.agentNumber,
+          reason: "partner_named",
+        },
+      ],
+      ...(await freeBatchSlot(db)),
+    })
+    .select("id")
+    .single();
+  if (batchError || !batch) throw new Error(`batch: ${batchError?.message ?? "no row"}`);
+  const batchId = batch.id as number;
+
+  const { error: lineError } = await db.from("rep_payout_rows").insert({
+    agent_id: idOf(PERSONAS.agent.email),
+    period: month,
+    mid: sharedMid,
+    merchant_name: `E2E Shared ${period} Co`,
+    volume: 1000,
+    residual_income: 100,
+    rep_split_pct: 50,
+    batch_id: batchId,
+  });
+  if (lineError) throw new Error(`line: ${lineError.message}`);
+
+  return { batchId, sharedMid };
 }
 
 /** A batch's skip record and acknowledgement, read as the service role. */
@@ -3279,21 +3357,43 @@ async function ensureShareFixture(
 
   const merchantIds: number[] = [];
   for (const m of [f.shared, f.admin]) {
-    const { data: existing } = await db.from("merchants").select("id").eq("mid", m.mid).maybeSingle();
+    let { data: existing } = await db
+      .from("merchants")
+      .select("id, split_agent_pct")
+      .eq("mid", m.mid)
+      .maybeSingle();
+    // One made by a run from before 20261030160000 has no rate, and its rate
+    // can no longer be written directly (set_merchant_split only, which needs
+    // an admin's session): make it again. Its lines went above; its shares now.
+    if (existing && existing.split_agent_pct === null) {
+      await db.from("merchant_rep_shares").delete().eq("merchant_id", existing.id);
+      const { error } = await db.from("merchants").delete().eq("id", existing.id);
+      if (error) throw new Error(`share fixture old merchant: ${error.message}`);
+      existing = null;
+    }
     let id = existing?.id as number | undefined;
     if (id === undefined) {
+      // Rate 50, so the 40 + 10 share totals the merchant's rate
+      // (set_merchant_rep_share's rule since 20261030160000).
       const { data: created, error } = await db
         .from("merchants")
-        .insert({ agent_id: ids.agent, mid: m.mid, dba: m.dba, status: "active", city: "Nashville", state: "TN" })
+        .insert({
+          agent_id: ids.agent, mid: m.mid, dba: m.dba, status: "active", city: "Nashville", state: "TN",
+          split_agent_pct: 50, split_company_pct: 50,
+        })
         .select("id")
         .single();
       if (error || !created) throw new Error(`share fixture merchant: ${error?.message}`);
       id = created.id as number;
-    } else {
-      await db.from("merchants").update({ agent_id: ids.agent, dba: m.dba }).eq("id", id);
     }
+    // The share first: a merchant with a live share cannot be moved
+    // (20261030160000), and a rerun may find it owned by someone else.
     const { error: shareError } = await db.from("merchant_rep_shares").delete().eq("merchant_id", id);
     if (shareError) throw new Error(`share fixture shares: ${shareError.message}`);
+    if (existing) {
+      const { error: moveError } = await db.from("merchants").update({ agent_id: ids.agent, dba: m.dba }).eq("id", id);
+      if (moveError) throw new Error(`share fixture merchant: ${moveError.message}`);
+    }
     merchantIds.push(id);
   }
   const [sharedMerchantId, adminMerchantId] = merchantIds;

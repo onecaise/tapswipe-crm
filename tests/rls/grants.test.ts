@@ -662,9 +662,11 @@ describe("grant surface after all migrations", () => {
       "public.shared_part(numeric, numeric, numeric)",
       // Writes both lines of a shared pair as the owner.
       "public.set_shared_residual(int, date, numeric)",
-      // The shared-aware commit: writes the ledger, deletes staging and
+      // The commit (20261030160000): writes the ledger, deletes staging and
       // writes audit_log as the owner.
-      "public.commit_residual_import_v2(int)",
+      "public.commit_residual_import_v3(int, text[])",
+      // The only write path to a merchant's rate, audited as the owner.
+      "public.set_merchant_split(int, numeric)",
       // Sets a batch's skips_acknowledged_at and writes audit_log as the owner.
       "public.acknowledge_residual_skips(int)",
       // Reads merchant_rep_shares and other reps' names past RLS. Its guard

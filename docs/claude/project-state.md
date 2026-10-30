@@ -20,3 +20,7 @@ Moved verbatim from `CLAUDE.md` on 19 Oct 2026 to keep that file under the size 
 ## The 2 Sep 2026 relink (moved verbatim from CLAUDE.md, 30 Oct 2026)
 
 On 2 Sep 2026 12:15 EDT the CLI was manually relinked to **prod**, and this file went on asserting dev was linked for seven days. Two read-only commands (`migration list --linked`, `npm run test:deployed`) ran under that false belief before anyone noticed — no writes, no data touched, and the 4 Sep prod deployment that followed was deliberate and taken from a full `db dump` backup first. That was luck rather than design: nothing in the repo compared the documented link against the actual one.
+
+## What the prod scripts encode (moved verbatim from CLAUDE.md, 30 Oct 2026)
+
+Two things they encode that cost a session each: `db push` **prompts** for confirmation on a remote target, so it must be run with `--yes` and its output must STREAM rather than be captured — buffering with `Out-String` swallows the prompt and hangs forever at near-zero CPU. And `db push` applies **everything** pending with no target-version flag, so any verification pinned to one migration reports PASS over the ones it did not look at; the migration check is now derived from `supabase/migrations/` instead.

@@ -403,6 +403,10 @@ export async function provisionFixtures(): Promise<Fixtures> {
         legal_business_name: `Live ${persona.fullName} Co LLC`,
         status: "active",
         processor: "TSYS",
+        // A rate, as an approved merchant has: commit v3 refuses a merchant
+        // with none (20261030160000).
+        split_agent_pct: 50,
+        split_company_pct: 50,
       })
       .select("id")
       .single();

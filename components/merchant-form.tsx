@@ -11,7 +11,6 @@ import {
   type MerchantStatus,
 } from "@/lib/merchants";
 import { US_STATES, isZip } from "@/lib/masks";
-import { EMPTY } from "@/lib/format";
 import type { OwnerOption } from "@/lib/merchant-owners";
 import type { Processor } from "@/lib/processors";
 import { friendlyDbError } from "@/lib/db-errors";
@@ -39,8 +38,6 @@ type FormState = {
   mid: string;
   status: MerchantStatus;
   processor: string;
-  split_agent_pct: string;
-  split_company_pct: string;
   date_added: string;
   street: string;
   city: string;
@@ -57,8 +54,6 @@ function toFormState(merchant?: Merchant): FormState {
     mid: merchant?.mid ?? "",
     status: merchant?.status ?? "active",
     processor: merchant?.processor ?? "",
-    split_agent_pct: merchant?.split_agent_pct?.toString() ?? "",
-    split_company_pct: merchant?.split_company_pct?.toString() ?? "",
     date_added: merchant?.date_added ?? "",
     street: merchant?.street ?? "",
     city: merchant?.city ?? "",
@@ -67,27 +62,9 @@ function toFormState(merchant?: Merchant): FormState {
   };
 }
 
-/**
- * The company half of the split, derived from the agent half.
- *
- * Returns null for anything that isn't a usable percentage, so a blank or
- * half-typed field writes NULL to both columns rather than a number derived
- * from nonsense — null/null is the one uneven pair merchants_split_totals_100
- * still allows.
- */
-function companySplitFrom(agentSplit: string): number | null {
-  if (agentSplit.trim() === "") return null;
-  const agent = Number(agentSplit);
-  if (!Number.isFinite(agent) || agent < 0 || agent > 100) return null;
-  return 100 - agent;
-}
-
-/** Empty text inputs become NULL, not "". Numbers parse or become NULL. */
+/** Empty text inputs become NULL, not "". */
 function toPayload(form: FormState) {
   const text = (v: string) => (v.trim() === "" ? null : v.trim());
-  const num = (v: string) => (v.trim() === "" ? null : Number(v));
-
-  const company = companySplitFrom(form.split_agent_pct);
 
   return {
     agent_id: form.agent_id,
@@ -96,10 +73,10 @@ function toPayload(form: FormState) {
     mid: text(form.mid),
     status: form.status,
     processor: text(form.processor),
-    // Both or neither. Sending an agent half with a null company half would
-    // trip the constraint, and the rep has no field to correct it with.
-    split_agent_pct: company === null ? null : num(form.split_agent_pct),
-    split_company_pct: company,
+    // No split: the merchant's rate is written only by set_merchant_split
+    // (the Split control on the merchant page, 20261030160000), which audits
+    // it. An approved merchant has its rep's rate from the pre-app; one
+    // created here has none until an admin sets it there.
     date_added: text(form.date_added),
     // Blank goes as NULL, never "": a legacy merchant with no location is
     // saved with none (merchants_location_guard only requires one on INSERT),
@@ -144,10 +121,6 @@ export function MerchantForm({
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
-
-  const derivedCompanySplit = companySplitFrom(form.split_agent_pct);
-  const companySplitLabel =
-    derivedCompanySplit === null ? EMPTY : `${derivedCompanySplit}`;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -224,7 +197,7 @@ export function MerchantForm({
           {isEdit
             ? "Only admins can change merchant information. Changing the owner moves the merchant to that rep's book."
             : "Choose the rep whose book this merchant belongs to."}{" "}
-          {"The owner decides who can see the merchant, not who is paid: residuals follow the Agent # on the processor's file, and a shared account's split is set on the merchant page."}
+          {"The owner is also who is paid: each month's residual for this MID goes to the merchant's owner. The split rate and a shared account's split are set on the merchant page."}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -380,37 +353,6 @@ export function MerchantForm({
                 value={form.date_added}
                 onChange={(e) => set("date_added", e.target.value)}
               />
-            </div>
-
-            {/* Only the agent half is an input; the company half is derived,
-                the same shape the pre-app wizard's business step uses. Both
-                being free text is what let 60/45 be saved, and the database now
-                refuses it (merchants_split_totals_100) — so leaving two boxes
-                here would just turn a silent wrong number into a constraint
-                error the rep cannot act on. Blank stays blank: a merchant whose
-                split is not recorded yet is an ordinary state, and both columns
-                null is the one pair the constraint still allows. */}
-            <div className="grid gap-2">
-              <Label htmlFor="split_agent_pct">Agent split %</Label>
-              <Input
-                id="split_agent_pct"
-                type="number"
-                min="0"
-                max="100"
-                step="0.01"
-                value={form.split_agent_pct}
-                onChange={(e) => set("split_agent_pct", e.target.value)}
-              />
-            </div>
-
-            <div className="grid gap-2">
-              <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                Company split %
-              </span>
-              <p className="text-sm">{companySplitLabel}</p>
-              <p className="text-xs text-muted-foreground">
-                Derived, always 100 minus the agent split.
-              </p>
             </div>
           </div>
 

@@ -11,6 +11,7 @@ import {
   statusIntent,
 } from "@/lib/merchants";
 import { formatDate, formatPct, formatText } from "@/lib/format";
+import { MerchantSplitCell } from "@/components/merchant-split-cell";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { loadRecordProposals } from "@/lib/quotes-data";
 import {
@@ -74,6 +75,7 @@ async function loadShareCard(
     shares,
     reps,
     defaultSignerId: merchant.agent_id,
+    rate: merchant.split_agent_pct,
     latestCommitted: ledger.latestCommitted,
     months: ledger.months,
   };
@@ -196,7 +198,19 @@ async function MerchantDetail({
         <Field label="Street">{formatText(merchant.street)}</Field>
         <Field label="ZIP">{formatText(merchant.zip)}</Field>
         <Field label="Processor">{formatText(merchant.processor)}</Field>
-        <Field label="Agent split">{formatPct(merchant.split_agent_pct)}</Field>
+        <Field label="Agent split">
+          {/* Admins set it here, through set_merchant_split (the only write
+              path); a rep reads it. */}
+          {isAdmin ? (
+            <MerchantSplitCell
+              merchantId={merchant.id}
+              dba={merchant.dba}
+              rate={merchant.split_agent_pct}
+            />
+          ) : (
+            formatPct(merchant.split_agent_pct)
+          )}
+        </Field>
         <Field label="Company split">
           {formatPct(merchant.split_company_pct)}
         </Field>

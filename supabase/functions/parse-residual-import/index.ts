@@ -42,16 +42,13 @@ import {
   orderBlockers,
   parseResidualSheet,
   payeeChangedNote,
-  previewSharedRow,
   previewUnsharedRow,
   previousPayees,
   rowWarnings,
-  sharePreviewNote,
   unsharedPreviewNote,
   type LastMonthLine,
   type MerchantByMid,
   type MonthLine,
-  type PreviewLedgerLine,
   type PreviewShare,
   type ResidualBlocker,
 } from "../_shared/residuals.ts";
@@ -296,14 +293,13 @@ export default {
       shareRole: line.share_role,
     }));
 
-    // ---- Shared-account preview flags (phase 4b) ------------------------
+    // ---- Shares on the file's merchants ---------------------------------
     //
-    // What commit_residual_import_v2 would do with each row about a shared
-    // account: the rules are previewSharedRow() in _shared/residuals.ts, a
-    // mirror of v2's plan. Advisory, never a blocker; the commit recomputes
-    // it from the shares in force then.
+    // For share_not_in_force only: the three v2 share flags went with v2
+    // (phase 8), because v3 pays a share's signer, who is the owner, and the
+    // partner directly. Advisory, never a blocker; the commit recomputes from
+    // the shares in force then.
     const shares: PreviewShare[] = [];
-    const ledger: PreviewLedgerLine[] = [];
     const midOfMerchant = new Map<number, string>(
       [...merchants.values()].map((merchant) => [merchant.id, merchant.mid]),
     );
@@ -330,34 +326,6 @@ export default {
           effectiveFrom: share.effective_from as string,
           effectiveTo: (share.effective_to as string | null) ?? null,
         });
-      }
-    }
-
-    if (shares.length > 0) {
-      const sharedMids = [...new Set(shares.map((share) => share.mid))];
-      for (const part of chunks(sharedMids)) {
-        const { data, error } = await ctx.supabaseAdmin
-          .from("rep_payout_rows")
-          .select("period, mid, agent_id, rep_share_id, share_role, line_kind")
-          .in("mid", part)
-          .eq("period", batchPeriod);
-
-        if (error) {
-          return json(
-            { error: `Could not read the ledger: ${error.message}` },
-            500,
-          );
-        }
-        for (const line of data ?? []) {
-          ledger.push({
-            period: line.period as string,
-            mid: line.mid as string,
-            agentId: line.agent_id as string,
-            repShareId: (line.rep_share_id as number | null) ?? null,
-            shareRole: (line.share_role as string | null) ?? null,
-            lineKind: line.line_kind as string,
-          });
-        }
       }
     }
 
@@ -424,9 +392,9 @@ export default {
         residual: row.residual_income,
       });
 
-      // Notes: shared-account flags first (they predict a skip), then a
-      // changed payee (A10), then a share that does not cover the month. One
-      // flag per row, by that precedence; every applicable sentence in the note.
+      // Notes: a changed payee (A10), then a share that does not cover the
+      // month. One flag per row, by that precedence; every applicable sentence
+      // in the note.
       const previewRow = {
         period: batchPeriod,
         agentId: merchant?.agentId ?? null,
@@ -435,19 +403,6 @@ export default {
       };
       const notes: { flag: string; note: string }[] = [];
       const ownerName = merchant ? nameOf(merchant.agentId) : "";
-      const preview = previewSharedRow(previewRow, shares, ledger);
-      if (preview !== null) {
-        notes.push({
-          flag: preview.flag,
-          note: sharePreviewNote(preview, {
-            mid: row.mid_raw ?? "",
-            period: batchPeriod,
-            signerName: nameOf(preview.share.primaryAgentId),
-            partnerName: nameOf(preview.share.secondaryAgentId),
-            ownerName,
-          }),
-        });
-      }
       if (blocker === null && merchant !== null && row.mid_raw !== null) {
         const before = previousPayees(lastMonthLines, row.mid_raw, merchant.agentId);
         if (before !== null) {
@@ -462,7 +417,7 @@ export default {
           });
         }
       }
-      const unshared = preview === null ? previewUnsharedRow(previewRow, shares) : null;
+      const unshared = previewUnsharedRow(previewRow, shares);
       if (unshared !== null) {
         notes.push({
           flag: unshared.flag,

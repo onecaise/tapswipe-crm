@@ -749,42 +749,20 @@ export function payeeChangedNote(context: {
 }
 
 // ---------------------------------------------------------------------------
-// Shared-account preview flags (phase 4b of docs/design/residual-splits.md, §7)
+// Shared accounts in the preview (phase 4b of docs/design/residual-splits.md)
 // ---------------------------------------------------------------------------
-
-/**
- * What commit_residual_import_v2 would do with a row about a shared account,
- * stored on the staging row as rep_payout_import_rows.preview_flag. The codes
- * are v2's own plan names, so a flag and the skip it predicts read the same.
- * The row's rep is now the merchant's OWNER (phase 7), not a rep the file
- * names, so:
- *
- *   share_not_applied  the owner is neither party to the share: imported as an
- *                      ordinary line for the owner; the share pays nothing.
- *   partner_named      the owner is the share's partner: v2 skips the row.
- *   line_not_shared    the owner is the signer, but a key of the pair already
- *                      holds a line that is not this share's: skipped.
- *
- * Kept while v2 is the commit: phase 8's v3 requires the signer to be the
- * owner, which makes the first two impossible by construction (memo §2.5).
- *
- * A flag never blocks. The commit recomputes all of this from the shares in
- * force when it runs, so this is advisory by construction.
- *
- * THIS MIRRORS v2's PLAN, and nothing type-checks the pair: the CASE in
- * commit_residual_import_v2 (20261030120000) is the authority. Change both
- * together. tests/live/residual-import.test.ts runs a file through this
- * preview and then through v2 and requires the flags to predict exactly the
- * rows v2 skipped.
- */
-export type SharePreviewFlag =
-  | "share_not_applied"
-  | "partner_named"
-  | "line_not_shared";
+//
+// The three share flags v2 needed (share_not_applied, partner_named,
+// line_not_shared) went with v2 in phase 8 of docs/design/intake-and-reports.md.
+// Under v3 a share's signer IS the merchant's owner (set_merchant_rep_share
+// refuses anything else, and an owner cannot be moved while a share is live),
+// and a MID with a line already in the month is refused, so none of the three
+// can happen; v3 refuses the import if an older share breaks the rule. What
+// remains here is share_not_in_force.
 
 export type PreviewShare = {
   id: number;
-  /** The share's merchant's CURRENT mid, as v2 joins it. */
+  /** The share's merchant's CURRENT mid, as the commit joins it. */
   mid: string;
   primaryAgentId: string;
   secondaryAgentId: string;
@@ -792,20 +770,6 @@ export type PreviewShare = {
   effectiveFrom: string;
   /** YYYY-MM-DD, exclusive; null = open-ended. */
   effectiveTo: string | null;
-};
-
-export type PreviewLedgerLine = {
-  period: string;
-  mid: string;
-  agentId: string;
-  repShareId: number | null;
-  shareRole: string | null;
-  /**
-   * 'import' or 'adjustment'. v2's line_not_shared looks at IMPORT lines only
-   * (20261016160000): an adjustment posted into the month must not make the
-   * signer's row look blocked. Absent means an import line.
-   */
-  lineKind?: string;
 };
 
 export type PreviewRow = {
@@ -816,9 +780,7 @@ export type PreviewRow = {
   blocked: boolean;
 };
 
-export type SharePreview = { flag: SharePreviewFlag; share: PreviewShare };
-
-/** The share covering this MID in this month, as v2's join finds it. */
+/** The share covering this MID in this month, as the commit's join finds it. */
 export function shareCovering(
   shares: readonly PreviewShare[],
   mid: string,
@@ -834,69 +796,12 @@ export function shareCovering(
   );
 }
 
-export function previewSharedRow(
-  row: PreviewRow,
-  shares: readonly PreviewShare[],
-  ledger: readonly PreviewLedgerLine[],
-): SharePreview | null {
-  if (row.blocked) return null;
-  if (row.period === null || row.agentId === null || row.mid === null) {
-    return null;
-  }
-
-  const share = shareCovering(shares, row.mid, row.period);
-  if (share === null) return null;
-
-  if (row.agentId === share.secondaryAgentId) {
-    return { flag: "partner_named", share };
-  }
-  if (row.agentId !== share.primaryAgentId) {
-    return { flag: "share_not_applied", share };
-  }
-
-  const foreign = ledger.some(
-    (line) =>
-      line.lineKind !== "adjustment" &&
-      line.period === row.period &&
-      line.mid === row.mid &&
-      (line.agentId === share.primaryAgentId ||
-        line.agentId === share.secondaryAgentId) &&
-      (line.repShareId !== share.id ||
-        line.shareRole !==
-          (line.agentId === share.primaryAgentId ? "primary" : "secondary")),
-  );
-  return foreign ? { flag: "line_not_shared", share } : null;
-}
-
-/** The sentence the review screen shows beside a flagged row. */
-export function sharePreviewNote(
-  preview: SharePreview,
-  context: {
-    mid: string;
-    period: string;
-    signerName: string;
-    partnerName: string;
-    ownerName: string;
-  },
-): string {
-  const pair = `${context.signerName} / ${context.partnerName}`;
-  const when = monthLabel(context.period);
-  switch (preview.flag) {
-    case "share_not_applied":
-      return `Share ${pair} not applied to MID ${context.mid} for ${when}: the merchant's owner, ${context.ownerName}, is not the share's signer. This row imports as an ordinary line for ${context.ownerName}.`;
-    case "partner_named":
-      return `MID ${context.mid} is shared by ${pair} for ${when}, and the merchant's owner is the partner. This row will be skipped: a shared account is imported on the signer's row.`;
-    case "line_not_shared":
-      return `MID ${context.mid} is shared by ${pair} for ${when}, but the ledger already holds a line for one of them on this MID that is not part of the share. This row will be skipped.`;
-  }
-}
-
 /**
  * share_not_in_force (phase 5 of docs/design/residual-splits.md): the MID's
  * merchant has a share, but none covers this month (it ended, or starts
- * later), so v2 pays the owner the whole rep side of a month the admin may
- * believe is shared. Advisory. Applied only where previewSharedRow found
- * nothing. (`looks_shared`, the other phase 5 flag, read who the FILE named;
+ * later), so the commit pays the owner the whole rep side of a month the
+ * admin may believe is shared. Advisory. Applied only where no share covers
+ * the month. (`looks_shared`, the other phase 5 flag, read who the FILE named;
  * the file names nobody now, and payee_changed replaces it.)
  */
 export type UnsharedPreview = {

@@ -11,27 +11,31 @@ import { Button } from "@/components/ui/button";
 /**
  * Commits a reviewed batch into the ledger.
  *
- * Calls commit_residual_import_v2, the shared-account-aware commit (phase 4b of
- * docs/design/residual-splits.md). It returns {written, skipped}; the old
- * commit_residual_import is kept only for an app version still deployed
- * somewhere and refuses any batch a share covers.
+ * Calls commit_residual_import_v3 (phase 8 of docs/design/intake-and-reports.md)
+ * with the warning types the admin said yes to. v3 recomputes every warning
+ * from the data at that moment and refuses any type not in `confirmed`, so the
+ * yes is enforced in the database, not here. It also re-resolves each MID's
+ * owner and refuses if one changed since the file was read.
  *
  * Goes through an RPC rather than an Edge Function, and the
- * reasons are in the migration: atomicity (one transaction, so a period is never
+ * reasons are in the migration: atomicity (one transaction, so a month is never
  * half-imported), no PostgREST row cap to page around, an audit row that fails
- * closed for free, and auth.uid() surviving `security definer` so the history rows
- * the merge triggers are attributed to whoever committed.
+ * closed for free, and auth.uid() surviving `security definer` so the audit row
+ * names whoever committed.
  *
- * Nothing here is a boundary. The RPC re-checks is_admin() itself and refuses a
- * batch that is not `review`, has no rows, or still has blockers — every message it
- * raises is written to be read by a person, so they are shown verbatim.
+ * Nothing here is a boundary. The RPC re-checks is_admin() itself, and every
+ * message it raises is written to be read by a person, so they are shown
+ * verbatim.
  */
 export function ResidualCommitButton({
   batchId,
   rowCount,
+  confirmed,
 }: {
   batchId: number;
   rowCount: number;
+  /** The warning types answered yes on the review screen. */
+  confirmed: string[];
 }) {
   const router = useRouter();
 
@@ -45,8 +49,8 @@ export function ResidualCommitButton({
 
     const supabase = createClient();
     const { error: rpcError } = await supabase.rpc(
-      "commit_residual_import_v2",
-      { batch_id_input: batchId },
+      "commit_residual_import_v3",
+      { batch_id_input: batchId, confirmed_input: confirmed },
     );
 
     setConfirming(false);
@@ -61,11 +65,7 @@ export function ResidualCommitButton({
     // itself again in the moment before the refreshed page replaces it.
     //
     // To the commit result: this batch's own page, which for a committed batch
-    // reports rows written and rows skipped, with any skipped rows in a Callout
-    // at the top until an admin reviews them. The figures are read back from
-    // the batch rather than carried in the URL -- written is row_count less the
-    // skip record v2 stored -- so they are the same after a reload, and a
-    // skipped row cannot be lost by navigating away from a toast.
+    // reports the rows imported, read back from the batch so a reload agrees.
     router.push(`/payouts/import/${batchId}`);
     router.refresh();
   };

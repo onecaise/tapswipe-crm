@@ -6,6 +6,7 @@ import {
   FIXTURE_BATCH_PROCESSOR,
   asPlatform,
   asUser,
+  commitV3,
   createTestDb,
   freeBatchMonth,
   insertBatch,
@@ -14,6 +15,7 @@ import {
   resetData,
   rows,
   seedPayouts,
+  stageForCommit,
   type TestDb,
 } from "../helpers/db";
 
@@ -173,13 +175,13 @@ describe("processor and month are required on every new batch", () => {
       expect(error?.message).toMatch(/started before the processor and month were chosen at upload/);
     });
 
-    it("can never be committed through v2 either, and nothing reaches the ledger", async () => {
+    it("can never be committed through v3 either, and nothing reaches the ledger", async () => {
       const id = await legacy("review");
       await db.exec(`
         insert into rep_payout_import_rows (batch_id, row_number, mid_raw, period, agent_id, volume)
         values (${id}, 2, 'LEGACY-1', '2026-07-01', '${AGENT_ID}', 10.00)`);
       await asUser(db, ADMIN_ID);
-      const error = await attempt(() => db.query(`select commit_residual_import_v2(${id})`));
+      const error = await attempt(() => db.query(`select commit_residual_import_v3(${id}, '{}')`));
       expect(error?.message).toMatch(/started before the processor and month were chosen at upload/);
       await asPlatform(db);
       const [{ n }] = await rows<{ n: number }>(db, `select count(*)::int as n from rep_payout_rows where mid = 'LEGACY-1'`);
@@ -287,21 +289,26 @@ describe("staging: raw cells, every refusal, the narrowed codes", () => {
 });
 
 describe("one committed batch per processor-month, with the month now required", () => {
-  it("still refuses a second committed batch for a pair through v2", async () => {
+  it("still refuses a second committed batch for a pair through v3, naming the first", async () => {
+    // v3 (20261030160000) refuses it itself, with a sentence; the unique index
+    // stays the backstop (tests/rls/commit-residual-import-v3.test.ts removes
+    // v3's check and meets the index).
     await asPlatform(db);
     const m = await month(db, -3);
     const ids: number[] = [];
-    for (const mid of ["P7-A", "P7-B"]) {
+    for (const mid of ["MID-AGENT-1", "MID-OTHER-1"]) {
       const id = await insertBatch(db, { extra: { processor: "'PayBright'", period: `'${m}'` } });
-      await db.exec(`
-        insert into rep_payout_import_rows (batch_id, row_number, mid_raw, period, agent_id, volume)
-        values (${id}, 2, '${mid}', '${m}', '${AGENT_ID}', 10.00)`);
+      await stageForCommit(db, id, [{ mid }]);
       ids.push(id);
     }
-    await asUser(db, ADMIN_ID);
-    await db.query(`select commit_residual_import_v2(${ids[0]})`);
-    const error = await attempt(() => db.query(`select commit_residual_import_v2(${ids[1]})`));
-    expect(error?.message).toMatch(/rep_payout_batches_one_committed_per_month/);
+    // Both merchants are TSYS's: a processor mismatch, confirmed.
+    await commitV3(db, ids[0], ["processor_mismatch"]);
+    const error = await attempt(() => commitV3(db, ids[1], ["processor_mismatch"]));
+    expect(error?.code).toBe("PT409");
+    expect(error?.message).toMatch(/^PayBright for /);
+    expect(error?.message).toContain(`is already committed (import #${ids[0]}).`);
+    const [{ status }] = await rows<{ status: string }>(db, `select status from rep_payout_batches where id = ${ids[1]}`);
+    expect(status).toBe("review");
   });
 
   it("freeBatchMonth gives each new fixture batch its own month", async () => {

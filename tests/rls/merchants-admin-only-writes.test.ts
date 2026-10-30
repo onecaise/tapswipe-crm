@@ -6,6 +6,7 @@ import {
   AGENT_NUMBER,
   asPlatform,
   asUser,
+  commitV3,
   createTestDb,
   insertBatch,
   migrationsBefore,
@@ -14,6 +15,7 @@ import {
   resetData,
   rows,
   seedPayouts,
+  stageForCommit,
   type TestDb,
 } from "../helpers/db";
 
@@ -59,13 +61,28 @@ async function shareMerchant(target: TestDb): Promise<void> {
   await asPlatform(target);
 }
 
+/** Whether the database has commit v3 (20261030160000), or only v2 before it. */
+async function hasV3(target: TestDb): Promise<boolean> {
+  const [{ n }] = await rows<{ n: number }>(
+    target,
+    `select count(*)::int as n from pg_proc where proname = 'commit_residual_import_v3'`,
+  );
+  return n > 0;
+}
+
 /**
  * One signer row in review for the shared MID -- what parse-residual-import
- * (service role) stages from the processor file.
+ * (service role) stages from the processor file. On a database with v3, the
+ * row is staged as v3 needs it (stageForCommit: the batch's month, the
+ * Processor and Income Type cells).
  */
 async function stageSignerRow(target: TestDb): Promise<number> {
   await asPlatform(target);
   const id = await insertBatch(target);
+  if (await hasV3(target)) {
+    await stageForCommit(target, id, [{ mid: SHARED_MID, volume: "5100.00", residual: "200.00" }]);
+    return id;
+  }
   await target.exec(`
     insert into rep_payout_import_rows
       (batch_id, row_number, agent_number_raw, mid_raw, merchant_name_raw,
@@ -86,7 +103,7 @@ async function ledgerLines(target: TestDb): Promise<Line[]> {
   return rows<Line>(
     target,
     `select agent_id, share_role, rep_share_id from rep_payout_rows
-      where mid = '${SHARED_MID}' and period = '${PAYOUT_PERIOD}'
+      where mid = '${SHARED_MID}'
       order by share_role nulls last, agent_id`,
   );
 }
@@ -106,9 +123,14 @@ async function runAttack(target: TestDb): Promise<{ touched: number[]; lines: Li
     `update merchants set mid = '${SHARED_MID} ' where mid = '${SHARED_MID}'`,
   );
 
-  // 2. The admin commits the month.
+  // 2. The admin commits the month (v2 before 20261030160000, v3 after; MID-
+  // AGENT-2 is an inactive Square merchant, so v3's two warnings are confirmed).
   await asUser(target, ADMIN_ID);
-  await target.query(`select commit_residual_import_v2(${batch})`);
+  await target.query(
+    (await hasV3(target))
+      ? `select commit_residual_import_v3(${batch}, array['inactive_merchant', 'processor_mismatch'])`
+      : `select commit_residual_import_v2(${batch})`,
+  );
 
   // 3. The signer puts the MID back.
   await asUser(target, AGENT_ID);
@@ -523,65 +545,45 @@ describe("an admin decides who owns a merchant", () => {
     expect(await allAudit(db)).toEqual([]);
   });
 
-  it("does not touch merchant_rep_shares or a single ledger line", async () => {
+  it("does not touch merchant_rep_shares or a single ledger line -- and a shared merchant cannot be moved at all", async () => {
     await addPartner(db);
     await shareMerchant(db);
     const sharesBefore = await snapshotOf(db, "merchant_rep_shares");
     const ledgerBefore = await snapshotOf(db, "rep_payout_rows");
 
+    // Since 20261030160000 a merchant with a live share is not moved: the
+    // share's signer must stay its owner (memo §2.5, A22).
     await asUser(db, ADMIN_ID);
-    await db.query(
-      `update merchants set agent_id = '${OTHER_AGENT_ID}' where mid = '${SHARED_MID}'`,
-    );
+    const refused = await db
+      .query(`update merchants set agent_id = '${OTHER_AGENT_ID}' where mid = '${SHARED_MID}'`)
+      .then(() => null, (error: { code?: string; message: string }) => error);
+    expect(refused?.code).toBe("PT409");
+    expect(refused?.message).toBe("This merchant has a shared-account split. End it before moving the merchant.");
+    // An unshared one moves, and no line or share changes either way.
+    await db.query(`update merchants set agent_id = '${OTHER_AGENT_ID}' where mid = 'MID-AGENT-1'`);
 
     expect(await snapshotOf(db, "merchant_rep_shares")).toBe(sharesBefore);
     expect(await snapshotOf(db, "rep_payout_rows")).toBe(ledgerBefore);
   });
 
-  it("does not change who is paid: the commit still follows the file's Agent #", async () => {
-    // Shared merchant moved to OTHER_AGENT: the signer's row still commits
-    // as the AGENT/PARTNER pair.
-    await addPartner(db);
-    await shareMerchant(db);
+  it("decides who is paid from the next read on: the payee is the owner at commit (v3, phase 7-8)", async () => {
+    // Until phase 7 the commit followed the file's Agent #, so a move did not
+    // change who was paid. The payee is now the merchant's owner: a merchant
+    // moved before its month is read is paid to its new owner.
     await asUser(db, ADMIN_ID);
-    await db.query(
-      `update merchants set agent_id = '${OTHER_AGENT_ID}' where mid = '${SHARED_MID}'`,
-    );
-    const shared = await stageSignerRow(db);
-    await asUser(db, ADMIN_ID);
-    await db.query(`select commit_residual_import_v2(${shared})`);
-    expect((await ledgerLines(db)).map((l) => [l.agent_id, l.share_role])).toEqual([
-      [AGENT_ID, "primary"],
-      [PARTNER_ID, "secondary"],
-    ]);
-
-    // Unshared merchant moved to OTHER_AGENT: a row naming AGENT's number is
-    // paid to AGENT, not to the new owner.
-    await asUser(db, ADMIN_ID);
-    await db.query(
-      `update merchants set agent_id = '${OTHER_AGENT_ID}' where mid = 'MID-AGENT-1'`,
-    );
+    await db.query(`update merchants set agent_id = '${OTHER_AGENT_ID}' where mid = 'MID-AGENT-1'`);
     await asPlatform(db);
     const batch = await insertBatch(db, { fileName: "owner.xlsx" });
-    await db.exec(`
-      insert into rep_payout_import_rows
-        (batch_id, row_number, agent_number_raw, mid_raw, merchant_name_raw,
-         period, agent_id, merchant_id, volume, average_ticket, total_cost,
-         residual_income, rep_split_pct)
-      values (${batch}, 2, '${AGENT_NUMBER}', 'MID-AGENT-1', 'Agent Active Co',
-         '2026-08-01', '${AGENT_ID}', (select id from merchants where mid = 'MID-AGENT-1'),
-         100.00, 10.00, 5.00, 40.00, 50.00);
-    `);
-    await asUser(db, ADMIN_ID);
-    await db.query(`select commit_residual_import_v2(${batch})`);
-    await asPlatform(db);
+    await stageForCommit(db, batch, [{ mid: "MID-AGENT-1", volume: "100.00", residual: "40.00" }]);
+    await commitV3(db, batch);
     expect(
       await rows<{ agent_id: string; rep_payout: string }>(
         db,
-        `select agent_id, rep_payout::text from rep_payout_rows
-          where mid = 'MID-AGENT-1' and period = '2026-08-01'`,
+        `select agent_id, rep_payout::text from rep_payout_rows where batch_id = ${batch}`,
       ),
-    ).toEqual([{ agent_id: AGENT_ID, rep_payout: "20.00" }]);
+    ).toEqual([{ agent_id: OTHER_AGENT_ID, rep_payout: "20.00" }]);
+    // Moved AFTER the read, the commit refuses rather than paying either rep
+    // (pinned in tests/rls/commit-residual-import-v3.test.ts).
   });
 
   it("goes red with the cross-agent trigger dropped: the reassignment leaves no row", async () => {

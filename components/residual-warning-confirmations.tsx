@@ -23,11 +23,10 @@ const SHOWN = 5;
  *
  * The commit is offered only when the import is not refused (`ready`) and every
  * type present has a yes. A no keeps it closed and says what to do instead. The
- * answers are this page's state: nothing stores them in this phase, because the
- * commit is still v2, which reads no warnings. Phase 8's v3 takes the confirmed
- * types as an argument, recomputes every warning itself and refuses a type that
- * was not confirmed -- the database, not this component, is what will enforce
- * the yes.
+ * yes answers go to commit_residual_import_v3 as its confirmed types; v3
+ * recomputes every warning itself, refuses a type that was not confirmed, and
+ * keeps what was confirmed on the batch (confirmed_warnings) -- the database,
+ * not this component, enforces the yes.
  */
 export function ResidualWarningConfirmations({
   batchId,
@@ -125,7 +124,11 @@ export function ResidualWarningConfirmations({
           </p>
           {confirmed && (
             <div className="mt-3">
-              <ResidualCommitButton batchId={batchId} rowCount={rowCount} />
+              <ResidualCommitButton
+                batchId={batchId}
+                rowCount={rowCount}
+                confirmed={present.filter((warning) => answers[warning] === "yes")}
+              />
             </div>
           )}
         </Callout>

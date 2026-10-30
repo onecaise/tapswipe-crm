@@ -39,6 +39,11 @@ beforeAll(async () => {
   fx = await provisionFixtures();
   const admin = adminClient();
 
+  // Inserted as the service role, not through set_merchant_rep_share: since
+  // 20261030160000 the RPC refuses a signer who is not the merchant's owner,
+  // so this shape -- a share on the owner's merchant naming two OTHER reps --
+  // can only be a row that predates that rule. The teardown must still handle
+  // one, and the table's CHECKs (40 + 10 <= 50) still admit it.
   const { data: share, error: shareError } = await admin
     .from("merchant_rep_shares")
     .insert({
