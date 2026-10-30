@@ -224,11 +224,14 @@ describe("rep_payout_rows: the constraints protect the money", () => {
   it("rejects a duplicate (period, agent_id, mid)", async () => {
     // The merge key. Two rows for one merchant in one period for one rep would
     // make the upsert ambiguous, and the importer would have no honest answer.
+    // The seeded line's own key, processor included (it joined the key in
+    // 20261030120000, and seeded lines carry one since 20261030140000).
     await asPlatform(db);
     await expect(
       db.exec(
-        `insert into rep_payout_rows (agent_id, period, mid)
-         values ('${AGENT_ID}', '${PAYOUT_PERIOD}', 'MID-AGENT-1')`,
+        `insert into rep_payout_rows (agent_id, period, mid, processor)
+         select agent_id, period, mid, processor from rep_payout_rows
+          where agent_id = '${AGENT_ID}' and period = '${PAYOUT_PERIOD}' and mid = 'MID-AGENT-1'`,
       ),
     ).rejects.toThrow(/unique|duplicate key/i);
   });
@@ -440,7 +443,8 @@ describe("batches and staging are admin-only, and client-read-only", () => {
     expect(staging.n).toBe(2);
     const [{ n }] = await rows<CountRow>(
       db,
-      `select count(*)::int as n from rep_payout_import_rows where blocker = 'unknown_agent'`,
+      // The seeded refusal: a MID no merchant has (20261030140000).
+      `select count(*)::int as n from rep_payout_import_rows where blocker = 'unknown_mid'`,
     );
     expect(n).toBe(1);
   });

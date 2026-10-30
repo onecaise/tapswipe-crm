@@ -593,7 +593,45 @@ export async function rows<T>(db: TestDb, sql: string): Promise<T[]> {
 export const PAYOUT_PERIOD = "2026-07-01";
 export const PAYOUT_PERIOD_PRIOR = "2026-06-01";
 
-/** Agent numbers seedPayouts() assigns, matching a processor's "Agent #". */
+/**
+ * The processor seedPayouts() gives its two batches, on a database new enough
+ * to have rep_payout_batches.processor (20261030120000). Their months are
+ * relative to now -- the review batch last month, the committed one the month
+ * before -- because a batch month must sit inside the import window
+ * (guard_payout_batch_period), which moves; a fixed month would start failing
+ * in two years. The STAGED and ledger rows keep PAYOUT_PERIOD: the commit is
+ * still v2, which takes a row's month from the row (phase 8's v3 takes it from
+ * the batch, and these fixtures move with it).
+ */
+export const SEED_BATCH_PROCESSOR = "TSYS";
+
+/**
+ * The processor a test's own batches use: the seeded one, so a line a test
+ * commits lands on the same merge key as the seeded line it re-imports
+ * (the key has carried the processor since 20261030120000). freeBatchMonth
+ * keeps them clear of seedPayouts' two months under the one-committed rule.
+ */
+export const FIXTURE_BATCH_PROCESSOR = SEED_BATCH_PROCESSOR;
+
+/**
+ * SQL for a month a new test batch can take: inside the import window (this UTC
+ * month and the 24 before it, guard_payout_batch_period) and not yet used by
+ * any batch of `processor`, newest first. Since 20261030140000 every new batch
+ * needs a processor and month, and a committed one must be the only committed
+ * batch for its pair; a fixture that inserts several batches gets a different
+ * month for each this way, and none goes stale as the window moves.
+ */
+export function freeBatchMonth(processor = FIXTURE_BATCH_PROCESSOR): string {
+  return `(select m::date
+     from generate_series(date_trunc('month', now() at time zone 'UTC') - interval '24 months',
+                          date_trunc('month', now() at time zone 'UTC'),
+                          interval '1 month') as m
+    where not exists (select 1 from rep_payout_batches b
+                       where b.processor = '${processor}' and b.period = m::date)
+    order by m desc limit 1)`;
+}
+
+/** Agent numbers seedPayouts() assigns -- a display code since phase 7. */
 export const AGENT_NUMBER = "4471";
 export const OTHER_AGENT_NUMBER = "9902";
 
@@ -610,7 +648,10 @@ export type PayoutFixtures = {
     other: number;
   };
   batchIds: {
-    /** status 'review', with one clean row and one unknown_agent blocker. */
+    /**
+     * status 'review', with one clean row and one blocked row: unknown_mid on a
+     * database with 20261030140000, unknown_agent on one from before it.
+     */
     review: number;
     /** status 'committed'. */
     committed: number;
@@ -647,6 +688,52 @@ export type PayoutFixtures = {
  *   - The review batch carries one clean row and one blocked row, so "this batch
  *     cannot commit" is not the same thing as "this batch is empty".
  */
+/**
+ * Inserts a residual import batch the way this database version accepts one,
+ * as whatever role is current, and returns its id. Where
+ * rep_payout_batches.processor exists (20261030120000 on) it gets
+ * FIXTURE_BATCH_PROCESSOR and a free month (freeBatchMonth): required on every
+ * new batch since 20261030140000. On a database replayed to before that, the
+ * batch it always got. `extra` adds columns as raw SQL values.
+ */
+export async function insertBatch(
+  db: TestDb,
+  fields: {
+    status?: string;
+    fileName?: string;
+    extra?: Record<string, string>;
+  } = {},
+): Promise<number> {
+  const fileName = fields.fileName ?? "file.xlsx";
+  const columns: Record<string, string> = {
+    imported_by: `'${ADMIN_ID}'`,
+    file_key: `'test/${fileName}'`,
+    file_name: `'${fileName}'`,
+    status: `'${fields.status ?? "review"}'`,
+    ...fields.extra,
+  };
+  if (await hasColumn(db, "rep_payout_batches", "processor")) {
+    columns.processor ??= `'${FIXTURE_BATCH_PROCESSOR}'`;
+    columns.period ??= freeBatchMonth(FIXTURE_BATCH_PROCESSOR);
+  }
+  const [{ id }] = await rows<{ id: number }>(
+    db,
+    `insert into rep_payout_batches (${Object.keys(columns).join(", ")})
+     values (${Object.values(columns).join(", ")}) returning id`,
+  );
+  return id;
+}
+
+/** Whether a column exists, for a fixture that runs at more than one schema version. */
+export async function hasColumn(db: TestDb, table: string, column: string): Promise<boolean> {
+  const [{ n }] = await rows<{ n: number }>(
+    db,
+    `select count(*)::int as n from information_schema.columns
+      where table_schema = 'public' and table_name = '${table}' and column_name = '${column}'`,
+  );
+  return n > 0;
+}
+
 export async function seedPayouts(db: TestDb): Promise<PayoutFixtures> {
   await asPlatform(db);
 
@@ -674,14 +761,43 @@ export async function seedPayouts(db: TestDb): Promise<PayoutFixtures> {
         (select id from merchants where mid = 'MID-OTHER-1'),
         9900.00, 45.00, 250.00, 71.20, 50.00);
 
+  `);
+
+  // The seeded ledger lines are TSYS imports wherever the ledger has the
+  // column, so a test batch (FIXTURE_BATCH_PROCESSOR) re-importing one merges
+  // into it, as every re-import did before the processor joined the key.
+  if (await hasColumn(db, "rep_payout_rows", "processor")) {
+    await db.exec(`update rep_payout_rows set processor = '${SEED_BATCH_PROCESSOR}'`);
+  }
+
+  // Processor and month on the batches wherever the columns exist: required on
+  // every new batch since 20261030140000. A database replayed to a point before
+  // 20261030120000 has neither column, and gets the batches it always got.
+  const hasBatchMonth = await hasColumn(db, "rep_payout_batches", "processor");
+  const month = (back: number) =>
+    `(date_trunc('month', now() at time zone 'UTC') - interval '${back} month')::date`;
+  await db.exec(
+    hasBatchMonth
+      ? `
+    insert into rep_payout_batches
+      (imported_by, file_key, file_name, status, row_count, committed_at,
+       processor, period)
+    values
+      ('${ADMIN_ID}', 'seed-review/July-2026.xlsx', 'July-2026.xlsx',
+        'review', 2, null, '${SEED_BATCH_PROCESSOR}', ${month(1)}),
+      ('${ADMIN_ID}', 'seed-done/June-2026.xlsx', 'June-2026.xlsx',
+        'committed', 1, now(), '${SEED_BATCH_PROCESSOR}', ${month(2)});`
+      : `
     insert into rep_payout_batches
       (imported_by, file_key, file_name, status, row_count, committed_at)
     values
       ('${ADMIN_ID}', 'seed-review/July-2026.xlsx', 'July-2026.xlsx',
         'review', 2, null),
       ('${ADMIN_ID}', 'seed-done/June-2026.xlsx', 'June-2026.xlsx',
-        'committed', 1, now());
-  `);
+        'committed', 1, now());`,
+  );
+
+  const hasBlockers = await hasColumn(db, "rep_payout_import_rows", "blockers");
 
   const [{ id: reviewBatch }] = await rows<{ id: number }>(
     db,
@@ -707,13 +823,24 @@ export async function seedPayouts(db: TestDb): Promise<PayoutFixtures> {
         (select id from merchants where mid = 'MID-AGENT-2'),
         5100.00, 34.00, 128.00,
         null, null),
-      -- Blocked: an agent number nobody holds. The one blocker that is fixable
-      -- from the review screen rather than by re-uploading the file.
+      -- Blocked: a MID no merchant has (an agent number nobody holds, on a
+      -- database from before 20261030140000). The one refusal fixed in the
+      -- CRM rather than by re-uploading the file.
       (${reviewBatch}, 3, 'Jul-26', '7788', 'MID-STRANGER', 'Bayside Auto',
         '2,300.00', '18.00', '$61.00',
         '${PAYOUT_PERIOD}', null, null, 2300.00, 18.00, 61.00,
-        'unknown_agent', 'No rep has agent # 7788.');
+        ${
+          hasBlockers
+            ? "'unknown_mid', 'MID MID-STRANGER is not a merchant in the CRM.'"
+            : "'unknown_agent', 'No rep has agent # 7788.'"
+        });
   `);
+  if (hasBlockers) {
+    await db.exec(
+      `update rep_payout_import_rows set blockers = array['unknown_mid']
+        where batch_id = ${reviewBatch} and blocker = 'unknown_mid'`,
+    );
+  }
 
   const ledger = await rows<{ id: number; agent_id: string; period: string; mid: string }>(
     db,

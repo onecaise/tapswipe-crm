@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -8,11 +10,14 @@ import {
 } from "@/lib/format";
 import {
   PAYOUT_BATCH_COLUMNS,
+  PAYOUT_BLOCKERS,
   PAYOUT_ROW_COLUMNS,
+  PAYOUT_WARNINGS,
   PAYOUT_SHARE_ADMIN_COLUMNS,
   isPartnerLine,
   batchStatusIntent,
   blockerLabel,
+  importMonths,
   isAdjustment,
   parsePeriodParam,
   payoutTotals,
@@ -23,9 +28,16 @@ import {
   skipReasonLabel,
   skipsOwed,
   summarizeByPeriod,
+  warningLabel,
+  warningQuestion,
+  warningsConfirmed,
   type PayoutImportRow,
   type SkippedRow,
 } from "@/lib/payouts";
+import {
+  RESIDUAL_BLOCKERS,
+  RESIDUAL_WARNINGS,
+} from "../../supabase/functions/_shared/residuals";
 
 /**
  * The pure logic behind the payouts pages.
@@ -349,19 +361,20 @@ describe("reviewImportRows", () => {
     return {
       id: 1,
       row_number: 2,
-      period_raw: "Jul-26",
-      agent_number_raw: "4471",
-      mid_raw: "MID-1",
+      processor_raw: "TSYS",
+      mid_raw: "012345678901",
       merchant_name_raw: "Joe's Diner",
+      income_type_raw: "Residuals",
       volume_raw: "1000",
-      average_ticket_raw: "10",
-      total_cost_raw: "25",
-      residual_income_raw: null,
-      rep_split_raw: null,
+      residual_income_raw: "25",
       period: "2026-07-01",
       agent_id: "aaaa",
-      merchant_id: null,
+      merchant_id: 1,
+      volume: 1000,
+      residual_income: 25,
       blocker: null,
+      blockers: [],
+      warnings: [],
       error: null,
       preview_flag: null,
       preview_note: null,
@@ -369,25 +382,28 @@ describe("reviewImportRows", () => {
     };
   }
 
-  it("a shared-account preview flag never blocks: the row is still clean and the batch ready", () => {
+  const refused = (code: string, over: Partial<PayoutImportRow> = {}) =>
+    staged({ blocker: code, blockers: [code], error: `msg ${code}`, ...over });
+
+  it("an advisory note never blocks: the row is still clean and the batch ready", () => {
     const review = reviewImportRows([
       staged({ preview_flag: "partner_named", preview_note: "skipped" }),
-      staged({ id: 2, mid_raw: "MID-2", preview_flag: "share_not_applied", preview_note: "x" }),
+      staged({ id: 2, mid_raw: "2", preview_flag: "payee_changed", preview_note: "x" }),
     ]);
     expect(review).toMatchObject({ total: 2, clean: 2, blocked: 0, ready: true });
   });
 
-  it("reports a clean batch as ready", () => {
-    const review = reviewImportRows([staged(), staged({ id: 2, mid_raw: "MID-2" })]);
-
-    expect(review).toMatchObject({
+  it("reports a clean batch as ready, with nothing to list", () => {
+    const review = reviewImportRows([staged(), staged({ id: 2, mid_raw: "2" })]);
+    expect(review).toEqual({
       total: 2,
       clean: 2,
       blocked: 0,
+      refusals: [],
+      unknownMids: [],
+      warnings: [],
       ready: true,
     });
-    expect(review.unknownAgents).toEqual([]);
-    expect(review.fileProblems).toEqual([]);
   });
 
   it("is NOT ready when the batch has no rows", () => {
@@ -396,131 +412,196 @@ describe("reviewImportRows", () => {
     expect(reviewImportRows([])).toMatchObject({ total: 0, ready: false });
   });
 
-  it("groups unknown agent numbers, because one action fixes all their rows", () => {
-    const review = reviewImportRows([
-      staged({
-        id: 1,
-        agent_number_raw: "7788",
-        agent_id: null,
-        blocker: "unknown_agent",
-        merchant_name_raw: "Bayside Auto",
-      }),
-      staged({
-        id: 2,
-        row_number: 3,
-        agent_number_raw: "7788",
-        agent_id: null,
-        blocker: "unknown_agent",
-        merchant_name_raw: "Bayside Tyres",
-      }),
-    ]);
-
-    expect(review.unknownAgents).toHaveLength(1);
-    expect(review.unknownAgents[0]).toMatchObject({
-      agentNumber: "7788",
-      rowCount: 2,
-      sampleMerchants: ["Bayside Auto", "Bayside Tyres"],
-    });
-    expect(review.ready).toBe(false);
+  it("refuses the whole batch on any one refusal", () => {
+    for (const code of PAYOUT_BLOCKERS) {
+      const review = reviewImportRows([staged(), refused(code, { id: 2, row_number: 3 })]);
+      expect(review, code).toMatchObject({ total: 2, clean: 1, blocked: 1, ready: false });
+      expect(review.refusals.map((r) => r.blocker), code).toEqual([code]);
+    }
   });
 
-  it("orders unknown agents by how many rows they hold", () => {
+  it("lists every unknown MID once, in file order", () => {
     const review = reviewImportRows([
-      staged({ id: 1, agent_number_raw: "1", agent_id: null, blocker: "unknown_agent" }),
-      staged({ id: 2, agent_number_raw: "2", agent_id: null, blocker: "unknown_agent" }),
-      staged({ id: 3, agent_number_raw: "2", agent_id: null, blocker: "unknown_agent" }),
+      refused("unknown_mid", { id: 1, row_number: 2, mid_raw: "4402" }),
+      refused("unknown_mid", { id: 2, row_number: 3, mid_raw: "4400" }),
+      staged({ id: 3, row_number: 4 }),
+      refused("unknown_mid", { id: 4, row_number: 5, mid_raw: "4401" }),
     ]);
-
-    expect(review.unknownAgents.map((g) => g.agentNumber)).toEqual(["2", "1"]);
+    expect(review.unknownMids).toEqual(["4402", "4400", "4401"]);
+    expect(review.refusals[0].rows.map((r) => r.rowNumber)).toEqual([2, 3, 5]);
   });
 
-  it("caps the merchant hint at three names", () => {
-    const rows = Array.from({ length: 6 }, (_, i) =>
-      staged({
-        id: i + 1,
-        agent_number_raw: "7788",
-        agent_id: null,
-        blocker: "unknown_agent",
-        merchant_name_raw: `Shop ${i}`,
-      }),
-    );
-
-    const review = reviewImportRows(rows);
-    expect(review.unknownAgents[0].sampleMerchants).toEqual([
-      "Shop 0",
-      "Shop 1",
-      "Shop 2",
-    ]);
-    expect(review.unknownAgents[0].rowCount).toBe(6);
-  });
-
-  it("groups rows with a blank agent number together", () => {
-    // Keyed on the empty string rather than on null, or each blank row becomes its
-    // own entry and a file missing the column entirely renders forty groups.
-    const review = reviewImportRows([
-      staged({ id: 1, agent_number_raw: null, agent_id: null, blocker: "unknown_agent" }),
-      staged({ id: 2, agent_number_raw: null, agent_id: null, blocker: "unknown_agent" }),
-    ]);
-
-    expect(review.unknownAgents).toHaveLength(1);
-    expect(review.unknownAgents[0].agentNumber).toBeNull();
-  });
-
-  it("lists other blockers per row, because each needs its own fix in the file", () => {
+  it("lists a row under EVERY refusal it trips, so none is hidden behind another", () => {
     const review = reviewImportRows([
       staged({
-        id: 1,
-        row_number: 5,
-        blocker: "unparseable_period",
-        error: 'Could not read "Q3 2026" as a month.',
-      }),
-      staged({
-        id: 2,
-        row_number: 9,
-        blocker: "bad_number",
-        error: "One of the figures on this row could not be read as a number.",
+        blocker: "duplicate_mid",
+        blockers: ["duplicate_mid", "unknown_mid", "wrong_income_type"],
+        error: "repeated. unknown. fees.",
+        mid_raw: "4400",
       }),
     ]);
+    expect(review.refusals.map((r) => r.blocker)).toEqual([
+      "duplicate_mid",
+      "unknown_mid",
+      "wrong_income_type",
+    ]);
+    expect(review.unknownMids).toEqual(["4400"]);
+    expect(review.blocked).toBe(1);
+  });
 
-    expect(review.fileProblems).toHaveLength(2);
-    const periods = review.fileProblems.find(
-      (p) => p.blocker === "unparseable_period",
-    );
-    expect(periods?.rows).toEqual([
-      { rowNumber: 5, detail: 'Could not read "Q3 2026" as a month.' },
+  it("orders refusals by the parser precedence", () => {
+    const review = reviewImportRows([
+      refused("unreadable_number", { id: 1 }),
+      refused("wrong_income_type", { id: 2 }),
+      refused("missing_mid", { id: 3 }),
+    ]);
+    expect(review.refusals.map((r) => r.blocker)).toEqual([
+      "missing_mid",
+      "wrong_income_type",
+      "unreadable_number",
     ]);
   });
 
-  it("falls back to the code when a blocker has no message", () => {
-    // A blocker added in SQL but not in blockerMessage should look raw, not blank.
+  it("carries the parser's sentence, and falls back to the code when there is none", () => {
     const review = reviewImportRows([
-      staged({ blocker: "something_new", error: null }),
+      refused("wrong_income_type", { row_number: 5, error: 'Income Type is "Fees", not Residuals.' }),
+      staged({ id: 2, blocker: "something_new", blockers: ["something_new"], error: null }),
     ]);
+    expect(review.refusals[0].rows).toEqual([
+      { rowNumber: 5, mid: "012345678901", detail: 'Income Type is "Fees", not Residuals.' },
+    ]);
+    expect(review.refusals[1].rows[0].detail).toBe("something_new");
+  });
 
-    expect(review.fileProblems[0].rows[0].detail).toBe("something_new");
+  it("lists a row staged before 20261030140000 (a blocker, no blockers) under its blocker", () => {
+    const review = reviewImportRows([staged({ blocker: "missing_mid", blockers: [], error: null })]);
+    expect(review.refusals.map((r) => r.blocker)).toEqual(["missing_mid"]);
+  });
+
+  it("groups warnings by TYPE, one group per type present, listing every row", () => {
+    const review = reviewImportRows([
+      staged({ id: 1, row_number: 2, warnings: ["bad_numbers"] }),
+      staged({ id: 2, row_number: 3, warnings: ["processor_mismatch", "bad_numbers"] }),
+      staged({ id: 3, row_number: 4 }),
+      staged({ id: 4, row_number: 5, warnings: ["bad_numbers"] }),
+    ]);
+    expect(review.warnings.map((w) => [w.warning, w.rows.map((r) => r.rowNumber)])).toEqual([
+      ["processor_mismatch", [3]],
+      ["bad_numbers", [2, 3, 5]],
+    ]);
+    // A warning is not a refusal.
+    expect(review).toMatchObject({ blocked: 0, ready: true });
   });
 
   it("counts a mixed batch correctly", () => {
     const review = reviewImportRows([
       staged({ id: 1 }),
-      staged({ id: 2, agent_id: null, blocker: "unknown_agent" }),
-      staged({ id: 3, blocker: "bad_number" }),
+      refused("unknown_mid", { id: 2 }),
+      refused("unreadable_number", { id: 3 }),
     ]);
-
     expect(review).toMatchObject({ total: 3, clean: 1, blocked: 2, ready: false });
   });
 });
 
-describe("blockerLabel", () => {
-  it("turns a code into prose", () => {
-    expect(blockerLabel("unknown_agent")).toBe("Agent # not recognised");
-    expect(blockerLabel("duplicate_in_file")).toBe("Duplicate row in the file");
+describe("the import vocabularies match the parser and the database", () => {
+  it("PAYOUT_BLOCKERS is the parser's list, in its order", () => {
+    expect([...PAYOUT_BLOCKERS]).toEqual([...RESIDUAL_BLOCKERS]);
+  });
+
+  it("PAYOUT_WARNINGS is the parser's list, in its order", () => {
+    expect([...PAYOUT_WARNINGS]).toEqual([...RESIDUAL_WARNINGS]);
+  });
+
+  it("both match the CHECKs in the migrations", async () => {
+    const parser = await readFile(
+      new URL("../../supabase/migrations/20261030140000_import_parser.sql", import.meta.url),
+      "utf8",
+    );
+    const blockerCheck = /rep_payout_import_rows_blocker_check check \(blocker in \(([^)]*)\)/.exec(parser);
+    expect(blockerCheck).not.toBeNull();
+    const codes = [...blockerCheck![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+    expect(new Set(codes)).toEqual(new Set(PAYOUT_BLOCKERS));
+    expect(codes).toHaveLength(PAYOUT_BLOCKERS.length);
+
+    const blockersCheck = /check \(blockers <@ array\[([^\]]*)\]/.exec(parser);
+    expect(blockersCheck).not.toBeNull();
+    expect(new Set([...blockersCheck![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]))).toEqual(
+      new Set(PAYOUT_BLOCKERS),
+    );
+
+    const schema = await readFile(
+      new URL("../../supabase/migrations/20261030120000_import_schema.sql", import.meta.url),
+      "utf8",
+    );
+    const warningCheck = /check \(warnings <@ array\[([^\]]*)\]/.exec(schema);
+    expect(warningCheck).not.toBeNull();
+    expect([...warningCheck![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1])).toEqual([...PAYOUT_WARNINGS]);
+  });
+});
+
+describe("blockerLabel and warning prose", () => {
+  it("has prose for every blocker and every warning", () => {
+    for (const code of PAYOUT_BLOCKERS) expect(blockerLabel(code), code).not.toBe(code);
+    for (const warning of PAYOUT_WARNINGS) {
+      expect(warningLabel(warning), warning).not.toBe(warning);
+      expect(warningQuestion(warning), warning).toMatch(/\?$/);
+    }
+    expect(blockerLabel("unknown_mid")).toBe("MID is not a merchant in the CRM");
   });
 
   it("passes an unrecognised code through rather than rendering undefined", () => {
-    // The review screen reads these straight from the database. A blocker added in
+    // The review screen reads these straight from the database. A code added in
     // SQL and not here should look raw, not blank.
     expect(blockerLabel("something_new")).toBe("something_new");
+    expect(warningLabel("something_new")).toBe("something_new");
+  });
+});
+
+describe("warningsConfirmed: one yes per warning TYPE per import (memo §0b.3)", () => {
+  it("is true with no warnings at all", () => {
+    expect(warningsConfirmed([], {})).toBe(true);
+  });
+
+  it("needs a yes for every type present, and one yes covers the type", () => {
+    const present = ["processor_mismatch", "bad_numbers"];
+    expect(warningsConfirmed(present, {})).toBe(false);
+    expect(warningsConfirmed(present, { bad_numbers: "yes" })).toBe(false);
+    expect(warningsConfirmed(present, { bad_numbers: "yes", processor_mismatch: "yes" })).toBe(true);
+  });
+
+  it("a no on any type keeps the commit closed", () => {
+    expect(warningsConfirmed(["bad_numbers"], { bad_numbers: "no" })).toBe(false);
+  });
+
+  it("an answer for a type that is not present opens nothing", () => {
+    expect(warningsConfirmed(["inactive_merchant"], { bad_numbers: "yes" })).toBe(false);
+  });
+});
+
+describe("importMonths: the upload page's months (memo A11)", () => {
+  it("offers this month and the 24 before it, newest first", () => {
+    const months = importMonths(new Date("2026-10-30T12:00:00Z"));
+    expect(months).toHaveLength(25);
+    expect(months[0]).toBe("2026-10-01");
+    expect(months[24]).toBe("2024-10-01");
+    expect(months).not.toContain("2026-11-01");
+    expect(months).not.toContain("2024-09-01");
+  });
+
+  it("takes the month in UTC, as the database does", () => {
+    // 00:30 UTC on 1 November is still 31 October west of UTC.
+    expect(importMonths(new Date("2026-11-01T00:30:00Z"))[0]).toBe("2026-11-01");
+    expect(importMonths(new Date("2026-01-15T00:00:00Z"))[1]).toBe("2025-12-01");
+  });
+
+  it("is the database's window: nothing future, 24 back the last accepted", async () => {
+    const schema = await readFile(
+      new URL("../../supabase/migrations/20261030120000_import_schema.sql", import.meta.url),
+      "utf8",
+    );
+    expect(schema).toContain("this_month date := date_trunc('month', now() at time zone 'UTC')::date;");
+    expect(schema).toContain("if new.period > this_month then");
+    expect(schema).toContain("if new.period < (this_month - interval '24 months')::date then");
   });
 });
 

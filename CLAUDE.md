@@ -37,7 +37,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **Bulk provisioning never hands out a credential**: `provision-user-batch` discards the temporary password unread. **Deactivation is two layers** (ban in GoTrue first, then `profiles.is_active`). `create-user` must delete the `auth.users` row if the `profiles` insert fails. → `docs/claude/user-accounts.md`, "Three tiers" below.
 - **Inline signed URLs are allow-listed by type** (PDF, plain text, three raster images; **never SVG**); everything else is forced to attachment. → `docs/claude/reference-data-and-marketing.md`.
 - **The per-bucket 50 MiB limit is the real upload ceiling**; `config.toml`'s `file_size_limit` limits nothing. Hosted buckets need it set out-of-band. → `docs/claude/edge-functions-and-storage.md`.
-- **The secrets validators exist twice and must change together** (`lib/masks.ts` and `_shared/pre-app-secrets.ts`, tax-ID pair `isTaxEin`/`isTaxSsn` included); the residual parser exists **once** — do not create a browser twin. → `docs/claude/edge-functions-and-storage.md`.
+- **The secrets validators exist twice and must change together** (`lib/masks.ts` and `_shared/pre-app-secrets.ts`, tax-ID pair `isTaxEin`/`isTaxSsn` included); the residual parser exists **once** — do not create a browser twin — and pays each row to the owner of the merchant its MID names (`agent_number` is a display code, never the join). → `docs/claude/edge-functions-and-storage.md`.
 - **Never show a `functions.invoke()` error's `.message` to a user** — use `lib/edge-functions.ts`. → "Next.js / auth wiring" below.
 - **`read-pre-app-secrets` returns last four to everyone, admin included.** A full value leaves only on a one-field `reveal`: admin-only, audited first by `record_pre_app_secret_reveal()` (fails closed, 30/hour), shown client-side and never printed. → `docs/claude/edge-functions-and-storage.md`.
 - **"Email" on marketing materials sends nothing** and must say so; when sending lands it goes next to that log line. → `docs/claude/reference-data-and-marketing.md`.
@@ -104,7 +104,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Not built yet:** My Submissions.
 - **Still starter-kit template:** `README.md` only. Edge Functions: twelve in the repo. Details of both → `docs/claude/project-state.md`.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Seventy-one migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Seventy-two migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 ## Hosted projects and deployment
 
@@ -164,10 +164,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2583 tests, 114 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (313 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2632 tests, 115 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (324 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (346 tests, 6 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (350 tests, 6 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -193,7 +193,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
-Baselines are the counts in the Commands block above (`npm test` 2583 tests / 114 files — every file must load; `test:live` 313; `test:deployed` 29; `test:e2e` 346, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
+Baselines are the counts in the Commands block above. The rules, each explained in full in **`docs/claude/testing.md`**:
 
 - Run `npm test` for any schema change; queries must run as `authenticated`, never the owner.
 - PGlite is Postgres 18.3, the stack 17.6 — pin constraint names in assertions, not SQLSTATEs.
@@ -227,9 +227,9 @@ Twelve functions, all registered in `supabase/config.toml` (a function not liste
 | --- | --- |
 | `create-user`, `deactivate-user`, `admin-reset-password` | admin user management via `auth.admin` + `profiles`, each writing `audit_log` |
 | `submit-pre-app-secrets`, `read-pre-app-secrets` | encrypt/decrypt the four secrets tables |
-| `residual-import-file-url` | admin-only; two modes — creates a `rep_payout_batches` row and signs an upload into `residual-imports`, or signs a download of a batch's stored file |
-| `parse-residual-import` | admin-only; reads a batch's XLSX with SheetJS and stages its rows. **Idempotent** — it clears the batch's staging rows first, which is what makes "resolve an agent number, then read again" one code path rather than two. Also writes the shared-account **preview flags** (`preview_flag` / `preview_note`) — advisory, never blockers; `previewSharedRow()` in `_shared/residuals.ts` mirrors `commit_residual_import_v2`'s plan, and the live suite pins the pair |
-| `export-residuals` | **not admin-only, deliberately.** Reads every row through the *caller-scoped* client, so RLS is the whole authorization story and a rep's export is their own book. Reaching for `supabaseAdmin` anywhere in it — even to join agent names — would silently turn that into the company's, which is the disclosure shape `search_crm` is `security invoker` to avoid. Paginates with `.range()`, because PostgREST's `max_rows` would otherwise export a silent prefix |
+| `residual-import-file-url` | admin-only; two modes — `{file_name, processor, period}` creates a `rep_payout_batches` row (both required, the month in the window) and signs an upload into `residual-imports`, or, for a committed processor-month, answers `{exists}` and creates nothing (replace is phase 9); `{batch_id}` signs a download of the stored file |
+| `parse-residual-import` | admin-only; reads a batch's six-column XLSX (Merchant Number as text) and stages each row for the owner of the merchant its MID names, with every refusal (`blockers`), the three `warnings` and advisory notes (`preview_flag`; the share flags mirror v2's plan, pinned by the live suite). **Idempotent** — clears the batch's staging rows first, so "add the merchant, then Read again" is one code path |
+| `export-residuals` | **not admin-only, deliberately.** Reads every row through the *caller-scoped* client, so RLS is the whole authorization and a rep's export is their own book; `supabaseAdmin` anywhere in it, even to join names, would make it the company's. Paginates with `.range()`, or PostgREST's `max_rows` exports a silent prefix. Not an import format since phase 7 |
 | `stage-user-import` | admin-only; parses a rep CSV into `user_import_rows`, creating the batch on the way. One function where residuals needs two, because the text arrives in the request body rather than via Storage. **Idempotent** — clears the batch's rows first, so "fix something, then read again" is one code path run twice. Two modes: `source_text` starts an import, `batch_id` re-reads the text already stored on the batch |
 | `provision-user-batch` | admin-only; creates the accounts for a staged import, **a bounded chunk per call**. Calls the same `provisionUser` core as `create-user` and **discards the temporary password unread**. See the bulk-import section below for why the loop lives in the browser |
 | `marketing-material-file-url` | the one function whose two modes have **different authorization**: an admin stocks the library (upload), every active user reads it (download). Copying `residual-import-file-url` wholesale would put `callerIsAdmin` on both branches and make the library invisible to the people it is for — with no policy failing, because the policy is correct and the function would simply be stricter than it. Creates the material row before signing, because the key is `{material_id}/{file_name}`. `download: true` asks Storage for `Content-Disposition: attachment`; without it the URL renders inline, which is what View and Print need |

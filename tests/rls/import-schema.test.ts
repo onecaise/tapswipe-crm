@@ -373,13 +373,20 @@ describe("the catalog changes in exactly the intended ways", () => {
 });
 
 // -------------------------------------------------------------------------
-// 2-8. Behaviour, on one database with every migration.
+// 2-8. Behaviour, on one database as this migration left it.
+//
+// Through 20261030120000, not every migration: the next one (20261030140000,
+// phase 7) makes a processor and month REQUIRED on every new batch, so the
+// rules here about a batch WITHOUT them -- together-or-neither, legacy
+// batches outside the one-committed rule, a replace with no processor-month,
+// staging rows of such a batch -- can only be shown on this schema. What
+// 20261030140000 changed is pinned by tests/rls/import-parser.test.ts.
 // -------------------------------------------------------------------------
 
 let db: TestDb;
 
 beforeAll(async () => {
-  db = await open();
+  db = await open(await migrationsThrough(MIGRATION));
 });
 
 beforeEach(async () => {

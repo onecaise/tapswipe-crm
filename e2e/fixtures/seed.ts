@@ -2355,6 +2355,55 @@ export async function clearBusinessDocuments(titles: string[]): Promise<void> {
     );
 }
 
+/** The processors an e2e batch may take, in the order freeBatchSlot tries them. */
+const E2E_BATCH_PROCESSORS = ["Square", "PayBright", "Netevia HQ", "Red Fynn", "TSYS"];
+
+/**
+ * A processor and month for a fixture batch that no batch on the stack uses.
+ *
+ * Every new batch needs both since 20261030140000, inside the import window
+ * (this UTC month and the 24 before it), and a committed one must be the only
+ * committed batch for its pair -- on a database the live suite shares. The
+ * fixtures' STAGED rows keep their own months (2027-2028, chosen to be clear of
+ * everything else): the commit is still v2, which files a row by its own
+ * month, so the batch's month is only a free slot here. Phase 8's v3 takes the
+ * month from the batch, and these fixtures move with it then.
+ */
+export async function freeBatchSlot(
+  db: SupabaseClient,
+): Promise<{ processor: string; period: string }> {
+  const { data, error } = await db.from("rep_payout_batches").select("processor, period");
+  if (error) throw new Error(`batch slots: ${error.message}`);
+  const used = new Set((data ?? []).map((b) => `${b.processor}|${b.period}`));
+  const now = new Date();
+  for (let back = 0; back <= 24; back += 1) {
+    const index = now.getUTCFullYear() * 12 + now.getUTCMonth() - back;
+    const year = Math.floor(index / 12);
+    const period = `${year}-${String(index - year * 12 + 1).padStart(2, "0")}-01`;
+    for (const processor of E2E_BATCH_PROCESSORS) {
+      if (!used.has(`${processor}|${period}`)) return { processor, period };
+    }
+  }
+  throw new Error("no free processor-month in the import window: clear old e2e batches");
+}
+
+/**
+ * Removes earlier runs' batches of this file name, with their staged rows,
+ * ledger lines and audit rows (FK order), so reruns cannot fill every
+ * processor-month freeBatchSlot has to offer.
+ */
+async function clearBatchesNamed(db: SupabaseClient, fileName: string): Promise<void> {
+  const { data: old } = await db.from("rep_payout_batches").select("id").eq("file_name", fileName);
+  const ids = (old ?? []).map((b) => b.id as number);
+  if (ids.length === 0) return;
+  const { error: linesError } = await db.from("rep_payout_rows").delete().in("batch_id", ids);
+  if (linesError) throw new Error(`old lines: ${linesError.message}`);
+  await db.from("rep_payout_import_rows").delete().in("batch_id", ids);
+  await db.from("audit_log").delete().eq("table_name", "rep_payout_batches").in("row_id", ids.map(String));
+  const { error } = await db.from("rep_payout_batches").delete().in("id", ids);
+  if (error) throw new Error(`old batches: ${error.message}`);
+}
+
 /**
  * A clean batch staged and ready to commit, for the commit specs.
  *
@@ -2380,6 +2429,7 @@ export async function createCommittableBatch(
   )?.id;
   if (!adminId || !agentId) throw new Error("Run seedE2E() first.");
 
+  await clearBatchesNamed(db, `e2e-${agentPeriod}.xlsx`);
   const { data: batch, error: batchError } = await db
     .from("rep_payout_batches")
     .insert({
@@ -2387,6 +2437,7 @@ export async function createCommittableBatch(
       file_key: `e2e/${agentPeriod}.xlsx`,
       file_name: `e2e-${agentPeriod}.xlsx`,
       status: "review",
+      ...(await freeBatchSlot(db)),
     })
     .select("id")
     .single();
@@ -2968,6 +3019,7 @@ export async function createSkippingBatch(period: string): Promise<{
       file_name: fileName,
       status: "review",
       row_count: 3,
+      ...(await freeBatchSlot(db)),
     })
     .select("id")
     .single();
@@ -3136,6 +3188,7 @@ export async function plantAdjustments(period: string): Promise<{
       status: "review",
       row_count: 1,
       adjustment_rows_ignored: 2,
+      ...(await freeBatchSlot(db)),
     })
     .select("id")
     .single();

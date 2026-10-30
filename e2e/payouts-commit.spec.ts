@@ -175,5 +175,7 @@ test("a committed batch reports the rows it imported, not zero", async ({
 
   // And the review-only figures are gone rather than showing misleading zeroes.
   await expect(page.getByText("Rows in the file")).toHaveCount(0);
+  // "Refused" since phase 7 (the review-only count was "Blocked").
+  await expect(page.getByText("Refused")).toHaveCount(0);
   await expect(page.getByText("Blocked")).toHaveCount(0);
 });

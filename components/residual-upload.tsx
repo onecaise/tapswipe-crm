@@ -1,16 +1,20 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { UploadIcon } from "lucide-react";
 
 import { callAdminFunction } from "@/lib/admin-users";
+import { formatDate, formatPeriod } from "@/lib/format";
 import { createClient } from "@/lib/supabase/client";
+import type { Processor } from "@/lib/processors";
 import { RESIDUAL_BUCKET } from "@/lib/payouts";
 import { abandonResidualBatch } from "@/lib/residual-batches";
 import { Callout } from "@/components/callout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
 type MintedUpload = {
   batch_id: number;
@@ -19,49 +23,100 @@ type MintedUpload = {
   fileKey: string;
 };
 
+/** What residual-import-file-url answers when that month is already committed. */
+type CommittedMonth = {
+  batch_id: number;
+  file_name: string;
+  committed_at: string | null;
+  paid: boolean;
+};
+
+type MintResponse = MintedUpload | { exists: CommittedMonth };
+
 type ParseResult = {
   batch_id: number;
   row_count: number;
   blocked_count: number;
 };
 
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+const SELECT_CLASS =
+  "border-input bg-background ring-offset-background focus-visible:ring-ring flex h-9 w-full rounded-md border px-3 py-1 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:opacity-50";
+
 /**
- * Uploads a residual XLSX and sends the admin to its review screen.
+ * Uploads a residual XLSX for one processor and month, and sends the admin to
+ * its review screen.
+ *
+ * The processor and month are chosen HERE and are the batch's (phase 7 of
+ * docs/design/intake-and-reports.md, §2.2): the file has no Period column, and
+ * its Processor column is only compared against this choice. `months` is the
+ * import window (this month and the 24 before it, A11), computed on the server;
+ * the database's guard_payout_batch_period() is the authority.
  *
  * Three steps, and the order is forced by the Storage key containing the batch id:
  *
- *   1. residual-import-file-url creates the batch row and signs an upload URL.
- *   2. The browser PUTs the file straight to Storage. Same upload-then-act shape
- *      documents-panel.tsx uses — the bytes never pass through a function.
+ *   1. residual-import-file-url creates the batch row and signs an upload URL --
+ *      or, when that processor and month is already COMMITTED, creates nothing
+ *      and says so. Replacing a committed month is phase 9; until then this
+ *      shows the replace prompt's facts and stops (the replace is not offered).
+ *   2. The browser PUTs the file straight to Storage. The bytes never pass
+ *      through a function.
  *   3. parse-residual-import reads the stored file and stages its rows.
  *
- * A file the parser REFUSES (a 400: not a spreadsheet, a missing column) is
- * abandoned straight away — it can never parse, so a `review` row for it was
- * only clutter an admin had to find and abandon by hand (D-08). An empty file
- * is refused before step 1. Any other failure at step 2 or 3 (upload error,
- * function down) still leaves a `review` batch with row_count 0, which the list
- * shows and offers to re-parse or abandon: there the file may well be fine.
- * Abandoned batches keep their file downloadable either way.
+ * A file the parser REFUSES outright (a 400: not a spreadsheet, a missing
+ * column, a CRM export) is abandoned straight away -- it can never parse, so a
+ * `review` row for it was only clutter (D-08). An empty file is refused before
+ * step 1. Any other failure at step 2 or 3 leaves a `review` batch with
+ * row_count 0, which the list shows and offers to re-read or abandon.
  *
  * Nothing here is a security boundary. Both functions verify the caller is an
- * active admin server-side; the page's requireAdmin() only keeps a rep from seeing
- * a form that would reject them.
+ * active admin server-side; the page's requireAdmin() only keeps a rep from
+ * seeing a form that would reject them.
  */
-export function ResidualUpload() {
+export function ResidualUpload({
+  processors,
+  months,
+}: {
+  processors: readonly Processor[];
+  /** The months that may be imported, `YYYY-MM-01`, newest first. */
+  months: readonly string[];
+}) {
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
 
+  const [processor, setProcessor] = useState("");
+  const [year, setYear] = useState("");
+  const [month, setMonth] = useState("");
   const [busy, setBusy] = useState<null | "uploading" | "parsing">(null);
   const [error, setError] = useState<string | null>(null);
+  const [committed, setCommitted] = useState<
+    (CommittedMonth & { processor: string; period: string }) | null
+  >(null);
+
+  const years = [...new Set(months.map((value) => value.slice(0, 4)))];
+  const monthsInYear = months
+    .filter((value) => value.startsWith(`${year}-`))
+    .map((value) => value.slice(5, 7))
+    .sort();
+  const period = year && month ? `${year}-${month}-01` : "";
 
   const upload = async (file: File) => {
     setError(null);
+    setCommitted(null);
 
-    // Refused before a batch exists (D-08): an empty file cannot be a report,
-    // and checking here costs nothing. Whether a non-empty file is a
-    // spreadsheet with the right columns only the parser can say — SheetJS
-    // lives in the function, not in this bundle — so that case is cleaned up
-    // after the parse instead (below).
+    if (processor === "") {
+      setError("Choose the processor this file is from.");
+      return;
+    }
+    if (period === "" || !months.includes(period)) {
+      setError("Choose the month and year this file is for.");
+      return;
+    }
+    // Refused before a batch exists (D-08): an empty file cannot be a report.
     if (file.size === 0) {
       setError("That file is empty.");
       return;
@@ -70,12 +125,20 @@ export function ResidualUpload() {
     setBusy("uploading");
 
     const { data: minted, error: mintError } =
-      await callAdminFunction<MintedUpload>("residual-import-file-url", {
+      await callAdminFunction<MintResponse>("residual-import-file-url", {
         file_name: file.name,
+        processor,
+        period,
       });
 
     if (mintError || !minted) {
       setError(mintError ?? "Could not start the import.");
+      setBusy(null);
+      return;
+    }
+
+    if ("exists" in minted) {
+      setCommitted({ ...minted.exists, processor, period });
       setBusy(null);
       return;
     }
@@ -108,12 +171,10 @@ export function ResidualUpload() {
     });
 
     if (parseError || !parsed) {
-      // A 400 is the parser refusing the file itself — not a spreadsheet, no
-      // sheets, a required column missing. Re-parsing that batch can never
-      // succeed, so it is abandoned through the same path as the Abandon
-      // button rather than left in Review for an admin to find (D-08). Any
-      // other failure (function down, 5xx, no response) leaves the batch for
-      // Re-parse, as before: the file may be fine.
+      // A 400 is the parser refusing the file itself. Re-parsing that batch can
+      // never succeed, so it is abandoned through the same path as the Abandon
+      // button rather than left in Review (D-08). Any other failure leaves the
+      // batch for Read again: the file may be fine.
       if (parseStatus === 400) {
         const problem = await abandonResidualBatch(supabase, minted.batch_id);
         setError(
@@ -139,14 +200,73 @@ export function ResidualUpload() {
       <div>
         <p className="text-sm font-medium">Upload a residual report</p>
         <p className="mt-1 text-xs text-muted-foreground">
-          The processor&apos;s monthly XLSX. It needs the columns Period, Agent #,
-          MID, Merchant name, Volume, Average ticket and Total cost — Residual
-          income and Rep split are filled in here afterwards, or supplied by
-          re-importing an export.
+          The processor&apos;s monthly XLSX, with the six columns Processor,
+          Merchant Number, Merchant Name, Income Type, Volume and Residual. Each
+          line is paid to the owner of the merchant its Merchant Number names.
         </p>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="residual-processor">Processor</Label>
+          <select
+            id="residual-processor"
+            className={SELECT_CLASS}
+            value={processor}
+            disabled={busy !== null}
+            onChange={(event) => setProcessor(event.target.value)}
+          >
+            <option value="">Choose…</option>
+            {processors.map((p) => (
+              <option key={p.code} value={p.code}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="residual-month">Month</Label>
+          <select
+            id="residual-month"
+            className={SELECT_CLASS}
+            value={month}
+            disabled={busy !== null || year === ""}
+            onChange={(event) => setMonth(event.target.value)}
+          >
+            <option value="">{year === "" ? "Choose a year first" : "Choose…"}</option>
+            {monthsInYear.map((mm) => (
+              <option key={mm} value={mm}>
+                {MONTH_NAMES[Number(mm) - 1]}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="residual-year">Year</Label>
+          <select
+            id="residual-year"
+            className={SELECT_CLASS}
+            value={year}
+            disabled={busy !== null}
+            onChange={(event) => {
+              const next = event.target.value;
+              setYear(next);
+              // A month that the new year does not offer (a future one) is
+              // cleared rather than silently kept.
+              if (!months.includes(`${next}-${month}-01`)) setMonth("");
+            }}
+          >
+            <option value="">Choose…</option>
+            {years.map((yyyy) => (
+              <option key={yyyy} value={yyyy}>
+                {yyyy}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
         <Input
           ref={fileRef}
           type="file"
@@ -180,6 +300,32 @@ export function ResidualUpload() {
               : "Upload"}
         </Button>
       </div>
+
+      {committed && (
+        <Callout tone="warning">
+          <div data-testid="replace-blocked">
+            <p className="font-medium">
+              {committed.processor} for {formatPeriod(committed.period)} was
+              already imported
+              {committed.committed_at
+                ? ` on ${formatDate(committed.committed_at)}`
+                : ""}
+              {committed.paid ? " and is marked paid" : ""}. Replace it?
+            </p>
+            <p className="mt-1 text-muted-foreground">
+              Replacing a committed month is not available yet: it arrives with
+              Mark paid. Nothing was uploaded, and the committed import is
+              unchanged.{" "}
+              <Link
+                href={`/payouts/import/${committed.batch_id}`}
+                className="underline underline-offset-4"
+              >
+                Open {committed.file_name}
+              </Link>
+            </p>
+          </div>
+        </Callout>
+      )}
 
       {error && <Callout tone="warning">{error}</Callout>}
     </div>

@@ -3,13 +3,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   ADMIN_ID,
   AGENT_ID,
-  OTHER_AGENT_ID,
-  PAYOUT_PERIOD,
   asPlatform,
   asUser,
   createTestDb,
+  insertBatch,
   migrationsBefore,
   migrationsThrough,
+  OTHER_AGENT_ID,
+  PAYOUT_PERIOD,
   resetData,
   rows,
   seedPayouts,
@@ -74,11 +75,7 @@ async function addPartner(db: TestDb): Promise<void> {
 /** A review batch of one row on MID-AGENT-2 for `agentId`. */
 async function stageOne(db: TestDb, agentId: string, agentNumber: string): Promise<number> {
   await asPlatform(db);
-  const [{ id }] = await rows<{ id: number }>(
-    db,
-    `insert into rep_payout_batches (imported_by, file_key, file_name, status)
-     values ('${ADMIN_ID}', 'test/file.xlsx', 'file.xlsx', 'review') returning id`,
-  );
+  const id = await insertBatch(db);
   await db.exec(`
     insert into rep_payout_import_rows
       (batch_id, row_number, agent_number_raw, mid_raw, merchant_name_raw,

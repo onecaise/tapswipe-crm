@@ -3,10 +3,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   ADMIN_ID,
   AGENT_ID,
-  PAYOUT_PERIOD,
   asPlatform,
   asUser,
   createTestDb,
+  insertBatch,
+  PAYOUT_PERIOD,
   resetData,
   rows,
   seedPayouts,
@@ -42,12 +43,7 @@ describe("rep_payout_batches status transitions", () => {
 
   async function batchIn(status: Status): Promise<number> {
     await asPlatform(db);
-    const [{ id }] = await rows<{ id: number }>(
-      db,
-      `insert into rep_payout_batches (imported_by, file_key, file_name, status)
-       values ('${ADMIN_ID}', 't/x.xlsx', 'x.xlsx', '${status}') returning id`,
-    );
-    return id;
+    return insertBatch(db, { status, fileName: "x.xlsx" });
   }
 
   async function statusOf(id: number): Promise<string> {
@@ -111,13 +107,14 @@ describe("rep_payout_batches status transitions", () => {
 
   it("leaves the acknowledgement free to stamp a committed batch", async () => {
     await asPlatform(db);
-    const [{ id }] = await rows<{ id: number }>(
-      db,
-      `insert into rep_payout_batches (imported_by, file_key, file_name, status, skipped_rows, committed_at)
-       values ('${ADMIN_ID}', 't/y.xlsx', 'y.xlsx', 'committed',
-               '[{"row_number": 2, "period": "${PAYOUT_PERIOD}", "mid": "M", "agent_number": "1", "reason": "partner_named"}]', now())
-       returning id`,
-    );
+    const id = await insertBatch(db, {
+      status: "committed",
+      fileName: "y.xlsx",
+      extra: {
+        skipped_rows: `'[{"row_number": 2, "period": "${PAYOUT_PERIOD}", "mid": "M", "agent_number": "1", "reason": "partner_named"}]'`,
+        committed_at: "now()",
+      },
+    });
     await asUser(db, ADMIN_ID);
     await db.query(`select acknowledge_residual_skips(${id})`);
     await asPlatform(db);

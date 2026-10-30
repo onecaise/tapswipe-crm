@@ -1,6 +1,6 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-6 built locally (§10).** Nothing has
+Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-7 built locally (§10).** Nothing has
 been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
@@ -1663,6 +1663,129 @@ Not done here, for later phases:
 Found while building: PGlite's `service_role` has no BYPASSRLS (the hosted one does), so a test
 that reads an admin-only table as `service_role` sees nothing there; `import-schema.test.ts` reads
 back as the owner and says why.
+
+### Phase 7: parser and upload page (30 Oct 2026, branch `intake-residuals`)
+
+Step 0 first: the eleven payout specs Phase 6 could not run passed 86/86 (80 + 6 setup) on a
+freshly restarted stack. The earlier failure was the environment, not Phase 6: two Playwright
+runs and a `next dev` from an earlier session were still running and holding port 3000.
+
+Built (`20261030140000_import_parser.sql`; Edge Functions `parse-residual-import`,
+`residual-import-file-url`, `export-residuals` (header constants only) and `_shared/residuals.ts`,
+`_shared/residual-imports.ts`):
+- **The six-column parser** (`_shared/residuals.ts`, still the only copy). It reads Processor,
+  Merchant Number, Merchant Name, Income Type, Volume and Residual. Headers are matched by name,
+  case- and whitespace-insensitively, after stripping a BOM and a leading apostrophe. The Merchant
+  Number is read as text: a numeric cell uses its formatted text when that is all digits (a
+  zero-padded format keeps its zeros), and otherwise its integer written out in full, never
+  `1.23457E+11`. Currency text is read (`$76,877.18`, `-$11.76`, `$-11.76`). The function reads
+  the sheet twice, as values and as displayed text.
+- **Payee by MID.** Each row's merchant is found by `merchants.mid`, and `agent_id` is that
+  merchant's owner. Agent # is not read; `profiles.agent_number` is now a display code only.
+- **Refusals** (`blockers text[]`, every code a row trips; `blocker` is the first by precedence,
+  for v2's `blocker is not null`): `missing_mid`, `duplicate_mid` (every row of a repeat),
+  `unknown_mid`, `mid_in_other_batch` (an import line for the month whose processor is another
+  one or NULL), `wrong_income_type`, `missing_figure`, `unreadable_number`. The four Agent #-era
+  codes are gone from the CHECK and from `lib/payouts.ts`.
+- **Warnings** (`warnings`): `processor_mismatch` (the file's cell or the merchant's saved
+  processor is not the batch's; a merchant with none is not a mismatch, A6), `inactive_merchant`
+  (only `inactive`, A26), and `bad_numbers` (volume ≤ 0 or residual > volume; a clawback on a
+  positive volume is silent, A25). They are stored per row, and the review screen asks one yes/no
+  per type.
+- **Notes**: `payee_changed` (A10) is new. The three share flags and `share_not_in_force` stay;
+  `looks_shared` is retired.
+- **Upload page**: Processor (from `processors`), Year and Month (this UTC month and the 24
+  before it, computed on the server), and the file. A committed processor-month returns
+  `{exists: {batch_id, file_name, committed_at, paid}}` and **no batch is created**. The page shows
+  the replace prompt's facts ("TSYS for July 2026 was already imported on … Replace it?") and says
+  the replace is not available yet. The import list shows each batch's processor and month.
+- **Review screen**: a red refusal Callout at the top listing every unknown MID and every other
+  refusal by row. One yes/no block per warning type, with rows folded past five. Commit is
+  offered only with no refusal and a yes on every type present. The Agent # "Assign / Create the
+  rep" section is gone.
+- **Required processor and month** on every new batch. The migration refuses, by id, a
+  committed or replaced batch without them, and by batch id any staged row with a retired code.
+  It then adds `require_payout_batch_month()`: an INSERT without both is PT400, an UPDATE cannot
+  clear them, and committing a batch without them is PT409. A validated CHECK
+  (`rep_payout_batches_month_when_committed`) backs it up. It is deliberately not NOT NULL (below).
+- Tests: `tests/rls/import-parser.test.ts` (new), `tests/unit/residuals-parse.test.ts`
+  (rewritten; it drives real XLSX bytes through the same SheetJS build), and
+  `tests/unit/residuals-preview.test.ts`, `tests/unit/payouts.test.ts`,
+  `tests/unit/figure-comma.test.ts`, `tests/live/residual-import.test.ts` (upload half rewritten),
+  `e2e/qa/residual-bad-import.spec.ts`, `e2e/qa/residual-import-comma.spec.ts` and the new
+  `e2e/qa/residual-review.spec.ts`. Fixtures: `seedPayouts()` (processor and relative months on
+  its batches, TSYS on its lines, `unknown_mid` as its refusal), new `insertBatch()` /
+  `freeBatchMonth()`, e2e `freeBatchSlot()`, and `seed-dev-payouts.mjs`.
+
+Where the memo was silent or said otherwise, and what was chosen (the conservative side each time):
+- **Processor and month are required on new batches by trigger, not by `NOT NULL`.** Review and
+  abandoned batches from before have neither, and there is no honest value to give them. They
+  are left untouched: a legacy review batch can still be abandoned, but it cannot be read again
+  (parse returns 409) or committed (trigger, then CHECK).
+- **Missing, repeated or unknown header columns are a whole-file 400, not staged rows**, as
+  before (D-08: the upload page abandons the batch). There is no MID to stage a row against, and
+  Read again cannot fix the shape. A column given twice is refused rather than first-wins. The
+  column order is not enforced, because columns are matched by name.
+- **The CRM export is refused with its own sentence** (§2.6 Recommend, built): a file with
+  `Agent #` or `Rep payout` is rejected, and so is the old seven-column Agent # file.
+- **Every refusal is kept per row** (`blockers`), which the memo does not have, so "every unknown
+  MID listed" holds even when a row is also a repeat or has a wrong Income Type.
+- **`duplicate_mid` refuses every occurrence, the first included.** A blank Income Type is
+  wrong. The singular "Residual" is wrong. A blank Processor cell is a `processor_mismatch`.
+- **A MID's length is not checked** (the 11-12 digits is a description, not a rule); unknown_mid
+  catches a wrong one. MIDs that differ only by a leading zero are different MIDs.
+- **Warnings are computed on blocked rows too** (where their inputs exist). Notes go only on
+  unblocked rows.
+- **The share preview flags are kept, against §8.1's "three flags removed".** The commit is still
+  v2, and v2 still skips a row whose owner is the partner and still imports a row whose owner is
+  outside the pair as ordinary. Removing the flags now would hide what the commit is about to do
+  with money. They retire with v2 in phase 8, when signer = owner makes them impossible.
+  `looks_shared` is retired now, because it read the rep the file named. The CHECK still allows
+  it for rows staged before.
+- **`payee_changed`** compares last month's import lines (any processor, signer or unshared only,
+  never a partner's) with the current owner. A MID with no line last month gets no note. When a
+  row has several notes, the flag shows the first (share flags, then payee_changed, then
+  share_not_in_force) and the note text holds them all.
+- **The parser writes no split** (`rep_split_pct` null) and no average ticket or total cost. The
+  rate is the merchant's, written at commit in phase 8; until then the admin fills it as before.
+- **`agent_number_raw` is not written**, so v2's skip record carries `agent_number: null`.
+- **`mid_in_other_batch` counts any import line for the month** with another or NULL processor,
+  whichever batch (or none) wrote it.
+- **The upload page has no default month.** The admin chooses, because a wrong default would
+  file a month under the wrong period. The window is the trigger's: the function checks the
+  shape only and passes the trigger's own sentence back.
+- **The replace prompt has no Yes.** The function does not accept `replace_batch_id`.
+- **Confirmations are page state in this phase.** v2 reads no warnings; v3 takes the confirmed
+  types and enforces them. A No keeps the commit closed and says what to do.
+- **A confirmed negative volume still cannot be committed.** v2 does not set
+  `volume_confirmed_negative`, so the ledger's volume CHECK refuses the line, and the admin sees
+  the constraint's message. That path is phase 8's.
+
+Not done here, for later phases:
+- **Phase 8.** Re-resolve the owner at commit. v2 still pays the staged `agent_id`, so an owner
+  changed between Read and Commit is paid as staged. Also: take the confirmed types; set the
+  negative-volume marker; check the staged month against the batch's. **The fixtures' staged and
+  batch months differ today**: hermetic batches take relative months while their rows are
+  2026-06/07, and e2e rows are 2027-2028 while their batches take free in-window slots. Phase 8
+  must align them.
+- **Phase 9.** The replace (the prompt's Yes), and `paid` from Mark paid. The `paid: true` branch
+  of the upload's answer cannot be exercised yet, because nothing can write
+  `payout_period_closures`.
+- **Phase 11** changes the export header; `EXPORT_COLUMN_HEADERS` holds the old one until then.
+- **Cleanup**: drop `looks_shared` from the CHECK, and `skipped_rows` / `adjustment_rows_ignored`
+  UI.
+
+Found while building:
+- **The coalesce merge cannot be reached through the real upload any more.** A second file for a
+  committed processor-month is the replace prompt, and the same MID under another processor is
+  `mid_in_other_batch`. The live "merges a re-import" test became "a second file is the replace
+  prompt, and the figures stay"; the rule itself is still pinned in SQL
+  (`tests/rls/commit-residual-import*.test.ts`) until phase 8.
+- **The local database held 22 committed batches with no processor** (earlier e2e runs). The
+  migration refused them, as designed, and the local stack was rebuilt (`supabase db reset`).
+- Fixtures that seed a ledger line and re-import it must give both the same processor, since the
+  processor joined the merge key. `seedPayouts()` now tags its lines TSYS, and the two
+  duplicate-key tests copy the seeded line's processor.
 
 ---
 

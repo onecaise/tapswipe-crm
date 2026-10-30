@@ -99,36 +99,38 @@ describe("parseNumberCell — commas (residual import)", () => {
 });
 
 describe("parseResidualSheet — a misplaced comma blocks the row and names the cell", () => {
+  // The six-column processor file (phase 7 of docs/design/intake-and-reports.md).
+  // The two figures are Volume and Residual; the old Total cost column is gone,
+  // so the misplaced comma is put in the Residual.
   const HEADER = [
-    COLUMN_HEADERS.period,
-    COLUMN_HEADERS.agent_number,
+    COLUMN_HEADERS.processor,
     COLUMN_HEADERS.mid,
     COLUMN_HEADERS.merchant_name,
+    COLUMN_HEADERS.income_type,
     COLUMN_HEADERS.volume,
-    COLUMN_HEADERS.average_ticket,
-    COLUMN_HEADERS.total_cost,
+    COLUMN_HEADERS.residual_income,
   ];
 
-  it("blocks as bad_number with a cell-level reason", () => {
+  it("blocks as unreadable_number with a cell-level reason", () => {
     const result = parseResidualSheet([
       HEADER,
-      ["Jul-26", "4471", "MID-1", "Joe's Diner", "12,400.00", "62.00", "12,99"],
+      ["TSYS", "012345678901", "Joe's Diner", "Residuals", "12,400.00", "12,99"],
     ]);
     if (!result.ok) throw new Error("expected a parse");
     const [row] = result.rows;
-    expect(row.blockers).toContain("bad_number");
-    expect(row.total_cost).toBeNull();
+    expect(row.blockers).toEqual(["unreadable_number"]);
+    expect(row.residual_income).toBeNull();
     expect(row.volume).toBe(12400);
-    expect(row.number_problems).toEqual([`Total cost "12,99" ${MISPLACED_COMMA}.`]);
+    expect(row.messages.unreadable_number).toBe(`Residual "12,99" ${MISPLACED_COMMA}.`);
   });
 
-  it("has no number problems on a clean row", () => {
+  it("has no problems on a clean row", () => {
     const result = parseResidualSheet([
       HEADER,
-      ["Jul-26", "4471", "MID-1", "Joe's Diner", "12,400.00", "62.00", "$310.00"],
+      ["TSYS", "012345678901", "Joe's Diner", "Residuals", "12,400.00", "$310.00"],
     ]);
     if (!result.ok) throw new Error("expected a parse");
     expect(result.rows[0].blockers).toEqual([]);
-    expect(result.rows[0].number_problems).toEqual([]);
+    expect(result.rows[0].messages).toEqual({});
   });
 });

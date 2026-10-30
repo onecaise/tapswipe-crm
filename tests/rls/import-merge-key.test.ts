@@ -4,14 +4,15 @@ import {
   ADMIN_ID,
   AGENT_ID,
   AGENT_NUMBER,
-  OTHER_AGENT_ID,
-  PAYOUT_PERIOD,
-  PAYOUT_PERIOD_PRIOR,
   asPlatform,
   asUser,
   createTestDb,
+  insertBatch,
   migrationsBefore,
   migrationsThrough,
+  OTHER_AGENT_ID,
+  PAYOUT_PERIOD,
+  PAYOUT_PERIOD_PRIOR,
   readMigration,
   resetData,
   rows,
@@ -431,11 +432,7 @@ describe("an import never merges into an adjustment, and an adjustment never int
     staged: { agentId: string; agentNumber: string; mid: string; period: string; volume: string; residual?: string; split?: string }[],
   ): Promise<number> {
     await asPlatform(db);
-    const [{ id }] = await rows<{ id: number }>(
-      db,
-      `insert into rep_payout_batches (imported_by, file_key, file_name, status)
-       values ('${ADMIN_ID}', 'test/f.xlsx', 'f.xlsx', 'review') returning id`,
-    );
+    const id = await insertBatch(db, { fileName: "f.xlsx" });
     for (const [index, r] of staged.entries()) {
       await db.exec(`
         insert into rep_payout_import_rows
@@ -510,9 +507,12 @@ describe("an import never merges into an adjustment, and an adjustment never int
 
   it("still refuses a second IMPORT line on a key, naming the merge key", async () => {
     await asPlatform(db);
+    // The seeded line's own key, processor included (seeded lines carry one
+    // since 20261030140000).
     const error = await attempt(() =>
-      db.exec(`insert into rep_payout_rows (agent_id, period, mid)
-               values ('${AGENT_ID}', '${PAYOUT_PERIOD}', 'MID-AGENT-1')`),
+      db.exec(`insert into rep_payout_rows (agent_id, period, mid, processor)
+         select agent_id, period, mid, processor from rep_payout_rows
+          where agent_id = '${AGENT_ID}' and period = '${PAYOUT_PERIOD}' and mid = 'MID-AGENT-1'`),
     );
     expect(error?.code).toBe("23505");
     expect(error?.message).toContain("rep_payout_rows_import_merge_key");

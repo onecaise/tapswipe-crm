@@ -4,13 +4,15 @@ import { ArrowLeftIcon } from "lucide-react";
 
 import { requireAdmin } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
-import { formatDate, formatText } from "@/lib/format";
+import { EMPTY, formatDate, formatPeriod, formatText } from "@/lib/format";
 import {
   PAYOUT_BATCH_COLUMNS,
   batchStatusIntent,
+  importMonths,
   skipsOwed,
   type PayoutBatch,
 } from "@/lib/payouts";
+import { loadProcessors } from "@/lib/processors";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { ResidualUpload } from "@/components/residual-upload";
@@ -36,10 +38,13 @@ async function ImportBatches() {
   await requireAdmin();
 
   const supabase = await createClient();
-  const { data, error } = await supabase
-    .from("rep_payout_batches")
-    .select(PAYOUT_BATCH_COLUMNS)
-    .order("id", { ascending: false });
+  const [{ data, error }, processors] = await Promise.all([
+    supabase
+      .from("rep_payout_batches")
+      .select(PAYOUT_BATCH_COLUMNS)
+      .order("id", { ascending: false }),
+    loadProcessors(supabase),
+  ]);
 
   if (error) {
     return (
@@ -53,7 +58,9 @@ async function ImportBatches() {
 
   return (
     <div className="flex flex-col gap-6">
-      <ResidualUpload />
+      {/* The window is the database's rule (A11); this is the list the page
+          offers, read from the clock at request time. */}
+      <ResidualUpload processors={processors} months={importMonths(new Date())} />
 
       {batches.length === 0 ? (
         <p className="text-sm text-muted-foreground">
@@ -64,6 +71,8 @@ async function ImportBatches() {
           <TableHeader>
             <TableRow>
               <TableHead>File</TableHead>
+              <TableHead>Processor</TableHead>
+              <TableHead>Month</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Rows</TableHead>
               <TableHead>Uploaded</TableHead>
@@ -80,6 +89,10 @@ async function ImportBatches() {
                   >
                     {formatText(batch.file_name)}
                   </Link>
+                </TableCell>
+                <TableCell>{batch.processor ?? EMPTY}</TableCell>
+                <TableCell className="whitespace-nowrap">
+                  {formatPeriod(batch.period)}
                 </TableCell>
                 <TableCell>
                   <div className="flex items-center gap-2">
@@ -132,7 +145,7 @@ export default function ImportPage() {
 
       <PageHeader
         title="Import residuals"
-        subtitle="Nothing is added to the ledger until every row of a batch resolves, so an import can wait here while a rep is set up."
+        subtitle="One file per processor and month. Nothing is added to the ledger until every row of a batch is accepted, so an import can wait here while its merchants are set up."
       />
 
       <Suspense

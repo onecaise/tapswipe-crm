@@ -17,15 +17,18 @@
 //
 // SheetJS is imported here rather than in _shared/, for the reason
 // parse-residual-import gives: a _shared module with a dependency would need an
-// import map of its own. The column names come from _shared/residuals.ts, which is
-// what keeps the export re-importable by the parser that reads it.
+// import map of its own. The column names are EXPORT_COLUMN_HEADERS in
+// _shared/residuals.ts. Since phase 7 of docs/design/intake-and-reports.md the
+// export is NOT an import format: the parser reads the processor's six-column
+// file and refuses this one (it carries Agent # and Rep payout). The header
+// itself changes in phase 11; until then the round-trip notes below are history.
 
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
 import * as XLSX from "xlsx";
 
 import { callerIsActive, json } from "../_shared/admin-users.ts";
-import { COLUMN_HEADERS } from "../_shared/residuals.ts";
+import { EXPORT_COLUMN_HEADERS as COLUMN_HEADERS } from "../_shared/residuals.ts";
 
 /** PostgREST caps a response at [api] max_rows; read in pages under that. */
 const PAGE_SIZE = 500;

@@ -262,13 +262,15 @@ describe("it stays quiet about everything else", () => {
     // plus the shared-line guards). Batches, staging and history itself have
     // none — they carry no agent_id, so the cross-agent function would read
     // NULL and log every write, the same trap support_ticket_replies needed its
-    // own function to avoid. The two triggers elsewhere are not audit
-    // triggers: the batch status guard (20261016170000) and the import-month
-    // window (20261030120000), named here so a third cannot slip in under them.
+    // own function to avoid. The three triggers elsewhere are not audit
+    // triggers: the batch status guard (20261016170000), the import-month
+    // window (20261030120000) and the required processor and month
+    // (20261030140000), named here so a fourth cannot slip in under them.
     expect(
       result.filter((r) => r.tgrelid !== "rep_payout_rows"),
     ).toEqual([
       { tgrelid: "rep_payout_batches", tgname: "rep_payout_batches_period_window" },
+      { tgrelid: "rep_payout_batches", tgname: "rep_payout_batches_require_month" },
       { tgrelid: "rep_payout_batches", tgname: "rep_payout_batches_status_transition" },
     ]);
     expect(result.some((r) => r.tgrelid === "rep_payout_rows")).toBe(true);

@@ -5,16 +5,22 @@
 // profile, admin, and only then the service-role client.
 //
 // IDEMPOTENT ON PURPOSE. Re-parsing deletes the batch's existing staging rows
-// first, so "resolve an agent number, then parse again" is an ordinary action
-// rather than a duplicate import. That is the whole mechanism behind the review
-// screen's Resolve button: there is one code path into staging, and resolution
-// simply runs it again with one more rep in the database.
+// first, so "add the merchant, then Read again" is an ordinary action rather
+// than a duplicate import. That is the whole mechanism behind the review
+// screen's Read again button: there is one code path into staging, and a fix
+// simply runs it again with one more merchant in the database.
+//
+// THE FILE AND THE PAYEE (phase 7 of docs/design/intake-and-reports.md). The
+// file has six columns (Processor, Merchant Number, Merchant Name, Income Type,
+// Volume, Residual); the month and processor are the BATCH's, chosen at upload.
+// Each row's payee is the owner of the merchant its Merchant Number names.
+// Agent # is not read: profiles.agent_number is a display code only.
 //
 // SheetJS is imported here rather than in _shared/, because a _shared module with
 // a dependency would need an import map of its own. All the parsing JUDGEMENT is
 // in _shared/residuals.ts, which stays dependency-free and is unit-tested under
 // vitest without Deno; this file only turns bytes into rows of cells and does the
-// two database lookups the parser cannot.
+// database lookups the parser cannot.
 
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
@@ -31,14 +37,20 @@ import {
 } from "../_shared/residual-imports.ts";
 import {
   blockerMessage,
-  lookbackStart,
+  midsInOtherBatches,
+  monthsBefore,
+  orderBlockers,
   parseResidualSheet,
-  pickBlocker,
+  payeeChangedNote,
   previewSharedRow,
   previewUnsharedRow,
+  previousPayees,
+  rowWarnings,
   sharePreviewNote,
   unsharedPreviewNote,
-  type PaidLine,
+  type LastMonthLine,
+  type MerchantByMid,
+  type MonthLine,
   type PreviewLedgerLine,
   type PreviewShare,
   type ResidualBlocker,
@@ -46,6 +58,15 @@ import {
 
 /** PostgREST caps a response at [api] max_rows; read in pages under that. */
 const PAGE_SIZE = 500;
+
+/** PostgREST's `in` filter goes in the URL; keep each list well under its limit. */
+const IN_CHUNK = 200;
+
+function chunks<T>(items: readonly T[], size = IN_CHUNK): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
 
 export default {
   fetch: withSupabase({ auth: "user" }, async (req, ctx) => {
@@ -81,7 +102,7 @@ export default {
     // batch is indistinguishable from one that is not the caller's.
     const { data: batch, error: batchError } = await ctx.supabase
       .from("rep_payout_batches")
-      .select("id, file_key, status")
+      .select("id, file_key, status, processor, period")
       .eq("id", batchId)
       .maybeSingle();
 
@@ -102,6 +123,20 @@ export default {
         409,
       );
     }
+    if (batch.processor === null || batch.period === null) {
+      // A batch started before the upload page asked for them
+      // (20261030140000). Its month and processor are not in the file any
+      // more, so there is nothing to read it against.
+      return json(
+        {
+          error:
+            "This import was started before the processor and month were chosen at upload, so it cannot be read again. Abandon it and upload the file again.",
+        },
+        409,
+      );
+    }
+    const batchProcessor = batch.processor as string;
+    const batchPeriod = batch.period as string;
 
     // ---- Read the file -------------------------------------------------
     const { data: blob, error: downloadError } = await ctx.supabaseAdmin.storage
@@ -119,15 +154,10 @@ export default {
     }
 
     let sheet: unknown[][];
+    let formatted: unknown[][];
     try {
       const bytes = new Uint8Array(await blob.arrayBuffer());
-      const workbook = XLSX.read(bytes, {
-        type: "array",
-        // So a date-formatted Period cell arrives as a Date rather than a serial
-        // number. parsePeriodCell handles both, but a real Date needs no epoch
-        // arithmetic and cannot be wrong about Excel's 1900 leap-year fiction.
-        cellDates: true,
-      });
+      const workbook = XLSX.read(bytes, { type: "array" });
 
       const first = workbook.SheetNames[0];
       if (first === undefined) {
@@ -136,18 +166,26 @@ export default {
 
       // Only the first sheet. A residual report is one table; picking a sheet by
       // guessing would make which numbers got imported depend on tab order.
-      sheet = XLSX.utils.sheet_to_json(workbook.Sheets[first], {
+      const options = {
         // Arrays of cells rather than objects keyed by header, so
         // _shared/residuals.ts owns the header mapping and can report exactly
         // which column is missing.
-        header: 1,
-        // Cells as their underlying values, not their display strings: a number
-        // stays a number and a date stays a Date.
-        raw: true,
+        header: 1 as const,
         // A gap inside a sheet must not shift every row number after it, which is
         // what an admin counts when told "row 22".
         defval: null,
         blankrows: true,
+      };
+      // Twice: the values (a number stays a number, for the figures) and the
+      // displayed text, which is the only place a stored-as-number Merchant
+      // Number keeps its leading zeros (parseMidCell).
+      sheet = XLSX.utils.sheet_to_json(workbook.Sheets[first], {
+        ...options,
+        raw: true,
+      }) as unknown[][];
+      formatted = XLSX.utils.sheet_to_json(workbook.Sheets[first], {
+        ...options,
+        raw: false,
       }) as unknown[][];
     } catch (error) {
       // A .csv renamed to .xlsx, a corrupt upload, a password-protected workbook.
@@ -162,90 +200,120 @@ export default {
       );
     }
 
-    const parsed = parseResidualSheet(sheet);
+    const parsed = parseResidualSheet(sheet, formatted);
     if (!parsed.ok) {
       return json({ error: parsed.error }, 400);
     }
 
-    // ---- Resolve agent numbers and MIDs --------------------------------
+    // ---- The lookups ---------------------------------------------------
     //
     // Through the ADMIN client, and this is the one place in the module that
     // reaches for it before authorization is "complete" in the usual sense.
     // Justified narrowly: the caller is already a verified active admin, checked
-    // above through the caller-scoped client, and an admin may read every profiles
-    // and merchants row anyway. So the admin client buys only the ability to
-    // resolve in two queries instead of forty round trips. It must not be used to
-    // DECIDE anything, and it is not — nothing below branches on privilege.
-    const agentNumbers = [
-      ...new Set(
-        parsed.rows
-          .map((row) => row.agent_number_raw)
-          .filter((value): value is string => value !== null),
-      ),
-    ];
+    // above through the caller-scoped client, and an admin may read every
+    // merchants, ledger, share and profiles row anyway. So the admin client buys
+    // only fewer round trips. It must not be used to DECIDE anything, and it is
+    // not -- nothing below branches on privilege.
     const mids = [
       ...new Set(
         parsed.rows
+          .filter((row) => !row.blockers.includes("missing_mid"))
           .map((row) => row.mid_raw)
           .filter((value): value is string => value !== null),
       ),
     ];
 
-    const reps = new Map<string, string>();
-    if (agentNumbers.length > 0) {
-      const { data, error } = await ctx.supabaseAdmin
-        .from("profiles")
-        .select("id, agent_number")
-        .in("agent_number", agentNumbers);
-
-      if (error) {
-        return json(
-          { error: `Could not look up agent numbers: ${error.message}` },
-          500,
-        );
-      }
-      for (const profile of data ?? []) {
-        reps.set(profile.agent_number as string, profile.id as string);
-      }
-    }
-
-    const merchants = new Map<string, number>();
-    if (mids.length > 0) {
+    // The payee lookup: MID -> merchant -> owner (memo §2.1, "kept and
+    // widened").
+    const merchants = new Map<string, MerchantByMid>();
+    for (const part of chunks(mids)) {
       const { data, error } = await ctx.supabaseAdmin
         .from("merchants")
-        .select("id, mid")
-        .in("mid", mids);
-
+        .select("id, mid, agent_id, status, processor")
+        .in("mid", part);
       if (error) {
         return json({ error: `Could not look up MIDs: ${error.message}` }, 500);
       }
       for (const merchant of data ?? []) {
-        merchants.set(merchant.mid as string, merchant.id as number);
+        merchants.set(merchant.mid as string, {
+          id: merchant.id as number,
+          mid: merchant.mid as string,
+          agentId: merchant.agent_id as string,
+          status: (merchant.status as string | null) ?? null,
+          processor: (merchant.processor as string | null) ?? null,
+        });
       }
     }
+
+    // Import lines already in the ledger for the batch's month (for
+    // mid_in_other_batch) and for the month before (for payee_changed), in
+    // pages: a large file can pass PostgREST's max_rows, and a truncated read
+    // would drop a refusal silently.
+    const readLines = async (period: string) => {
+      const lines: {
+        mid: string;
+        processor: string | null;
+        agent_id: string;
+        share_role: string | null;
+      }[] = [];
+      for (const part of chunks(mids)) {
+        for (let page = 0; ; page += 1) {
+          const { data, error } = await ctx.supabaseAdmin
+            .from("rep_payout_rows")
+            .select("mid, processor, agent_id, share_role")
+            .eq("line_kind", "import")
+            .eq("period", period)
+            .in("mid", part)
+            .order("id", { ascending: true })
+            .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
+          if (error) return { error: error.message, lines };
+          lines.push(...((data ?? []) as typeof lines));
+          if ((data ?? []).length < PAGE_SIZE) break;
+        }
+      }
+      return { error: null, lines };
+    };
+
+    const thisMonth = await readLines(batchPeriod);
+    if (thisMonth.error !== null) {
+      return json({ error: `Could not read the ledger: ${thisMonth.error}` }, 500);
+    }
+    const otherBatchMids = midsInOtherBatches(
+      thisMonth.lines.map((line): MonthLine => ({
+        mid: line.mid,
+        processor: line.processor,
+      })),
+      batchProcessor,
+    );
+
+    const lastMonth = await readLines(monthsBefore(batchPeriod, 1));
+    if (lastMonth.error !== null) {
+      return json({ error: `Could not read the ledger: ${lastMonth.error}` }, 500);
+    }
+    const lastMonthLines: LastMonthLine[] = lastMonth.lines.map((line) => ({
+      mid: line.mid,
+      agentId: line.agent_id,
+      shareRole: line.share_role,
+    }));
 
     // ---- Shared-account preview flags (phase 4b) ------------------------
     //
     // What commit_residual_import_v2 would do with each row about a shared
     // account: the rules are previewSharedRow() in _shared/residuals.ts, a
-    // mirror of v2's plan. Read with the admin client for the reason above --
-    // an active admin may read every share, ledger line and profile -- and,
-    // as above, nothing here DECIDES anything: a flag is advisory, never a
-    // blocker, and the commit recomputes it from the shares in force then.
+    // mirror of v2's plan. Advisory, never a blocker; the commit recomputes
+    // it from the shares in force then.
     const shares: PreviewShare[] = [];
     const ledger: PreviewLedgerLine[] = [];
-    const names = new Map<string, string>();
-
     const midOfMerchant = new Map<number, string>(
-      [...merchants].map(([mid, id]) => [id, mid]),
+      [...merchants.values()].map((merchant) => [merchant.id, merchant.mid]),
     );
-    if (midOfMerchant.size > 0) {
+    for (const part of chunks([...midOfMerchant.keys()])) {
       const { data, error } = await ctx.supabaseAdmin
         .from("merchant_rep_shares")
         .select(
           "id, merchant_id, primary_agent_id, secondary_agent_id, effective_from, effective_to",
         )
-        .in("merchant_id", [...midOfMerchant.keys()]);
+        .in("merchant_id", part);
 
       if (error) {
         return json(
@@ -266,21 +334,13 @@ export default {
     }
 
     if (shares.length > 0) {
-      const periods = [
-        ...new Set(
-          parsed.rows
-            .map((row) => row.period)
-            .filter((value): value is string => value !== null),
-        ),
-      ];
       const sharedMids = [...new Set(shares.map((share) => share.mid))];
-
-      if (periods.length > 0) {
+      for (const part of chunks(sharedMids)) {
         const { data, error } = await ctx.supabaseAdmin
           .from("rep_payout_rows")
           .select("period, mid, agent_id, rep_share_id, share_role, line_kind")
-          .in("mid", sharedMids)
-          .in("period", periods);
+          .in("mid", part)
+          .eq("period", batchPeriod);
 
         if (error) {
           return json(
@@ -301,76 +361,23 @@ export default {
       }
     }
 
-    // ---- "Looks shared" lookback (phase 5) ------------------------------
-    //
-    // Who else was paid on each of the file's MIDs in the six months before
-    // a row's month, or in it: committed IMPORT lines (an adjustment is a
-    // correction, not a payee), read in pages because a large file times
-    // seven months can pass PostgREST's max_rows, and a truncated lookback
-    // would drop a warning silently. Admin client, for the reason above.
-    const filePeriods = parsed.rows
-      .map((row) => row.period)
-      .filter((value): value is string => value !== null)
-      .sort();
-    const paid: PaidLine[] = [];
-    if (mids.length > 0 && filePeriods.length > 0) {
-      const from = lookbackStart(filePeriods[0]);
-      const to = filePeriods[filePeriods.length - 1];
-      for (let page = 0; ; page += 1) {
-        const { data, error } = await ctx.supabaseAdmin
-          .from("rep_payout_rows")
-          .select("period, mid, agent_id")
-          .eq("line_kind", "import")
-          .in("mid", mids)
-          .gte("period", from)
-          .lte("period", to)
-          .order("id", { ascending: true })
-          .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
-
-        if (error) {
-          return json(
-            { error: `Could not read the ledger: ${error.message}` },
-            500,
-          );
-        }
-        for (const line of data ?? []) {
-          paid.push({
-            period: line.period as string,
-            mid: line.mid as string,
-            agentId: line.agent_id as string,
-          });
-        }
-        if ((data ?? []).length < PAGE_SIZE) break;
-      }
-    }
-    // The file's own rows count too: the same MID under two Agent #s.
-    for (const row of parsed.rows) {
-      const fileAgent =
-        row.agent_number_raw === null
-          ? undefined
-          : reps.get(row.agent_number_raw);
-      if (
-        fileAgent !== undefined && row.period !== null && row.mid_raw !== null
-      ) {
-        paid.push({ period: row.period, mid: row.mid_raw, agentId: fileAgent });
-      }
-    }
-
+    // ---- Names, for the notes ------------------------------------------
+    const names = new Map<string, string>();
     const people = [
       ...new Set([
+        ...[...merchants.values()].map((merchant) => merchant.agentId),
         ...shares.flatMap((share) => [
           share.primaryAgentId,
           share.secondaryAgentId,
         ]),
-        ...reps.values(),
-        ...paid.map((line) => line.agentId),
+        ...lastMonthLines.map((line) => line.agentId),
       ]),
     ];
-    if (people.length > 0) {
+    for (const part of chunks(people)) {
       const { data, error } = await ctx.supabaseAdmin
         .from("profiles")
         .select("id, full_name")
-        .in("id", people);
+        .in("id", part);
 
       if (error) {
         return json(
@@ -384,89 +391,120 @@ export default {
     }
     const nameOf = (id: string) => names.get(id) ?? "an unknown rep";
 
+    // ---- The staged rows -----------------------------------------------
     const staged = parsed.rows.map((row) => {
-      const agentId =
-        row.agent_number_raw === null
+      const merchant =
+        row.mid_raw === null || row.blockers.includes("missing_mid")
           ? null
-          : (reps.get(row.agent_number_raw) ?? null);
+          : (merchants.get(row.mid_raw) ?? null);
 
-      // unknown_agent joins the parser's findings and pickBlocker applies the
-      // documented precedence, rather than this file deciding it wins or loses
-      // against a bad figure.
-      const candidates: (ResidualBlocker | null)[] = [...row.blockers];
-      if (row.agent_number_raw === null || agentId === null) {
-        candidates.push("unknown_agent");
+      const codes: ResidualBlocker[] = [...row.blockers];
+      const messages = { ...row.messages };
+      if (!row.blockers.includes("missing_mid") && row.mid_raw !== null) {
+        if (merchant === null) {
+          codes.push("unknown_mid");
+          messages.unknown_mid = blockerMessage("unknown_mid", { mid: row.mid_raw });
+        }
+        if (otherBatchMids.has(row.mid_raw)) {
+          codes.push("mid_in_other_batch");
+          messages.mid_in_other_batch = blockerMessage("mid_in_other_batch", {
+            mid: row.mid_raw,
+            period: batchPeriod,
+          });
+        }
       }
+      const blockers = orderBlockers(codes);
+      const blocker = blockers[0] ?? null;
 
-      const blocker = pickBlocker(candidates);
+      const warnings = rowWarnings({
+        fileProcessor: row.processor_raw,
+        batchProcessor,
+        merchant,
+        volume: row.volume,
+        residual: row.residual_income,
+      });
 
+      // Notes: shared-account flags first (they predict a skip), then a
+      // changed payee (A10), then a share that does not cover the month. One
+      // flag per row, by that precedence; every applicable sentence in the note.
       const previewRow = {
-        period: row.period,
-        agentId,
+        period: batchPeriod,
+        agentId: merchant?.agentId ?? null,
         mid: row.mid_raw,
         blocked: blocker !== null,
       };
+      const notes: { flag: string; note: string }[] = [];
+      const ownerName = merchant ? nameOf(merchant.agentId) : "";
       const preview = previewSharedRow(previewRow, shares, ledger);
-      // Only where no share covers the month: one flag per row, in the
-      // precedence _shared/residuals.ts documents.
-      const unshared = preview === null
-        ? previewUnsharedRow(previewRow, shares, paid)
-        : null;
+      if (preview !== null) {
+        notes.push({
+          flag: preview.flag,
+          note: sharePreviewNote(preview, {
+            mid: row.mid_raw ?? "",
+            period: batchPeriod,
+            signerName: nameOf(preview.share.primaryAgentId),
+            partnerName: nameOf(preview.share.secondaryAgentId),
+            ownerName,
+          }),
+        });
+      }
+      if (blocker === null && merchant !== null && row.mid_raw !== null) {
+        const before = previousPayees(lastMonthLines, row.mid_raw, merchant.agentId);
+        if (before !== null) {
+          notes.push({
+            flag: "payee_changed",
+            note: payeeChangedNote({
+              mid: row.mid_raw,
+              period: batchPeriod,
+              previousNames: before.map(nameOf),
+              ownerName,
+            }),
+          });
+        }
+      }
+      const unshared = preview === null ? previewUnsharedRow(previewRow, shares) : null;
+      if (unshared !== null) {
+        notes.push({
+          flag: unshared.flag,
+          note: unsharedPreviewNote(unshared, {
+            mid: row.mid_raw ?? "",
+            period: batchPeriod,
+            ownerName,
+            nameOf,
+          }),
+        });
+      }
 
       return {
         batch_id: batchId,
         row_number: row.row_number,
-        period_raw: row.period_raw,
-        agent_number_raw: row.agent_number_raw,
+        processor_raw: row.processor_raw,
         mid_raw: row.mid_raw,
         merchant_name_raw: row.merchant_name_raw,
+        income_type_raw: row.income_type_raw,
         volume_raw: row.volume_raw,
-        average_ticket_raw: row.average_ticket_raw,
-        total_cost_raw: row.total_cost_raw,
         residual_income_raw: row.residual_income_raw,
-        rep_split_raw: row.rep_split_raw,
-        period: row.period,
-        agent_id: agentId,
-        merchant_id:
-          row.mid_raw === null ? null : (merchants.get(row.mid_raw) ?? null),
+        // The month is the batch's: the file has no Period column.
+        period: batchPeriod,
+        agent_id: merchant?.agentId ?? null,
+        merchant_id: merchant?.id ?? null,
         volume: row.volume,
-        average_ticket: row.average_ticket,
-        total_cost: row.total_cost,
         residual_income: row.residual_income,
-        rep_split_pct: row.rep_split_pct,
+        // Not read from the file, and not decided here: the rate is the
+        // merchant's, written at commit (phase 8, memo §0b.4).
+        rep_split_pct: null,
         blocker,
-        preview_flag: preview?.flag ?? unshared?.flag ?? null,
-        preview_note: agentId === null
-          ? null
-          : preview !== null
-          ? sharePreviewNote(preview, {
-            mid: row.mid_raw ?? "",
-            period: row.period ?? "",
-            signerName: nameOf(preview.share.primaryAgentId),
-            partnerName: nameOf(preview.share.secondaryAgentId),
-            fileRepName: nameOf(agentId),
-          })
-          : unshared !== null
-          ? unsharedPreviewNote(unshared, {
-            mid: row.mid_raw ?? "",
-            period: row.period ?? "",
-            fileRepName: nameOf(agentId),
-            hasMerchant: row.mid_raw !== null && merchants.has(row.mid_raw),
-            nameOf,
-          })
-          : null,
-        // A misplaced comma names its cell (D-10), so the admin is not left
-        // hunting across five figures for the one that was refused.
+        blockers,
+        warnings,
+        preview_flag: notes[0]?.flag ?? null,
+        preview_note: notes.length > 0 ? notes.map((n) => n.note).join(" ") : null,
         error:
           blocker === null
             ? null
-            : blocker === "bad_number" && row.number_problems.length > 0
-              ? row.number_problems.join(" ")
-              : blockerMessage(blocker, {
-                agentNumber: row.agent_number_raw ?? "",
-                mid: row.mid_raw ?? "",
-                period: row.period_raw ?? "",
-              }),
+            : blockers
+              .map((code) => messages[code])
+              .filter((text): text is string => Boolean(text))
+              .join(" "),
       };
     });
 
@@ -497,13 +535,16 @@ export default {
     const blockedCount = staged.filter((row) => row.blocker !== null).length;
     const flaggedCount = staged.filter((row) => row.preview_flag !== null)
       .length;
+    const warningCounts: Record<string, number> = {};
+    for (const row of staged) {
+      for (const warning of row.warnings) {
+        warningCounts[warning] = (warningCounts[warning] ?? 0) + 1;
+      }
+    }
 
     const { error: countError } = await ctx.supabaseAdmin
       .from("rep_payout_batches")
-      .update({
-        row_count: staged.length,
-        adjustment_rows_ignored: parsed.adjustments_ignored,
-      })
+      .update({ row_count: staged.length, adjustment_rows_ignored: 0 })
       .eq("id", batchId);
 
     if (countError) {
@@ -513,15 +554,15 @@ export default {
       );
     }
 
-    // Counts only. The review screen reads the staging rows itself — it holds
-    // SELECT on them — so shaping the whole review payload here would be a second
+    // Counts only. The review screen reads the staging rows itself -- it holds
+    // SELECT on them -- so shaping the whole review payload here would be a second
     // copy of that grouping to keep in step with the first.
     return json({
       batch_id: batchId,
       row_count: staged.length,
       blocked_count: blockedCount,
       flagged_count: flaggedCount,
-      adjustments_ignored: parsed.adjustments_ignored,
+      warning_counts: warningCounts,
     });
   }),
 };
@@ -537,9 +578,10 @@ export default {
     --data '{"batch_id":1}'
 
   Expected: 200 with { batch_id, row_count, blocked_count, flagged_count,
-            adjustments_ignored }
-            400 if the file is unreadable or a required column is missing
+            warning_counts }
+            400 if the file is unreadable, a required column is missing or
+                repeated, or it is a CRM export
             404 if the batch does not exist, or has no uploaded file
-            409 if the batch is already committed or abandoned
+            409 if the batch is not in review, or has no processor and month
             403 if the caller is not an active admin
 */

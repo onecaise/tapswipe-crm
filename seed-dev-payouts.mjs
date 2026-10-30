@@ -1,7 +1,9 @@
 // Throwaway local-dev bootstrap for the payouts module. Local stack only.
-// Adds agent numbers, a committed period of ledger rows, and one review batch
-// left blocked on an unknown agent number — so all four /payouts pages have
-// something on them.
+// Adds agent numbers (a display code), a committed period of ledger rows, and
+// one review batch in the six-column processor format (phase 7 of
+// docs/design/intake-and-reports.md), refused for unknown MIDs and a wrong
+// Income Type and carrying a processor-mismatch warning -- so all four
+// /payouts pages have something on them.
 import { execSync } from "node:child_process";
 import { createClient } from "@supabase/supabase-js";
 import * as XLSX from "xlsx";
@@ -48,7 +50,17 @@ console.log(
   (merchants ?? []).map((m) => `${m.mid}=${m.dba}`).join(", "),
 );
 
-const { data: batch } = await db
+// Batches carry a processor and month (required since 20261030140000), inside
+// the import window: last month for the committed one, this month for the one
+// in review. The ledger lines keep the fixed months the pages are read at.
+const monthsBack = (n) => {
+  const now = new Date();
+  const index = now.getUTCFullYear() * 12 + now.getUTCMonth() - n;
+  const year = Math.floor(index / 12);
+  return `${year}-${String(index - year * 12 + 1).padStart(2, "0")}-01`;
+};
+
+const { data: batch, error: batchError } = await db
   .from("rep_payout_batches")
   .insert({
     imported_by: adminId,
@@ -57,9 +69,12 @@ const { data: batch } = await db
     status: "committed",
     row_count: 4,
     committed_at: new Date().toISOString(),
+    processor: "TSYS",
+    period: monthsBack(1),
   })
   .select("id")
   .single();
+if (batchError) throw new Error(`batch: ${batchError.message}`);
 
 // Two periods, and one row deliberately left without figures so the "awaiting
 // figures" states have something to show.
@@ -80,6 +95,7 @@ for (const period of periods) {
       residual_income: filled ? 60 + index * 14.5 : null,
       rep_split_pct: filled ? 60 : null,
       batch_id: batch.id,
+      processor: "TSYS",
     });
   }
 }
@@ -96,13 +112,14 @@ ledger.push({
   residual_income: -18.5,
   rep_split_pct: 60,
   batch_id: batch.id,
+  processor: "TSYS",
 });
 
 const { error: ledgerError } = await db.from("rep_payout_rows").insert(ledger);
 if (ledgerError) throw new Error(`ledger: ${ledgerError.message}`);
 console.log(`ledger rows: ${ledger.length} across ${periods.length} periods`);
 
-// A review batch, uploaded and parsed for real so it is blocked the way a real
+// A review batch, uploaded and parsed for real so it is refused the way a real
 // one would be.
 const anon = createClient(API, ANON, {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -128,25 +145,21 @@ const call = async (name, body) => {
 };
 
 const minted = await call("residual-import-file-url", {
-  file_name: "August 2026 residuals.xlsx",
+  file_name: "TSYS residuals.xlsx",
+  processor: "TSYS",
+  period: monthsBack(0),
 });
-if (minted.status !== 200) throw new Error(JSON.stringify(minted.body));
+if (minted.status !== 200 || !minted.body.batch_id) {
+  throw new Error(JSON.stringify(minted.body));
+}
 
 const rows = [
-  [
-    "Period",
-    "Agent #",
-    "MID",
-    "Merchant name",
-    "Volume",
-    "Average ticket",
-    "Total cost",
-  ],
-  ["Aug-26", "4471", merchants?.[0]?.mid ?? "MID-1", merchants?.[0]?.dba ?? "A Co", "14,200.00", "58.00", "$355.00"],
-  ["Aug-26", "4471", "MID-NEWSHOP", "New Shop LLC", 6100, 33, 152],
-  ["Aug-26", "7788", "MID-STRANGER", "Bayside Auto", 2300, 18, 61],
-  ["Aug-26", "7788", "MID-STRANGER-2", "Bayside Tyres", 1900, 22, 47],
-  ["Q3 2026", "4471", "MID-ODD", "Odd Period Co", 100, 5, 3],
+  ["Processor", "Merchant Number", "Merchant Name", "Income Type", "Volume", "Residual"],
+  ["TSYS", merchants?.[0]?.mid ?? "000000000001", merchants?.[0]?.dba ?? "A Co", "Residuals", "$14,200.00", "$355.00"],
+  ["Netevia HQ", merchants?.[1]?.mid ?? "000000000002", merchants?.[1]?.dba ?? "B Co", "Residuals", "$6,100.00", "$152.00"],
+  ["TSYS", "440012345678", "Bayside Auto", "Residuals", "$2,300.00", "$61.00"],
+  ["TSYS", "440012345679", "Bayside Tyres", "Residuals", "$1,900.00", "-$11.76"],
+  ["TSYS", merchants?.[2]?.mid ?? "000000000003", "Odd Co", "Fees", "$100.00", "$3.00"],
 ];
 const buffer = XLSX.write(
   (() => {

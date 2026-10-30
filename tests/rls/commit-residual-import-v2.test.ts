@@ -1,17 +1,19 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  FIXTURE_BATCH_PROCESSOR,
   ADMIN_ID,
   AGENT_ID,
   AGENT_NUMBER,
+  asPlatform,
+  asUser,
+  createTestDb,
+  insertBatch,
+  migrationsBefore,
   OTHER_AGENT_ID,
   OTHER_AGENT_NUMBER,
   PAYOUT_PERIOD,
   PAYOUT_PERIOD_PRIOR,
-  asPlatform,
-  asUser,
-  createTestDb,
-  migrationsBefore,
   resetData,
   rows,
   seedPayouts,
@@ -88,12 +90,7 @@ async function addReps(db: TestDb): Promise<void> {
 /** A new review batch holding `staged`, sheet rows numbered from 2. */
 async function stage(db: TestDb, staged: StagedRow[]): Promise<number> {
   await asPlatform(db);
-  const [{ id }] = await rows<{ id: number }>(
-    db,
-    `insert into rep_payout_batches (imported_by, file_key, file_name, status)
-     values ('${ADMIN_ID}', 'test/file.xlsx', 'file.xlsx', 'review')
-     returning id`,
-  );
+  const id = await insertBatch(db);
   const values = staged.map((r, index) => {
     const num = (v: string | null | undefined) => (v == null ? "null" : v);
     return `(${id}, ${index + 2}, '${r.agentNumber}', '${r.mid}',
@@ -355,13 +352,19 @@ describe.each([
       ),
     ).toEqual(before);
 
-    // ...and the import-schema columns set aside above hide nothing: these
-    // batches carry no processor, so every one of them is empty.
+    // ...and the import-schema columns set aside above hide nothing. Since
+    // 20261030140000 every batch must carry a processor and month, so they are
+    // not empty any more; they are UNIFORM: one processor on every batch and
+    // every line (seeded lines included), a month on every batch, and no
+    // replace. A uniform column cannot make two runs differ.
     for (const batch of v2.batches) {
-      for (const key of IMPORT_SCHEMA_BATCH_KEYS) expect(batch[key], key).toBeNull();
+      expect(batch.processor).toBe(FIXTURE_BATCH_PROCESSOR);
+      expect(batch.period).not.toBeNull();
+      expect(batch.replaces_batch_id).toBeNull();
+      expect(batch.replaced_by_batch_id).toBeNull();
     }
     for (const line of v2.ledger) {
-      expect(line.processor).toBeNull();
+      expect(line.processor).toBe(FIXTURE_BATCH_PROCESSOR);
       expect(line.volume_confirmed_negative).toBe(false);
     }
 

@@ -3,12 +3,13 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
   ADMIN_ID,
   AGENT_ID,
-  OTHER_AGENT_ID,
   asPlatform,
   asUser,
   createTestDb,
+  insertBatch,
   migrationsBefore,
   migrationsThrough,
+  OTHER_AGENT_ID,
   readMigration,
   rows,
   seed,
@@ -184,12 +185,9 @@ describe("the same batches give the same results before and after", () => {
     await db.exec(`
       update profiles set agent_number = '4471' where id = '${AGENT_ID}';
       update profiles set agent_number = '9902' where id = '${OTHER_AGENT_ID}';
-      insert into rep_payout_batches (imported_by, file_key, file_name, status)
-      values ('${ADMIN_ID}', 'g/a.xlsx', 'a.xlsx', 'review'),
-             ('${ADMIN_ID}', 'g/b.xlsx', 'b.xlsx', 'review');
     `);
-    const batches = await rows<{ id: number }>(db, `select id from rep_payout_batches order by id`);
-    const [a, b] = batches.map((batch) => batch.id);
+    const a = await insertBatch(db, { fileName: "a.xlsx" });
+    const b = await insertBatch(db, { fileName: "b.xlsx" });
 
     const staged = (batch: number, rowsSql: string) => `
       insert into rep_payout_import_rows

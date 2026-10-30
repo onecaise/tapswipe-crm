@@ -4,12 +4,13 @@ import {
   ADMIN_ID,
   AGENT_ID,
   AGENT_NUMBER,
-  OTHER_AGENT_ID,
-  PAYOUT_PERIOD,
   asPlatform,
   asUser,
   createTestDb,
+  insertBatch,
   migrationsBefore,
+  OTHER_AGENT_ID,
+  PAYOUT_PERIOD,
   resetData,
   rows,
   seedPayouts,
@@ -64,12 +65,7 @@ async function shareMerchant(target: TestDb): Promise<void> {
  */
 async function stageSignerRow(target: TestDb): Promise<number> {
   await asPlatform(target);
-  const [{ id }] = await rows<{ id: number }>(
-    target,
-    `insert into rep_payout_batches (imported_by, file_key, file_name, status)
-     values ('${ADMIN_ID}', 'test/file.xlsx', 'file.xlsx', 'review')
-     returning id`,
-  );
+  const id = await insertBatch(target);
   await target.exec(`
     insert into rep_payout_import_rows
       (batch_id, row_number, agent_number_raw, mid_raw, merchant_name_raw,
@@ -566,11 +562,7 @@ describe("an admin decides who owns a merchant", () => {
       `update merchants set agent_id = '${OTHER_AGENT_ID}' where mid = 'MID-AGENT-1'`,
     );
     await asPlatform(db);
-    const [{ id: batch }] = await rows<{ id: number }>(
-      db,
-      `insert into rep_payout_batches (imported_by, file_key, file_name, status)
-       values ('${ADMIN_ID}', 'test/owner.xlsx', 'owner.xlsx', 'review') returning id`,
-    );
+    const batch = await insertBatch(db, { fileName: "owner.xlsx" });
     await db.exec(`
       insert into rep_payout_import_rows
         (batch_id, row_number, agent_number_raw, mid_raw, merchant_name_raw,
