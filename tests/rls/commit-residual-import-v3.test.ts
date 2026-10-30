@@ -488,105 +488,133 @@ const RESIDUALS = ["100.00", "0.01", "0.03", "0.05", "1.01", "33.33", "99.99", "
 const cents = (v: string) => Math.round(Number(v) * 100);
 const money = (c: number) => (c / 100).toFixed(2);
 
+const RATES = [0, 30, 45, 50];
+const SPLITS: [number, number][] = [
+  [25, 25], [40, 10], [0.01, 49.99], // rate 50
+  [15, 15], [20, 10], [29.99, 0.01], // rate 30
+  [22.5, 22.5], [33.33, 11.67], // rate 45
+];
+
+/**
+ * The unshared grid: a merchant per (rate, residual), one batch, committed.
+ * Returns every way the lines differ from the merchant's rate -- empty when
+ * the money is right. A function, not a test body, so the mutation proofs
+ * below can run the same grid against a broken copy of v3 and watch it fail.
+ */
+async function unsharedGrid(target: TestDb): Promise<string[]> {
+  const staged: Staged[] = [];
+  for (const rate of RATES) {
+    for (const [i, residual] of RESIDUALS.entries()) {
+      const mid = `U-${rate}-${i}`;
+      await merchant(target, mid, { rate });
+      staged.push({ mid, volume: "100000.00", residual });
+    }
+  }
+  const { id } = await batchWith(target, staged);
+  await commit(target, id);
+
+  const lines = await rows<{ mid: string; rate: string; residual: string; payout: string; volume: string; share_role: string | null }>(
+    target,
+    `select mid, rep_split_pct::text as rate, residual_income::text as residual,
+            rep_payout::text as payout, volume::text as volume, share_role
+       from rep_payout_rows where batch_id = ${id}`,
+  );
+  const wrong: string[] = [];
+  for (const { mid } of staged) {
+    const line = lines.find((l) => l.mid === mid);
+    if (!line) {
+      wrong.push(`${mid}: no line`);
+      continue;
+    }
+    const [, rate, i] = mid.split("-");
+    const r = cents(RESIDUALS[Number(i)]);
+    // The company keeps the rest; at rate 0, all of it (payout 0.00).
+    const want = { rate: Number(rate).toFixed(2), residual: money(r), payout: money(rateOf(r, Number(rate) * 100)), volume: "100000.00", share_role: null };
+    const got = { rate: line.rate, residual: line.residual, payout: line.payout, volume: line.volume, share_role: line.share_role };
+    if (JSON.stringify(got) !== JSON.stringify(want)) wrong.push(`${mid}: ${JSON.stringify(got)} != ${JSON.stringify(want)}`);
+  }
+  if (lines.length !== staged.length) wrong.push(`${lines.length} lines for ${staged.length} rows`);
+  return wrong;
+}
+
+/**
+ * The shared grid: SPLITS x RESIDUALS, each a merchant at the split's total
+ * rate with a share covering the month. Returns every way a pair differs
+ * from the cent rule, and how many exact half-cent ties the grid held (so the
+ * tie rule is known to be exercised).
+ */
+async function sharedGrid(target: TestDb): Promise<{ wrong: string[]; ties: number; result: Record<string, number> }> {
+  const staged: Staged[] = [];
+  const { period } = await batchWith(target, []); // to learn the month the next batch takes
+  await asPlatform(target);
+  await target.exec(`delete from rep_payout_batches`);
+  for (const [k, [a, b]] of SPLITS.entries()) {
+    for (const [i, residual] of RESIDUALS.entries()) {
+      const mid = `S-${k}-${i}`;
+      const m = await merchant(target, mid, { rate: a + b });
+      await share(target, m, AGENT_ID, OTHER_AGENT_ID, a, b, period);
+      staged.push({ mid, volume: "100000.00", residual });
+    }
+  }
+  const batch = await batchWith(target, staged, { period });
+  const result = await commit(target, batch.id);
+
+  type Line = { mid: string; agent_id: string; share_role: string; rate: string; residual: string; account: string; payout: string; volume: string | null };
+  const lines = await rows<Line>(
+    target,
+    `select mid, agent_id, share_role, rep_split_pct::text as rate, residual_income::text as residual,
+            account_residual_income::text as account, rep_payout::text as payout,
+            volume::text as volume
+       from rep_payout_rows where batch_id = ${batch.id}`,
+  );
+  const wrong: string[] = [];
+  let ties = 0;
+  const differs = (mid: string, got: object, want: object) => {
+    const picked = Object.fromEntries(Object.keys(want).map((key) => [key, (got as Record<string, unknown>)[key]]));
+    if (JSON.stringify(picked) !== JSON.stringify(want)) wrong.push(`${mid}: ${JSON.stringify(picked)} != ${JSON.stringify(want)}`);
+  };
+  for (const [k, [a, b]] of SPLITS.entries()) {
+    const s = Math.round((a + b) * 100);
+    for (const [i, residual] of RESIDUALS.entries()) {
+      const mid = `S-${k}-${i}`;
+      const signer = lines.find((l) => l.mid === mid && l.share_role === "primary");
+      const partner = lines.find((l) => l.mid === mid && l.share_role === "secondary");
+      if (!signer || !partner) {
+        wrong.push(`${mid}: missing a line of the pair`);
+        continue;
+      }
+      const r = cents(residual);
+      const t = rateOf(r, s);
+      const p = part(t, Math.round(b * 100), s);
+      const rp = part(r, Math.round(b * 100), s);
+      differs(mid, signer, { agent_id: AGENT_ID, rate: (s / 100).toFixed(2), account: money(r), payout: money(t - p), residual: money(r - rp), volume: "100000.00" });
+      differs(mid, partner, { agent_id: OTHER_AGENT_ID, rate: (s / 100).toFixed(2), account: money(r), payout: money(p), residual: money(rp), volume: null });
+      // The pair is exactly T, so the company's R - T never moves.
+      if (cents(signer.payout) + cents(partner.payout) !== t) wrong.push(`${mid}: pair is not T`);
+      if (cents(signer.residual) + cents(partner.residual) !== r) wrong.push(`${mid}: pieces are not R`);
+      // Odd-in-R: neither side takes the opposite sign to the account.
+      if (Math.sign(cents(signer.payout)) * Math.sign(t) === -1) wrong.push(`${mid}: signer's sign`);
+      if (Math.sign(cents(partner.payout)) * Math.sign(t) === -1) wrong.push(`${mid}: partner's sign`);
+      // An exact half-cent tie on the partner's piece: the signer absorbs it.
+      if ((2 * Math.abs(t) * Math.round(b * 100)) % (2 * s) === s) ties += 1;
+    }
+  }
+  if (lines.length !== staged.length * 2) wrong.push(`${lines.length} lines for ${staged.length} shared rows`);
+  return { wrong, ties, result };
+}
+
 describe("the money: the merchant's rate, the company the rest, the cent rule on a shared account", () => {
   it("pays every unshared line at its merchant's rate -- 0, 30, 45 and 50 -- across odd cents", async () => {
-    const RATES = [0, 30, 45, 50];
-    const staged: Staged[] = [];
-    for (const rate of RATES) {
-      for (const [i, residual] of RESIDUALS.entries()) {
-        const mid = `U-${rate}-${i}`;
-        await merchant(db, mid, { rate });
-        staged.push({ mid, volume: "100000.00", residual });
-      }
-    }
-    const { id } = await batchWith(db, staged);
-    expect((await commit(db, id)).written).toBe(staged.length);
-
-    const lines = await rows<{ mid: string; rate: string; residual: string; payout: string; volume: string; share_role: string | null }>(
-      db,
-      `select mid, rep_split_pct::text as rate, residual_income::text as residual,
-              rep_payout::text as payout, volume::text as volume, share_role
-         from rep_payout_rows where batch_id = ${id}`,
-    );
-    expect(lines).toHaveLength(staged.length);
-    for (const line of lines) {
-      const [, rate, i] = line.mid.split("-");
-      const r = cents(RESIDUALS[Number(i)]);
-      const t = rateOf(r, Number(rate) * 100);
-      expect(line, line.mid).toMatchObject({
-        rate: `${Number(rate).toFixed(2)}`,
-        residual: money(r),
-        payout: money(t),
-        volume: "100000.00",
-        share_role: null,
-      });
-      // The company keeps the rest; at rate 0, all of it.
-      if (Number(rate) === 0) expect(line.payout).toBe("0.00");
-    }
+    expect(await unsharedGrid(db)).toEqual([]);
   });
 
   it("divides the merchant's rate between signer and partner by the cent rule, the pair summing to T", async () => {
-    const SPLITS: [number, number][] = [
-      [25, 25], [40, 10], [0.01, 49.99], // rate 50
-      [15, 15], [20, 10], [29.99, 0.01], // rate 30
-      [22.5, 22.5], [33.33, 11.67], // rate 45
-    ];
-    const staged: Staged[] = [];
-    const { period } = await batchWith(db, []); // to learn the month the next batch takes
-    await asPlatform(db);
-    await db.exec(`delete from rep_payout_batches`);
-    for (const [k, [a, b]] of SPLITS.entries()) {
-      for (const [i, residual] of RESIDUALS.entries()) {
-        const mid = `S-${k}-${i}`;
-        const m = await merchant(db, mid, { rate: a + b });
-        await share(db, m, AGENT_ID, OTHER_AGENT_ID, a, b, period);
-        staged.push({ mid, volume: "100000.00", residual });
-      }
-    }
-    const batch = await batchWith(db, staged, { period });
-    const result = await commit(db, batch.id);
-    expect(result).toEqual({
-      written: staged.length * 2,
-      rows: staged.length,
-      shared: staged.length,
-      overrides: 0,
-      replaced_lines: 0,
-    });
-
-    type Line = { mid: string; agent_id: string; share_role: string; rate: string; residual: string; account: string; payout: string; volume: string | null; a: string; b: string };
-    const lines = await rows<Line>(
-      db,
-      `select mid, agent_id, share_role, rep_split_pct::text as rate, residual_income::text as residual,
-              account_residual_income::text as account, rep_payout::text as payout,
-              volume::text as volume, primary_rep_pct::text as a, secondary_rep_pct::text as b
-         from rep_payout_rows where batch_id = ${batch.id}`,
-    );
-    let odd = 0;
-    for (const [k, [a, b]] of SPLITS.entries()) {
-      const s = Math.round((a + b) * 100);
-      for (const [i, residual] of RESIDUALS.entries()) {
-        const mid = `S-${k}-${i}`;
-        const signer = lines.find((l) => l.mid === mid && l.share_role === "primary")!;
-        const partner = lines.find((l) => l.mid === mid && l.share_role === "secondary")!;
-        const r = cents(residual);
-        const t = rateOf(r, s);
-        const p = part(t, Math.round(b * 100), s);
-        const rp = part(r, Math.round(b * 100), s);
-        expect(signer, mid).toMatchObject({ agent_id: AGENT_ID, rate: (s / 100).toFixed(2), account: money(r), payout: money(t - p), residual: money(r - rp), volume: "100000.00" });
-        expect(partner, mid).toMatchObject({ agent_id: OTHER_AGENT_ID, rate: (s / 100).toFixed(2), account: money(r), payout: money(p), residual: money(rp), volume: null });
-        // The pair is exactly T, so the company's R - T never moves.
-        expect(cents(signer.payout) + cents(partner.payout), mid).toBe(t);
-        expect(cents(signer.residual) + cents(partner.residual), mid).toBe(r);
-        // Odd-in-R: neither side takes the opposite sign to the account.
-        expect(Math.sign(cents(signer.payout)) * Math.sign(t)).not.toBe(-1);
-        expect(Math.sign(cents(partner.payout)) * Math.sign(t)).not.toBe(-1);
-        // An exact half-cent tie on the partner's piece: the signer absorbs it.
-        if ((2 * Math.abs(t) * Math.round(b * 100)) % (2 * s) === s) odd += 1;
-      }
-    }
-    expect(lines).toHaveLength(staged.length * 2);
+    const { wrong, ties, result } = await sharedGrid(db);
+    const shared = SPLITS.length * RESIDUALS.length;
+    expect(result).toEqual({ written: shared * 2, rows: shared, shared, overrides: 0, replaced_lines: 0 });
+    expect(wrong).toEqual([]);
     // The grid holds exact half-cent ties (25+25 on an odd T), so the tie rule is exercised.
-    expect(odd).toBeGreaterThan(0);
+    expect(ties).toBeGreaterThan(0);
   });
 });
 
@@ -1021,6 +1049,201 @@ describe("mutation proofs: each protection is what stops its case", () => {
       const error = await attempt(() => commit(db, id, ["bad_numbers"]));
       await asPlatform(db);
       expect(error?.message).toMatch(/rep_payout_rows_volume_check/);
+    });
+  });
+
+  // Step 0 of phase 9: every refusal above that had no proof of its own. Each
+  // case is first refused by the real v3 with its own sentence; with the one
+  // check removed, the same data is either committed or refused by something
+  // else (a later check or the ledger's own index) -- never by that sentence.
+  // So each refusal test above fails if its check is taken out.
+  const REFUSALS: {
+    label: string;
+    fragment: string;
+    replacement: string;
+    make: () => Promise<{ id: number; confirmed?: string[] }>;
+    refusal: RegExp;
+  }[] = [
+    {
+      label: "unknown confirmation code",
+      fragment: "if exists (select 1 from unnest(confirmed) as c(code)",
+      replacement: "if false and exists (select 1 from unnest(confirmed) as c(code)",
+      make: async () => ({ id: (await batchWith(db, [{ mid: "MID-AGENT-1" }])).id, confirmed: ["looks_shared"] }),
+      refusal: /^Only processor_mismatch, inactive_merchant and bad_numbers can be confirmed\.$/,
+    },
+    {
+      label: "status (an abandoned batch)",
+      fragment: "if batch.status <> 'review' then",
+      replacement: "if false then",
+      make: async () => {
+        const { id } = await batchWith(db, [{ mid: "MID-AGENT-1" }]);
+        await asPlatform(db);
+        await db.exec(`update rep_payout_batches set status = 'abandoned' where id = ${id}`);
+        return { id };
+      },
+      refusal: /^this import is already abandoned$/,
+    },
+    {
+      label: "processor-and-month check (a legacy batch)",
+      fragment: "if batch.processor is null or batch.period is null then",
+      replacement: "if false then",
+      make: async () => {
+        await asPlatform(db);
+        await db.exec(`set session_replication_role = replica`);
+        let id: number;
+        try {
+          [{ id }] = await rows<{ id: number }>(
+            db,
+            `insert into rep_payout_batches (imported_by, file_key, file_name, status)
+             values ('${ADMIN_ID}', 'old/f.xlsx', 'f.xlsx', 'review') returning id`,
+          );
+        } finally {
+          await db.exec(`set session_replication_role = origin`);
+        }
+        await db.exec(`insert into rep_payout_import_rows (batch_id, row_number, mid_raw, income_type_raw, processor_raw,
+                                                           period, agent_id, merchant_id, volume, residual_income)
+                       select ${id}, 2, mid, 'Residuals', 'TSYS', '2026-07-01', agent_id, id, 1000, 100
+                         from merchants where mid = 'MID-AGENT-1'`);
+        return { id };
+      },
+      refusal: /started before the processor and month were chosen at upload/,
+    },
+    {
+      label: "empty-batch check",
+      fragment: "if staged = 0 then",
+      replacement: "if false then",
+      make: async () => ({ id: (await batchWith(db, [])).id }),
+      refusal: /^this import has no rows$/,
+    },
+    {
+      label: "blocked-row check",
+      fragment: "if blocked > 0 then",
+      replacement: "if false then",
+      // A clean row carrying a stored blocker: nothing else would refuse it.
+      make: async () => ({ id: (await batchWith(db, [{ mid: "MID-AGENT-1", blocker: "mid_in_other_batch" }])).id }),
+      refusal: /rows are still blocked$/,
+    },
+    {
+      label: "blank-MID check",
+      fragment: "and (r.mid_raw is null or btrim(r.mid_raw) = '');",
+      replacement: "and false;",
+      make: async () => ({ id: (await batchWith(db, [{ mid: "  " }])).id }),
+      refusal: /^Rows 2 have no MID\./,
+    },
+    {
+      label: "repeated-MID check (the merge key then refuses the second line)",
+      fragment: "having count(*) > 1) d;",
+      replacement: "having false) d;",
+      make: async () => ({ id: (await batchWith(db, [{ mid: "MID-AGENT-1" }, { mid: "MID-AGENT-1" }])).id }),
+      refusal: /^A MID appears on more than one row/,
+    },
+    {
+      label: "unknown-MID check (the row would be dropped silently)",
+      fragment: "and not exists (select 1 from merchants m where m.mid = r.mid_raw);",
+      replacement: "and false;",
+      make: async () => ({ id: (await batchWith(db, [{ mid: "NOPE-1", agentId: null }])).id }),
+      refusal: /are not merchants in the CRM/,
+    },
+    {
+      label: "Income Type check",
+      fragment: "<> 'residuals';",
+      replacement: "<> 'residuals' and false;",
+      make: async () => ({ id: (await batchWith(db, [{ mid: "MID-AGENT-1", incomeType: "Bonus" }])).id }),
+      refusal: /Income Type other than Residuals/,
+    },
+    {
+      label: "missing-figure check",
+      fragment: "and (r.volume is null or r.residual_income is null);",
+      replacement: "and false;",
+      make: async () => ({ id: (await batchWith(db, [{ mid: "MID-AGENT-1", residual: null }])).id }),
+      refusal: /have no Volume or no Residual/,
+    },
+    {
+      label: "no-rate check",
+      fragment: "where r.batch_id = batch_id_input and m.split_agent_pct is null;",
+      replacement: "where false;",
+      make: async () => {
+        await merchant(db, "NORATE-1", { rate: null });
+        return { id: (await batchWith(db, [{ mid: "NORATE-1" }])).id };
+      },
+      refusal: /belong to merchants with no split rate/,
+    },
+    {
+      label: "shares-total-the-rate check",
+      fragment: "or s.primary_rep_pct + s.secondary_rep_pct <> m.split_agent_pct);",
+      replacement: ");",
+      make: async () => {
+        const m = await merchant(db, "SH-RATE", { rate: 40 });
+        const batch = await batchWith(db, [{ mid: "SH-RATE" }]);
+        await share(db, m, AGENT_ID, OTHER_AGENT_ID, 25, 25, batch.period);
+        return { id: batch.id };
+      },
+      refusal: /have a shared-account split whose signer is not the merchant's owner, or whose shares do not total/,
+    },
+  ];
+
+  it.each(REFUSALS)("the $label", async ({ fragment, replacement, make, refusal }) => {
+    await swap(async () => {
+      const { id, confirmed } = await make();
+      const real = await attempt(() => commit(db, id, confirmed));
+      await asPlatform(db);
+      expect(real?.message, "the real v3 refuses the case with its sentence").toMatch(refusal);
+      await without(fragment, replacement);
+      const mutated = await attempt(() => commit(db, id, confirmed));
+      await asPlatform(db);
+      expect(mutated?.message ?? "committed", "without the check, that sentence is gone").not.toMatch(refusal);
+    });
+  });
+
+  it("the is_admin() guard (a rep would commit)", async () => {
+    await swap(async () => {
+      const { id } = await batchWith(db, [{ mid: "MID-AGENT-1" }]);
+      const asAgent = async () => {
+        await asUser(db, AGENT_ID);
+        try {
+          return await db.query(`select ${V3}(${id}, '{}')`);
+        } finally {
+          await asPlatform(db);
+        }
+      };
+      expect((await attempt(asAgent))?.code).toBe("PT403");
+      await without("if not is_admin() then", "if false then");
+      expect(await attempt(asAgent)).toBeNull();
+      expect(await lineCount(db, id)).toBe(1);
+    });
+  });
+
+  it("the house line (rate 0 still writes its line): skipping it fails the unshared grid", async () => {
+    await swap(async () => {
+      expect(await unsharedGrid(db)).toEqual([]);
+      await resetData(db);
+      await without(
+        "     and not exists (\n       select 1 from merchant_rep_shares s",
+        "     and m.split_agent_pct > 0\n     and not exists (\n       select 1 from merchant_rep_shares s",
+      );
+      const wrong = await unsharedGrid(db);
+      expect(wrong.length).toBeGreaterThan(0);
+      expect(wrong.some((w) => /^U-0-\d+: no line$/.test(w))).toBe(true);
+    });
+  });
+
+  it("the cent rule: a shared_part that rounds half away from zero fails the shared grid at the ties", async () => {
+    await swap(async () => {
+      const [{ def: sharedPart }] = await rows<{ def: string }>(
+        db,
+        `select pg_get_functiondef('shared_part(numeric, numeric, numeric)'::regprocedure) as def`,
+      );
+      try {
+        await db.exec(`create or replace function shared_part(total numeric, part numeric, whole numeric)
+                       returns numeric language sql immutable strict set search_path = public
+                       as $$ select round(total * part / whole, 2) $$`);
+        const { wrong, ties } = await sharedGrid(db);
+        expect(ties).toBeGreaterThan(0);
+        expect(wrong.length).toBeGreaterThan(0);
+      } finally {
+        await asPlatform(db);
+        await db.exec(sharedPart);
+      }
     });
   });
 
