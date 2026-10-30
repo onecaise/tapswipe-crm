@@ -210,7 +210,9 @@ describe("grant surface after all migrations", () => {
     // log_payout_row_change(), which is security definer and bypasses grants
     // entirely — which is precisely what lets the history table have no client
     // write path at all.
-    for (const table of ["rep_payout_import_rows", "rep_payout_row_history"]) {
+    // payout_period_closures (20261030120000) joins them: it is written only
+    // by phase 9's definer functions, never by a client, admin included.
+    for (const table of ["rep_payout_import_rows", "rep_payout_row_history", "payout_period_closures"]) {
       expect(
         await tablePrivileges(db, "authenticated", table),
         `${table} should be SELECT-only for authenticated`,
@@ -389,6 +391,7 @@ describe("grant surface after all migrations", () => {
       "quotes",
       "quote_line_items",
       "merchant_rep_shares",
+      "payout_period_closures",
     ]) {
       expect(
         await nonDmlPrivileges(db, "authenticated", table),
@@ -603,6 +606,10 @@ describe("grant surface after all migrations", () => {
       // 20261014140000: the shared-pair guard and the partner-rate copy.
       "guard_shared_line()",
       "copy_signer_rate_to_partner()",
+      // 20261030120000: the import-month window, the closure guard and its audit.
+      "guard_payout_batch_period()",
+      "guard_payout_period_closure()",
+      "log_payout_period_closure()",
     ]) {
       expect(
         await canExecute(db, "authenticated", signature),
@@ -635,6 +642,8 @@ describe("grant surface after all migrations", () => {
       "rep_payout_row_history",
       // Which reps share which account, and in what ratio -- payroll terms.
       "merchant_rep_shares",
+      // Which processor-months were marked paid (20261030120000).
+      "payout_period_closures",
     ]) {
       expect(
         await tablePrivileges(db, "anon", table),

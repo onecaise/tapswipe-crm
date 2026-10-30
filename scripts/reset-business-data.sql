@@ -91,6 +91,9 @@ declare
     -- residuals
     'rep_payout_batches', 'rep_payout_import_rows', 'rep_payout_rows',
     'rep_payout_row_history', 'merchant_rep_shares',
+    -- Mark paid (20261030120000): which processor-months were paid. Business
+    -- data: it describes ledger months this script empties.
+    'payout_period_closures',
     -- bulk user import staging
     'user_import_batches', 'user_import_rows',
     -- reference data

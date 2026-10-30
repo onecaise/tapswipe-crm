@@ -170,6 +170,7 @@ describe("reset-business-data.sql on the local stack", () => {
     // At least the seed's row before (the local DB may also hold e2e drafts
     // with a tax ID), and none after.
     expect(out).toMatch(/^pre_app_tax_secrets\|[1-9]\d*\|0\|cleared$/m);
+    expect(out).toMatch(/^payout_period_closures\|[1-9]\d*\|0\|cleared$/m);
     expect(out).toMatch(/^storage\.objects\|\d+\|\d+\|NOT touched: delete these files by hand$/m);
   });
 
@@ -189,7 +190,7 @@ describe("reset-business-data.sql on the local stack", () => {
     expect(run.err).toMatch(/DRY RUN: rolled back/);
     const after = psql(SNAPSHOT);
     expect(tagged(after.out, "SNAP")).toEqual(tagged(before.out, "SNAP"));
-    expect(tagged(before.out, "SNAP").length).toBeGreaterThan(35);
+    expect(tagged(before.out, "SNAP").length).toBeGreaterThan(36);
   });
 
   it.each([
@@ -243,7 +244,8 @@ describe("reset-business-data.sql on the local stack", () => {
     expect(names).toContain("profiles");
     expect(names).toContain("processors");
     expect(names).toContain("pre_app_tax_secrets");
-    expect(names.length).toBe(35 + 2);
+    expect(names).toContain("payout_period_closures");
+    expect(names.length).toBe(36 + 2);
     const inventory = psql(INVENTORY);
     expect(inventory.ok).toBe(true);
     expect(tagged(psql(SNAPSHOT).out, "SNAP")).toEqual(tagged(before.out, "SNAP"));

@@ -498,7 +498,7 @@ describe("an import never merges into an adjustment, and an adjustment never int
       insert into rep_payout_rows (agent_id, period, mid, line_kind,
         adjustment_amount, adjusts_period, adjustment_note)
       values ('${AGENT_ID}', '${PAYOUT_PERIOD}', 'MID-AGENT-1', 'adjustment', -5.00, '${PAYOUT_PERIOD_PRIOR}', 'x')
-      on conflict (period, agent_id, mid) where line_kind = 'import' do update
+      on conflict (period, processor, agent_id, mid) where line_kind = 'import' do update
         set adjustment_amount = excluded.adjustment_amount;
     `);
 

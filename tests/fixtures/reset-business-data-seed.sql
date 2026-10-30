@@ -88,9 +88,16 @@ insert into bug_reports (agent_id, page, description) values
   ('a0000000-0000-4000-8000-000000000002', '/dashboard', 'Fake bug');
 
 -- Residuals: a batch, a staged row, a share, a shared ledger line (which holds
--- merchant_rep_shares through its RESTRICT key) and a history row.
-insert into rep_payout_batches (imported_by, file_key, file_name) values
-  ('a0000000-0000-4000-8000-000000000001', 'reset/fake.xlsx', 'fake.xlsx');
+-- merchant_rep_shares through its RESTRICT key), a history row and a paid
+-- month. The batch and the closure carry a processor (20261030120000), so the
+-- reset truncates two more tables with a foreign key INTO a kept table. Their
+-- month is last month, computed, because both refuse a month outside the
+-- import window and a fixed date would expire.
+insert into rep_payout_batches (imported_by, file_key, file_name, processor, period) values
+  ('a0000000-0000-4000-8000-000000000001', 'reset/fake.xlsx', 'fake.xlsx', 'TSYS',
+   (date_trunc('month', now() at time zone 'UTC') - interval '1 month')::date);
+insert into payout_period_closures (period, processor) values
+  ((date_trunc('month', now() at time zone 'UTC') - interval '1 month')::date, 'TSYS');
 insert into rep_payout_import_rows (batch_id, row_number) values
   ((select id from rep_payout_batches where file_key = 'reset/fake.xlsx'), 1);
 insert into merchant_rep_shares (merchant_id, primary_agent_id, secondary_agent_id,

@@ -182,19 +182,24 @@ function stable(row: Json): Json {
 
 type Snapshot = { ledger: Json[]; history: Json[]; audit: Json[]; batches: Json[] };
 
-async function snapshot(db: TestDb, dropBatchKeys: string[] = []): Promise<Snapshot> {
+async function snapshot(
+  db: TestDb,
+  dropBatchKeys: string[] = [],
+  dropLedgerKeys: string[] = [],
+): Promise<Snapshot> {
   await asPlatform(db);
   const grab = async (table: string) =>
     (await rows<{ j: Json }>(db, `select to_jsonb(t) as j from ${table} t order by id`)).map(
       (r) => stable(r.j),
     );
-  const batches = (await grab("rep_payout_batches")).map((b) => {
-    const copy = { ...b };
-    for (const key of dropBatchKeys) delete copy[key];
+  const without = (keys: string[]) => (row: Json) => {
+    const copy = { ...row };
+    for (const key of keys) delete copy[key];
     return copy;
-  });
+  };
+  const batches = (await grab("rep_payout_batches")).map(without(dropBatchKeys));
   return {
-    ledger: await grab("rep_payout_rows"),
+    ledger: (await grab("rep_payout_rows")).map(without(dropLedgerKeys)),
     history: await grab("rep_payout_row_history"),
     audit: await grab("audit_log"),
     batches,
@@ -297,6 +302,9 @@ describe.each([
   // The batch columns added after the pre-phase-4 function: phase 4 (the skip
   // record) and phase 5 (adjustment rows a parse ignored).
   const NEW_BATCH_KEYS = ["skipped_rows", "skips_acknowledged_at", "adjustment_rows_ignored"];
+  // The columns the import schema (20261030120000) added after all of the above.
+  const IMPORT_SCHEMA_BATCH_KEYS = ["processor", "period", "replaces_batch_id", "replaced_by_batch_id"];
+  const IMPORT_SCHEMA_LEDGER_KEYS = ["processor", "volume_confirmed_negative"];
   const runs = {} as Record<Variant, Awaited<ReturnType<typeof runSequence>>>;
 
   beforeAll(async () => {
@@ -326,15 +334,36 @@ describe.each([
     expect(v2).toEqual(guarded);
 
     // Against v2 before the merge-key swap, only the batch column phase 5
-    // added differs.
-    expect(await snapshot(runs.v2.db, ["adjustment_rows_ignored"])).toEqual(
-      await snapshot(runs["pre-phase-5 v2"].db),
-    );
+    // added differs -- plus the columns the import schema (20261030120000)
+    // added to batches and ledger, which the older databases do not have.
+    expect(
+      await snapshot(
+        runs.v2.db,
+        ["adjustment_rows_ignored", ...IMPORT_SCHEMA_BATCH_KEYS],
+        IMPORT_SCHEMA_LEDGER_KEYS,
+      ),
+    ).toEqual(await snapshot(runs["pre-phase-5 v2"].db));
 
     // Against the function as it was before this phase, the two batch columns
     // this phase added are the only difference, so they are set aside...
     const before = await snapshot(runs["pre-phase-4 old"].db);
-    expect(await snapshot(runs.v2.db, NEW_BATCH_KEYS)).toEqual(before);
+    expect(
+      await snapshot(
+        runs.v2.db,
+        [...NEW_BATCH_KEYS, ...IMPORT_SCHEMA_BATCH_KEYS],
+        IMPORT_SCHEMA_LEDGER_KEYS,
+      ),
+    ).toEqual(before);
+
+    // ...and the import-schema columns set aside above hide nothing: these
+    // batches carry no processor, so every one of them is empty.
+    for (const batch of v2.batches) {
+      for (const key of IMPORT_SCHEMA_BATCH_KEYS) expect(batch[key], key).toBeNull();
+    }
+    for (const line of v2.ledger) {
+      expect(line.processor).toBeNull();
+      expect(line.volume_confirmed_negative).toBe(false);
+    }
 
     // ...and on both new databases they say nothing was skipped.
     for (const batch of [...v2.batches, ...guarded.batches]) {
@@ -921,9 +950,10 @@ describe("catalog, grants and redaction", () => {
       /\b(residual_income|account_residual_income|rep_split_pct|rep_share_id|share_role|primary_rep_pct|secondary_rep_pct)\s*=/,
     );
     const partnerInsert = body.slice(body.indexOf("-- 4b."), body.indexOf("-- 5."));
-    // The partial merge key (20261016160000): every target names the predicate.
+    // The partial merge key (20261016160000): every target names the
+    // predicate -- and, since 20261030120000, the processor.
     expect(partnerInsert).toMatch(
-      /on conflict \(period, agent_id, mid\) where line_kind = 'import' do nothing;/,
+      /on conflict \(period, processor, agent_id, mid\) where line_kind = 'import' do nothing;/,
     );
   });
 

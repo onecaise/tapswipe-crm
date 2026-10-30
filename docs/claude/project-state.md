@@ -16,3 +16,7 @@ Moved verbatim from `CLAUDE.md` on 19 Oct 2026 to keep that file under the size 
 ## The prod pooler host (moved verbatim from CLAUDE.md, 28 Oct 2026)
 
 **`aws-0`, not `aws-1` — this file said `aws-1` until 18 Sep 2026 and that was never verified.** `aws-0` is what actually authenticated against prod, twice, in the diagnostic and the push. Both hostnames resolve to real, distinct Supabase pooler IPs and both accept TCP on 5432, so nothing about DNS or a port check will tell you which is right. The wrong one fails as `Tenant or user not found`, which reads exactly like a bad password and will send you off rotating a credential that was fine. `scripts/prod-state.ps1` and its two callers all use `aws-0` and print the alternate as a hint on failure.
+
+## The 2 Sep 2026 relink (moved verbatim from CLAUDE.md, 30 Oct 2026)
+
+On 2 Sep 2026 12:15 EDT the CLI was manually relinked to **prod**, and this file went on asserting dev was linked for seven days. Two read-only commands (`migration list --linked`, `npm run test:deployed`) ran under that false belief before anyone noticed — no writes, no data touched, and the 4 Sep prod deployment that followed was deliberate and taken from a full `db dump` backup first. That was luck rather than design: nothing in the repo compared the documented link against the actual one.

@@ -27,7 +27,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **`log_cross_agent_change()` fails closed on purpose** — never wrap its audit insert in an exception handler. A new table must have **every verb** audited somewhere. `audit_log` has no insert policy and `authenticated` holds `select` only. → `docs/claude/rpcs-profiles-audit.md`.
 - **A column that must be immutable is a GRANT, not a policy.** Column-level UPDATE grants: `quotes.status` only; `rep_payout_rows.residual_income` + `rep_split_pct` only; `rep_payout_batches.status` only (and a trigger admits only `review -> abandoned`). `notes` has no UPDATE at either layer. → `docs/claude/proposals-and-catalog.md`, `docs/claude/payouts-and-teardown.md`.
 - **Any column the client supplies and no policy reads is unvalidated** (the `documents.file_key` lesson). Fix it at the layer that cannot be skipped: the price lock trigger `snapshot_quote_line_item()` overwrites every snapshot column; `enforce_quote_version()` assigns versions and refuses foreign groups; the browser sends only `product_id` and `quantity`; only `submit_pre_app()` writes a pre-app's split and rep names, from the profile. → `docs/claude/edge-functions-and-storage.md`, `docs/claude/proposals-and-catalog.md`, `docs/claude/rpcs-profiles-audit.md`.
-- **The commit RPC's merge rule is `coalesce(excluded.<col>, rep_payout_rows.<col>)`** — reversing the arguments silently wipes hand-entered residuals. Every `on conflict` on `rep_payout_rows` must say `where line_kind = 'import'`. → "Three tiers" below, `docs/claude/payouts-and-teardown.md`.
+- **The commit RPC's merge rule is `coalesce(excluded.<col>, rep_payout_rows.<col>)`** — reversing the arguments silently wipes hand-entered residuals. Every `on conflict` on `rep_payout_rows` names `(period, processor, agent_id, mid)` and says `where line_kind = 'import'`; a negative `volume` only on a `volume_confirmed_negative` line. → "Three tiers" below, `docs/claude/payouts-and-teardown.md`.
 - **The legacy `documents` table and bucket are closed** (SELECT for admin only, no client write, its three functions removed). Do not reopen them. → `docs/claude/notes-tasks-documents.md`.
 
 **Edge Functions, Storage and the app**
@@ -76,7 +76,7 @@ Postgres grants `EXECUTE` to `PUBLIC` on every new function, and `PUBLIC` includ
 
 ### Three tiers of data access — pick the right one
 
-1. **Normal tables via `supabase-js`** (`merchants`, `leads`, `ghost_sheets`, `pre_apps` + children, `support_tickets`, `notes`, `tasks`, `audit_log`, `rep_payout_rows` + the three other `rep_payout_*` tables, the two `user_import_*` tables, and the reference-data tables `marketing_materials`, `business_documents`, `products`, `brands`, plus `processors`, which no client writes — `docs/claude/reference-data-and-marketing.md`). The legacy `documents` table is SELECT-only for `authenticated` and admits only an admin since 20261013121000. RLS does the enforcement; the client talks to Postgres directly. Note how little of that list is client-*writable*: the payout and user-import tables are read-only to `authenticated` apart from one status update each, because everything that creates their rows runs as service role.
+1. **Normal tables via `supabase-js`** (`merchants`, `leads`, `ghost_sheets`, `pre_apps` + children, `support_tickets`, `notes`, `tasks`, `audit_log`, `rep_payout_rows` + the three other `rep_payout_*` tables, `payout_period_closures` (Mark paid, admin SELECT only), the two `user_import_*` tables, and the reference-data tables `marketing_materials`, `business_documents`, `products`, `brands`, plus `processors`, which no client writes — `docs/claude/reference-data-and-marketing.md`). The legacy `documents` table is SELECT-only for `authenticated` and admits only an admin since 20261013121000. RLS does the enforcement; the client talks to Postgres directly. Note how little of that list is client-*writable*: the payout and user-import tables are read-only to `authenticated` apart from one status update each, because everything that creates their rows runs as service role.
 2. **Secrets tables — Edge Function only.** `pre_app_owner_secrets` (SSN), `pre_app_banking_secrets` (ABA routing / account number), `pre_app_terminal_secrets` (RP password), `pre_app_tax_secrets` (business tax ID, EIN or SSN; its kind must equal `pre_apps.ein_type`, and the plaintext `pre_apps.ein_number` is dropped, `20261026140000`) are locked twice over: RLS enabled with **zero policies**, *and* no grant to `anon` or `authenticated` at all. Either alone denies read and write; both means a policy added by mistake still opens nothing. Values are stored as `bytea` AES ciphertext; only a service-role Edge Function holding the encryption key can touch them. This includes the agent's initial submission — the browser must POST that data to `submit-pre-app-secrets`, never insert it via `supabase-js`. Never add a policy to these tables, and never grant them.
 3. **`commit_residual_import(batch_id_input int)` RPC** — `security definer`, guarded by an explicit `is_admin()`, moves a reviewed batch's staging rows into `rep_payout_rows`. Why an RPC and not an Edge Function: `docs/claude/payouts-and-teardown.md`. **The `coalesce(excluded.<col>, rep_payout_rows.<col>)` on the two money columns is the entire merge rule**: reverse those arguments and every re-import silently clears a month of hand-entered residuals, violating no constraint and raising no error. `tests/rls/commit-residual-import.test.ts` asserts both directions and greps the function body for it.
 4. **`approve_pre_app(pre_app_id_input int)` RPC** — `security definer` plpgsql that creates a `merchants` row from a pre-app (address and `processor` copied), flips its status to `approved`, and writes `audit_log`. It guards itself with an explicit `is_admin()` check at the top; keep that check if you edit it.
@@ -104,7 +104,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Not built yet:** My Submissions.
 - **Still starter-kit template:** `README.md` only. Edge Functions: twelve in the repo. Details of both → `docs/claude/project-state.md`.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Seventy migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Seventy-one migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 ## Hosted projects and deployment
 
@@ -139,7 +139,7 @@ Two things they encode that cost a session each: `db push` **prompts** for confi
 
 **`npm run db:push -- --db-url <prod>` used to print `dev, ok` and go to prod** (npm appended the flag after the guard); since 21 Oct 2026 the wrappers launch the CLI from the guard, which refuses `--project-ref` and `--db-url` (`docs/claude/security-fixes.md`, phase 4). When targeting prod by URL, call `npx supabase` directly so nothing claims to have checked something it did not.
 
-**The linked-project claim above drifted once, silently, and the guard exists because of it.** On 2 Sep 2026 12:15 EDT the CLI was manually relinked to **prod**, and this file went on asserting dev was linked for seven days. Two read-only commands (`migration list --linked`, `npm run test:deployed`) ran under that false belief before anyone noticed — no writes, no data touched, and the 4 Sep prod deployment that followed was deliberate and taken from a full `db dump` backup first. That was luck rather than design: nothing in the repo compared the documented link against the actual one. Now something does — `scripts/check-linked-project.mjs` prints the linked project and **fails closed** when it is prod, missing, or an unrecognised ref. Use the wrapped scripts for anything acting on the linked project:
+**The linked-project claim above drifted once, silently, and the guard exists because of it.** On 2 Sep 2026 the CLI was relinked to **prod** while this file said dev for seven days (story: `docs/claude/project-state.md`). Now something does — `scripts/check-linked-project.mjs` prints the linked project and **fails closed** when it is prod, missing, or an unrecognised ref. Use the wrapped scripts for anything acting on the linked project:
 
 ```bash
 npm run guard:linked      # print the linked project; exit 1 if prod or unrecognised
@@ -164,7 +164,7 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2545 tests, 113 files — every file must load)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2583 tests, 114 files — every file must load)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (313 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
 npm run test:e2e       # Playwright, real browser against the app on the local stack (346 tests, 6 of them the shared setup)
@@ -193,7 +193,7 @@ npx supabase functions serve --env-file ./supabase/functions/.env         # loca
 | `npm run test:deployed` | every project in `.env.deployed.local` | network |
 | `npm run test:e2e` | the rendered app in a real browser | Docker, `supabase start`, **`functions serve`**, Chromium |
 
-Baselines are the counts in the Commands block above (`npm test` 2545 tests / 113 files — every file must load; `test:live` 313; `test:deployed` 29; `test:e2e` 346, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
+Baselines are the counts in the Commands block above (`npm test` 2583 tests / 114 files — every file must load; `test:live` 313; `test:deployed` 29; `test:e2e` 346, 6 of them shared setup). The rules, each explained in full in **`docs/claude/testing.md`**:
 
 - Run `npm test` for any schema change; queries must run as `authenticated`, never the owner.
 - PGlite is Postgres 18.3, the stack 17.6 — pin constraint names in assertions, not SQLSTATEs.

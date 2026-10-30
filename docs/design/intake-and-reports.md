@@ -1,6 +1,6 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-5 built locally (§10).** Nothing has
+Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-6 built locally (§10).** Nothing has
 been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
@@ -1563,6 +1563,106 @@ Found while building:
   default (a test bug here, not an app bug).
 - The guard's message reads "a approved pre-app" (existing grammar, not changed).
 - The Supabase CLI is still linked to PROD, as phases 1 and 4 found; nothing linked was run.
+
+### Phase 6: import schema (30 Oct 2026, branch `intake-residuals`)
+
+Built (`20261030120000_import_schema.sql`; database only, no Edge Function changed):
+- `rep_payout_batches`: `processor` (FK `processors`), `period` (the 1st), set together or not at
+  all; `replaces_batch_id` / `replaced_by_batch_id` (self FKs); status gains `replaced`, which
+  needs `replaced_by_batch_id` and vice versa. The import window (memo A11) is the trigger
+  `guard_payout_batch_period()`: not after the current month, not more than 24 months before it
+  (24 back accepted, 25 refused).
+- `rep_payout_batches_one_committed_per_month`: unique `(processor, period) where status =
+  'committed'`. Review, abandoned and replaced batches are not limited.
+- Staging: `warnings text[]` (the three confirmable types) and the six new blocker codes beside
+  the five the deployed parser still writes.
+- Ledger: `processor` (FK, snapshot of the batch's), `volume_confirmed_negative`, the volume rule,
+  and the merge key `(period, processor, agent_id, mid) NULLS NOT DISTINCT where line_kind =
+  'import'`. Both commit functions re-created to write `batch.processor` and name the new key;
+  nothing else in them changed (pinned by a test that undoes the edits and compares bodies).
+- `payout_period_closures (period, processor, closed_at)`: admin SELECT, no client write, no
+  UPDATE, no future month, every insert and delete audited by its own trigger.
+- `scripts/reset-business-data.sql` clears the new table (36 tables).
+- Tests: `tests/rls/import-schema.test.ts` (catalog diff, every rule above, the migration's
+  refusals and its pass over a populated database).
+
+**Where the coalesce merge rule lives now, and what phase 8 must change.** The latest definitions
+of both functions are in `20261030120000` (§4 of the file): `commit_residual_import(int)` (its one
+`on conflict … do update`) and `commit_residual_import_v2(int)` step 3, the ordinary-rows upsert
+(`residual_income = coalesce(excluded.residual_income, rep_payout_rows.residual_income)` and the
+same for `rep_split_pct`). v2's shared-signer conflict writes no money ("NEVER THE MONEY ON
+CONFLICT") and its partner insert is `do nothing`. Phase 8: v3 never merges (plain insert; a second
+import of a processor-month is phase 9's replace), drop v2, and rewrite the CLAUDE.md rule line and
+Three tiers §3 to say the old function still carries the rule; `tests/rls/commit-residual-import-v2.test.ts`
+(which greps for it) goes with v2. Phase 13 drops `commit_residual_import(int)`, its test and the
+rule text.
+
+Where the memo was silent or said otherwise, and what was chosen (conservative side each time):
+- **`processor` and `period` are nullable in this phase**, though §1.B says `not null`.
+  `residual-import-file-url` still creates batches without them until phase 7, and making them
+  required now would break the current upload → commit path (and the live and e2e suites that
+  drive it). Instead: together-or-neither, FK, first-of-month and the window apply to every value
+  written. **The phase that makes them `NOT NULL` must first refuse, naming the ids, any committed
+  batch that has none.**
+- **So this migration has no batch row it cannot carry.** Every new batch column is nullable and
+  every new batch CHECK passes on a row that has none of them. Its refusals are what it can
+  actually break: a ledger line with a negative volume (only possible where the old CHECK was
+  altered by hand; named by id), and four preconditions on the definitions it replaces (merge key,
+  volume CHECK, status CHECK, blocker CHECK). No empty-table assertion (§8.1), per the phase 1
+  lesson.
+- **The window is a trigger, not a CHECK**: a CHECK reading the clock passes on insert and refuses
+  the same row on a restore years later. It checks the period only when it is written. "Current
+  month" is UTC, pinned rather than read from the session's TimeZone.
+- **`replaced` is added now** (§8.1 puts it in phase 6, §8.4 in phase 9): a replaced batch must
+  leave the one-committed rule, so the status is part of the rule's shape. Phase 9 still owns the
+  replace itself and the definer-side transitions (`committed -> replaced` only, `replaced`
+  terminal); the client rule is unchanged (review -> abandoned only), and a client cannot set
+  `replaced`.
+- **A replace pair cannot point at itself, and a batch that replaces another must carry a
+  processor-month.** Not in the memo; cheap and strictly tighter.
+- **NULLs distinct in the batch rule, NOT distinct in the merge key.** A batch without a processor
+  has no month to be unique on. A ledger line without one (every line today) must still collide
+  with its twin, or a re-import would duplicate a month instead of merging it.
+- **The volume rule is stricter than §2.4's `volume >= 0 or volume_confirmed_negative`**: it is
+  `volume_confirmed_negative = coalesce(volume < 0, false)`, so the marker is allowed only on a
+  negative volume and the column says exactly which lines entered that way. Phase 8 must set the
+  marker on negative-volume lines only, not on every confirmed `bad_numbers` row (a zero-volume or
+  residual-over-volume row stays unmarked). Zero and NULL volume stay allowed unmarked. No existing
+  test inserted a negative volume, so none had to be marked; "rejects a negative volume" in
+  `rep-payouts.test.ts` still holds (unmarked) and is unchanged.
+- **Staging `warnings` and the new blocker codes are in this phase** (§8.1), but the TypeScript
+  lists (`PAYOUT_BLOCKERS`, labels) are not touched: they move with the parser in phase 7, which
+  also removes the five old codes. The staging raw columns (`processor_raw`, `income_type_raw`) and
+  `confirmed_warnings` / `replace_summary` on batches are left to phases 7-9, which write them.
+- **`payout_period_closures` has no `closed_by` and no confirmation column**, as §3.2 says (Owen
+  confirmed 30 Oct 2026, over the phase 6 instruction's wording). Who marked it is the audit row.
+- **The closure audit is a table trigger, not a line in each RPC**, so every verb is audited
+  whoever writes (CLAUDE.md's every-verb rule). Phase 9's `close_payout_period()` and
+  `reopen_payout_period()` must therefore NOT write their own `close_payout_period` /
+  `reopen_payout_period` rows (the trail would double); the reopen's reason goes on its
+  `payout_period_reopenings` row. Row id format: `'2026-07-01/TSYS'`.
+- **A closure is never UPDATEd and never for a month that has not begun**, enforced by a trigger.
+  Phase 9's close function should also require a committed batch for that processor-month (not
+  enforced here; phase 9 owns that rule).
+- **`close_payout_period()` is NOT built here**, though §8.1 lists it under phase 6: the phase 6
+  instruction moved it to phase 9 with Reopen.
+- **`service_role` gets SELECT on the closures table**, as `processors`; nothing writes it outside
+  a definer function.
+- **v2's partner line copies its signer line's processor.** A filter matching the signer line to
+  the batch's processor was written first and taken out: the partner's conflict target already
+  separates processors, so no test could tell it was there.
+
+Not done here, for later phases:
+- **Phase 7:** a NULL-processor import line (everything committed before phase 7) and a
+  processor-tagged one are different keys now, so a legacy month re-imported under a processor would
+  sit beside the old lines. Nothing writes a tagged line before phase 7; its `mid_in_other_batch`
+  blocker must count a NULL-processor line as "another processor's".
+- **Phase 8:** check a staged row's period against its batch's (v3 takes the month from the batch),
+  and write `processor` from the batch on every line, adjustments excepted.
+
+Found while building: PGlite's `service_role` has no BYPASSRLS (the hosted one does), so a test
+that reads an admin-only table as `service_role` sees nothing there; `import-schema.test.ts` reads
+back as the owner and says why.
 
 ---
 
