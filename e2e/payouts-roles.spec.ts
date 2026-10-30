@@ -181,6 +181,45 @@ test.describe("as an agent", () => {
     });
   });
 
+  test("cannot delete ledger lines, mark a month paid or post an adjustment by calling the API directly", async ({
+    page,
+    request,
+  }) => {
+    await page.goto(`/payouts/${PERIODS.many}`);
+
+    const { apiUrl, publishableKey } = publicStackConfig();
+    const token = await accessTokenFrom(page);
+    expect(token, "the signed-in page should hold an access token").toBeTruthy();
+    const headers = {
+      apikey: publishableKey,
+      Authorization: `Bearer ${token as string}`,
+      "Content-Type": "application/json",
+    };
+
+    // No client holds DELETE on the ledger since 20261030190000: refused
+    // outright (42501), not filtered to zero rows as the old policy did.
+    const direct = await request.delete(`${apiUrl}/rest/v1/rep_payout_rows?mid=eq.E2E-A1000`, { headers });
+    expect(direct.status()).toBe(403);
+    expect(await direct.json()).toMatchObject({ code: "42501" });
+
+    // The three phase 9 functions each check is_admin() first.
+    for (const [fn, data] of [
+      ["delete_payout_period", { period_input: `${PERIODS.many}-01`, processor_input: null }],
+      ["close_payout_period", { period_input: `${PERIODS.many}-01`, processor_input: "TSYS", confirmation_input: "x" }],
+      ["post_payout_adjustment", {
+        agent_id_input: "00000000-0000-0000-0000-000000000001", mid_input: "E2E-A1000",
+        adjusts_period_input: `${PERIODS.many}-01`, processor_input: "TSYS", amount_input: 1, note_input: "x",
+      }],
+    ] as const) {
+      const response = await request.post(`${apiUrl}/rest/v1/rpc/${fn}`, { headers, data });
+      expect(response.status(), fn).toBe(403);
+      expect(await response.json(), fn).toMatchObject({ code: "PT403", message: "admin only" });
+    }
+
+    await page.reload();
+    await expect(page.getByRole("cell", { name: "E2E-A1000" })).toBeVisible();
+  });
+
   test("cannot reach another rep's payout summary", async ({ page }) => {
     await page.goto(`/payouts/${PERIODS.many}`);
     const ownSummary = page.getByRole("link", { name: "Payout summary" });

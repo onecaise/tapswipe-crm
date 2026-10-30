@@ -442,11 +442,19 @@ describe("merchant split must total 100", () => {
     );
   });
 
-  it("allows both halves null — a split simply not recorded yet", async () => {
-    await asUser(db, ADMIN_ID);
-    await db.exec(insertSplit("null", "null"));
-
+  it("allows both halves null — a split simply not recorded yet (a merchant made before 20261030180000)", async () => {
+    // Since 20261030180000 an insert with both halves null takes the owner's
+    // profile rate (tests/rls/merchant-default-rate.test.ts), so the null pair
+    // is now only the shape of an older row. The CHECKs still admit it: the
+    // insert below runs with triggers off, as such a row was written, and
+    // CHECK constraints are not triggers -- they still apply.
     await asPlatform(db);
+    await db.exec(`set session_replication_role = replica`);
+    try {
+      await db.exec(insertSplit("null", "null"));
+    } finally {
+      await db.exec(`set session_replication_role = origin`);
+    }
     const [m] = await rows<{ a: string | null }>(
       db,
       `select split_agent_pct::text as a from merchants where dba = 'Split Test'`,

@@ -137,7 +137,12 @@ async function refused(target: TestDb, id: number, confirmed: string[] = []): Pr
   return error as DbError;
 }
 
-/** A merchant at a rate, owned by `owner`, as the platform. */
+/**
+ * A merchant at a rate, owned by `owner`, as the platform. `rate: null` is a
+ * merchant with NO rate, which since 20261030180000 only a row made before
+ * that migration can be (an insert without one takes the owner's profile
+ * rate): so it is inserted with triggers off, the shape such a row has.
+ */
 async function merchant(
   target: TestDb,
   mid: string,
@@ -145,6 +150,20 @@ async function merchant(
 ): Promise<number> {
   await asPlatform(target);
   const rate = fields.rate === undefined ? 50 : fields.rate;
+  if (rate === null) await target.exec(`set session_replication_role = replica`);
+  try {
+    return await insertMerchant(target, mid, fields, rate);
+  } finally {
+    if (rate === null) await target.exec(`set session_replication_role = origin`);
+  }
+}
+
+async function insertMerchant(
+  target: TestDb,
+  mid: string,
+  fields: { owner?: string; processor?: string | null; status?: string },
+  rate: number | null,
+): Promise<number> {
   const [{ id }] = await rows<{ id: number }>(
     target,
     `insert into merchants (agent_id, mid, dba, status, processor, split_agent_pct, split_company_pct, city, state)

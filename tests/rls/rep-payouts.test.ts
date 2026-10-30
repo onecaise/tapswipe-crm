@@ -7,6 +7,7 @@ import {
   OTHER_AGENT_ID,
   PAYOUT_PERIOD,
   PAYOUT_PERIOD_PRIOR,
+  SEED_BATCH_PROCESSOR,
   asPlatform,
   asUser,
   createTestDb,
@@ -169,22 +170,31 @@ describe("rep_payout_rows: which verbs each role holds", () => {
     expect(v).toBe("88.40");
   });
 
-  it("filters an agent's delete of their own row to nothing", async () => {
+  it("refuses an agent's delete of their own row: no client holds DELETE", async () => {
+    // Was "filtered to nothing" by the admin-only delete policy. Since
+    // 20261030190000 the grant itself is gone, so the refusal is louder.
     await asUser(db, AGENT_ID);
-    await db.exec(`delete from rep_payout_rows where id = ${fx.rowIds.filled}`);
+    await expect(
+      db.exec(`delete from rep_payout_rows where id = ${fx.rowIds.filled}`),
+    ).rejects.toThrow(/permission denied for table rep_payout_rows/);
 
     await asPlatform(db);
     expect(await countRows(db)).toBe(4);
   });
 
-  it("lets an admin delete a whole period", async () => {
-    // The escape hatch for an import that was simply wrong. Individual rows are
-    // not deletable through the UI, but the policy is per-row and this is what it
-    // permits.
+  it("refuses an admin's direct delete, and deletes a whole period through delete_payout_period", async () => {
+    // The escape hatch for an import that was simply wrong is one audited
+    // function now (20261030190000); the browser DELETE it replaced wrote no
+    // audit row. tests/rls/replace-paid-adjustments.test.ts pins its rules.
     await asUser(db, ADMIN_ID);
-    await db.exec(
-      `delete from rep_payout_rows where period = '${PAYOUT_PERIOD}'`,
-    );
+    await expect(
+      db.exec(`delete from rep_payout_rows where period = '${PAYOUT_PERIOD}'`),
+    ).rejects.toThrow(/permission denied for table rep_payout_rows/);
+    await asPlatform(db);
+    expect(await countRows(db)).toBe(4);
+
+    await asUser(db, ADMIN_ID);
+    await db.exec(`select delete_payout_period('${PAYOUT_PERIOD}', '${SEED_BATCH_PROCESSOR}')`);
 
     await asPlatform(db);
     expect(await countRows(db)).toBe(1);

@@ -242,6 +242,53 @@ async function BatchReview({
         linkToBatch={false}
       />
 
+      {/* The replace (phase 9): a batch that replaces another says so while
+          it waits, and the one it replaced points to its successor. */}
+      {batch.replaces_batch_id !== null && batch.status === "review" && (
+        <Callout tone="warning">
+          <div data-testid="replaces-import">
+            <p className="font-medium">
+              This file replaces{" "}
+              <Link
+                href={`/payouts/import/${batch.replaces_batch_id}`}
+                className="underline underline-offset-4"
+              >
+                import #{batch.replaces_batch_id}
+              </Link>
+              .
+            </p>
+            <p className="mt-1 text-muted-foreground">
+              Committing it removes every line that import wrote for{" "}
+              {batch.processor} {formatPeriod(batch.period)} and writes these
+              instead. It is refused if the month has been marked paid since.
+            </p>
+          </div>
+        </Callout>
+      )}
+      {batch.status === "replaced" && batch.replaced_by_batch_id !== null && (
+        <div className="rounded-xl border p-4 text-sm text-muted-foreground">
+          <p data-testid="replaced-by">
+            Replaced by{" "}
+            <Link
+              href={`/payouts/import/${batch.replaced_by_batch_id}`}
+              className="underline underline-offset-4"
+            >
+              import #{batch.replaced_by_batch_id}
+            </Link>
+            . Its lines were removed when that one was committed; the file is
+            kept.
+          </p>
+        </div>
+      )}
+      {batch.status === "deleted" && (
+        <div className="rounded-xl border p-4 text-sm text-muted-foreground">
+          <p>
+            This month&rsquo;s lines from this import were deleted. The file is
+            kept.
+          </p>
+        </div>
+      )}
+
       {batch.status === "review" && batch.processor === null && (
         <Callout tone="warning">
           <p className="font-medium">

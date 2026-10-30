@@ -61,8 +61,11 @@ const SELECT_CLASS =
  *
  *   1. residual-import-file-url creates the batch row and signs an upload URL --
  *      or, when that processor and month is already COMMITTED, creates nothing
- *      and says so. Replacing a committed month is phase 9; until then this
- *      shows the replace prompt's facts and stops (the replace is not offered).
+ *      and says so, and this asks "Replace it?" (phase 9). Yes asks again with
+ *      replace_batch_id, which creates a batch that REPLACES the committed one;
+ *      it then goes through the same read, review and confirm steps, and the
+ *      replace happens at commit (commit_residual_import_v3). A month marked
+ *      paid is not offered the Yes: it is refused, and says how to fix it.
  *   2. The browser PUTs the file straight to Storage. The bytes never pass
  *      through a function.
  *   3. parse-residual-import reads the stored file and stages its rows.
@@ -94,7 +97,7 @@ export function ResidualUpload({
   const [busy, setBusy] = useState<null | "uploading" | "parsing">(null);
   const [error, setError] = useState<string | null>(null);
   const [committed, setCommitted] = useState<
-    (CommittedMonth & { processor: string; period: string }) | null
+    (CommittedMonth & { processor: string; period: string; file: File }) | null
   >(null);
 
   const years = [...new Set(months.map((value) => value.slice(0, 4)))];
@@ -104,7 +107,7 @@ export function ResidualUpload({
     .sort();
   const period = year && month ? `${year}-${month}-01` : "";
 
-  const upload = async (file: File) => {
+  const upload = async (file: File, replaceBatchId?: number) => {
     setError(null);
     setCommitted(null);
 
@@ -129,6 +132,7 @@ export function ResidualUpload({
         file_name: file.name,
         processor,
         period,
+        ...(replaceBatchId === undefined ? {} : { replace_batch_id: replaceBatchId }),
       });
 
     if (mintError || !minted) {
@@ -138,7 +142,7 @@ export function ResidualUpload({
     }
 
     if ("exists" in minted) {
-      setCommitted({ ...minted.exists, processor, period });
+      setCommitted({ ...minted.exists, processor, period, file });
       setBusy(null);
       return;
     }
@@ -310,12 +314,14 @@ export function ResidualUpload({
               {committed.committed_at
                 ? ` on ${formatDate(committed.committed_at)}`
                 : ""}
-              {committed.paid ? " and is marked paid" : ""}. Replace it?
+              {committed.paid
+                ? " and is marked paid, so it cannot be replaced."
+                : ". Replace it?"}
             </p>
             <p className="mt-1 text-muted-foreground">
-              Replacing a committed month is not available yet: it arrives with
-              Mark paid. Nothing was uploaded, and the committed import is
-              unchanged.{" "}
+              {committed.paid
+                ? "Reopen the month on the Payouts page (with a reason) to replace it, or post an adjustment there instead. Nothing was uploaded."
+                : "Yes reads this file into a new import for you to review. Its lines replace the committed ones only when you commit it; until then nothing changes."}{" "}
               <Link
                 href={`/payouts/import/${committed.batch_id}`}
                 className="underline underline-offset-4"
@@ -323,6 +329,27 @@ export function ResidualUpload({
                 Open {committed.file_name}
               </Link>
             </p>
+            {!committed.paid && (
+              <div className="mt-2 flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={busy !== null}
+                  onClick={() => void upload(committed.file, committed.batch_id)}
+                >
+                  Yes, replace it
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy !== null}
+                  onClick={() => setCommitted(null)}
+                >
+                  No
+                </Button>
+              </div>
+            )}
           </div>
         </Callout>
       )}

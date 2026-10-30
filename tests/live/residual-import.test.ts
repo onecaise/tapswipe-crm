@@ -35,6 +35,7 @@ import {
   invoke,
   provisionFixtures,
   teardownFixtures,
+  toReachableUrl,
   userClient,
   warmFunctions,
   type Fixtures,
@@ -192,10 +193,15 @@ function workbook(rows: unknown[][]): Buffer {
   return XLSX.write(book, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }
 
-async function mint(fileName: string, processor: string, period: string) {
+async function mint(fileName: string, processor: string, period: string, replaceBatchId?: number) {
   return invoke(
     "residual-import-file-url",
-    { file_name: fileName, processor, period },
+    {
+      file_name: fileName,
+      processor,
+      period,
+      ...(replaceBatchId === undefined ? {} : { replace_batch_id: replaceBatchId }),
+    },
     fixtures.tokens.admin,
   );
 }
@@ -203,7 +209,7 @@ async function mint(fileName: string, processor: string, period: string) {
 /** Mints an upload URL, PUTs the bytes, and parses -- the browser's three steps. */
 async function importFile(
   rows: unknown[][],
-  options: { fileName?: string; processor?: string; period?: string; bytes?: Buffer } = {},
+  options: { fileName?: string; processor?: string; period?: string; bytes?: Buffer; replaces?: number } = {},
 ): Promise<{
   batchId: number;
   period: string;
@@ -215,7 +221,7 @@ async function importFile(
       ? { processor: options.processor ?? PROCESSOR, period: options.period }
       : await freeSlot({ processor: options.processor });
   rows = rows.map((row) => row.map((cell) => (cell === BATCH ? processor : cell)));
-  const minted = await mint(options.fileName ?? "live-residuals.xlsx", processor, period);
+  const minted = await mint(options.fileName ?? "live-residuals.xlsx", processor, period, options.replaces);
   expect(minted.status, minted.raw).toBe(200);
   expect(minted.body.exists, minted.raw).toBeUndefined();
 
@@ -447,7 +453,7 @@ describe("the upload takes the processor and month, and is the replace prompt's 
     expect(data).toEqual({ processor: "Red Fynn", period, status: "review" });
   });
 
-  it("answers a committed processor-month with its facts, and creates NO batch (the replace is phase 9)", async () => {
+  it("answers a committed processor-month with its facts, and creates NO batch until the admin says Yes", async () => {
     const mid = newMid();
     await merchantFor("owner", mid);
     // A month where TSYS and Square are both free, so the second processor's
@@ -467,14 +473,174 @@ describe("the upload takes the processor and month, and is the replace prompt's 
       },
     });
     expect(await nothingNamed("second.xlsx")).toEqual([]);
-    // (paid: true needs a payout_period_closures row, which no client and not
-    // even the service role can write until phase 9's close_payout_period().)
 
     // Another processor, same month: a different pair, so a batch is created.
     const other = await mint("other-processor.xlsx", "Square", period);
     expect(other.status, other.raw).toBe(200);
     expect(other.body.batch_id).toEqual(expect.any(Number));
     batchIds.push(other.body.batch_id as number);
+  });
+});
+
+describe("replace over HTTP: Yes, read, review, commit (phase 9)", () => {
+  const asAdmin = () => userClient(fixtures.tokens.admin);
+  const typed = (period: string) => `${PROCESSOR} ${label(period)}`;
+  const reopen = (period: string) =>
+    asAdmin().rpc("reopen_payout_period", {
+      period_input: period,
+      processor_input: PROCESSOR,
+      reason_input: "Live test cleanup: reopening its own month.",
+    });
+
+  async function committedMonth(mid: string, residual = "$25.00") {
+    const slot = await freeSlot({ processor: PROCESSOR });
+    const { batchId } = await importFile([HEADER, line(mid, { residual })], { fileName: "original.xlsx", ...slot });
+    expect((await commitV3(batchId)).error).toBeNull();
+    return { batchId, period: slot.period };
+  }
+
+  it("Yes creates a batch that replaces the committed one; it is read, reviewed and committed through v3", async () => {
+    const mid = newMid();
+    const other = newMid();
+    await merchantFor("owner", mid);
+    await merchantFor("owner", other);
+    const old = await committedMonth(mid);
+
+    const next = await importFile([HEADER, line(mid, { residual: "$40.00" }), line(other, { residual: "$2.00" })], {
+      fileName: "corrected.xlsx",
+      processor: PROCESSOR,
+      period: old.period,
+      replaces: old.batchId,
+    });
+    expect(next.parse.status, next.parse.raw).toBe(200);
+    const { data: batch } = await adminClient()
+      .from("rep_payout_batches")
+      .select("status, replaces_batch_id, processor, period")
+      .eq("id", next.batchId)
+      .single();
+    expect(batch).toEqual({ status: "review", replaces_batch_id: old.batchId, processor: PROCESSOR, period: old.period });
+    // Nothing changes until the commit.
+    expect((await ledgerFor(mid, old.period))?.residual_income).toBe(25);
+
+    const { data: result, error } = await commitV3(next.batchId);
+    expect(error, error?.message).toBeNull();
+    expect(result).toMatchObject({ written: 2, rows: 2, replaced_lines: 1 });
+    expect(await ledgerFor(mid, old.period)).toMatchObject({ residual_income: 40, batch_id: next.batchId });
+    expect(await ledgerFor(other, old.period)).toMatchObject({ residual_income: 2, batch_id: next.batchId });
+
+    const { data: replaced } = await adminClient()
+      .from("rep_payout_batches")
+      .select("status, replaced_by_batch_id")
+      .eq("id", old.batchId)
+      .single();
+    expect(replaced).toEqual({ status: "replaced", replaced_by_batch_id: next.batchId });
+
+    // The old file is kept, and still signs for download.
+    const download = await invoke("residual-import-file-url", { batch_id: old.batchId }, fixtures.tokens.admin);
+    expect(download.status, download.raw).toBe(200);
+    const bytes = await fetch(toReachableUrl(download.body.signedUrl as string));
+    expect(bytes.status).toBe(200);
+
+    // One audit row each: both commits, then the replace of the old one.
+    const { data: audit } = await adminClient()
+      .from("audit_log")
+      .select("action, row_id")
+      .in("action", ["commit_residual_import", "replace_residual_import"])
+      .in("row_id", [String(old.batchId), String(next.batchId)])
+      .order("id");
+    expect(audit).toEqual([
+      { action: "commit_residual_import", row_id: String(old.batchId) },
+      { action: "commit_residual_import", row_id: String(next.batchId) },
+      { action: "replace_residual_import", row_id: String(old.batchId) },
+    ]);
+  });
+
+  it("refuses the Yes once the month is marked paid, and says so; the prompt carries paid: true", async () => {
+    const mid = newMid();
+    await merchantFor("owner", mid);
+    const old = await committedMonth(mid);
+    const close = await asAdmin().rpc("close_payout_period", {
+      period_input: old.period,
+      processor_input: PROCESSOR,
+      confirmation_input: typed(old.period),
+    });
+    expect(close.error, close.error?.message).toBeNull();
+    try {
+      const prompt = await mint("paid.xlsx", PROCESSOR, old.period);
+      expect(prompt.body.exists).toMatchObject({ batch_id: old.batchId, paid: true });
+
+      const yes = await mint("paid.xlsx", PROCESSOR, old.period, old.batchId);
+      expect(yes.status, yes.raw).toBe(409);
+      expect(yes.body.error).toBe(
+        `${PROCESSOR} for ${label(old.period)} is marked paid and cannot be replaced. Reopen it (with a reason) on the Payouts page, or post an adjustment instead.`,
+      );
+      const { data } = await adminClient().from("rep_payout_batches").select("id").eq("file_name", "paid.xlsx");
+      expect(data).toEqual([]);
+    } finally {
+      expect((await reopen(old.period)).error).toBeNull();
+    }
+  });
+
+  it("refuses a Yes naming a batch that is not the committed one, creating nothing", async () => {
+    const mid = newMid();
+    await merchantFor("owner", mid);
+    const old = await committedMonth(mid);
+    const wrong = await mint("wrong.xlsx", PROCESSOR, old.period, old.batchId + 100000);
+    expect(wrong.status, wrong.raw).toBe(409);
+    expect(wrong.body.error).toMatch(/is no longer the committed import for/);
+    const free = await freeSlot({ processor: PROCESSOR });
+    const nothing = await mint("wrong.xlsx", PROCESSOR, free.period, old.batchId);
+    expect(nothing.status, nothing.raw).toBe(409);
+    const bad = await mint("wrong.xlsx", PROCESSOR, old.period, -1);
+    expect(bad.status, bad.raw).toBe(400);
+    const { data } = await adminClient().from("rep_payout_batches").select("id").eq("file_name", "wrong.xlsx");
+    expect(data).toEqual([]);
+  });
+
+  it("the database refuses the replace when the month was marked paid AFTER the Yes", async () => {
+    const mid = newMid();
+    await merchantFor("owner", mid);
+    const old = await committedMonth(mid);
+    const next = await importFile([HEADER, line(mid, { residual: "$1.00" })], {
+      fileName: "late.xlsx",
+      processor: PROCESSOR,
+      period: old.period,
+      replaces: old.batchId,
+    });
+    const close = await asAdmin().rpc("close_payout_period", {
+      period_input: old.period,
+      processor_input: PROCESSOR,
+      confirmation_input: typed(old.period),
+    });
+    expect(close.error, close.error?.message).toBeNull();
+    try {
+      const { error } = await commitV3(next.batchId);
+      expect(error?.code).toBe("PT409");
+      expect(error?.message).toMatch(/is marked paid and cannot be replaced/);
+      expect((await ledgerFor(mid, old.period))?.batch_id).toBe(old.batchId);
+    } finally {
+      expect((await reopen(old.period)).error).toBeNull();
+    }
+  });
+
+  it("a rep and anon reach none of the phase 9 functions over PostgREST, and nobody DELETEs ledger lines", async () => {
+    const calls: [string, Record<string, unknown>][] = [
+      ["close_payout_period", { period_input: month(-1), processor_input: PROCESSOR, confirmation_input: "x" }],
+      ["reopen_payout_period", { period_input: month(-1), processor_input: PROCESSOR, reason_input: "a reason here" }],
+      ["delete_payout_period", { period_input: month(-1), processor_input: PROCESSOR }],
+      ["post_payout_adjustment", {
+        agent_id_input: fixtures.userIds.owner, mid_input: "x", adjusts_period_input: month(-1),
+        processor_input: PROCESSOR, amount_input: 1, note_input: "note",
+      }],
+    ];
+    for (const [fn, args] of calls) {
+      const rep = await userClient(fixtures.tokens.owner).rpc(fn, args);
+      expect(rep.error?.code, fn).toBe("PT403");
+      const anon = await anonClient().rpc(fn, args);
+      expect(anon.error?.code, fn).toBe("42501");
+    }
+    const { error } = await asAdmin().from("rep_payout_rows").delete().eq("mid", "nothing-here");
+    expect(error?.code).toBe("42501");
   });
 });
 

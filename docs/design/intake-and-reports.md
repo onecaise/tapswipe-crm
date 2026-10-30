@@ -1,6 +1,6 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-8 built locally (§10).** Nothing has
+Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-9 built locally (§10).** Nothing has
 been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
@@ -1234,6 +1234,7 @@ Each item is what the build will assume unless Owen says otherwise.
 | A28 | Sharing a house merchant | **[CONFIRM: money]** Refused: a merchant at rate 0 has no rep side to divide. | Two shares of 0 pay nobody and only add lines. |
 | A29 | Lowering a merchant's rate below its open override | **[CONFIRM: money]** `set_merchant_split` refuses it, naming the override; the admin ends or changes the override first. | Otherwise the override would exceed the rate (§0b.5) and the rep's net would go negative. |
 | A30 | Rate precision | `numeric(5,2)`, 0.00-50.00 in 0.01 steps, matching `split_agent_pct` and the override. | The existing columns already have that type; Bruce Rozar's ~46% effective rate (§11) may be a blend, not a single rate. |
+| A31 | A merchant created without a rate | *Decided (Owen, 30 Oct 2026):* it takes the owner rep's CURRENT profile rate at creation, as a snapshot, by the approval rule (company = 100 minus it); the house profile gives 0. No rate is invented: an owner with none refuses the insert. A later change to the rep's rate does not touch existing merchants. Built with phase 9 (`20261030180000`). | A hand-made merchant (the merchant form) had no rate, and v3 refused its MID until someone remembered `set_merchant_split`. |
 
 ---
 
@@ -1886,6 +1887,87 @@ Not done here, for later phases:
 - **Phase 10**: override lines at step 6; `set_merchant_split` refusing a rate below an open
   override (A29).
 - **Cleanup**: drop the retired flags from the CHECK, the skip UI and its columns.
+
+### Phase 9: replace, Mark paid, period delete, adjustments (30 Oct 2026, branch `intake-residuals`)
+
+Step 0 first (its own commit, `5c1b870`): Phase 8 had mutation proofs for eight of v3's
+protections. Every other refusal (unknown confirmation code, status, missing month, empty batch,
+blocked row, blank / repeated / unknown MID, Income Type, missing figure, no rate, shares not
+totalling the rate) and the `is_admin()` guard now has one too: the real v3 refuses the case with
+its sentence, a copy without that check does not. The money grids (rates 0, 30, 45, 50 across odd
+cents; eight share splits with half-cent ties) were made re-runnable against a mutant: a v3 that
+skips the house line fails the unshared grid, and a `shared_part` that rounds half away from zero
+fails the shared grid at its ties.
+
+Built (`20261030180000_merchant_default_rate.sql`, `20261030190000_replace_paid_adjustments.sql`;
+Edge Function `residual-import-file-url`):
+- **A31, merchant default rate**: `default_merchant_split()`, BEFORE INSERT on `merchants`. Both
+  split columns NULL → the owner's `profiles.split_rate_pct` and 100 minus it (house: 0 / 100); a
+  rate the insert carries is kept; no rate invented (PT409); a snapshot (a later `set_rep_split`
+  and a move to another rep change nothing); no backfill.
+- **Mark paid / Reopen** (A8): `close_payout_period(period, processor, confirmation)` and
+  `reopen_payout_period(period, processor, reason)`. The closures table's trigger writes the one
+  audit row per action; the reason reaches it as `audit_log.detail` through the transaction-local
+  `tapswipe.reopen_reason`.
+- **Replace inside v3** (§2.3 step 4, §3.2), and the upload prompt's Yes (`replace_batch_id`).
+- **`delete_payout_period(period, processor)`** replacing the client delete (DELETE revoked, policy
+  dropped); the old path wrote no audit row, the defect §2.1 recorded.
+- **`post_payout_adjustment(agent, mid, adjusts_period, processor, amount, note)`** (A23).
+- Batch status `deleted`; `replaced` and `deleted` only from `committed`, final for every writer.
+- The app: `/payouts` lists each committed processor-month with its paid state, Mark paid (typed
+  phrase), Reopen (reason) and, on a paid month, the adjustment form; the period page deletes per
+  processor; the upload prompt's Yes / No, and the paid case; the review page says what a
+  replacing batch replaces and what replaced a batch.
+- Tests: `tests/rls/replace-paid-adjustments.test.ts`, `tests/rls/merchant-default-rate.test.ts`,
+  `tests/live/commit-concurrency.test.ts` (two real connections), the live replace-over-HTTP block
+  in `tests/live/residual-import.test.ts`; e2e `merchant-split.spec.ts`, `payouts-paid.spec.ts`,
+  and the rewritten replace-prompt test in `qa/residual-review.spec.ts`.
+
+Where the memo was silent or said otherwise, and what was chosen (the conservative side each time):
+- **The Reopen reason is on the audit row (`audit_log.detail`, new), not a `payout_period_reopenings`
+  table** (§3.2). The table's only reason was that `audit_log` had no detail column; the
+  instruction for this phase put the reason on the one audit row, so it has one home. `detail` is
+  NULL elsewhere except the period delete's count.
+- **A closure DELETE without a reason is refused at the trigger**, the owner included, so no path
+  reopens silently. A test cleanup must `TRUNCATE` (no row trigger) or reopen with a reason.
+- **The typed confirmation** (no wording in the memo): the processor code and month as the page
+  shows them, "TSYS July 2026", case and runs of space ignored. Mark paid also needs a committed
+  batch for that processor-month, and refuses one already paid (saying when).
+- **A Reopen reason is 10 to 500 characters** after trimming.
+- **Replace is v3, not a dedicated function**: the memo specifies it there (§2.3 step 4), and one
+  function means a replace cannot drift from a first commit's refusals or money.
+- **Replace refuses when the batch it replaces is no longer THE committed one** for the same
+  processor-month (a second replace of one batch; a deleted month), as well as when paid.
+- **The adjustment refusal for replace and delete covers both kinds**: an adjustment adjusting the
+  month on a MID the old lines paid (share corrections carry no processor) OR under its processor
+  (general adjustments carry one).
+- **The general adjustment needs a MID** (the ledger's `mid` is NOT NULL; the instruction's list
+  omitted it, the memo's has it), must name a CRM merchant, and is **refused for a month not marked
+  paid**: §0.5 says the fix before payment is a replace. Payee active (as a share correction's
+  partner); amount non-zero whole cents; reason 1-500; no double-post guard (several adjustments
+  for one month are legitimate; the form disables while posting).
+- **`post_share_correction()` is unchanged**, so its "already posted" guard counts a general
+  adjustment on the same MID and month and refuses a share correction there. The safe side; its
+  sentence predates general adjustments.
+- **The period delete is per processor** (§3.4's signature). NULL processor means the lines
+  committed before processors were recorded. Only IMPORT lines go; adjustment lines (corrections
+  already made) stay. The month's committed batch becomes **`deleted`** (new status: the memo did not
+  say what happens to the batch; this frees the slot for a new file and keeps the record). Nothing
+  to delete is PT404. Audit `row_id` `'<period>/<processor>'` (`/none` for NULL), `detail` the line
+  count and batch.
+- **`replaced` and `deleted` are final for every writer**, not only clients: no update of any kind.
+- **A31's trigger is `security definer`**, not the invoker default: a BEFORE trigger runs before
+  RLS's WITH CHECK, so an invoker copy answered a rep's (refused) insert into another rep's book
+  with "the owner has no split rate", a false sentence about that rep. Definer keeps RLS the
+  refusal. It fills only when BOTH split columns arrive NULL.
+- **Not built** (Recommend items, not instructed): the replace's `replace_summary` jsonb (§3.2
+  table) and the "not marked paid after 45 days" reminder (§9.1).
+
+Not done here, for later phases:
+- **Phase 10**: override lines at v3 step 6. The replace already deletes every line with the old
+  `batch_id`, so overrides carrying it are removed and rebuilt with no change to the replace.
+- An admin's client INSERT may still carry an explicit merchant rate (unaudited); only the NULL case
+  is defaulted. Closing that is a separate decision.
 
 ---
 

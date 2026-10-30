@@ -190,7 +190,7 @@ describe("processor and month are required on every new batch", () => {
       expect(status).toBe("review");
     });
 
-    it("the CHECK stands behind the trigger: committed or replaced needs a processor", async () => {
+    it("the CHECK stands behind the trigger: committed, replaced or deleted needs a processor", async () => {
       const id = await legacy("review");
       await db.exec(`set session_replication_role = replica`);
       try {
@@ -207,8 +207,9 @@ describe("processor and month are required on every new batch", () => {
           where conname = 'rep_payout_batches_month_when_committed'`,
       );
       expect(validated).toBe(true);
+      // 'deleted' joined the committed states in 20261030190000 (phase 9).
       expect(def).toBe(
-        "CHECK (((status <> ALL (ARRAY['committed'::text, 'replaced'::text])) OR (processor IS NOT NULL)))",
+        "CHECK (((status <> ALL (ARRAY['committed'::text, 'replaced'::text, 'deleted'::text])) OR (processor IS NOT NULL)))",
       );
     });
   });

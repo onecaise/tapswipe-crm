@@ -5,10 +5,12 @@ import { UploadIcon } from "lucide-react";
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { formatMoney, formatPeriod, periodParam } from "@/lib/format";
-import { summarizeByPeriod, type PayoutRow } from "@/lib/payouts";
+import { payoutMonthLabel, summarizeByPeriod, type PayoutRow } from "@/lib/payouts";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
+import { PayoutAdjustmentForm } from "@/components/payout-adjustment-form";
 import { PayoutExportButton } from "@/components/payout-export-button";
+import { PayoutMonthPaid } from "@/components/payout-month-paid";
 import { StatCard } from "@/components/stat-card";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -199,6 +201,120 @@ async function PayoutPeriods() {
   );
 }
 
+/**
+ * Every committed processor-month, with whether it is marked paid and the two
+ * actions (memo §3.2, A8), and the adjustment form on a paid one (§3.3).
+ * Admin-only by requireUser's role AND by RLS: rep_payout_batches and
+ * payout_period_closures are admin-SELECT tables, so a rep's query would
+ * return nothing here anyway.
+ *
+ * Paid is per processor and month because a file is: TSYS July can be paid
+ * while Square July is still being corrected.
+ */
+async function ProcessorMonths() {
+  const profile = await requireUser();
+  if (profile.role !== "admin") return null;
+
+  const supabase = await createClient();
+  const [batches, closures, reps] = await Promise.all([
+    supabase
+      .from("rep_payout_batches")
+      .select("id, file_name, processor, period, committed_at")
+      .eq("status", "committed")
+      .order("period", { ascending: false })
+      .order("processor", { ascending: true }),
+    supabase.from("payout_period_closures").select("period, processor, closed_at"),
+    supabase
+      .from("profiles")
+      .select("id, full_name")
+      .eq("is_active", true)
+      .order("full_name", { ascending: true }),
+  ]);
+
+  const error = batches.error ?? closures.error ?? reps.error;
+  if (error) {
+    return (
+      <p className="text-sm text-destructive">
+        Could not load the processor months: {error.message}
+      </p>
+    );
+  }
+
+  type Month = { id: number; file_name: string; processor: string; period: string; committed_at: string | null };
+  const months = (batches.data ?? []) as Month[];
+  if (months.length === 0) return null;
+
+  const paid = new Map(
+    ((closures.data ?? []) as { period: string; processor: string; closed_at: string }[]).map(
+      (c) => [`${c.processor}|${c.period}`, c.closed_at],
+    ),
+  );
+  const activeReps = (reps.data ?? []) as { id: string; full_name: string }[];
+
+  return (
+    <section className="flex flex-col gap-3" aria-labelledby="processor-months">
+      <div>
+        <h2 id="processor-months" className="text-base font-semibold tracking-tight">
+          Processor months
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          Until a month is marked paid it can be replaced (upload the corrected file) or
+          deleted. Once paid, it is corrected with an adjustment.
+        </p>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Month</TableHead>
+            <TableHead>Processor</TableHead>
+            <TableHead>Import</TableHead>
+            <TableHead>Paid</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {months.map((month) => {
+            const closedAt = paid.get(`${month.processor}|${month.period}`) ?? null;
+            return (
+              <TableRow key={month.id} data-testid="processor-month">
+                <TableCell className="whitespace-nowrap font-medium">
+                  {formatPeriod(month.period)}
+                </TableCell>
+                <TableCell>{month.processor}</TableCell>
+                <TableCell>
+                  <Link
+                    href={`/payouts/import/${month.id}`}
+                    className="block max-w-[22ch] truncate underline underline-offset-4"
+                    title={month.file_name}
+                  >
+                    {month.file_name}
+                  </Link>
+                </TableCell>
+                <TableCell className="whitespace-normal">
+                  <div className="flex min-w-0 flex-col gap-2">
+                    <PayoutMonthPaid
+                      period={month.period}
+                      processor={month.processor}
+                      label={payoutMonthLabel(month.processor, month.period)}
+                      closedAt={closedAt}
+                    />
+                    {closedAt !== null && (
+                      <PayoutAdjustmentForm
+                        period={month.period}
+                        processor={month.processor}
+                        reps={activeReps}
+                      />
+                    )}
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </section>
+  );
+}
+
 async function HeaderActions() {
   const profile = await requireUser();
 
@@ -240,6 +356,10 @@ export default function PayoutsPage() {
         }
       >
         <PayoutPeriods />
+      </Suspense>
+
+      <Suspense fallback={null}>
+        <ProcessorMonths />
       </Suspense>
     </PageShell>
   );

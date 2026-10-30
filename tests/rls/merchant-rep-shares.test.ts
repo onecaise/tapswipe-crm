@@ -422,12 +422,20 @@ describe("set_merchant_rep_share", () => {
  * of 0 has nothing to share.
  */
 describe("set_merchant_rep_share under the owner rule and the merchant's rate", () => {
+  // rate null: a merchant with NO rate, which since 20261030180000 only a row
+  // made before that migration can be (an insert without one takes the
+  // owner's profile rate), so it is inserted with triggers off.
   async function merchantAt(mid: string, rate: number | null): Promise<number> {
     await asPlatform(db);
-    await db.exec(`
-      insert into merchants (agent_id, mid, dba, status, city, state, split_agent_pct, split_company_pct)
-      values ('${AGENT_ID}', '${mid}', '${mid} Co', 'active', 'Nashville', 'TN',
-              ${rate === null ? "null" : rate}, ${rate === null ? "null" : 100 - rate});`);
+    if (rate === null) await db.exec(`set session_replication_role = replica`);
+    try {
+      await db.exec(`
+        insert into merchants (agent_id, mid, dba, status, city, state, split_agent_pct, split_company_pct)
+        values ('${AGENT_ID}', '${mid}', '${mid} Co', 'active', 'Nashville', 'TN',
+                ${rate === null ? "null" : rate}, ${rate === null ? "null" : 100 - rate});`);
+    } finally {
+      if (rate === null) await db.exec(`set session_replication_role = origin`);
+    }
     return merchantId(mid);
   }
 

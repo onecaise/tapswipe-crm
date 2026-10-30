@@ -4,7 +4,12 @@
 //   { file_name, processor, period }
 //                  -> creates the batch row, returns a signed UPLOAD url; or,
 //                     when that processor-month is already committed,
-//                     { exists } and NO batch (the replace is phase 9)
+//                     { exists } and NO batch (the page asks "Replace it?")
+//   { file_name, processor, period, replace_batch_id }
+//                  -> the Yes to that question: creates a batch that REPLACES
+//                     the committed one, unless the month is marked paid
+//                     (409). The replace itself happens at commit, inside
+//                     commit_residual_import_v3 (phase 9).
 //   { batch_id }   -> returns a signed DOWNLOAD url for that batch's file
 //
 // verify_jwt = false in config.toml, so this function authenticates the caller
@@ -133,6 +138,12 @@ export default {
     const processor = body.processor;
     const period = body.period;
 
+    // The Yes to the replace prompt names the committed batch it saw.
+    const replaceId = body.replace_batch_id;
+    if (replaceId !== undefined && !isPositiveInt(replaceId)) {
+      return json({ error: "replace_batch_id must be a positive integer" }, 400);
+    }
+
     // Through the caller's client: processors is readable by every
     // authenticated user, and the foreign key would refuse an unknown code
     // anyway -- this only turns that into a sentence.
@@ -152,10 +163,13 @@ export default {
     }
 
     // One committed batch per (processor, month). A second file for a
-    // committed month is a REPLACE, which phase 9 builds: until then the
-    // answer is the facts of the committed batch and NO new batch (memo
-    // §2.2), so the page can show the replace prompt and stop there. Through
-    // the caller's client: an admin reads every batch and closure via RLS.
+    // committed month is a REPLACE (memo §2.2, §3.2). Asked without
+    // replace_batch_id, the answer is the facts of the committed batch and NO
+    // new batch, so the page can ask "Replace it?". Asked with it -- the Yes
+    // -- a replacement batch is created, unless the month is marked paid.
+    // This is the early answer only: commit_residual_import_v3 re-checks all
+    // of it under its locks. Through the caller's client: an admin reads
+    // every batch and closure via RLS.
     const { data: committed, error: committedError } = await ctx.supabase
       .from("rep_payout_batches")
       .select("id, file_name, committed_at")
@@ -169,6 +183,21 @@ export default {
         500,
       );
     }
+    const monthName = new Date(`${period}T00:00:00Z`).toLocaleString("en-US", {
+      month: "long",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+
+    if (!committed && replaceId !== undefined) {
+      return json(
+        {
+          error: `Import #${replaceId} is no longer the committed import for ${processor} for ${monthName}. Upload the file again.`,
+        },
+        409,
+      );
+    }
+
     if (committed) {
       const { data: closure, error: closureError } = await ctx.supabase
         .from("payout_period_closures")
@@ -182,14 +211,32 @@ export default {
           500,
         );
       }
-      return json({
-        exists: {
-          batch_id: committed.id,
-          file_name: committed.file_name,
-          committed_at: committed.committed_at,
-          paid: closure !== null,
-        },
-      });
+      if (replaceId === undefined) {
+        return json({
+          exists: {
+            batch_id: committed.id,
+            file_name: committed.file_name,
+            committed_at: committed.committed_at,
+            paid: closure !== null,
+          },
+        });
+      }
+      if (committed.id !== replaceId) {
+        return json(
+          {
+            error: `Import #${replaceId} is no longer the committed import for ${processor} for ${monthName}. Upload the file again.`,
+          },
+          409,
+        );
+      }
+      if (closure !== null) {
+        return json(
+          {
+            error: `${processor} for ${monthName} is marked paid and cannot be replaced. Reopen it (with a reason) on the Payouts page, or post an adjustment instead.`,
+          },
+          409,
+        );
+      }
     }
 
     const fileName = sanitizeFileName(body.file_name);
@@ -207,6 +254,7 @@ export default {
         row_count: 0,
         processor,
         period,
+        replaces_batch_id: replaceId ?? null,
       })
       .select("id")
       .single();
@@ -285,6 +333,10 @@ export default {
   Expected: 200 with { batch_id, path, token, signedUrl, fileKey }
             200 with { exists: { batch_id, file_name, committed_at, paid } }
                 and no batch, when that processor-month is committed
+            200 with { batch_id, ... } for a replacement, given
+                replace_batch_id = the committed batch
+            409 with replace_batch_id when the month is marked paid, or the
+                batch named is not (or no longer) the committed one
             400 for a missing or unknown processor, a malformed period, or a
                 month outside the import window
             200 with { signedUrl, fileName } when given { batch_id } instead

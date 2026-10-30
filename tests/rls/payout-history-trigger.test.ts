@@ -4,6 +4,7 @@ import {
   ADMIN_ID,
   AGENT_ID,
   PAYOUT_PERIOD,
+  SEED_BATCH_PROCESSOR,
   asPlatform,
   asUser,
   createTestDb,
@@ -314,9 +315,11 @@ describe("it outlives what it describes", () => {
       `update rep_payout_rows set rep_split_pct = 45.00 where id = ${fx.rowIds.other}`,
     );
 
+    // Through delete_payout_period() since 20261030190000: the client DELETE
+    // is gone. The lines are seedPayouts' TSYS lines for that month.
     await asUser(db, ADMIN_ID);
     await db.exec(
-      `delete from rep_payout_rows where period = '${PAYOUT_PERIOD}'`,
+      `select delete_payout_period('${PAYOUT_PERIOD}', '${SEED_BATCH_PROCESSOR}')`,
     );
 
     expect(await history(db)).toHaveLength(2);
@@ -332,8 +335,12 @@ describe("it outlives what it describes", () => {
 
     await asUser(db, ADMIN_ID);
     await expect(
-      db.exec(`delete from rep_payout_rows where period = '${PAYOUT_PERIOD}'`),
+      db.exec(`select delete_payout_period('${PAYOUT_PERIOD}', '${SEED_BATCH_PROCESSOR}')`),
     ).resolves.not.toThrow();
+    await asPlatform(db);
+    expect(
+      await rows(db, `select count(*)::int as n from rep_payout_rows where period = '${PAYOUT_PERIOD}'`),
+    ).toEqual([{ n: 0 }]);
   });
 });
 

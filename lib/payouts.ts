@@ -46,9 +46,11 @@ export const PAYOUT_BATCH_STATUSES = [
   "review",
   "committed",
   "abandoned",
-  // A committed batch a later one replaced (20261030120000). Only a definer
-  // function sets it (phase 9); listed so a replaced batch renders.
+  // A committed batch a later one replaced (20261030120000), and one whose
+  // lines delete_payout_period removed (20261030190000). Only a definer
+  // function sets either, and both are final.
   "replaced",
+  "deleted",
 ] as const;
 
 export type PayoutBatchStatus = (typeof PAYOUT_BATCH_STATUSES)[number];
@@ -105,6 +107,12 @@ export type PayoutRow = {
   /** Generated and stored; null whenever either input is null. Never written. */
   rep_payout: number | null;
   batch_id: number | null;
+  /**
+   * The processor the line was paid under (the batch's, 20261030120000); on
+   * an adjustment, the paid month's it corrects; null on a line committed
+   * before processors were recorded, and on a share correction.
+   */
+  processor: string | null;
   /**
    * 'import' for a line a residual file put there; 'adjustment' for one
    * post_share_correction() posted (20261016161000). An adjustment line pays
@@ -165,7 +173,7 @@ export function splitPayoutLines<T extends { line_kind?: PayoutLineKind | null }
  * recomputing it here from two strings.
  */
 export const PAYOUT_ROW_COLUMNS =
-  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id, line_kind, adjustment_amount, adjusts_period, adjustment_note, rep_share_id, share_role";
+  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id, processor, line_kind, adjustment_amount, adjusts_period, adjustment_note, rep_share_id, share_role";
 
 /**
  * The shared-account snapshot, added to PAYOUT_ROW_COLUMNS on ADMIN pages
@@ -217,10 +225,31 @@ export type PayoutBatch = {
   processor: string | null;
   /** YYYY-MM-01. */
   period: string | null;
+  /** The committed batch this one replaces at commit (phase 9), or null. */
+  replaces_batch_id: number | null;
+  /** Set when a later batch replaced this one (status 'replaced'). */
+  replaced_by_batch_id: number | null;
 };
 
 export const PAYOUT_BATCH_COLUMNS =
-  "id, imported_by, file_key, file_name, status, row_count, uploaded_at, committed_at, skipped_rows, skips_acknowledged_at, adjustment_rows_ignored, processor, period";
+  "id, imported_by, file_key, file_name, status, row_count, uploaded_at, committed_at, skipped_rows, skips_acknowledged_at, adjustment_rows_ignored, processor, period, replaces_batch_id, replaced_by_batch_id";
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/**
+ * A processor-month as close_payout_period() expects it typed, e.g.
+ * "TSYS July 2026": the processor code, then Postgres's
+ * to_char(period, 'FMMonth YYYY'). English and from the date's own digits,
+ * never the browser's locale or time zone, or the phrase shown would not be
+ * the phrase the database accepts.
+ */
+export function payoutMonthLabel(processor: string, period: string): string {
+  const [year, month] = period.split("-");
+  return `${processor} ${MONTH_NAMES[Number(month) - 1]} ${year}`;
+}
 
 /**
  * One row commit_residual_import_v2 did not apply, as it records it on the

@@ -121,6 +121,16 @@ function groupByAgent(rows: PayoutRow[], reps: Map<string, Rep>): Group[] {
     );
 }
 
+/** The month's import lines counted per processor (NULL: before processors were recorded). */
+function processorsIn(rows: PayoutRow[]): [string | null, number][] {
+  const counts = new Map<string | null, number>();
+  for (const row of rows) {
+    if (row.line_kind !== "import") continue;
+    counts.set(row.processor, (counts.get(row.processor) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort(([a], [b]) => (a ?? "").localeCompare(b ?? ""));
+}
+
 async function PeriodLedger({
   params,
 }: {
@@ -242,18 +252,18 @@ async function PeriodLedger({
                 gets their own rows. And it is the bulk-entry path for an admin —
                 export, fill the two columns in Excel, upload it again. */}
             <PayoutExportButton period={period} label="Export XLSX" />
-            {isAdmin && (
-              <PayoutPeriodDelete
-                period={period}
-                // Every line goes, adjustments included -- and an adjustment,
-                // like a hand-entered figure, is not something a re-import
-                // brings back.
-                rowCount={overall.rows + overall.adjustments}
-                filledCount={
-                  overall.rows - overall.unfilled + overall.adjustments
-                }
-              />
-            )}
+            {/* One delete per processor in the month: a file is one
+                processor's, and delete_payout_period deletes that
+                processor's import lines only (adjustments stay). */}
+            {isAdmin &&
+              processorsIn(rows).map(([processor, count]) => (
+                <PayoutPeriodDelete
+                  key={processor ?? ""}
+                  period={period}
+                  processor={processor}
+                  rowCount={count}
+                />
+              ))}
           </div>
         }
       />

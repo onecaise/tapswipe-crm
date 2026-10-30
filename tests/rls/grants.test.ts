@@ -168,13 +168,15 @@ describe("grant surface after all migrations", () => {
     // rep_payout_rows: no INSERT. Rows are created only by
     // commit-residual-import under the service role, so an INSERT grant would be
     // backed by no policy — a ledger of what a processor reported must not be
-    // writable a row at a time from a browser. DELETE is the whole-period
-    // escape hatch, admin-gated by policy. UPDATE is held on two COLUMNS only
-    // (20261014160000), so — the quotes case below — it is invisible to
-    // has_table_privilege, and the per-column loop is what pins it.
+    // writable a row at a time from a browser. No DELETE either since
+    // 20261030190000: the period delete is delete_payout_period(), audited and
+    // refused for a paid month, and the grant and its policy are gone. UPDATE
+    // is held on two COLUMNS only (20261014160000), so — the quotes case
+    // below — it is invisible to has_table_privilege, and the per-column loop
+    // is what pins it.
     expect(
       await tablePrivileges(db, "authenticated", "rep_payout_rows"),
-    ).toEqual(["DELETE", "SELECT"]);
+    ).toEqual(["SELECT"]);
     const payoutUpdatable = await rows<{ column_name: string }>(
       db,
       `select attname as column_name from pg_attribute
