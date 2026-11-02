@@ -1010,17 +1010,20 @@ describe("who sees what", () => {
     await asPlatform(db);
   });
 
-  it("no client changes an override line: the figures are CHECKed off it, the override columns are not granted", async () => {
+  it("no client changes an override line: no grant (since 20261102140000), and the figures are CHECKed off it for the owner", async () => {
     const { batch } = await committed();
     const [{ id }] = await rows<{ id: number }>(db, `select id from rep_payout_rows where batch_id = ${batch} and override_role = 'credit'`);
-    let error = await rpc(db, `update rep_payout_rows set residual_income = 5 where id = ${id}`);
-    expect(error?.message).toContain("rep_payout_rows_adjustment_no_figures");
-    error = await rpc(db, `update rep_payout_rows set rep_split_pct = 50 where id = ${id}`);
-    expect(error?.message).toContain("rep_payout_rows_adjustment_no_figures");
-    error = await rpc(db, `update rep_payout_rows set override_amount = 99 where id = ${id}`);
-    expect(error?.message).toMatch(/permission denied/);
-    error = await rpc(db, `delete from rep_payout_rows where id = ${id}`);
-    expect(error?.message).toMatch(/permission denied/);
+    for (const set of ["residual_income = 5", "rep_split_pct = 50", "override_amount = 99"]) {
+      const error = await rpc(db, `update rep_payout_rows set ${set} where id = ${id}`);
+      expect(error?.message, set).toMatch(/permission denied/);
+    }
+    await asPlatform(db);
+    for (const set of ["residual_income = 5", "rep_split_pct = 50"]) {
+      const error = await attempt(() => db.query(`update rep_payout_rows set ${set} where id = ${id}`));
+      expect(error?.message, set).toContain("rep_payout_rows_adjustment_no_figures");
+    }
+    const deleteError = await rpc(db, `delete from rep_payout_rows where id = ${id}`);
+    expect(deleteError?.message).toMatch(/permission denied/);
   });
 });
 

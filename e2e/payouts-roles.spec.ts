@@ -136,13 +136,12 @@ test.describe("as an agent", () => {
       },
     );
 
-    // RLS FILTERS rather than erroring: the update policy on rep_payout_rows is
-    // admin-only, so the statement succeeds against zero rows. The affected
-    // count is the assertion, NOT the status code — a 204 here would look like
-    // success to anyone reading only the status, which is exactly why
-    // PayoutFigureCell passes count: "exact" and treats 0 as a failure.
-    expect(response.status()).toBe(204);
-    expect(response.headers()["content-range"]).toBe("*/0");
+    // REFUSED since 20261102140000 (phase 11): no client role holds UPDATE on
+    // rep_payout_rows, an admin included, so PostgREST answers 403 with the
+    // privilege error. (It was a 204 filtered to zero rows while admins held a
+    // column grant and the update policy hid the row from a rep.)
+    expect(response.status()).toBe(403);
+    expect((await response.json()).code).toBe("42501");
 
     // And the figure is untouched on reload.
     await page.reload();
@@ -276,16 +275,15 @@ test.describe("as an admin", () => {
     expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b)));
   });
 
-  test("is offered the admin affordances", async ({ page }) => {
+  test("is offered the admin affordances, and no figure editing", async ({ page }) => {
     await page.goto(`/payouts/${PERIODS.many}`);
 
     await expect(
       page.getByRole("button", { name: /delete period/i }),
     ).toBeVisible();
-    // One bulk-split control per rep group.
-    await expect(page.getByRole("button", { name: "Apply" })).toHaveCount(3);
-    // Two editable figures per row across 12 rows, plus one bulk-split box per
-    // rep group.
-    await expect(page.getByRole("textbox")).toHaveCount(12 * 2 + 3);
+    // And no figure editing, an admin included (20261102140000): the inline
+    // cells (two per row) and the per-rep bulk split are gone.
+    await expect(page.getByRole("button", { name: "Apply" })).toHaveCount(0);
+    await expect(page.getByRole("textbox")).toHaveCount(0);
   });
 });

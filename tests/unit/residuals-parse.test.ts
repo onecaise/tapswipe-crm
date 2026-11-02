@@ -3,6 +3,7 @@ import * as XLSX from "xlsx";
 
 import {
   COLUMN_HEADERS,
+  EXPORT_HEADER,
   RESIDUAL_BLOCKERS,
   RESIDUAL_COLUMNS,
   blockerMessage,
@@ -436,6 +437,20 @@ describe("parseResidualSheet", () => {
     const result = parseResidualSheet([
       ["Period", "Agent #", "Agent", "MID", "Merchant name", "Volume", "Rep payout"],
       ["2026-07-01", "4471", "Ann", "MID-1", "Joe", 1, 1],
+    ]);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.error).toMatch(/looks like a CRM export, not a processor file/);
+  });
+
+  it("refuses the export's own header (phase 11), though it shares Processor, Volume and Residual with a processor file", () => {
+    // The header memo §2.6 specifies, in order.
+    expect([...EXPORT_HEADER]).toEqual([
+      "Period", "Processor", "Agent #", "Agent", "MID", "Merchant name",
+      "Volume", "Residual", "Rep split", "Rep payout", "Line", "Account share",
+    ]);
+    const result = parseResidualSheet([
+      [...EXPORT_HEADER],
+      ["2026-07-01", "TSYS", "4471", "Ann", "MID-1", "Joe", 1000, 100, 50, 50, "Override", null],
     ]);
     expect(result.ok).toBe(false);
     expect(!result.ok && result.error).toMatch(/looks like a CRM export, not a processor file/);

@@ -170,10 +170,10 @@ describe("grant surface after all migrations", () => {
     // backed by no policy — a ledger of what a processor reported must not be
     // writable a row at a time from a browser. No DELETE either since
     // 20261030190000: the period delete is delete_payout_period(), audited and
-    // refused for a paid month, and the grant and its policy are gone. UPDATE
-    // is held on two COLUMNS only (20261014160000), so — the quotes case
-    // below — it is invisible to has_table_privilege, and the per-column loop
-    // is what pins it.
+    // refused for a paid month, and the grant and its policy are gone. No
+    // UPDATE either since 20261102140000 (it had been two COLUMNS, from
+    // 20261014160000): a column grant is invisible to has_table_privilege, so
+    // the per-column loop is what pins that none is left.
     expect(
       await tablePrivileges(db, "authenticated", "rep_payout_rows"),
     ).toEqual(["SELECT"]);
@@ -184,10 +184,7 @@ describe("grant surface after all migrations", () => {
           and has_column_privilege('authenticated', 'rep_payout_rows', attname, 'UPDATE')
         order by attname`,
     );
-    expect(payoutUpdatable.map((r) => r.column_name)).toEqual([
-      "rep_split_pct",
-      "residual_income",
-    ]);
+    expect(payoutUpdatable.map((r) => r.column_name)).toEqual([]);
 
     // rep_payout_batches: SELECT to list them, UPDATE to abandon one. No INSERT
     // because the Storage key contains the batch id, so the row is created
@@ -662,8 +659,6 @@ describe("grant surface after all migrations", () => {
       "public.end_merchant_rep_share(int, date)",
       "public.cancel_merchant_rep_share(int)",
       "public.shared_part(numeric, numeric, numeric)",
-      // Writes both lines of a shared pair as the owner.
-      "public.set_shared_residual(int, date, numeric)",
       // The commit (20261030160000): writes the ledger, deletes staging and
       // writes audit_log as the owner.
       "public.commit_residual_import_v3(int, text[])",

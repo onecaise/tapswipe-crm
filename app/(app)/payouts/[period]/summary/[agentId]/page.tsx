@@ -149,7 +149,7 @@ async function Summary({
                  period that is still being worked on would otherwise look final. */
               <p className="mt-1 text-xs font-medium text-warning">
                 {totals.unfilled} of {totals.rows} merchants have no residual figure
-                entered yet — this summary is incomplete.
+                — this summary is incomplete.
               </p>
             )}
           </header>

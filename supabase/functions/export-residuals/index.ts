@@ -1,4 +1,4 @@
-// Exports rep_payout_rows as an XLSX — and one that can be fed straight back in.
+// Exports rep_payout_rows as an XLSX download.
 //
 // verify_jwt = false in config.toml, so this function authenticates the caller
 // itself.
@@ -17,18 +17,17 @@
 //
 // SheetJS is imported here rather than in _shared/, for the reason
 // parse-residual-import gives: a _shared module with a dependency would need an
-// import map of its own. The column names are EXPORT_COLUMN_HEADERS in
-// _shared/residuals.ts. Since phase 7 of docs/design/intake-and-reports.md the
-// export is NOT an import format: the parser reads the processor's six-column
-// file and refuses this one (it carries Agent # and Rep payout). The header
-// itself changes in phase 11; until then the round-trip notes below are history.
+// import map of its own. The header row is EXPORT_HEADER in _shared/residuals.ts
+// (memo §2.6, phase 11 of docs/design/intake-and-reports.md). The export is NOT
+// an import format: the parser reads the processor's six-column file and refuses
+// this one, which carries Agent # and Rep payout.
 
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
 import * as XLSX from "xlsx";
 
 import { callerIsActive, json } from "../_shared/admin-users.ts";
-import { EXPORT_COLUMN_HEADERS as COLUMN_HEADERS } from "../_shared/residuals.ts";
+import { EXPORT_HEADER } from "../_shared/residuals.ts";
 
 /** PostgREST caps a response at [api] max_rows; read in pages under that. */
 const PAGE_SIZE = 500;
@@ -36,11 +35,10 @@ const PAGE_SIZE = 500;
 type Row = {
   agent_id: string;
   period: string;
+  processor: string | null;
   mid: string;
   merchant_name: string | null;
   volume: string | null;
-  average_ticket: string | null;
-  total_cost: string | null;
   residual_income: string | null;
   rep_split_pct: string | null;
   rep_payout: string | null;
@@ -95,7 +93,7 @@ export default {
       let query = ctx.supabase
         .from("rep_payout_rows")
         .select(
-          "agent_id, period, mid, merchant_name, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, line_kind, share_role, primary_rep_pct, secondary_rep_pct",
+          "agent_id, period, processor, mid, merchant_name, volume, residual_income, rep_split_pct, rep_payout, line_kind, share_role, primary_rep_pct, secondary_rep_pct",
         )
         .order("period", { ascending: false })
         .order("agent_id", { ascending: true })
@@ -138,61 +136,37 @@ export default {
       }
     }
 
-    // The nine canonical headers are what make this file re-importable; `Agent` and
-    // `Rep payout` are extras the parser ignores, because mapHeaders skips headers
-    // it does not recognise. `Agent` does not collide with `Agent #` — the
-    // normaliser reduces them to `agent` and `agent#`.
+    // The header (memo §2.6): EXPORT_HEADER, one row per ledger line.
     //
-    // `Line` (phase 5) is the one extra the parser reads: "Adjustment" on a line
-    // post_share_correction() wrote, blank on an import line. The parser SKIPS a
-    // row marked Adjustment, so a round trip can never turn a correction into an
-    // import line or merge it into one. An adjustment's Residual income and Rep
-    // split are blank (it has neither); its Rep payout is the adjustment amount.
+    // `Processor` is the line's (the batch's; an adjustment's is the paid
+    // month's); blank on a line from before processors were recorded.
+    // `Residual` is the line's own residual (a shared line's piece of the
+    // account's). `Line` says what kind of line it is: blank for a merchant
+    // line from a file, "Adjustment" for a correction, "Override" for an
+    // override debit or credit (20261102120000). An adjustment and an override
+    // have no Volume, Residual or Rep split; their Rep payout is the amount.
     //
-    // `Account share` (phase 7) is the row's OWN share of the rep side on a
-    // shared account -- 40 on the signer's line, 10 on the partner's -- and
-    // blank on an unshared line. Never the other rep's figure: a rep's export
-    // holds only their own lines (RLS), and each line names its own share. Last
-    // in the row so no existing column moves, and ignored by the parser, whose
-    // header lookup is exact ("account share" matches nothing it reads).
+    // `Account share` is the row's OWN share of the rep side on a shared
+    // account -- 40 on the signer's line, 10 on the partner's -- and blank
+    // otherwise. Never the other rep's figure: a rep's export holds only their
+    // own lines (RLS), and each line names its own share.
     //
-    // DELIBERATELY NO TOTAL ROW. A total has no MID, so re-importing this file would
-    // block that row with missing_mid and refuse the whole batch — breaking the
-    // round trip that is the entire point of the export. The pages show the totals.
-    const sheet: unknown[][] = [
-      [
-        COLUMN_HEADERS.period,
-        COLUMN_HEADERS.agent_number,
-        "Agent",
-        COLUMN_HEADERS.mid,
-        COLUMN_HEADERS.merchant_name,
-        COLUMN_HEADERS.volume,
-        COLUMN_HEADERS.average_ticket,
-        COLUMN_HEADERS.total_cost,
-        COLUMN_HEADERS.residual_income,
-        COLUMN_HEADERS.rep_split,
-        "Rep payout",
-        COLUMN_HEADERS.line,
-        "Account share",
-      ],
-    ];
+    // No total row: the pages show the totals, and a row with no MID is not a
+    // ledger line.
+    const sheet: unknown[][] = [[...EXPORT_HEADER]];
 
     for (const row of rows) {
       const rep = reps.get(row.agent_id);
       sheet.push([
-        // YYYY-MM-DD as text, which parsePeriodCell reads back exactly. Writing a
-        // Date here would let Excel's display format decide what the file says.
+        // YYYY-MM-DD as text: a Date would let Excel's display format decide
+        // what the file says.
         row.period,
+        row.processor ?? "",
         rep?.number ?? "",
         rep?.name ?? "",
         row.mid,
         row.merchant_name ?? "",
         num(row.volume),
-        num(row.average_ticket),
-        num(row.total_cost),
-        // Blank rather than 0 when unset, so a re-import leaves the figure alone
-        // instead of writing a zero nobody entered. This is the export half of the
-        // coalesce rule in commit_residual_import.
         num(row.residual_income),
         num(row.rep_split_pct),
         num(row.rep_payout),

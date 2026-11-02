@@ -85,7 +85,7 @@ async function PayoutPeriods() {
     { repPayout: 0, unfilled: 0 },
   );
 
-  // Where "Awaiting figures" should send someone — and only when that question
+  // Where "Lines with no figure" should send someone — and only when that question
   // has one answer. The card totals unfilled rows across every period, so it is
   // a link exactly while a single period is waiting, which is the ordinary case
   // (one import, one month, many blank rows). With two months outstanding an
@@ -107,9 +107,10 @@ async function PayoutPeriods() {
           value={formatMoney(overall.repPayout)}
         />
         {/* Accented only for an admin, and only because it is the one figure on
-            this page that represents outstanding work — rows still waiting for
-            someone to enter a residual. A rep cannot act on it, so it stays
-            plain for them.
+            this page that flags a problem — lines with no residual or rate,
+            which since 20261102140000 nobody edits: an admin fixes the month
+            by replacing it, or by an adjustment once it is paid. A rep cannot
+            act on it, so it stays plain for them.
 
             Linked for BOTH roles, though, and the asymmetry is deliberate: the
             two props answer different questions. `accent` is about priority, and
@@ -119,7 +120,7 @@ async function PayoutPeriods() {
             roles could already reach it from the period name; this just stops
             the figure naming the work from being the one thing that is inert. */}
         <StatCard
-          label="Awaiting figures"
+          label="Lines with no figure"
           value={overall.unfilled}
           accent={isAdmin && overall.unfilled > 0}
           href={soleUnfilledHref}
@@ -159,7 +160,7 @@ async function PayoutPeriods() {
                     blanks is waiting on someone. Exactly what the two intents
                     mean everywhere else, so no new colour is needed.
 
-                    "N to enter" is a LINK to the period, because it was the one
+                    The count is a LINK to the period, because it was the one
                     thing on this page naming the outstanding work and the one
                     thing that could not be clicked — the period name in the
                     first column was the only way in, and it reads as a label
@@ -175,20 +176,18 @@ async function PayoutPeriods() {
                 ) : (
                   <Link
                     href={`/payouts/${periodParam(period.period)}`}
-                    // Named rather than left to read as a bare "1 to enter",
-                    // which says nothing out of its row. Deliberately NOT "Enter
-                    // figures for…": a rep reaches this link too and cannot
-                    // enter anything (update on rep_payout_rows is admin-only),
-                    // so the label states the fact both roles share and neither
-                    // is promised an action they do not have.
-                    aria-label={`${formatPeriod(period.period)} — ${period.unfilled} awaiting figures`}
+                    // Named rather than left to read as a bare count, which says
+                    // nothing out of its row. It states a fact and promises no
+                    // action: nobody enters a figure (20261102140000); a month
+                    // is fixed by a replace, or an adjustment once paid.
+                    aria-label={`${formatPeriod(period.period)} — ${period.unfilled} with no figure`}
                     className="rounded-full focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
                     <StatusBadge
                       intent="warning"
                       className="transition-opacity hover:opacity-80"
                     >
-                      {period.unfilled} to enter
+                      {period.unfilled} with no figure
                     </StatusBadge>
                   </Link>
                 )}

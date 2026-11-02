@@ -270,3 +270,122 @@ describe("two real connections race v3; exactly one wins and the other is refuse
     expect(lines).toEqual([{ mid }]);
   });
 });
+
+/**
+ * A commit racing an override change on the SAME merchant and month (phase 11
+ * of docs/design/intake-and-reports.md). Both take the share lock
+ * (hashtext('tapswipe.merchant_rep_shares')), and set_merchant_override also
+ * takes the merchant row FOR UPDATE where v3 holds it FOR SHARE, so whichever
+ * starts first finishes first and the other decides on what it committed:
+ *   * commit first: the override then finds the month committed and is
+ *     refused by the month rule (PT409, its sentence) -- the month has no
+ *     override lines and never will;
+ *   * override first: the commit then reads it and writes the pair.
+ * Never a raw constraint error, never a deadlock.
+ */
+describe("a commit and an override change on the same merchant and month", () => {
+  function overrideAsAdmin(merchantId: number, period: string, hold: boolean, tag: string): string {
+    return `
+begin;
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"${fixtures.userIds.admin}","role":"authenticated"}', true);
+select '${tag}', set_merchant_override(${merchantId}, '${fixtures.userIds.intruder}', 10, '${period}');
+${hold ? `select '${tag}-holding', pg_sleep(${HOLD_SECONDS});` : ""}
+commit;
+`;
+  }
+
+  async function merchantId(mid: string): Promise<number> {
+    const { data } = await adminClient().from("merchants").select("id").eq("mid", mid).single();
+    return data!.id as number;
+  }
+
+  async function overrideLinesOf(batchId: number) {
+    const { data } = await adminClient()
+      .from("rep_payout_rows")
+      .select("override_role, override_amount")
+      .eq("batch_id", batchId)
+      .eq("line_kind", "override")
+      .order("override_amount");
+    return data ?? [];
+  }
+
+  async function overridesOn(id: number) {
+    const { data } = await adminClient().from("merchant_overrides").select("effective_from").eq("merchant_id", id);
+    return data ?? [];
+  }
+
+  it("commit first: the override is refused by the month rule, cleanly, and the month has no override lines", async () => {
+    const period = await freeMonth();
+    const mid = await merchant();
+    const id = await merchantId(mid);
+    const only = await batch(period, [mid]);
+
+    const [a, b] = await race(commitAsAdmin(only, true, "covr-A"), overrideAsAdmin(id, period, false, "covr-B"), "covr");
+
+    expect(a.code, a.err).toBe(0);
+    expect(b.code).not.toBe(0);
+    expect(b.ms).toBeGreaterThan(1000);
+    expect(b.err).toContain("is already committed for this MID. An override can only start after it");
+    expect(b.err).not.toMatch(/duplicate key|deadlock|violates/);
+    expect(await overrideLinesOf(only)).toEqual([]);
+    expect(await overridesOn(id)).toEqual([]);
+  });
+
+  it("override first: the commit waits, reads it, and writes the pair", async () => {
+    const period = await freeMonth();
+    const mid = await merchant();
+    const id = await merchantId(mid);
+    const only = await batch(period, [mid]);
+
+    const [a, b] = await race(overrideAsAdmin(id, period, true, "ocov-A"), commitAsAdmin(only, false, "ocov-B"), "ocov");
+
+    expect(a.code, a.err).toBe(0);
+    expect(b.code, b.err).toBe(0);
+    expect(b.ms).toBeGreaterThan(1000);
+    expect(b.out).toMatch(/"overrides": 1/);
+    // R 100 at 10%: the owner's debit -10, the intruder's credit +10.
+    expect(await overrideLinesOf(only)).toEqual([
+      { override_role: "debit", override_amount: -10 },
+      { override_role: "credit", override_amount: 10 },
+    ]);
+  });
+
+  it("mutation proof: without set_merchant_override's locks, it slips in under the commit and breaks the month rule", async () => {
+    const SIG = "set_merchant_override(int, uuid, numeric, date)";
+    const original = probe(`select pg_get_functiondef('${SIG}'::regprocedure);`);
+    const LOCK = "perform pg_advisory_xact_lock(hashtext('tapswipe.merchant_rep_shares'));";
+    const ROW = "select * into m from merchants where id = merchant_id_input for update;";
+    expect(original).toContain(LOCK);
+    expect(original).toContain(ROW);
+    const mutated = original
+      .replace(LOCK, "perform 1;")
+      .replace(ROW, "select * into m from merchants where id = merchant_id_input;");
+    try {
+      expect(spawnSync("docker", PSQL, { input: `${mutated};`, encoding: "utf8", env: ENV }).status).toBe(0);
+      const period = await freeMonth();
+      const mid = await merchant();
+      const id = await merchantId(mid);
+      const only = await batch(period, [mid]);
+
+      const a = session(commitAsAdmin(only, true, "nolockovr-A"));
+      await until(
+        () => probe(`select count(*) from pg_stat_activity where query like '%nolockovr-A-holding%' and state = 'active' and pid <> pg_backend_pid()`) === "1",
+        "the commit to hold",
+      );
+      // Nothing makes it wait now: it reads "nothing committed" and inserts.
+      const b = await session(overrideAsAdmin(id, period, false, "nolockovr-B"));
+      const done = await a;
+      expect(done.code, done.err).toBe(0);
+      expect(b.code, b.err).toBe(0);
+      // The broken outcome the locks prevent: an override starting AT a
+      // committed month that paid no override.
+      expect(await overridesOn(id)).toEqual([{ effective_from: period }]);
+      expect(await overrideLinesOf(only)).toEqual([]);
+    } finally {
+      const restore = spawnSync("docker", PSQL, { input: `${original};`, encoding: "utf8", env: ENV });
+      expect(restore.status, restore.stderr).toBe(0);
+      expect(probe(`select pg_get_functiondef('${SIG}'::regprocedure);`)).toBe(original);
+    }
+  });
+});

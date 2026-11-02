@@ -61,22 +61,24 @@ export const COLUMN_HEADERS: Record<ResidualColumn, string> = {
 export const REQUIRED_COLUMNS: readonly ResidualColumn[] = RESIDUAL_COLUMNS;
 
 /**
- * The export's own header names (export-residuals). NOT an import format any
- * more (memo §2.6): the export keeps this header until phase 11 replaces it,
- * and the parser refuses a file carrying either CRM_EXPORT_MARKERS header.
+ * The export's header row, in order (export-residuals; memo §2.6, phase 11).
+ * A download, NOT an import format: the parser refuses a file carrying either
+ * CRM_EXPORT_MARKERS header, and this one carries both.
  */
-export const EXPORT_COLUMN_HEADERS = {
-  period: "Period",
-  agent_number: "Agent #",
-  mid: "MID",
-  merchant_name: "Merchant name",
-  volume: "Volume",
-  average_ticket: "Average ticket",
-  total_cost: "Total cost",
-  residual_income: "Residual income",
-  rep_split: "Rep split",
-  line: "Line",
-} as const;
+export const EXPORT_HEADER = [
+  "Period",
+  "Processor",
+  "Agent #",
+  "Agent",
+  "MID",
+  "Merchant name",
+  "Volume",
+  "Residual",
+  "Rep split",
+  "Rep payout",
+  "Line",
+  "Account share",
+] as const;
 
 /**
  * Headers only the CRM's own export carries. A file with one is an export
@@ -329,8 +331,8 @@ export const MISPLACED_COMMA =
  * Whether every comma in a cell is a thousands separator: `1,299.00`, `12,345`.
  * The currency sign, whitespace, percent, accounting parentheses and minus are
  * peeled off first, matching what parseNumberCell tolerates around the digits.
- * Shared with nothing on purpose -- parseFigureInput in lib/payouts.ts carries
- * its own copy of the same shape (see the note above that function).
+ * Shared with nothing. The payout cell's parseFigureInput carried a copy of the
+ * same shape until the cell was removed (20261102140000).
  */
 function isThousandsGrouped(text: string): boolean {
   const body = text

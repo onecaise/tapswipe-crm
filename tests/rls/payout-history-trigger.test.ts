@@ -16,8 +16,15 @@ import {
 } from "../helpers/db";
 
 /**
- * log_payout_row_change() — the field-level trail behind the two money figures an
- * admin types.
+ * log_payout_row_change() — the field-level trail behind the two money figures.
+ *
+ * SINCE 20261102140000 NO CLIENT EDITS A LEDGER LINE (phase 11 of
+ * docs/design/intake-and-reports.md): an admin's figure cell and bulk split are
+ * gone, and a signed-in admin's UPDATE is refused (asserted below). The trigger
+ * is KEPT as a backstop: any owner-side edit -- a definer function written
+ * later, a hand repair -- is still recorded and still fails closed. So the
+ * behaviours below are driven the way such a write runs: as the owner, with the
+ * admin's identity in the JWT claims.
  *
  * Corrections to rep_payout_rows overwrite in place, so the row itself carries no
  * memory of what a residual used to be. This trigger is that memory, and it is the
@@ -76,11 +83,32 @@ async function history(db: TestDb): Promise<HistoryRow[]> {
   );
 }
 
-/** Runs an update to rep_payout_rows as an admin, the way the UI does. */
+/**
+ * Runs an update to rep_payout_rows the only way one still runs: as the OWNER
+ * (how a security definer function executes), with the admin's identity in the
+ * JWT claims, so auth.uid() is the admin. No client role may update the table.
+ */
 async function editAsAdmin(db: TestDb, sql: string): Promise<void> {
-  await asUser(db, ADMIN_ID);
+  await db.exec(`reset role;`);
+  await db.exec(
+    `set request.jwt.claims = '${JSON.stringify({ sub: ADMIN_ID, role: "authenticated" })}';`,
+  );
   await db.exec(sql);
 }
+
+describe("no client path records anything, because there is none", () => {
+  it("a signed-in admin's edit is refused (no grant), and nothing is recorded", async () => {
+    await asUser(db, ADMIN_ID);
+    let error: { code?: string; message: string } | null = null;
+    try {
+      await db.exec(`update rep_payout_rows set residual_income = 91.00 where id = ${fx.rowIds.filled}`);
+    } catch (caught) {
+      error = caught as { code?: string; message: string };
+    }
+    expect(error?.code).toBe("42501");
+    expect(await history(db)).toEqual([]);
+  });
+});
 
 describe("it records a change to either money figure", () => {
   it("captures old, new, who, and enough context to read the row later", async () => {
@@ -395,11 +423,11 @@ describe("a history failure rolls the edit back — fail closed, not silent", ()
 
 describe("the trigger cannot be defeated by the grants it runs against", () => {
   it("writes history even though authenticated holds no INSERT on that table", async () => {
-    // This is why the function must be `security definer`. rep_payout_row_history
-    // has no INSERT policy and no INSERT privilege for `authenticated`, so a
-    // security invoker trigger would have its insert refused and would fail the
-    // admin's UPDATE outright — turning the fail-closed design into a table nobody
-    // could edit at all.
+    // Why the function is `security definer`: rep_payout_row_history has no
+    // INSERT policy and no INSERT privilege for `authenticated`. When admins
+    // edited lines (until 20261102140000) an invoker trigger would have failed
+    // every edit; now that no client updates the ledger it stays definer so an
+    // edit is recorded whoever writes it.
     await asPlatform(db);
     const [{ ok }] = await rows<{ ok: boolean }>(
       db,

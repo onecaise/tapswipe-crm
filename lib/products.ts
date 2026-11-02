@@ -243,8 +243,8 @@ export function matchesProductSearch(product: Product, query: string): boolean {
  * Parses a typed price into what the column should hold, or reports why not.
  *
  * Returns `{ value }` on success — where `null` is the legitimate "not priced
- * yet" — and `{ error }` otherwise. Modelled on parseFigureInput() in
- * lib/payouts.ts, including the reason it is not just `Number(x)`: an empty
+ * yet" — and `{ error }` otherwise. Modelled on the payout cell's
+ * parseFigureInput() (removed with the cell, 20261102140000), including the reason it is not just `Number(x)`: an empty
  * box and a zero are different answers, and `Number("")` is 0.
  */
 export function parsePriceInput(

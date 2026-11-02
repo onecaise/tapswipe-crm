@@ -1140,7 +1140,7 @@ describe("committing over HTTP", () => {
     expect(error?.message).toMatch(/blocked/i);
   });
 
-  it("commits to the owner, keeps hand-entered figures, and a second file for the month is the replace prompt", async () => {
+  it("commits to the owner; nobody edits the line after (20261102140000); a second file for the month is the replace prompt", async () => {
     const asAdmin = userClient(fixtures.tokens.admin);
     const mid = newMid();
     await merchantFor("owner", mid);
@@ -1155,7 +1155,7 @@ describe("committing over HTTP", () => {
     expect(commitError).toBeNull();
     expect(imported).toBe(1);
 
-    let row = await ledgerFor(mid, first.period);
+    const row = await ledgerFor(mid, first.period);
     expect(row).toMatchObject({
       agent_id: fixtures.userIds.owner,
       processor: PROCESSOR,
@@ -1166,30 +1166,15 @@ describe("committing over HTTP", () => {
       rep_payout: null,
     });
 
-    // 2. An admin enters the figures, the way the period page does.
-    const { error: editError, count } = await asAdmin
-      .from("rep_payout_rows")
-      .update(
-        { residual_income: 88.4, rep_split_pct: 60 },
-        { count: "exact" },
-      )
-      .eq("mid", mid)
-      .eq("period", first.period);
-    expect(editError).toBeNull();
-    expect(count).toBe(1);
-
-    row = await ledgerFor(mid, first.period);
-    // The generated column computed in the database, not here.
-    expect(row?.rep_payout).toBe(53.04);
-
-    // 2b. Those two figures are ALL an admin's session may write
-    // (20261014160000). Any other column is refused by the grant, loudly, as a
-    // 42501 through PostgREST -- not filtered to zero rows -- and nothing moves,
-    // even when an allowed column rides in the same request.
+    // 2. Nobody edits a committed line, an admin included, through PostgREST:
+    // the figures the removed cell sent, and any other column, are refused by
+    // the grant (42501), loudly -- not filtered to zero rows -- and nothing
+    // moves. A fix is a replace (below: the prompt) or an adjustment.
     for (const patch of [
+      { residual_income: 88.4, rep_split_pct: 60 },
+      { rep_split_pct: 60 },
       { volume: 1 },
       { merchant_name: "Forged Co" },
-      { residual_income: 1, merchant_name: "Forged Co" },
     ]) {
       const { error: refused } = await asAdmin
         .from("rep_payout_rows")
@@ -1202,7 +1187,7 @@ describe("committing over HTTP", () => {
 
     // 3. A corrected file for the same processor and month is no longer a
     // merge: the upload answers with the committed batch (the replace prompt)
-    // and creates nothing, so the hand-entered figures cannot be reached.
+    // and creates nothing.
     const again = await mint("corrected.xlsx", PROCESSOR, first.period);
     expect(again.body.exists).toMatchObject({ batch_id: first.batchId });
     // The same MID under ANOTHER processor that month is refused outright.
@@ -1212,27 +1197,14 @@ describe("committing over HTTP", () => {
     });
     expect((await stagedRows(elsewhere.batchId))[0].blocker).toBe("mid_in_other_batch");
 
-    row = await ledgerFor(mid, first.period);
-    expect(row?.residual_income).toBe(88.4);
-    expect(row?.rep_split_pct).toBe(60);
-    expect(row?.rep_payout).toBe(53.04);
+    expect(await ledgerFor(mid, first.period)).toEqual(row);
 
-    // 4. And the edit left a trail, attributed to the admin who made it.
+    // 4. And no edit left a trail, because none happened.
     const { data: history } = await adminClient()
       .from("rep_payout_row_history")
-      .select("field, old_value, new_value, changed_by")
-      .eq("mid", mid)
-      .order("id");
-
-    expect((history ?? []).map((h) => h.field)).toEqual([
-      "residual_income",
-      "rep_split_pct",
-    ]);
-    expect(history?.[0]).toMatchObject({
-      old_value: 25,
-      new_value: 88.4,
-      changed_by: fixtures.userIds.admin,
-    });
+      .select("id")
+      .eq("mid", mid);
+    expect(history).toEqual([]);
   });
 
   it("cannot be committed twice", async () => {
@@ -1281,18 +1253,14 @@ describe("a rep sees only their own committed rows", () => {
     expect((adminRows ?? []).length).toBe(2);
   });
 
-  it("refuses a rep's attempt to edit their own figure", async () => {
-    // Filtered rather than errored -- `authenticated` holds the UPDATE grant, since
-    // an admin is authenticated too, so the admin-only USING clause is what hides
-    // the row. A count of zero is the only signal, which is why the inline cell
-    // checks it.
-    const { count, error } = await userClient(fixtures.tokens.owner)
+  it("refuses a rep's attempt to edit their own figure, outright", async () => {
+    // Was filtered to zero rows while authenticated held a column grant for
+    // admins; since 20261102140000 there is none, so it is a 42501.
+    const { error } = await userClient(fixtures.tokens.owner)
       .from("rep_payout_rows")
       .update({ residual_income: 999 }, { count: "exact" })
       .eq("mid", scopeMids.owner);
-
-    expect(error).toBeNull();
-    expect(count).toBe(0);
+    expect(error?.code).toBe("42501");
 
     const row = await ledgerFor(scopeMids.owner, scopePeriod);
     expect(row?.residual_income).toBe(3);
@@ -1411,7 +1379,10 @@ describe("the export is scoped by RLS, and is no longer an import format", () =>
     });
     expect(asOwner.status).toBe(200);
 
-    const mids = (rows: unknown[][]) => rows.slice(1).map((r) => String(r[3]));
+    const mids = (rows: unknown[][]) => {
+      const at = (rows[0] as string[]).indexOf("MID");
+      return rows.slice(1).map((r) => String(r[at]));
+    };
     expect(mids(asOwner.rows).length).toBeGreaterThan(0);
     expect(mids(asAdmin.rows).length).toBeGreaterThan(
       mids(asOwner.rows).length,
@@ -1426,24 +1397,23 @@ describe("the export is scoped by RLS, and is no longer an import format", () =>
     expect(response.status).toBe(403);
   });
 
-  it("keeps its header until phase 11 changes it", async () => {
+  it("has the header memo §2.6 gives it (phase 11)", async () => {
     const { rows } = await exportWorkbook(fixtures.tokens.admin, {
       period: scopePeriod,
     });
 
     expect(rows[0]).toEqual([
       "Period",
+      "Processor",
       "Agent #",
       "Agent",
       "MID",
       "Merchant name",
       "Volume",
-      "Average ticket",
-      "Total cost",
-      "Residual income",
+      "Residual",
       "Rep split",
       "Rep payout",
-      // Phase 5: "Adjustment" or blank.
+      // Blank, "Adjustment" or "Override".
       "Line",
       // The row's own share on a shared account, blank otherwise.
       "Account share",
@@ -1457,7 +1427,7 @@ describe("the export is scoped by RLS, and is no longer an import format", () =>
 
     for (const row of rows.slice(1)) {
       expect(
-        String(row[3] ?? "").trim(),
+        String(row[(rows[0] as string[]).indexOf("MID")] ?? "").trim(),
         `every data row must carry a MID, got ${JSON.stringify(row)}`,
       ).not.toBe("");
     }
@@ -1475,6 +1445,46 @@ describe("the export is scoped by RLS, and is no longer an import format", () =>
       "This looks like a CRM export, not a processor file: it has an Agent # or Rep payout column. Upload the processor's own residual report.",
     );
     expect(await stagedRows(back.batchId)).toEqual([]);
+  });
+
+  it("labels an override's two lines \"Override\" with their signed Rep payout, under the batch's processor; that export is refused too", async () => {
+    // Phase 10 wrote the label and never tested it. A 10% override on a rate-50
+    // merchant (owner), paid to the intruder persona, committed through the
+    // real path: set_merchant_override as the admin, then import and v3.
+    const mid = newMid();
+    const merchantId = await merchantFor("owner", mid);
+    const slot = await freeSlot();
+    const asAdmin = userClient(fixtures.tokens.admin);
+    const { error: setError } = await asAdmin.rpc("set_merchant_override", {
+      merchant_id_input: merchantId,
+      recipient_id_input: fixtures.userIds.intruder,
+      override_pct_input: 10,
+      effective_from_input: slot.period,
+    });
+    expect(setError, setError?.message).toBeNull();
+    const { batchId } = await importFile([HEADER, line(mid, { residual: "$100.00" })], slot);
+    expect((await commitV3(batchId)).error).toBeNull();
+
+    const exported = await exportWorkbook(fixtures.tokens.admin, { period: slot.period });
+    const header = exported.rows[0] as string[];
+    const at = (name: string) => header.indexOf(name);
+    const lines = exported.rows
+      .slice(1)
+      .filter((row) => row[at("MID")] === mid)
+      .map((row) => [row[at("Line")] ?? "", row[at("Processor")], row[at("Agent #")], row[at("Rep payout")],
+                     row[at("Volume")] ?? null, row[at("Residual")] ?? null, row[at("Rep split")] ?? null]);
+    const sorted = (list: unknown[][]) => [...list].sort((a, b) => Number(a[3]) - Number(b[3]));
+    expect(sorted(lines)).toEqual(sorted([
+      // The import line: the file's residual at the merchant's rate.
+      ["", slot.processor, OWNER_NUMBER, 50, 1000, 100, 50],
+      // The override pair: no figures, the signed amount.
+      ["Override", slot.processor, OWNER_NUMBER, -10, null, null, null],
+      ["Override", slot.processor, PERSONA_AGENT_NUMBERS.intruder, 10, null, null, null],
+    ]));
+
+    const back = await importFile(exported.rows, { fileName: "override-export.xlsx" });
+    expect(back.parse.status, back.parse.raw).toBe(400);
+    expect(back.parse.body.error).toMatch(/^This looks like a CRM export, not a processor file/);
   });
 });
 
@@ -1914,7 +1924,7 @@ describe("phase 5: a correction exports as Line = Adjustment, and share_not_in_f
     const header = admin.rows[0] as string[];
     const at = (name: string) => header.indexOf(name);
     const mine = admin.rows.slice(1).filter((row) => row[at("MID")] === signerMid);
-    expect(mine.map((row) => [row[at("Agent #")], row[at("Residual income")], row[at("Rep split")], row[at("Rep payout")], row[at("Line")]])).toEqual(
+    expect(mine.map((row) => [row[at("Agent #")], row[at("Residual")], row[at("Rep split")], row[at("Rep payout")], row[at("Line")]])).toEqual(
       expect.arrayContaining([
         [OWNER_NUMBER, null, null, -10, "Adjustment"],
         [INTRUDER_NUMBER, null, null, 10, "Adjustment"],

@@ -26,14 +26,14 @@ import {
  *     else moves; service_role is byte-identical;
  *   * a signed-in admin writing any other column is refused with a permission
  *     error, including when the statement also writes an allowed column;
- *   * the two app paths -- the inline figure cell and the per-rep bulk split --
- *     send exactly the statements they always did and still work, and the
- *     paths that write other columns (FK SET NULL, the owner) still work.
+ *   * on the FULL schema, since 20261102140000 (phase 11 of
+ *     docs/design/intake-and-reports.md) the two columns went too: NO client
+ *     role -- a rep, an admin, anon -- updates a ledger line at all, not even
+ *     with the statements the removed inline cell and bulk split sent; the
+ *     paths that are not clients (FK SET NULL, the owner) still work.
  *
- * The definer paths are pinned on the full schema elsewhere and run after this
- * migration there: commit_residual_import's ON CONFLICT DO UPDATE in
- * commit-residual-import.test.ts, set_shared_residual and the invoker
- * partner-rate copy in shared-lines.test.ts.
+ * The lock itself (the trigger behind the grant, the migration's refusals, and
+ * that replace and adjustment still work) is tests/rls/lock-residuals.test.ts.
  */
 
 const MIGRATION = "20261014160000_rep_payout_rows_update_columns.sql";
@@ -132,7 +132,7 @@ describe("the privilege catalog, before and after 20261014160000", () => {
   });
 });
 
-describe("through a signed-in session, on the full schema", () => {
+describe("through a signed-in session, on the full schema (no client UPDATE since 20261102140000)", () => {
   let db: TestDb;
   let fx: PayoutFixtures;
 
@@ -149,8 +149,9 @@ describe("through a signed-in session, on the full schema", () => {
     fx = await seedPayouts(db);
   });
 
-  async function attempt(userId: string, sql: string) {
+  async function attempt(userId: string | null, sql: string, anon = false) {
     await asUser(db, userId);
+    if (anon) await db.exec(`set role anon`);
     try {
       const result = await db.query(sql);
       return { error: null as DbError | null, affected: result.affectedRows ?? 0 };
@@ -170,8 +171,8 @@ describe("through a signed-in session, on the full schema", () => {
     return row;
   }
 
-  it("refuses an admin writing any other column, with a permission error, and changes nothing", async () => {
-    const others = (
+  it("refuses an admin writing ANY column -- the two figures included -- with a permission error, and changes nothing", async () => {
+    const columns = (
       await rows<{ name: string; generated: string }>(
         db,
         `select attname as name, attgenerated as generated from pg_attribute
@@ -182,12 +183,13 @@ describe("through a signed-in session, on the full schema", () => {
       // rep_payout is generated: Postgres refuses any assignment to it before
       // privileges are checked ("can only be updated to DEFAULT"), for every
       // role, which rep-payouts.test.ts pins.
-      .filter((c) => c.generated === "" && !EDITABLE.includes(c.name))
+      .filter((c) => c.generated === "")
       .map((c) => c.name);
-    expect(others.length).toBeGreaterThan(20);
+    expect(columns).toEqual(expect.arrayContaining(EDITABLE));
+    expect(columns.length).toBeGreaterThan(20);
 
     const before = await snapshot(fx.rowIds.filled);
-    for (const column of others) {
+    for (const column of columns) {
       // A self-assignment: type-correct for every column, and still a write
       // the privilege check has to admit.
       const { error } = await attempt(
@@ -200,61 +202,34 @@ describe("through a signed-in session, on the full schema", () => {
     expect(await snapshot(fx.rowIds.filled)).toEqual(before);
   });
 
-  it("refuses the whole statement when an allowed column rides with a refused one", async () => {
-    const before = await snapshot(fx.rowIds.filled);
-    const { error } = await attempt(
-      ADMIN_ID,
-      `update rep_payout_rows set residual_income = 1.00, merchant_name = 'Renamed'
-        where id = ${fx.rowIds.filled}`,
-    );
-    expect(error?.code).toBe("42501");
-    expect(await snapshot(fx.rowIds.filled)).toEqual(before);
-  });
-
-  it("the inline figure cell: one figure by id, exactly as the component sends it", async () => {
-    for (const [sql, field] of [
-      [`update rep_payout_rows set residual_income = 91.00 where id = ${fx.rowIds.filled}`, "residual_income"],
-      [`update rep_payout_rows set rep_split_pct = 55 where id = ${fx.rowIds.filled}`, "rep_split_pct"],
+  it("the removed inline figure cell's statements are refused, and write no history", async () => {
+    for (const sql of [
+      `update rep_payout_rows set residual_income = 91.00 where id = ${fx.rowIds.filled}`,
+      `update rep_payout_rows set rep_split_pct = 55 where id = ${fx.rowIds.filled}`,
     ]) {
       const { error, affected } = await attempt(ADMIN_ID, sql);
-      expect(error, field).toBeNull();
-      expect(affected, field).toBe(1);
+      expect(error?.code, sql).toBe("42501");
+      expect(affected).toBe(0);
     }
-    const [row] = await rows<{ rep_payout: string; history: number }>(
-      db,
-      `select rep_payout::text,
-              (select count(*)::int from rep_payout_row_history where row_id = ${fx.rowIds.filled}
-                  and changed_by = '${ADMIN_ID}') as history
-         from rep_payout_rows where id = ${fx.rowIds.filled}`,
-    );
-    // round(91.00 x 55 / 100, 2) = 50.05; one history row per edit, the admin's.
-    expect(row).toEqual({ rep_payout: "50.05", history: 2 });
+    expect(await rows(db, `select count(*)::int as n from rep_payout_row_history`)).toEqual([{ n: 0 }]);
   });
 
-  it("the bulk split: one rep's rate for one period, exactly as the component sends it", async () => {
-    const { error, affected } = await attempt(
+  it("the removed bulk split's statement is refused, and no rate moves", async () => {
+    const { error } = await attempt(
       ADMIN_ID,
       `update rep_payout_rows set rep_split_pct = 55.55
         where period = '${PAYOUT_PERIOD}' and agent_id = '${AGENT_ID}'`,
     );
-    expect(error).toBeNull();
-    // AGENT_ID's filled and blank rows in the current period, and nothing else.
-    expect(affected).toBe(2);
-    const rates = await rows<{ id: number; rep_split_pct: string }>(
-      db,
-      `select id, rep_split_pct::text from rep_payout_rows
-        where rep_split_pct = 55.55 order by id`,
-    );
-    expect(rates.map((r) => r.id)).toEqual([fx.rowIds.filled, fx.rowIds.blank].sort((a, b) => a - b));
+    expect(error?.code).toBe("42501");
+    expect(await rows(db, `select count(*)::int as n from rep_payout_rows where rep_split_pct = 55.55`)).toEqual([{ n: 0 }]);
   });
 
-  it("a rep still gets zero rows, not an error: the grant admits, the policy filters", async () => {
-    const { error, affected } = await attempt(
-      AGENT_ID,
-      `update rep_payout_rows set residual_income = 1.00 where id = ${fx.rowIds.filled}`,
-    );
-    expect(error).toBeNull();
-    expect(affected).toBe(0);
+  it("a rep is refused outright (it was filtered to zero rows while the grant existed); so is anon", async () => {
+    const rep = await attempt(AGENT_ID, `update rep_payout_rows set residual_income = 1.00 where id = ${fx.rowIds.filled}`);
+    expect(rep.error?.code).toBe("42501");
+    const anon = await attempt(null, `update rep_payout_rows set residual_income = 1.00 where id = ${fx.rowIds.filled}`, true);
+    expect(anon.error?.code).toBe("42501");
+    expect((await snapshot(fx.rowIds.filled)).row).toMatchObject({ residual_income: 88.4 });
   });
 
   it("an admin deleting a merchant still clears merchant_id: FK actions run as the owner", async () => {

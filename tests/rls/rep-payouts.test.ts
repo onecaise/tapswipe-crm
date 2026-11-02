@@ -136,31 +136,36 @@ describe("rep_payout_rows: which verbs each role holds", () => {
     expect(await countRows(db)).toBe(4);
   });
 
-  it("lets an admin update the two money figures", async () => {
+  it("refuses an admin's update of the two money figures: no client edits a line", async () => {
+    // Was "lets an admin update" until 20261102140000 (phase 11): a committed
+    // line is fixed by a replace or an adjustment, never edited, and the grant
+    // the figure cell used is gone. The full lock is tests/rls/lock-residuals.
     await asUser(db, ADMIN_ID);
-    await db.exec(
-      `update rep_payout_rows set residual_income = 91.00
-        where id = ${fx.rowIds.filled}`,
-    );
+    await expect(
+      db.exec(
+        `update rep_payout_rows set residual_income = 91.00
+          where id = ${fx.rowIds.filled}`,
+      ),
+    ).rejects.toThrow(/permission denied for table rep_payout_rows/);
 
     await asPlatform(db);
     const [{ v }] = await rows<{ v: string }>(
       db,
       `select residual_income::text as v from rep_payout_rows where id = ${fx.rowIds.filled}`,
     );
-    expect(v).toBe("91.00");
+    expect(v).toBe("88.40");
   });
 
-  it("filters an agent's update of their own row to nothing", async () => {
-    // Filtered, not refused: `authenticated` does hold the UPDATE grant (an admin
-    // is authenticated too), so the privilege check passes and the admin-only
-    // USING clause is what hides the row. The figures belong to whoever runs
-    // payouts, not to the rep being paid.
+  it("refuses an agent's update of their own row", async () => {
+    // Was filtered to nothing by the admin-only USING clause; since
+    // 20261102140000 no client holds UPDATE, so it is refused outright.
     await asUser(db, AGENT_ID);
-    await db.exec(
-      `update rep_payout_rows set residual_income = 999.00
-        where id = ${fx.rowIds.filled}`,
-    );
+    await expect(
+      db.exec(
+        `update rep_payout_rows set residual_income = 999.00
+          where id = ${fx.rowIds.filled}`,
+      ),
+    ).rejects.toThrow(/permission denied for table rep_payout_rows/);
 
     await asPlatform(db);
     const [{ v }] = await rows<{ v: string }>(
@@ -542,8 +547,13 @@ describe("batches and staging are admin-only, and client-read-only", () => {
 
 describe("rep_payout_row_history is admin-read-only", () => {
   beforeEach(async () => {
-    // One real edit, so there is something to fail to see.
-    await asUser(db, ADMIN_ID);
+    // One real edit, so there is something to fail to see. As the owner with
+    // the admin's identity: no client edits a line since 20261102140000, and
+    // the history trigger stays as a backstop for an owner-side edit.
+    await db.exec(`reset role;`);
+    await db.exec(
+      `set request.jwt.claims = '${JSON.stringify({ sub: ADMIN_ID, role: "authenticated" })}';`,
+    );
     await db.exec(
       `update rep_payout_rows set residual_income = 91.00 where id = ${fx.rowIds.filled}`,
     );

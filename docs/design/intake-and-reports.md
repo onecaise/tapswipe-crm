@@ -1,6 +1,6 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-10 built locally (§10).** Nothing has
+Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-11 built locally (§10).** Nothing has
 been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
@@ -2088,6 +2088,61 @@ Found while building:
   rendering test); the block is two columns, the label wrapping under the name.
 - The migration's exact-text preconditions (`pg_get_constraintdef`) read the same on PGlite 18.3
   and the local stack's 17.6, and its checksum held over the local database's real rows.
+
+### Phase 11: lock residuals (2 Nov 2026, branch `intake-residuals`)
+
+Step 0 first (its own commit, `c25c0d5`): Phase 10 had behaviour tests but no mutation check for
+the cap at rates 0 and 50, one override per merchant per month, no client write, and the
+recipient's read of the merchant, and no test at all for a deactivated recipient refusing a
+REPLACE. Each now has one, layer by layer (the function's check, then the constraint, grant or
+policy behind it). The money property test was already there: two seeds of 200 cases, each
+mirrored at -R, so 800 committed rows through the real v3.
+
+Built (`20261102140000_lock_residuals.sql`; Edge Function `export-residuals` and
+`_shared/residuals.ts`):
+- **No client UPDATE on `rep_payout_rows`**: the column grant on `residual_income` and
+  `rep_split_pct` (`20261014160000`) and any table-level UPDATE revoked from anon,
+  authenticated and PUBLIC; the "admin only update" policy dropped; and
+  `guard_client_payout_update()` (BEFORE UPDATE, invoker) refuses any update made as
+  `authenticated` or `anon`, an admin included (PT409, "A committed payout line is never
+  edited…"). Each layer refuses alone. The service role and the owner (definer functions, FK
+  actions, the teardowns) are untouched.
+- **`set_shared_residual()` dropped.** `guard_shared_line()`, the partner-rate copy and
+  `log_payout_row_change()` are kept as backstops with no client path (§2.1).
+- **The app**: `PayoutFigureCell`, `PayoutBulkSplit` and `SharedResidualControl` deleted, with
+  `parseFigureInput` (their only user) and the round-trip copy on the export button and period
+  page. The period page and the statement are read-only for every role.
+- **The export header is §2.6's**: `Period, Processor, Agent #, Agent, MID, Merchant name,
+  Volume, Residual, Rep split, Rep payout, Line, Account share` (`EXPORT_HEADER`); `Line` is blank,
+  `Adjustment` or `Override`. The parser still refuses it as a CRM export (it carries `Agent #` and
+  `Rep payout`).
+- Tests: `tests/rls/lock-residuals.test.ts` (catalog; a rep, the recipient, an admin and anon
+  refused on import, shared, override and adjustment lines; each layer's mutation proof; replace
+  and adjustment still work; the migration's pass and refusals); the inverted
+  `rep-payout-update-grant`, `rep-payouts`, `payout-history-trigger`, `shared-lines`,
+  `share-corrections`, `merchant-overrides` and `grants` assertions; live: the export header, the
+  `Override` label with signed amounts and its refusal on re-upload, and a commit racing
+  `set_merchant_override` over two real connections in both orders (plus a mutation proof that
+  removes the override function's locks and shows the month rule broken).
+
+Where the memo was silent, and what was chosen (the conservative side each time):
+- **A trigger behind the revoked grant** (the memo says revoke): a grant added back by hand would
+  otherwise reopen client edits. It names the client roles, so definer functions and the service
+  role are unaffected.
+- **The service role keeps UPDATE**: the test teardowns detach lines from a batch they delete,
+  and no Edge Function updates the ledger.
+- **No audited admin replacement for the removed controls.** The memo names the replacements
+  (replace before paid, adjustment after), and no workflow is stranded: every line v3 writes has
+  both figures, and a legacy line with none is fixed by deleting the month and importing it again,
+  or by an adjustment once paid.
+- **"Awaiting figures" / "N to enter" now read "Lines with no figure" / "N with no figure"**, with
+  the counts and links kept: nobody enters a figure any more, so the old words promised an action
+  that does not exist. The statement no longer says "entered yet".
+- **The export drops `Average ticket` and `Total cost`** (not in §2.6's header) and adds
+  `Processor`. `Residual` is the line's own residual (a shared line's piece of the account's).
+- **The partner-line wording on the admin's period page is unchanged** ("its residual and split
+  follow the signer's line"): still true, now as a fact about how v3 writes the pair.
+- **The skipped-row acknowledgement UI stays** for the cleanup phase, as phase 8 left it.
 
 ---
 

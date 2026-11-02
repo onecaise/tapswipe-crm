@@ -95,13 +95,13 @@ test("the periods list links to each period it lists", async ({ page }) => {
   // The three periods this suite owns that have rows for this rep.
   //
   // exact: true throughout, because a period with unfilled figures now carries a
-  // SECOND link to itself — the "N to enter" badge, labelled "March 2027 — 1
-  // awaiting figures". Playwright matches an accessible name by substring by
+  // SECOND link to itself — the count badge, labelled "March 2027 — 1 with no
+  // figure". Playwright matches an accessible name by substring by
   // default, so the loose form resolved to two elements and tripped strict mode
   // on exactly the unfilled period. The right fix is here rather than on the
   // badge: this test is about the period-NAME column, and shortening the badge's
   // label to dodge it would cost a screen-reader user the context that makes a
-  // bare "1 to enter" mean anything.
+  // bare count mean anything.
   for (const label of ["April 2027", "May 2027", "March 2027"]) {
     await expect(
       page.getByRole("link", { name: label, exact: true }),
@@ -119,9 +119,9 @@ test("the periods list links to each period it lists", async ({ page }) => {
 
 test("the outstanding-figures count is itself the way in", async ({ page }) => {
   // The discoverability bug this pairs with: /payouts named the outstanding work
-  // in two places — the "N to enter" badge and the "Awaiting figures" card — and
+  // in two places — the count badge and the "Lines with no figure" card — and
   // neither could be clicked. The period name in the first column was the only
-  // route to the screen where those figures are entered, and it reads as a label
+  // route to the screen that shows those lines, and it reads as a label
   // rather than as somewhere to go.
   //
   // In e2e rather than a unit test because there is nowhere else: these are async
@@ -130,7 +130,7 @@ test("the outstanding-figures count is itself the way in", async ({ page }) => {
   await page.goto("/payouts");
 
   const badge = page.getByRole("link", {
-    name: "March 2027 — 1 awaiting figures",
+    name: "March 2027 — 1 with no figure",
     exact: true,
   });
   await expect(badge).toBeVisible();

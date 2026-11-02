@@ -459,7 +459,17 @@ describe("post_share_correction", () => {
 
   it("refuses an admin's hand edit of the figures on an adjustment line", async () => {
     const result = await correct(ADMIN_ID);
+    // Since 20261102140000 an admin holds no UPDATE at all: the grant refuses
+    // every column first. The CHECK still refuses the figures for the owner,
+    // who holds every privilege.
     await asUser(db, ADMIN_ID);
+    for (const set of ["residual_income = 1.00", "rep_split_pct = 50", "adjustment_amount = 99"]) {
+      const error = await attempt(() =>
+        db.query(`update rep_payout_rows set ${set} where id = ${result.partner_line_id}`),
+      );
+      expect(error?.code, set).toBe("42501");
+    }
+    await asPlatform(db);
     for (const set of ["residual_income = 1.00", "rep_split_pct = 50"]) {
       const error = await attempt(() =>
         db.query(`update rep_payout_rows set ${set} where id = ${result.partner_line_id}`),
@@ -467,11 +477,6 @@ describe("post_share_correction", () => {
       expect(error?.code, set).toBe("23514");
       expect(error?.message).toContain("rep_payout_rows_adjustment_no_figures");
     }
-    // The amount itself: the column grant refuses it first.
-    const amount = await attempt(() =>
-      db.query(`update rep_payout_rows set adjustment_amount = 99 where id = ${result.partner_line_id}`),
-    );
-    expect(amount?.code).toBe("42501");
     await asPlatform(db);
   });
 });
