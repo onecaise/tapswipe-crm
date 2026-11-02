@@ -741,6 +741,24 @@ describe("commit v3 writes the override lines", () => {
     ]);
   });
 
+  it("a replace is refused when the recipient has been deactivated since, and the committed month stays", async () => {
+    const m = await merchant(db, "OV-1");
+    const first = await batchWith(db, [{ mid: "OV-1", residual: "100.00" }]);
+    const ov = await plant(db, m, 10, first.period);
+    await commit(db, first.id);
+    const before = await linesOf(db, first.id);
+    await db.exec(`update profiles set is_active = false where id = '${MANAGER_ID}'`);
+    const second = await batchWith(db, [{ mid: "OV-1", residual: "80.00" }], { period: first.period, replaces: first.id });
+    const error = await refused(db, second.id);
+    expect([error.code, error.message]).toEqual([
+      "PT409",
+      `Overrides on MIDs OV-1 (override #${ov} to ${MANAGER_NAME}) pay someone who is deactivated. End each override (or reactivate the person), then commit.`,
+    ]);
+    expect(await linesOf(db, first.id)).toEqual(before);
+    expect(await rows(db, `select id, status from rep_payout_batches where id in (${first.id}, ${second.id}) order by id`))
+      .toEqual([{ id: first.id, status: "committed" }, { id: second.id, status: "review" }]);
+  });
+
   it("delete_payout_period removes the month's override lines with its import lines", async () => {
     const m = await merchant(db, "OV-1");
     const { id, period } = await batchWith(db, [{ mid: "OV-1" }]);
@@ -1433,6 +1451,139 @@ describe("mutation proofs: each protection is what stops its case", () => {
       const [{ result }] = await rows<{ result: unknown[] }>(db, `select my_override_recipients() as result`);
       await asPlatform(db);
       expect(result.length).toBe(1);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Added after Phase 10 (Step 0 of Phase 11): the protections that had a
+  // behaviour test but no mutation check. Schema mutations (a dropped
+  // constraint, a grant, a policy) are undone in `finally`, because
+  // beforeEach restores functions only.
+  // -----------------------------------------------------------------------
+
+  it("the cap at rate 0: the rate-0 refusal, and behind it the cap itself", async () => {
+    await without("set_merchant_override(int, uuid, numeric, date)", "if m.split_agent_pct = 0 then", "if false then");
+    await swap(async () => {
+      const m = await merchant(db, "HOUSE", { rate: 0 });
+      // Without its own sentence a house merchant is still refused, by the cap.
+      const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 0.01, '2030-01-01')`);
+      expect([error?.code, error?.message]).toEqual([
+        "22023",
+        "An override comes out of the rep side, so it cannot be more than this merchant's rate: 0.",
+      ]);
+    });
+    await without("set_merchant_override(int, uuid, numeric, date)",
+      "if override_pct_input > m.split_agent_pct then", "if false then");
+    await swap(async () => {
+      const [{ id }] = await rows<{ id: number }>(db, `select id from merchants where mid = 'HOUSE'`);
+      expect(await rpc(db, `select set_merchant_override(${id}, '${MANAGER_ID}', 0.01, '2030-01-01')`)).toBeNull();
+    });
+  });
+
+  it("the cap at rate 50: the function's outer bound, and behind it the table CHECK", async () => {
+    await without("set_merchant_override(int, uuid, numeric, date)",
+      "or override_pct_input <= 0 or override_pct_input > 50 then", "or override_pct_input <= 0 then");
+    await without("set_merchant_override(int, uuid, numeric, date)",
+      "if override_pct_input > m.split_agent_pct then", "if false then");
+    await swap(async () => {
+      const m = await merchant(db, "FIFTY", { rate: 50 });
+      const sql = `select set_merchant_override(${m}, '${MANAGER_ID}', 50.01, '2030-01-01')`;
+      // Both checks in the function gone: the table's outer bound refuses.
+      expect((await rpc(db, sql))?.message).toContain("merchant_overrides_pct_range");
+      await asPlatform(db);
+      await db.exec(`alter table merchant_overrides drop constraint merchant_overrides_pct_range`);
+      try {
+        expect(await rpc(db, sql)).toBeNull();
+      } finally {
+        await asPlatform(db);
+        await db.exec(`delete from merchant_overrides;
+          alter table merchant_overrides add constraint merchant_overrides_pct_range
+            check (override_pct > 0 and override_pct <= 50)`);
+      }
+    });
+  });
+
+  it("one override per merchant per month: the function's overlap check, and behind it the exclusion constraint", async () => {
+    await without("set_merchant_override(int, uuid, numeric, date)",
+      "raise exception 'That month overlaps another override on this merchant.'\n      using errcode = 'PT409';", "null;");
+    await swap(async () => {
+      const m = await merchant(db, "OV-1");
+      await plant(db, m, 10, "2030-01-01", { to: "2030-06-01" });
+      const sql = `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-03-01')`;
+      expect((await rpc(db, sql))?.message).toContain("merchant_overrides_no_overlap");
+      await asPlatform(db);
+      await db.exec(`alter table merchant_overrides drop constraint merchant_overrides_no_overlap`);
+      try {
+        expect(await rpc(db, sql)).toBeNull();
+        expect(await rows(db, `select count(*)::int as n from merchant_overrides where merchant_id = ${m}`)).toEqual([{ n: 2 }]);
+      } finally {
+        await asPlatform(db);
+        await db.exec(`delete from merchant_overrides;
+          alter table merchant_overrides add constraint merchant_overrides_no_overlap
+            exclude using gist (merchant_id with =, daterange(effective_from, effective_to) with &&)`);
+      }
+    });
+  });
+
+  it("no client write: the missing grant, and behind it the missing write policy", async () => {
+    await swap(async () => {
+      const m = await merchant(db, "OV-1");
+      const insert = `insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from)
+                      values (${m}, '${MANAGER_ID}', 5, '2030-01-01')`;
+      expect((await rpc(db, insert))?.message).toMatch(/permission denied for table merchant_overrides/);
+      await asPlatform(db);
+      await db.exec(`grant insert on merchant_overrides to authenticated;
+                     grant usage on sequence merchant_overrides_id_seq to authenticated;`);
+      try {
+        // A grant alone: RLS has no INSERT policy, so it still refuses.
+        expect((await rpc(db, insert))?.message).toMatch(/row-level security/);
+        await asPlatform(db);
+        await db.exec(`create policy "mutant open" on merchant_overrides for insert to authenticated with check (true)`);
+        expect(await rpc(db, insert)).toBeNull();
+      } finally {
+        await asPlatform(db);
+        await db.exec(`drop policy if exists "mutant open" on merchant_overrides;
+                       revoke insert on merchant_overrides from authenticated;
+                       revoke usage on sequence merchant_overrides_id_seq from authenticated;`);
+      }
+    });
+  });
+
+  it("the recipient's read of the merchant: only the merchants policies stand in the way", async () => {
+    await swap(async () => {
+      const m = await merchant(db, "OV-1");
+      const { id, period } = await batchWith(db, [{ mid: "OV-1" }]);
+      await plant(db, m, 10, period);
+      await commit(db, id);
+      const read = async () => {
+        await asUser(db, MANAGER_ID);
+        try {
+          return await rows(db, `select id from merchants where id = ${m}`);
+        } finally {
+          await asPlatform(db);
+        }
+      };
+      expect(await read()).toEqual([]);
+      await db.exec(`create policy "mutant open" on merchants for select to authenticated using (true)`);
+      try {
+        expect(await read()).toEqual([{ id: m }]);
+      } finally {
+        await asPlatform(db);
+        await db.exec(`drop policy "mutant open" on merchants`);
+      }
+    });
+  });
+
+  it("v3's deactivated-recipient backstop on a REPLACE", async () => {
+    await without(`${V3}(int, text[])`, "and not p.is_active", "and false");
+    await swap(async () => {
+      const m = await merchant(db, "OV-1");
+      const first = await batchWith(db, [{ mid: "OV-1", residual: "100.00" }]);
+      await plant(db, m, 10, first.period);
+      await commit(db, first.id);
+      await db.exec(`update profiles set is_active = false where id = '${MANAGER_ID}'`);
+      const second = await batchWith(db, [{ mid: "OV-1", residual: "80.00" }], { period: first.period, replaces: first.id });
+      expect((await commit(db, second.id)).replaced_lines).toBe(3);
     });
   });
 });
