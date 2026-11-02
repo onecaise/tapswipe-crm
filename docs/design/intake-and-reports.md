@@ -2144,6 +2144,8 @@ Where the memo was silent, and what was chosen (the conservative side each time)
   follow the signer's line"): still true, now as a fact about how v3 writes the pair.
 - **The skipped-row acknowledgement UI stays** for the cleanup phase, as phase 8 left it.
 
+The full e2e suite, run once after a clean restart (stack stopped and started, functions served, `.next` deleted, nothing else running): **372 passed, 0 failed, 0 flaky, 19.1 minutes**; the slowest test 19.8s (a Document Center page's first compile).
+
 ---
 
 ## 11. Open questions (28 Oct 2026)
