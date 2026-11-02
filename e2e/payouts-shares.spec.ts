@@ -1,8 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import {
+  OVERRIDE_FIXTURE,
   PERSONAS,
   SHARE_FIXTURE,
+  createOverrideFixture,
+  overrideLines,
   seedE2E,
   storageStateFor,
   type SeedResult,
@@ -276,4 +279,133 @@ test.describe("as a third rep", () => {
       await expectNoSidewaysScroll(page);
     });
   }
+});
+
+/**
+ * Overrides on a shared account (20261102120000; memo §4.3-4.4, A4c), from
+ * createOverrideFixture(): a 5% override on a shared merchant (agent signs
+ * 40, agent2 partners 10) and on a plain one of agent's, both paid to agent3,
+ * committed through the real v3. The deduction divides between signer and
+ * partner by the cent rule (49.38 + 12.35 = 61.73). Each rep sees their OWN
+ * debit and who receives it; the recipient sees the credit with the
+ * merchant's name as plain text, and nothing of the merchant, the percent or
+ * either rep.
+ */
+test.describe("overrides on a shared account", () => {
+  const o = OVERRIDE_FIXTURE;
+  let fx: Awaited<ReturnType<typeof createOverrideFixture>>;
+  const block = (page: Page) => page.getByTestId("payout-overrides");
+  const lines = (page: Page) => page.getByTestId("payout-override-line");
+  const statementLines = (page: Page) => page.getByTestId("statement-override");
+
+  test.beforeAll(async () => {
+    const seeded = await seedE2E();
+    fx = await createOverrideFixture("shares");
+    // The commit wrote the pair the memo specifies, to the cent.
+    expect(await overrideLines(fx.batchId)).toEqual([
+      { agent_id: seeded.ids.agent, role: "debit", amount: -49.38 },
+      { agent_id: seeded.ids.agent2, role: "debit", amount: -12.35 },
+      { agent_id: seeded.ids.agent, role: "debit", amount: -10 },
+      { agent_id: seeded.ids.agent3, role: "credit", amount: -0.59 },
+      { agent_id: seeded.ids.agent, role: "debit", amount: 0.59 },
+      { agent_id: seeded.ids.agent3, role: "credit", amount: 10 },
+      { agent_id: seeded.ids.agent3, role: "credit", amount: 61.73 },
+    ]);
+  });
+
+  test.describe("the signer", () => {
+    test.use({ storageState: storageStateFor("agent") });
+
+    test("reads their own two debits and who receives them; nothing of the partner's piece or the credit", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}`);
+      const mine = lines(page).filter({ hasText: fx.shared.dba });
+      await expect(mine).toHaveCount(1);
+      await expect(mine).toContainText(`Override ${o.pct}% of residual · to ${PERSONAS.agent3.fullName}`);
+      await expect(mine).toContainText(o.shared.signerDebit);
+      await expect(lines(page).filter({ hasText: fx.plain.dba })).toContainText(o.plain.debit);
+      await expect(block(page).getByText(o.shared.partnerDebit)).toHaveCount(0);
+      await expect(block(page).getByText(o.shared.credit)).toHaveCount(0);
+      await expect(block(page).getByText("Override received")).toHaveCount(0);
+    });
+
+    test("the statement prints the same lines", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}/summary/${fx.ids.agent}`);
+      await expect(statementLines(page).filter({ hasText: fx.shared.dba })).toContainText(
+        `Override ${o.pct}% of residual · to ${PERSONAS.agent3.fullName}`,
+      );
+      await expect(statementLines(page).filter({ hasText: fx.shared.dba })).toContainText(o.shared.signerDebit);
+      await expect(page.getByText(o.shared.partnerDebit)).toHaveCount(0);
+    });
+  });
+
+  test.describe("the partner", () => {
+    test.use({ storageState: storageStateFor("agent2") });
+
+    test("reads their own piece of the deduction and who receives it; nothing of the signer's", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}`);
+      // Scoped to this fixture: another spec's fixture may share the month.
+      const mine = lines(page).filter({ hasText: fx.shared.dba });
+      await expect(mine).toHaveCount(1);
+      await expect(mine).toContainText(`Override ${o.pct}% of residual · to ${PERSONAS.agent3.fullName}`);
+      await expect(mine).toContainText(o.shared.partnerDebit);
+      await expect(page.getByText(o.shared.signerDebit)).toHaveCount(0);
+      await expect(page.getByText(fx.plain.dba)).toHaveCount(0);
+      // The merchant name in the override block is plain text for the partner.
+      await expect(block(page).getByRole("link")).toHaveCount(0);
+    });
+  });
+
+  test.describe("the recipient", () => {
+    test.use({ storageState: storageStateFor("agent3") });
+
+    test("reads the credits with the merchants' names as plain text, and nothing else of them", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}`);
+      const shared = lines(page).filter({ hasText: fx.shared.dba });
+      await expect(shared).toHaveCount(1);
+      await expect(lines(page).filter({ hasText: fx.plain.dba })).toHaveCount(1);
+      await expect(shared).toContainText("Override received");
+      await expect(shared).toContainText(o.shared.credit);
+      await expect(lines(page).filter({ hasText: fx.plain.dba })).toContainText(o.plain.credit);
+      await expect(block(page).getByRole("link")).toHaveCount(0);
+      for (const leak of [
+        `${o.pct}%`,
+        o.shared.signerDebit,
+        o.shared.partnerDebit,
+        PERSONAS.agent.fullName,
+        PERSONAS.agent2.fullName,
+        "of residual",
+      ]) {
+        await expect(page.getByText(leak, { exact: true }), leak).toHaveCount(0);
+        await expect(block(page).getByText(leak), leak).toHaveCount(0);
+      }
+    });
+
+    test("the statement prints the credits with no MID, and no percent", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}/summary/${fx.ids.agent3}`);
+      await expect(statementLines(page).filter({ hasText: fx.shared.dba })).toContainText(o.shared.credit);
+      await expect(statementLines(page).filter({ hasText: fx.plain.dba })).toContainText(o.plain.credit);
+      await expect(page.getByText(fx.shared.mid)).toHaveCount(0);
+      await expect(page.getByText(`${o.pct}%`)).toHaveCount(0);
+    });
+
+    test("cannot open the merchant behind a credit", async ({ page }) => {
+      await page.goto(`/merchants/${fx.shared.merchantId}`);
+      await expect(page.getByText(/We couldn.t find that/)).toBeVisible();
+      await expect(page.getByRole("heading", { name: fx.shared.dba })).toHaveCount(0);
+    });
+  });
+
+  test.describe("the admin", () => {
+    test.use({ storageState: storageStateFor("admin") });
+
+    test("sees every line, the credit with its percent", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}`);
+      for (const amount of [o.shared.signerDebit, o.shared.partnerDebit, o.shared.credit]) {
+        await expect(block(page).getByText(amount).first(), amount).toBeVisible();
+      }
+      await expect(
+        lines(page).filter({ hasText: fx.shared.dba }).filter({ hasText: "Override received" }),
+      ).toContainText(`Override received · ${o.pct}% of residual`);
+    });
+  });
 });

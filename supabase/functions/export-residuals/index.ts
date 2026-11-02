@@ -196,7 +196,13 @@ export default {
         num(row.residual_income),
         num(row.rep_split_pct),
         num(row.rep_payout),
-        row.line_kind === "adjustment" ? "Adjustment" : "",
+        // "Override" (20261102120000, memo §2.6): a debit or credit line
+        // commit v3 wrote; its Rep payout is the signed override amount.
+        row.line_kind === "adjustment"
+          ? "Adjustment"
+          : row.line_kind === "override"
+            ? "Override"
+            : "",
         row.share_role === "primary"
           ? num(row.primary_rep_pct)
           : row.share_role === "secondary"

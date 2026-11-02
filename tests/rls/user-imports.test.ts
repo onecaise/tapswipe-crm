@@ -452,7 +452,14 @@ describe("imported_by is one of twenty-five references to profiles", () => {
     ).rejects.toThrow(/foreign key|violates/i);
   });
 
-  it("counts twenty-five columns referencing profiles(id)", async () => {
+  it("counts twenty-six columns referencing profiles(id)", async () => {
+    // 20261102120000 added the twenty-sixth, merchant_overrides.recipient_id,
+    // NO ACTION like the share columns it copies: an override is a payroll
+    // record. All four teardown lists clear overrides -- by merchant first
+    // (merchant_id is ON DELETE RESTRICT, and an override on this rep's
+    // merchant names somebody else), then by recipient, after the override
+    // lines that hold them (rep_payout_rows.override_id, also RESTRICT).
+    //
     // 20261014130000 added the twenty-fourth and twenty-fifth:
     // merchant_rep_shares.primary_agent_id and .secondary_agent_id, both NO
     // ACTION. A share is a payroll record, so it must block deleting either
@@ -489,7 +496,19 @@ describe("imported_by is one of twenty-five references to profiles", () => {
          join pg_class t on t.oid = c.confrelid
         where c.contype = 'f' and t.relname = 'profiles'`,
     );
-    expect(n).toBe(25);
+    expect(n).toBe(26);
+    // The newest one by name, so a count that balanced out could not hide it.
+    expect(
+      await rows(
+        db,
+        `select src.relname as table_name, a.attname as column_name, c.confdeltype as on_delete
+           from pg_constraint c
+           join pg_class src on src.oid = c.conrelid
+           join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
+          where c.contype = 'f' and c.confrelid = 'public.profiles'::regclass
+            and src.relname = 'merchant_overrides'`,
+      ),
+    ).toEqual([{ table_name: "merchant_overrides", column_name: "recipient_id", on_delete: "a" }]);
   });
 
   it("has exactly one non-NO-ACTION reference, and it is manager_id", async () => {

@@ -24,3 +24,7 @@ On 2 Sep 2026 12:15 EDT the CLI was manually relinked to **prod**, and this file
 ## What the prod scripts encode (moved verbatim from CLAUDE.md, 30 Oct 2026)
 
 Two things they encode that cost a session each: `db push` **prompts** for confirmation on a remote target, so it must be run with `--yes` and its output must STREAM rather than be captured — buffering with `Out-String` swallows the prompt and hangs forever at near-zero CPU. And `db push` applies **everything** pending with no target-version flag, so any verification pinned to one migration reports PASS over the ones it did not look at; the migration check is now derived from `supabase/migrations/` instead.
+
+## The sidebar (moved verbatim from CLAUDE.md, 2 Nov 2026)
+
+Sidebar contents are data in `lib/nav.ts`, not JSX. An item without an `href` renders as a muted, `aria-disabled` row — the mechanism for listing a section before its page exists. **No item currently uses it**; Notes and Tasks did until `/notes` and `/tasks` were built, and a permanently-greyed row trains people to ignore that part of the nav, so prefer building the page or dropping the row over leaving one there. `usePathname()` supplies the active item, which under `cacheComponents` is runtime-only data: the client nav **must** sit inside a `<Suspense>` boundary, and its fallback therefore cannot call the hook either. That is why `components/sidebar-nav-list.tsx` takes `pathname` as a prop and is shared by both the streamed nav and its fallback.

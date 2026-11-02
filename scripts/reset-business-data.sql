@@ -91,6 +91,10 @@ declare
     -- residuals
     'rep_payout_batches', 'rep_payout_import_rows', 'rep_payout_rows',
     'rep_payout_row_history', 'merchant_rep_shares',
+    -- Overrides (20261102120000): per-merchant payroll terms, like shares.
+    -- Business data: they describe merchants and ledger lines this script
+    -- empties (both hold it by RESTRICT keys).
+    'merchant_overrides',
     -- Mark paid (20261030120000): which processor-months were paid. Business
     -- data: it describes ledger months this script empties.
     'payout_period_closures',

@@ -114,6 +114,17 @@ insert into rep_payout_rows (agent_id, period, mid, merchant_id, batch_id,
 insert into rep_payout_row_history (row_id, period, agent_id, mid, field) values
   ((select id from rep_payout_rows where mid = 'RST-MID-1'), '2026-08-01',
    'a0000000-0000-4000-8000-000000000002', 'RST-MID-1', 'residual_income');
+-- An override (20261102120000) and the credit line it paid, which holds
+-- merchant_overrides through its RESTRICT key as the shared line holds the share.
+insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from) values
+  ((select id from merchants where dba = 'Reset Merchant 1'),
+   'a0000000-0000-4000-8000-000000000001', 10, '2026-08-01');
+insert into rep_payout_rows (agent_id, period, processor, mid, merchant_id, batch_id,
+                             line_kind, override_id, override_role, override_amount) values
+  ('a0000000-0000-4000-8000-000000000001', '2026-08-01', 'TSYS', 'RST-MID-1',
+   (select id from merchants where dba = 'Reset Merchant 1'),
+   (select id from rep_payout_batches where file_key = 'reset/fake.xlsx'),
+   'override', (select id from merchant_overrides limit 1), 'credit', 1.00);
 
 -- Bulk user import staging.
 insert into user_import_batches (imported_by, file_name, source_text) values

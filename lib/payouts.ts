@@ -133,6 +133,15 @@ export type PayoutRow = {
   /** 'primary' (the signer) or 'secondary' (the partner), or null. */
   share_role: ShareRole | null;
   /**
+   * An override line's override (20261102120000), its side and its signed
+   * amount: a 'debit' on the rep(s) whose merchant carries it, a 'credit' on
+   * its recipient. Null on every other line. Who receives a rep's override
+   * comes from my_override_recipients(), never from these.
+   */
+  override_id: number | null;
+  override_role: OverrideRole | null;
+  override_amount: number | null;
+  /**
    * The share snapshot, read ONLY on admin pages (PAYOUT_SHARE_ADMIN_COLUMNS).
    * Absent on a rep's rows by construction: a rep page never selects them,
    * so the partner's share cannot be rendered there even by mistake.
@@ -144,24 +153,35 @@ export type PayoutRow = {
 
 export type ShareRole = "primary" | "secondary";
 
-export type PayoutLineKind = "import" | "adjustment";
+export type PayoutLineKind = "import" | "adjustment" | "override";
+
+export type OverrideRole = "debit" | "credit";
 
 /** True for a line post_share_correction() wrote rather than a file. */
 export function isAdjustment(row: { line_kind?: PayoutLineKind | null }): boolean {
   return row.line_kind === "adjustment";
 }
 
+/** True for an override line commit v3 wrote (20261102120000). */
+export function isOverride(row: { line_kind?: PayoutLineKind | null }): boolean {
+  return row.line_kind === "override";
+}
+
 /**
  * Lines split the way every payout page shows them: merchant lines in the
- * table, adjustment lines in their own block under it. Order is kept.
+ * table, override lines and adjustment lines each in their own block under
+ * it. Order is kept.
  */
 export function splitPayoutLines<T extends { line_kind?: PayoutLineKind | null }>(
   rows: readonly T[],
-): { imports: T[]; adjustments: T[] } {
+): { imports: T[]; overrides: T[]; adjustments: T[] } {
   const imports: T[] = [];
+  const overrides: T[] = [];
   const adjustments: T[] = [];
-  for (const row of rows) (isAdjustment(row) ? adjustments : imports).push(row);
-  return { imports, adjustments };
+  for (const row of rows) {
+    (isAdjustment(row) ? adjustments : isOverride(row) ? overrides : imports).push(row);
+  }
+  return { imports, overrides, adjustments };
 }
 
 /**
@@ -173,7 +193,7 @@ export function splitPayoutLines<T extends { line_kind?: PayoutLineKind | null }
  * recomputing it here from two strings.
  */
 export const PAYOUT_ROW_COLUMNS =
-  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id, processor, line_kind, adjustment_amount, adjusts_period, adjustment_note, rep_share_id, share_role";
+  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id, processor, line_kind, adjustment_amount, adjusts_period, adjustment_note, rep_share_id, share_role, override_id, override_role, override_amount";
 
 /**
  * The shared-account snapshot, added to PAYOUT_ROW_COLUMNS on ADMIN pages
@@ -408,10 +428,12 @@ export function importMonths(now: Date): string[] {
 }
 
 export type PayoutTotals = {
-  /** Merchant (import) lines. Adjustment lines are counted separately. */
+  /** Merchant (import) lines. Adjustment and override lines are counted separately. */
   rows: number;
   /** Adjustment lines: in repPayout, never in rows or unfilled. */
   adjustments: number;
+  /** Override lines (debits and credits): in repPayout, never in rows or unfilled. */
+  overrides: number;
   volume: number;
   residualIncome: number;
   repPayout: number;
@@ -444,6 +466,11 @@ export type PayoutTotals = {
  *      never in `rows` or `unfilled`: a period holding a correction is not
  *      "awaiting figures" because of it. A row with no line_kind (a hand-written
  *      fixture) is an import line.
+ *   5. **An override line is the same: money, not a merchant.** It carries no
+ *      residual, rate or volume either (20261102120000) and pays
+ *      override_amount -- negative on the rep whose merchant carries it,
+ *      positive on its recipient -- so it counts in repPayout and in
+ *      `overrides`, never in `rows`, the volume, the residual or `unfilled`.
  *
  * Totals are summed in floating point and rounded once at the end. Exactness lives
  * in Postgres, which is why rep_payout is a generated column rather than computed
@@ -462,12 +489,17 @@ export function payoutTotals(
   let repPayout = 0;
   let unfilled = 0;
   let adjustments = 0;
+  let overrides = 0;
 
   for (const row of rows) {
     repPayout += toNumber(row.rep_payout);
 
     if (isAdjustment(row)) {
       adjustments += 1;
+      continue;
+    }
+    if (isOverride(row)) {
+      overrides += 1;
       continue;
     }
 
@@ -480,8 +512,9 @@ export function payoutTotals(
   }
 
   return {
-    rows: rows.length - adjustments,
+    rows: rows.length - adjustments - overrides,
     adjustments,
+    overrides,
     volume: round2(volume),
     residualIncome: round2(residualIncome),
     repPayout: round2(repPayout),

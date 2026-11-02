@@ -133,8 +133,9 @@ describe("commit", () => {
     );
     // 35 since the intake-and-reports merge: processors (kept) and
     // pre_app_tax_secrets (cleared); 36 since phase 6 added
-    // payout_period_closures (cleared).
-    expect(tables.length).toBe(36);
+    // payout_period_closures (cleared); 37 since phase 10 added
+    // merchant_overrides (cleared).
+    expect(tables.length).toBe(37);
     for (const { t } of tables) {
       const n = await count(db, t);
       if (t === "profiles") expect(n, t).toBe(3);
@@ -151,12 +152,13 @@ describe("commit", () => {
     expect(marker).toEqual({ id: 1, actor_id: null, action: "business_data_reset" });
 
     // The grid: one row per kept and cleared table, plus auth.users and storage.
-    expect(grid.length).toBe(2 + 1 + 34 + 1);
+    expect(grid.length).toBe(2 + 1 + 35 + 1);
     expect(grid.find((r) => r.table_name === "brands")?.status).toBe("cleared");
     expect(grid.find((r) => r.table_name === "profiles")?.status).toBe("kept, unchanged");
     expect(grid.find((r) => r.table_name === "processors")?.status).toBe("kept, unchanged");
     expect(grid.find((r) => r.table_name === "pre_app_tax_secrets")?.status).toBe("cleared");
     expect(grid.find((r) => r.table_name === "payout_period_closures")?.status).toBe("cleared");
+    expect(grid.find((r) => r.table_name === "merchant_overrides")?.status).toBe("cleared");
   });
 
   it("keeps processors' five rows exactly, and the new pre-app tax secrets go", async () => {
@@ -246,7 +248,7 @@ describe("scripts/reset-business-data-counts.sql", () => {
     const before = await snapshot(db);
     const pre = await counts();
     expect(await snapshot(db)).toEqual(before);
-    expect(Object.keys(pre).length).toBe(36 + 2);
+    expect(Object.keys(pre).length).toBe(37 + 2);
     expect(pre).toMatchObject({
       leads: 2, profiles: 3, processors: 5, pre_app_tax_secrets: 1, "auth.users": 3, "storage.objects": null,
     });

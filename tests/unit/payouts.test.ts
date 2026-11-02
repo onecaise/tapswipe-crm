@@ -19,6 +19,7 @@ import {
   blockerLabel,
   importMonths,
   isAdjustment,
+  isOverride,
   parsePeriodParam,
   payoutTotals,
   previewFlagLabel,
@@ -192,6 +193,7 @@ describe("payoutTotals", () => {
     expect(totals).toEqual({
       rows: 2,
       adjustments: 0,
+      overrides: 0,
       volume: 22300,
       residualIncome: 159.6,
       repPayout: 88.64,
@@ -281,6 +283,7 @@ describe("payoutTotals", () => {
     expect(payoutTotals([])).toEqual({
       rows: 0,
       adjustments: 0,
+      overrides: 0,
       volume: 0,
       residualIncome: 0,
       repPayout: 0,
@@ -660,6 +663,7 @@ describe("adjustment lines (phase 5)", () => {
     ).toEqual({
       rows: 2,
       adjustments: 2,
+      overrides: 0,
       volume: 2000,
       residualIncome: 100,
       repPayout: 60.6,
@@ -671,6 +675,7 @@ describe("adjustment lines (phase 5)", () => {
     expect(payoutTotals([adjustmentLine(10.61), adjustmentLine(-10.61)])).toEqual({
       rows: 0,
       adjustments: 2,
+      overrides: 0,
       volume: 0,
       residualIncome: 0,
       repPayout: 0,
@@ -740,5 +745,66 @@ describe("adjustment lines (phase 5)", () => {
   it("labels the two phase-5 preview flags", () => {
     expect(previewFlagLabel("share_not_in_force")).toBe("Share does not cover this month");
     expect(previewFlagLabel("looks_shared")).toBe("Looks shared, no share set");
+  });
+});
+
+describe("override lines (20261102120000)", () => {
+  // As commit v3 writes them: no volume, residual or rate; the payout is the
+  // signed override amount (negative on the rep, positive on the recipient).
+  const overrideLine = (amount: number) => ({
+    line_kind: "override" as const,
+    volume: null,
+    residual_income: null,
+    rep_split_pct: null,
+    rep_payout: amount,
+  });
+  const importLine = { line_kind: "import" as const, volume: 1000, residual_income: 100, rep_split_pct: 50, rep_payout: 50 };
+
+  it("counts an override line in the payout, never as a merchant, volume, residual or awaiting figures", () => {
+    expect(payoutTotals([importLine, overrideLine(-10), { ...importLine, residual_income: null, rep_payout: null }])).toEqual({
+      rows: 2,
+      adjustments: 0,
+      overrides: 1,
+      volume: 2000,
+      residualIncome: 100,
+      repPayout: 40,
+      unfilled: 1,
+    });
+  });
+
+  it("a recipient holding only credits has a complete period: no merchants, nothing awaiting", () => {
+    expect(payoutTotals([overrideLine(10), overrideLine(-1.18)])).toEqual({
+      rows: 0,
+      adjustments: 0,
+      overrides: 2,
+      volume: 0,
+      residualIncome: 0,
+      repPayout: 8.82,
+      unfilled: 0,
+    });
+  });
+
+  it("splits lines three ways, keeping order", () => {
+    const rows = [
+      { id: 1, line_kind: "import" as const },
+      { id: 2, line_kind: "override" as const },
+      { id: 3, line_kind: "adjustment" as const },
+      { id: 4, line_kind: "override" as const },
+      { id: 5, line_kind: "import" as const },
+    ];
+    const { imports, overrides, adjustments } = splitPayoutLines(rows);
+    expect(imports.map((r) => r.id)).toEqual([1, 5]);
+    expect(overrides.map((r) => r.id)).toEqual([2, 4]);
+    expect(adjustments.map((r) => r.id)).toEqual([3]);
+    expect(isOverride({ line_kind: "override" })).toBe(true);
+    expect(isOverride({ line_kind: "import" })).toBe(false);
+    expect(isOverride({ line_kind: null })).toBe(false);
+  });
+
+  it("reads the override columns on every payout read", () => {
+    const columns = PAYOUT_ROW_COLUMNS.split(", ");
+    for (const column of ["override_id", "override_role", "override_amount"]) {
+      expect(columns).toContain(column);
+    }
   });
 });

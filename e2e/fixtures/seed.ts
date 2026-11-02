@@ -2412,6 +2412,8 @@ async function clearBatchesNamed(
     if (merchantIds.length > 0) {
       await db.from("rep_payout_rows").delete().in("merchant_id", merchantIds);
       await db.from("merchant_rep_shares").delete().in("merchant_id", merchantIds);
+      // ON DELETE RESTRICT, like the shares (20261102120000).
+      await db.from("merchant_overrides").delete().in("merchant_id", merchantIds);
       const { error } = await db.from("merchants").delete().in("id", merchantIds);
       if (error) throw new Error(`old merchants: ${error.message}`);
     }
@@ -2657,6 +2659,31 @@ export async function clearImportedUsers(
         .delete()
         .in("id", shareIds);
       if (sharesError) throw new Error(`Could not delete shares: ${sharesError.message}`);
+    }
+    // merchant_overrides.recipient_id, the twenty-sixth reference to
+    // profiles(id), NO ACTION (20261102120000). The shares' shape: overrides
+    // this user receives or that sit on their merchant (merchant_id is ON
+    // DELETE RESTRICT), their lines first (rep_payout_rows.override_id is
+    // RESTRICT too, and a pair includes the other person's line).
+    const overrideFilters = [`recipient_id.eq.${user.id}`];
+    if (merchantIds.length > 0) overrideFilters.push(`merchant_id.in.(${merchantIds.join(",")})`);
+    const { data: overrides, error: overridesReadError } = await db
+      .from("merchant_overrides")
+      .select("id")
+      .or(overrideFilters.join(","));
+    if (overridesReadError) throw new Error(`Could not read overrides: ${overridesReadError.message}`);
+    const overrideIds = (overrides ?? []).map((override) => override.id as number);
+    if (overrideIds.length > 0) {
+      const { error: overrideLinesError } = await db
+        .from("rep_payout_rows")
+        .delete()
+        .in("override_id", overrideIds);
+      if (overrideLinesError) throw new Error(`Could not delete override lines: ${overrideLinesError.message}`);
+      const { error: overridesError } = await db
+        .from("merchant_overrides")
+        .delete()
+        .in("id", overrideIds);
+      if (overridesError) throw new Error(`Could not delete overrides: ${overridesError.message}`);
     }
     // marketing_materials.uploaded_by and marketing_material_events.agent_id,
     // the twentieth and twenty-first references to profiles(id) and both NO
@@ -3069,6 +3096,243 @@ export async function createSharedBatch(label: string): Promise<{
   if (rowsError) throw new Error(`staging: ${rowsError.message}`);
 
   return { batchId, period: slot.period, sharedMid, plainMid };
+}
+
+/**
+ * Overrides on the payout surfaces (20261102120000), through the REAL path:
+ * a shared merchant (agent signs 40, agent2 partners 10, rate 50) and a plain
+ * one (agent, rate 50), each with a 5% override paid to agent3 -- party to
+ * neither, and the recipient whose view A4c is about -- set by the signed-in
+ * admin with set_merchant_override(), then the month committed with
+ * commit_residual_import_v3() as that admin. Nothing is planted on the ledger.
+ *
+ * The figures (memo §4.4), chosen so no amount is a substring of another:
+ *   shared R 1,234.56: T 617.28 = signer 493.82 + partner 123.46;
+ *     X = 61.73, the partner's piece shared_part(61.73, 10, 50) = 12.35,
+ *     the signer's 49.38.
+ *   plain R 200.00: T 100.00; X = 10.00.
+ *   clawback R -11.76 (A25: no warning): T -5.88; X = -0.59, so the rep's
+ *     debit is +0.59 and the recipient gives back 0.59.
+ * 5%, not 10% or 40%: payouts-shares asserts those share figures never
+ * appear on the other party's page.
+ *
+ * At a free processor-month in the import window (freeBatchSlot), returned as
+ * `period` (YYYY-MM). Clears an earlier run's first (its batch, lines,
+ * merchants, share and overrides).
+ */
+export const OVERRIDE_FIXTURE = {
+  pct: 5,
+  shared: { residual: 1234.56, signerDebit: "-$49.38", partnerDebit: "-$12.35", credit: "$61.73" },
+  plain: { residual: 200, debit: "-$10.00", credit: "$10.00" },
+  clawback: { residual: -11.76, debit: "$0.59", credit: "-$0.59" },
+} as const;
+
+export async function createOverrideFixture(label: string): Promise<{
+  batchId: number;
+  period: string;
+  shared: { mid: string; dba: string; merchantId: number };
+  plain: { mid: string; dba: string; merchantId: number };
+  clawback: { mid: string; dba: string; merchantId: number };
+  ids: { admin: string; agent: string; agent2: string; agent3: string };
+}> {
+  const db = serviceClient();
+  const prefix = `E2E-OVR-${label}`;
+  const fileName = `e2e-override-${label}.xlsx`;
+  const shared = { mid: `${prefix}-SHARED`, dba: `E2E Override Shared ${label}` };
+  const plain = { mid: `${prefix}-PLAIN`, dba: `E2E Override Plain ${label}` };
+  const clawback = { mid: `${prefix}-CLAWBACK`, dba: `E2E Override Clawback ${label}` };
+
+  const { data: reps, error: repsError } = await db
+    .from("profiles")
+    .select("id, email")
+    .in("email", [PERSONAS.admin.email, PERSONAS.agent.email, PERSONAS.agent2.email, PERSONAS.agent3.email]);
+  if (repsError || (reps ?? []).length !== 4) {
+    throw new Error(`override fixture reps: ${repsError?.message ?? "personas missing; run seedE2E() first"}`);
+  }
+  const idOf = (address: string) => reps!.find((rep) => rep.email === address)!.id as string;
+  const ids = {
+    admin: idOf(PERSONAS.admin.email),
+    agent: idOf(PERSONAS.agent.email),
+    agent2: idOf(PERSONAS.agent2.email),
+    agent3: idOf(PERSONAS.agent3.email),
+  };
+
+  await clearBatchesNamed(db, fileName, prefix);
+  const slot = await freeBatchSlot(db);
+  const sharedId = await fixtureMerchant(db, ids.agent, shared.mid, shared.dba);
+  const plainId = await fixtureMerchant(db, ids.agent, plain.mid, plain.dba);
+  const clawbackId = await fixtureMerchant(db, ids.agent, clawback.mid, clawback.dba);
+
+  const { error: shareError } = await db.from("merchant_rep_shares").insert({
+    merchant_id: sharedId,
+    primary_agent_id: ids.agent,
+    secondary_agent_id: ids.agent2,
+    primary_rep_pct: 40,
+    secondary_rep_pct: 10,
+    effective_from: slot.period,
+  });
+  if (shareError) throw new Error(`override fixture share: ${shareError.message}`);
+
+  // The admin's session: set_merchant_override and v3 are is_admin() first,
+  // and the service role has no auth.uid(). persistSession off and NO signOut,
+  // for the reason stampAdminTimelineEdits gives.
+  const { apiUrl, publishableKey } = publicStackConfig();
+  const asAdmin = createClient(apiUrl, publishableKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { error: signInError } = await asAdmin.auth.signInWithPassword({
+    email: PERSONAS.admin.email,
+    password: E2E_PASSWORD,
+  });
+  if (signInError) throw new Error(`override fixture sign-in: ${signInError.message}`);
+  for (const merchantId of [sharedId, plainId, clawbackId]) {
+    const { error } = await asAdmin.rpc("set_merchant_override", {
+      merchant_id_input: merchantId,
+      recipient_id_input: ids.agent3,
+      override_pct_input: OVERRIDE_FIXTURE.pct,
+      effective_from_input: slot.period,
+    });
+    if (error) throw new Error(`set_merchant_override: ${error.message}`);
+  }
+
+  const { data: batch, error: batchError } = await db
+    .from("rep_payout_batches")
+    .insert({
+      imported_by: ids.admin,
+      file_key: `e2e/${fileName}`,
+      file_name: fileName,
+      status: "review",
+      ...slot,
+    })
+    .select("id")
+    .single();
+  if (batchError || !batch) throw new Error(`override fixture batch: ${batchError?.message ?? "no row"}`);
+  const batchId = batch.id as number;
+
+  const base = {
+    batch_id: batchId,
+    period: slot.period,
+    processor_raw: slot.processor,
+    income_type_raw: "Residuals",
+    agent_id: ids.agent,
+    volume: 50000,
+  };
+  const { error: rowsError } = await db.from("rep_payout_import_rows").insert([
+    { ...base, row_number: 2, mid_raw: shared.mid, merchant_name_raw: shared.dba, merchant_id: sharedId,
+      residual_income: OVERRIDE_FIXTURE.shared.residual },
+    { ...base, row_number: 3, mid_raw: plain.mid, merchant_name_raw: plain.dba, merchant_id: plainId,
+      residual_income: OVERRIDE_FIXTURE.plain.residual },
+    { ...base, row_number: 4, mid_raw: clawback.mid, merchant_name_raw: clawback.dba, merchant_id: clawbackId,
+      volume: 5000, residual_income: OVERRIDE_FIXTURE.clawback.residual },
+  ]);
+  if (rowsError) throw new Error(`override fixture staging: ${rowsError.message}`);
+
+  const { error: commitError } = await asAdmin.rpc("commit_residual_import_v3", {
+    batch_id_input: batchId,
+    confirmed_input: [],
+  });
+  if (commitError) throw new Error(`override fixture commit: ${commitError.message}`);
+
+  return {
+    batchId,
+    period: slot.period.slice(0, 7),
+    shared: { ...shared, merchantId: sharedId },
+    plain: { ...plain, merchantId: plainId },
+    clawback: { ...clawback, merchantId: clawbackId },
+    ids,
+  };
+}
+
+/** The override lines a batch holds, as the service role: who, which side, how much. */
+export async function overrideLines(batchId: number): Promise<{ agent_id: string; role: string; amount: number }[]> {
+  const { data, error } = await serviceClient()
+    .from("rep_payout_rows")
+    .select("agent_id, override_role, override_amount")
+    .eq("batch_id", batchId)
+    .eq("line_kind", "override")
+    .order("override_amount", { ascending: true });
+  if (error) throw new Error(`override lines: ${error.message}`);
+  return (data ?? []).map((row) => ({
+    agent_id: row.agent_id as string,
+    role: row.override_role as string,
+    amount: Number(row.override_amount),
+  }));
+}
+
+/**
+ * A merchant for the override card spec, owned by agent, rate 50, no lines,
+ * with any earlier run's merchant, overrides and audit rows cleared. Returns
+ * its id. agent's manager is agent2 (ensureReportingLine), so the card's
+ * default recipient is "E2E Agent Two".
+ */
+export async function overrideCardMerchant(label: string): Promise<number> {
+  const db = serviceClient();
+  const mid = `E2E-OVRCARD-${label}`;
+  const { data: old } = await db.from("merchants").select("id").eq("mid", mid);
+  for (const { id } of old ?? []) {
+    const { data: overrides } = await db.from("merchant_overrides").select("id").eq("merchant_id", id);
+    const overrideIds = (overrides ?? []).map((o) => String(o.id));
+    if (overrideIds.length > 0) {
+      await db.from("audit_log").delete().eq("table_name", "merchant_overrides").in("row_id", overrideIds);
+    }
+    await db.from("merchant_overrides").delete().eq("merchant_id", id);
+    const { error } = await db.from("merchants").delete().eq("id", id);
+    if (error) throw new Error(`override card merchant: ${error.message}`);
+  }
+  const { data: agent } = await db.from("profiles").select("id").eq("email", PERSONAS.agent.email).single();
+  if (!agent) throw new Error("Run seedE2E() first.");
+  return fixtureMerchant(db, agent.id as string, mid, `E2E Override Card ${label}`);
+}
+
+/**
+ * set_merchant_override as the signed-in admin persona -- the only way an
+ * override can be made (the service role holds no INSERT, and the function
+ * is is_admin() first). Throws the database's sentence on a refusal.
+ */
+export async function setOverrideAsAdmin(
+  merchantId: number,
+  recipient: PersonaKey,
+  pct: number,
+  from: string,
+): Promise<number> {
+  const db = serviceClient();
+  const { data: who } = await db.from("profiles").select("id").eq("email", PERSONAS[recipient].email).single();
+  if (!who) throw new Error("Run seedE2E() first.");
+  const { apiUrl, publishableKey } = publicStackConfig();
+  const asAdmin = createClient(apiUrl, publishableKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { error: signInError } = await asAdmin.auth.signInWithPassword({
+    email: PERSONAS.admin.email,
+    password: E2E_PASSWORD,
+  });
+  if (signInError) throw new Error(`admin sign-in: ${signInError.message}`);
+  const { data, error } = await asAdmin.rpc("set_merchant_override", {
+    merchant_id_input: merchantId,
+    recipient_id_input: who.id,
+    override_pct_input: pct,
+    effective_from_input: from,
+  });
+  if (error) throw new Error(error.message);
+  return data as number;
+}
+
+/** The overrides on one merchant, as the service role. */
+export async function overridesOn(merchantId: number): Promise<
+  { recipient_id: string; override_pct: number; effective_from: string; effective_to: string | null }[]
+> {
+  const { data, error } = await serviceClient()
+    .from("merchant_overrides")
+    .select("recipient_id, override_pct, effective_from, effective_to")
+    .eq("merchant_id", merchantId)
+    .order("effective_from", { ascending: true });
+  if (error) throw new Error(`overrides on ${merchantId}: ${error.message}`);
+  return (data ?? []).map((row) => ({
+    recipient_id: row.recipient_id as string,
+    override_pct: Number(row.override_pct),
+    effective_from: row.effective_from as string,
+    effective_to: (row.effective_to as string | null) ?? null,
+  }));
 }
 
 /**

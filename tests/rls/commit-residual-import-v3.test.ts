@@ -379,7 +379,9 @@ describe("no merge: a month is committed once", () => {
     );
     expect(body.toLowerCase()).not.toContain("on conflict");
     expect(body).not.toMatch(/coalesce\(excluded/);
-    expect(body.match(/insert into rep_payout_rows/g)).toHaveLength(3);
+    // Unshared, signer, partner -- and since 20261102120000 the override
+    // lines (step 6), a plain insert like the other three.
+    expect(body.match(/insert into rep_payout_rows/g)).toHaveLength(4);
   });
 });
 

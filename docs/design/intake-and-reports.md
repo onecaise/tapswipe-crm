@@ -1,6 +1,6 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-9 built locally (§10).** Nothing has
+Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-10 built locally (§10).** Nothing has
 been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
@@ -1968,6 +1968,126 @@ Not done here, for later phases:
   `batch_id`, so overrides carrying it are removed and rebuilt with no change to the replace.
 - An admin's client INSERT may still carry an explicit merchant rate (unaudited); only the NULL case
   is defaulted. Closing that is a separate decision.
+
+### Phase 10: overrides (2 Nov 2026, branch `intake-residuals`)
+
+Owen confirmed A4c, A4d and A4f as written before the build: the rep sees who receives their
+override, the recipient sees the merchant's name as plain text with no access to the merchant;
+Report 1 gets "Overrides received" (phase 12); every override has a named recipient.
+
+Built (`20261102120000_merchant_overrides.sql`; Edge Function `export-residuals`, the `Line`
+column only):
+- **`merchant_overrides`** as §4.2: `override_pct` CHECK `> 0` and `<= 50` (the outer bound),
+  months on the 1st with an exclusive end, at most one per merchant per month (exclusion,
+  A4e), `recipient_id` the **26th** `profiles` FK (NO ACTION), `merchant_id` RESTRICT. RLS
+  enabled in the migration itself (not left to `ensure_rls`), one admin SELECT policy; everything
+  revoked first, then `authenticated` SELECT and `service_role` SELECT + DELETE (teardowns).
+- **`set_merchant_override(merchant, recipient, pct, from)`, `end_merchant_override(id, to)`,
+  `cancel_merchant_override(id)`**: definer, `search_path = public, pg_temp`, `is_admin()` first,
+  the share lock, an audit row in the same transaction (no exception handler), their own
+  revoke/grant lines. The cap is the **merchant's rate** (0.01-50 at rate 50, up to 30 at 30,
+  none at 0), refused with the rate named. The recipient must exist, be active, not be the owner
+  and not be a party of a share overlapping the override. A merchant whose pre-app is not
+  submitted or approved is refused (A4b). The month rule is the shares': no boundary at or
+  before the latest committed month for the MID.
+- **The rules that hold over time**: `set_merchant_split` refuses a rate below a live override
+  (A29); moving a merchant with a live override is refused (`guard_merchant_split_and_owner`);
+  `set_merchant_rep_share` refuses naming an overlapping override's recipient as a party.
+  `merchant_has_live_override()` has no client EXECUTE.
+- **The ledger**: `override_id` (RESTRICT), `override_role` (`debit`/`credit`), signed
+  `override_amount`; `line_kind` gains `override`; `rep_payout` gains its branch by drop and
+  re-add under the 20261014140000 precautions (refuses over a dependent or a column grant;
+  count, total and per-row md5 compared or nothing commits). The two adjustment CHECKs say "not
+  an adjustment" where they said "import"; an override line carries a batch and a processor, no
+  figure and no share column; one line per (batch, override, role, rep).
+- **v3 step 6**, the cent rule (§4.4), in this order: `X = round(R × o / 100, 2)` once, from the
+  account residual (half away from zero, `rep_payout`'s own rounding); unshared, the owner's
+  debit `-X`; shared, the partner's piece `shared_part(X, b, a + b)` and the signer's `X` minus
+  it (the signer takes the odd cent); the recipient's credit `+X`. So debits + credit = 0 and
+  the reps' nets + the credit = T exactly; the company's R - T never moves. A clawback imports
+  without a warning and reverses in proportion (A25). Backstops before anything is written
+  (PT409, naming MIDs and override ids): an override above the merchant's rate now; one paid to
+  the owner or a party of a covering share; one whose recipient is deactivated. The result's
+  `overrides` is the number of file rows an override applied to.
+- **Replace** needs no change of its own: the old batch's override lines carry its `batch_id`,
+  so the existing delete removes them, and step 6 writes them again.
+- **`delete_payout_period`** now deletes the month's override lines with its import lines.
+- **Visibility (A4c)**: `my_override_recipients()` (definer, `is_active_agent()` first,
+  `override_id`, `recipient_name`, `override_pct` only, for overrides the caller holds a DEBIT
+  line for). No merchants policy changed. The period page and the statement have an Overrides
+  block: a debit reads "Override 10% of residual · to Dana Cole", a credit "Override received"
+  with the merchant's name as plain text (an admin's credit also shows the percent); the
+  statement prints no MID on a credit. `payoutTotals` counts override lines in the payout,
+  never as merchants, volume, residual or awaiting figures.
+- **Merchant page** (admins): an Override card (`components/merchant-override-card.tsx`) with
+  the override in force, the history, Set/Change (recipient prefilled with the owner's manager,
+  the percent with a worked example, the first month), End and Cancel. **A rep's merchant page
+  shows nothing about overrides**: no card, no action, no notice.
+- **Teardown and reset**: all four teardown lists clear overrides by merchant and by recipient,
+  their lines first; `scripts/reset-business-data.sql` clears `merchant_overrides` (37 tables),
+  with a fixture row and an override line.
+- Tests: `tests/rls/merchant-overrides.test.ts` (76: table, grants, the cap at 0/30/46.5/50, one
+  per month, recipient rules, month rule, audit rows, the rules over time, the commit and
+  replace lines, clawback, zero, backstops, the property test over 800 random mirrored cases
+  through the real commit, visibility, CHECKs, the migration's refusals and pass, and 20
+  mutation proofs); `tests/rls/shared-lines-rewrite.test.ts` (the second rewrite moves none of
+  ~78,000 awkward, shared and adjustment payouts; its guard aborts a rewrite that would);
+  `tests/live/override-teardown.test.ts`; `tests/unit/overrides.test.ts`; e2e
+  `merchant-override.spec.ts` (new) and override blocks in `payouts-shares.spec.ts` and
+  `payouts-rendering.spec.ts`; every new e2e test failed under a revert of what it protects.
+
+Where the memo was silent or said otherwise, and what was chosen (the conservative side each time):
+- **The function never picks the recipient.** §4.1 says the recipient defaults to the manager,
+  "prefilled in the form but editable": the card prefills it; `set_merchant_override` requires
+  one (22023 without).
+- **"Change" is a new override from a later month**, the open one ended at that month in the same
+  call (the shares' shape), so the table is the history. No in-place edit of a percent or a
+  recipient.
+- **A deactivated recipient refuses the commit (and a replace)**, naming the MID, the override
+  and the person. The admin ends the override or reactivates them. A replace of a month whose
+  recipient has since left is therefore refused too; that month can still be deleted and
+  re-imported after the override is ended.
+- **A merchant with a live override cannot be moved** (silent in the memo; the shares' rule). It
+  also stops the recipient becoming the owner.
+- **A share naming an overlapping override's recipient is refused** at `set_merchant_rep_share`,
+  and v3 re-checks it.
+- **X = 0 still writes the pair at 0.00**, so every month an override was in force shows it.
+- **What a replace uses: the override in force at replace time.** The month rule makes it the
+  one the original commit used for every MID the original paid (no boundary can move at or
+  before a committed month); for a MID new to the replacing file it is whatever is in force. One
+  code path (replace is v3), and committed lines are snapshots (`override_amount` stored), so
+  editing an override later never changes a committed month.
+- **The §4.2 CHECK "a debit line's agent_id is never the override's recipient_id" is not a
+  CHECK**: the debit line carries no recipient (a column would put the recipient's id on the
+  rep's row, and a 27th profiles reference). The rule is held by `set_merchant_override`, the
+  move refusal, `set_merchant_rep_share` and v3's refusal. Added instead: one line per (batch,
+  override, role, rep).
+- **The percent is not snapshotted on the line.** Override rows are immutable except their end,
+  so the rep's statement reads it through `my_override_recipients()`; the recipient never sees
+  it.
+- **The recipient learns the merchant's name only**: not the percent, not the rep, and the
+  statement prints no MID on a credit. The credit line itself carries `mid` and `merchant_id` (as
+  a partner's line does; the ledger requires `mid`), readable through the API on their own row;
+  neither opens the merchant.
+- **`service_role` gets SELECT and DELETE, not `all`** (§4.2 said `all`): nothing outside the
+  definer functions inserts or updates an override.
+- **Cancel** is refused when a line references the override (§4.3) or when a committed month
+  falls inside it (the shares' rule). Set is refused for a merchant with no MID, no rate or a
+  rate of 0.
+- **"Latest committed month" counts import lines only**, as phase 8's share functions do.
+- **Export**: `Line` reads `Override` on an override line (§2.6). The export is not an import
+  format, so nothing reads it back.
+
+Found while building:
+- **An override line must carry its batch, and `rep_payout_rows.batch_id` is ON DELETE SET
+  NULL**, so deleting a batch (or a teardown detaching lines from it) is refused while an
+  override line points at it. The live helper and both seed scripts now delete override lines on
+  a user's own batches before detaching the rest; `tests/live/override-teardown.test.ts` proves
+  the obstacle and the teardown.
+- **Three columns put the amount behind the table's sideways scroll at 360px** (caught by the new
+  rendering test); the block is two columns, the label wrapping under the name.
+- The migration's exact-text preconditions (`pg_get_constraintdef`) read the same on PGlite 18.3
+  and the local stack's 17.6, and its checksum held over the local database's real rows.
 
 ---
 

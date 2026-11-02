@@ -536,6 +536,18 @@ async function clearPayoutRows(
   const batchIds = (batches ?? []).map((batch) => batch.id as number);
 
   if (batchIds.length > 0) {
+    // Except an override line, which must carry its batch
+    // (rep_payout_rows_adjustment_no_figures, 20261102120000): detaching one
+    // is refused, and so would be the batch delete's own SET NULL. It is
+    // derived from the batch's lines, so it goes with the batch.
+    const { error: overrideLinesError } = await admin
+      .from("rep_payout_rows")
+      .delete()
+      .eq("line_kind", "override")
+      .in("batch_id", batchIds);
+    if (overrideLinesError) {
+      throw new Error(`Could not delete override lines: ${overrideLinesError.message}`);
+    }
     await admin
       .from("rep_payout_rows")
       .update({ batch_id: null })
@@ -667,6 +679,51 @@ export async function clearRepShares(
     .delete()
     .in("id", shareIds);
   if (sharesError) throw new Error(`Could not delete shares: ${sharesError.message}`);
+}
+
+/**
+ * merchant_overrides (20261102120000): recipient_id is the TWENTY-SIXTH
+ * reference to profiles(id), NO ACTION -- the shares' shape exactly.
+ *
+ * Every override this user receives OR that sits on their merchant (an
+ * override on this user's merchant names somebody else, and merchant_id is ON
+ * DELETE RESTRICT). The override lines naming them go first:
+ * rep_payout_rows.override_id is ON DELETE RESTRICT, and a pair includes the
+ * OTHER person's line, which clearPayoutRows (by agent) never reaches. Must
+ * run before the owner tables are deleted. Errors are thrown, not swallowed.
+ */
+export async function clearOverrides(
+  admin: SupabaseClient,
+  userId: string,
+): Promise<void> {
+  const { data: merchants } = await admin
+    .from("merchants")
+    .select("id")
+    .eq("agent_id", userId);
+  const merchantIds = (merchants ?? []).map((merchant) => merchant.id as number);
+
+  const filters = [`recipient_id.eq.${userId}`];
+  if (merchantIds.length > 0) filters.push(`merchant_id.in.(${merchantIds.join(",")})`);
+  const { data: overrides, error: readError } = await admin
+    .from("merchant_overrides")
+    .select("id")
+    .or(filters.join(","));
+  if (readError) throw new Error(`Could not read overrides for ${userId}: ${readError.message}`);
+
+  const overrideIds = (overrides ?? []).map((override) => override.id as number);
+  if (overrideIds.length === 0) return;
+
+  const { error: linesError } = await admin
+    .from("rep_payout_rows")
+    .delete()
+    .in("override_id", overrideIds);
+  if (linesError) throw new Error(`Could not delete override lines: ${linesError.message}`);
+
+  const { error: overridesError } = await admin
+    .from("merchant_overrides")
+    .delete()
+    .in("id", overrideIds);
+  if (overridesError) throw new Error(`Could not delete overrides: ${overridesError.message}`);
 }
 
 async function clearMarketingMaterials(
@@ -810,6 +867,7 @@ export async function teardownFixtures(): Promise<void> {
     // Before the owner deletes below: a share's merchant_id is ON DELETE
     // RESTRICT, so a leftover share fails the merchants delete.
     await clearRepShares(admin, user.id);
+    await clearOverrides(admin, user.id);
     await admin.from("documents").delete().eq("agent_id", user.id);
     for (const table of ownerRowIds.keys()) {
       const { error: ownerDeleteError } = await admin
@@ -899,6 +957,7 @@ export async function deleteUserCompletely(userId: string): Promise<void> {
   await admin.from("audit_log").delete().eq("actor_id", userId);
   await admin.from("audit_log").delete().eq("row_id", userId);
   await clearRepShares(admin, userId);
+  await clearOverrides(admin, userId);
   await clearPayoutRows(admin, userId);
   await clearUserImports(admin, userId);
   await clearQuotes(admin, userId);

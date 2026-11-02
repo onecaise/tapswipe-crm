@@ -30,8 +30,10 @@ import {
   type AdminShareView,
   type OwnShareView,
 } from "@/lib/rep-shares";
+import { loadOverrideViews, overrideIdsOf } from "@/lib/overrides";
 import { SharedResidualControl } from "@/components/shared-residual-control";
 import { PayoutAdjustments } from "@/components/payout-adjustments";
+import { PayoutOverrides } from "@/components/payout-overrides";
 import { loadSkipReviewers } from "@/lib/residual-skips";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
@@ -212,6 +214,11 @@ async function PeriodLedger({
     ? new Map<number, OwnShareView>()
     : await loadOwnShareViews(supabase, false, profile.id, shareIds);
 
+  // Override lines (20261102120000): who receives each one. An admin reads
+  // the table; a rep reads my_override_recipients(), which names the
+  // recipient of their own debits only (memo A4c).
+  const overrideViews = await loadOverrideViews(supabase, isAdmin, overrideIdsOf(rows));
+
   // Committed batches that skipped a row in THIS period (phase 4b, design
   // §5.4). Not role-branched: rep_payout_batches is admin-only by policy, so a
   // rep's query returns nothing and they never see a skip notice -- a skipped
@@ -296,10 +303,10 @@ async function PeriodLedger({
 
       {groups.map((group) => {
         const totals = payoutTotals(group.rows);
-        // Merchant lines in the table; adjustment lines (post_share_correction,
-        // phase 5) in their own block under it. A rep can hold only
-        // adjustments in a month nobody has imported yet.
-        const { imports, adjustments } = splitPayoutLines(group.rows);
+        // Merchant lines in the table; override lines and adjustment lines
+        // each in their own block under it. A rep can hold only adjustments
+        // in a month nobody has imported yet, and a recipient only overrides.
+        const { imports, overrides, adjustments } = splitPayoutLines(group.rows);
 
         return (
           <section key={group.agentId} className="flex flex-col gap-3">
@@ -321,6 +328,13 @@ async function PeriodLedger({
                   </span>
                   {totals.unfilled > 0 && (
                     <> · {totals.unfilled} awaiting figures</>
+                  )}
+                  {totals.overrides > 0 && (
+                    <>
+                      {" · "}
+                      {totals.overrides} override line
+                      {totals.overrides === 1 ? "" : "s"}
+                    </>
                   )}
                   {totals.adjustments > 0 && (
                     <>
@@ -493,6 +507,13 @@ async function PeriodLedger({
               </TableBody>
             </Table>
             )}
+
+            <PayoutOverrides
+              lines={overrides}
+              views={overrideViews}
+              repName={group.rep?.full_name ?? "this rep"}
+              isAdmin={isAdmin}
+            />
 
             <PayoutAdjustments
               lines={adjustments}

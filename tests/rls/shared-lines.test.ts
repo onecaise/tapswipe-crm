@@ -502,6 +502,8 @@ describe("the adjustment branch, against a scratch table built from the migratio
   const INPUT_COLUMNS = [
     "line_kind",
     "adjustment_amount",
+    // The override branch's input (20261102120000), which rewrote the column.
+    "override_amount",
     "share_role",
     "residual_income",
     "rep_split_pct",
@@ -511,13 +513,20 @@ describe("the adjustment branch, against a scratch table built from the migratio
     "rep_payout",
   ];
 
+  /**
+   * The expression as the NEWEST migration that re-adds the column writes it:
+   * 20261014140000 first, 20261102120000 (the override branch) since. Copied,
+   * never retyped, and compared with the live column below.
+   */
   async function expressionFromMigration(): Promise<string> {
-    const sql = await readMigration("20261014140000_shared_lines.sql");
-    const match = sql.match(
-      /add column rep_payout numeric\(14,2\) generated always as \(\n([\s\S]*?)\n {2}\) stored;/,
-    );
-    if (!match) throw new Error("rep_payout expression not found in 20261014140000");
-    return match[1];
+    for (const file of ["20261102120000_merchant_overrides.sql", "20261014140000_shared_lines.sql"]) {
+      const sql = await readMigration(file);
+      const match = sql.match(
+        /add column rep_payout numeric\(14,2\) generated always as \(\n([\s\S]*?)\n {2}\) stored;/,
+      );
+      if (match) return match[1];
+    }
+    throw new Error("rep_payout expression not found in any migration that re-adds it");
   }
 
   async function createScratch(): Promise<void> {
@@ -599,6 +608,32 @@ ${await expressionFromMigration()}
       { label: "shared-looking", amount: "7.00", rep_payout: "7.00" },
       // Zero pays zero -- not NULL, which would read as "not worked out yet".
       { label: "zero", amount: "0.00", rep_payout: "0.00" },
+    ]);
+  });
+
+  it("the override branch pays exactly override_amount, signed, whatever else the row carries", async () => {
+    await createScratch();
+    await db.exec(`
+      insert into adjustment_scratch
+        (label, line_kind, override_amount, adjustment_amount, share_role, residual_income,
+         rep_split_pct, account_residual_income, primary_rep_pct, secondary_rep_pct)
+      values
+        ('debit',          'override', -10.00, 99.00, null, 100.00, 50.00, null, null, null),
+        ('credit',         'override', 10.00,  null,  null, 100.00, 50.00, null, null, null),
+        ('clawback debit', 'override', 1.18,   null,  null, null,   null,  null, null, null),
+        ('shared-looking', 'override', -1.67,  null,  'primary', 100.00, 50.00, 100.00, 25, 25),
+        ('zero',           'override', 0,      null,  null, null,   null,  null, null, null),
+        ('blank',          'override', null,   null,  null, 100.00, 50.00, null, null, null);
+    `);
+    expect(
+      await rows(db, `select label, rep_payout::text from adjustment_scratch order by label`),
+    ).toEqual([
+      { label: "blank", rep_payout: null },
+      { label: "clawback debit", rep_payout: "1.18" },
+      { label: "credit", rep_payout: "10.00" },
+      { label: "debit", rep_payout: "-10.00" },
+      { label: "shared-looking", rep_payout: "-1.67" },
+      { label: "zero", rep_payout: "0.00" },
     ]);
   });
 });

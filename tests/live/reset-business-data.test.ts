@@ -245,7 +245,8 @@ describe("reset-business-data.sql on the local stack", () => {
     expect(names).toContain("processors");
     expect(names).toContain("pre_app_tax_secrets");
     expect(names).toContain("payout_period_closures");
-    expect(names.length).toBe(36 + 2);
+    expect(names).toContain("merchant_overrides");
+    expect(names.length).toBe(37 + 2);
     const inventory = psql(INVENTORY);
     expect(inventory.ok).toBe(true);
     expect(tagged(psql(SNAPSHOT).out, "SNAP")).toEqual(tagged(before.out, "SNAP"));
