@@ -1,5 +1,6 @@
 import {
   BanknoteIcon,
+  BarChart3Icon,
   LayoutDashboardIcon,
   BoxesIcon,
   BugIcon,
@@ -118,6 +119,14 @@ export const NAV_GROUPS: readonly NavGroup[] = [
         label: "Products",
         href: "/admin/products",
         icon: BoxesIcon,
+        adminOnly: true,
+      },
+      // The two payout reports (memo §7.2). adminOnly because the page is:
+      // both report functions refuse a rep, and the page redirects one.
+      {
+        label: "Reports",
+        href: "/admin/reports",
+        icon: BarChart3Icon,
         adminOnly: true,
       },
     ],

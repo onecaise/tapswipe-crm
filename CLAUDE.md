@@ -21,7 +21,8 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **Admin sees every row; an active agent sees only `agent_id = auth.uid()`** — `(agent_id = auth.uid() and is_active_agent()) or is_admin()`. Reuse the two `security definer` helpers; never inline a role lookup. → "Access control" below.
 - **A new table needs RLS *and* explicit grants** (the four-step checklist below); **a new function needs `revoke all … from public` + `grant execute … to authenticated, service_role`** in the same migration. Never grant `anon` anything. **Do not rely on `ensure_rls`.** → below.
 - **The four `*_secrets` tables: zero policies, zero grants, Edge Function only** — including the agent's first submission. Never add a policy or a grant. → "Three tiers" below.
-- **`security invoker` is the default for RPCs.** `definer` only when the function must reach what the caller may not, and then it owes a hand-written guard first (`is_admin()` / `is_active_agent()`) plus `set search_path`. `search_crm` and `dashboard_counts` must stay invoker (tests assert `prosecdef` false). → `docs/claude/rpcs-profiles-audit.md`.
+- **`security invoker` is the default for RPCs.** `definer` only when the function must reach what the caller may not, and then it owes a hand-written guard first (`is_admin()` / `is_active_agent()`) plus `set search_path`. `search_crm`, `dashboard_counts` and the two report functions must stay invoker (tests assert `prosecdef` false). → `docs/claude/rpcs-profiles-audit.md`.
+- **`/admin/reports` reads only the committed ledger** via the invoker `rep_payout_summary()` / `merchant_processor_summary()` (`is_admin()` first): the ledger's `rep_payout` and each line's `rep_split_pct`, never `profiles.split_rate_pct`. Total = split + overrides received; deductions never in it. → `docs/claude/payouts-and-teardown.md`.
 - **The cross-book definer functions return redacted shapes, built with `jsonb_build_object` so hidden fields are ABSENT, not null**: `check_duplicates()` (warns only — **must never become a block**), `accounts_in_city()` (equality on `norm_city()` only; never a prefix/autocomplete for non-admins), `my_share_partners()` (party-only for every caller; a rep never sees the partner's share, rate or payout, and gets no access to the partner's merchant), `my_override_recipients()` (the caller's own debits only; the recipient gets the merchant's name as text, never the merchant). → `docs/claude/rpcs-profiles-audit.md`.
 - **`profiles` has no client write path**: new columns are set only by a `security definer` RPC with `is_admin()` first (`set_user_role`, `set_agent_number`, `set_territory`, `set_manager`, `set_rep_identity`, `set_rep_split`). **`territory`, `manager_id`, `legal_name`, `llc_legal_name` and `split_rate_pct` must never appear in a policy**; `role` stays `'agent' | 'admin'`; manager graph is one hop. → `docs/claude/rpcs-profiles-audit.md`.
 - **`log_cross_agent_change()` fails closed on purpose** — never wrap its audit insert in an exception handler. A new table must have **every verb** audited somewhere. `audit_log` has no insert policy and `authenticated` holds `select` only. → `docs/claude/rpcs-profiles-audit.md`.
@@ -101,7 +102,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 
 **Current state matters when reading the code**, and it is a mix — real CRM pages alongside untouched starter scaffolding:
 
-- **Built:** every CRM route under `app/(app)/`, the `lib/*` data-access helpers, notes/tasks panels, the Document Center (a company library, not per-record), and Proposals at `/proposals`. Full route and helper inventory → `docs/claude/project-state.md`.
+- **Built:** every CRM route under `app/(app)/`, the `lib/*` data-access helpers, notes/tasks panels, the Document Center (a company library, not per-record), Proposals at `/proposals`, and the payout Reports at `/admin/reports`. Full route and helper inventory → `docs/claude/project-state.md`.
 - **Not built yet:** My Submissions.
 - **Still starter-kit template:** `README.md` only. Edge Functions: twelve in the repo. Details of both → `docs/claude/project-state.md`.
 
@@ -124,7 +125,7 @@ So `supabase db push`, `functions deploy` and `migration list --linked` target *
 - **Relink** (`supabase link --project-ref zuvsdkjnfstrjahstsmg`, then `ALLOW_PROD_SUPABASE=1 npm run db:push`). This is the 2 Sep incident's own mechanism — it changes global CLI state, and until it is reversed the guard fails closed on every wrapped command, blocking unrelated work.
 - **`--db-url`** with the prod connection string. No relink and no global state, but it needs the prod Postgres password, which is deliberately nowhere in this repo — `.env.deployed.local` holds publishable keys only.
 
-**And the URL is not the obvious one.** `db.zuvsdkjnfstrjahstsmg.supabase.co` resolves to an **AAAA record only** (measured 16 Sep 2026), so on a host without IPv6 egress it fails at DNS — "No address associated with hostname" — before any credential is tested. Use the pooler in **session** mode, and note the username carries the ref:
+**And the URL is not the obvious one:** `db.<ref>.supabase.co` is IPv6-only and fails at DNS without IPv6 egress (`docs/claude/project-state.md`). Use the pooler in **session** mode; the username carries the ref:
 
 ```
 postgresql://postgres.zuvsdkjnfstrjahstsmg@aws-0-us-west-2.pooler.supabase.com:5432/postgres   # password in $env:PGPASSWORD, never in the URL (a command line is readable by other processes; scripts/prod-db.ps1)
@@ -155,7 +156,7 @@ The guard reads `supabase/.temp/linked-project.json`, so it reports what the CLI
 
 **Never run `supabase projects api-keys`.** It prints the project's service-role key to stdout, and stdout is a transcript — a terminal scrollback, a CI log, an agent session — that outlives the command. `scripts/load-hardware-catalog.mjs` is the one caller, and it captures the output and never prints it; anything you type by hand has no such guarantee.
 
-**The local stack's service versions follow the LINKED project, not your intent.** `supabase start` reads `supabase/.temp/{gotrue,rest,storage,postgres}-version`, which `supabase link` rewrites to match whichever project it just linked — so a relink to prod silently changes what the *local* stack runs on its next start. After any `supabase link` to another project: relink to dev, run `npm run guard:linked`, and if local uploads then fail with **`42P10`**, `supabase stop` then `supabase start` so the containers match the versions again.
+**The local stack's service versions follow the LINKED project**: after any `supabase link`, relink to dev and see `docs/claude/project-state.md` (the `42P10` fix).
 
 ## Commands
 
@@ -165,10 +166,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2863 tests, 119 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (341 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2909 tests, 121 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (347 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (372 tests, 6 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (379 tests, 6 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)

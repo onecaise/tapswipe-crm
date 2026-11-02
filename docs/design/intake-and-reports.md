@@ -1,6 +1,6 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-11 built locally (§10).** Nothing has
+Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-12 built locally (§10).** Nothing has
 been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
@@ -2145,6 +2145,97 @@ Where the memo was silent, and what was chosen (the conservative side each time)
 - **The skipped-row acknowledgement UI stays** for the cleanup phase, as phase 8 left it.
 
 The full e2e suite, run once after a clean restart (stack stopped and started, functions served, `.next` deleted, nothing else running): **372 passed, 0 failed, 0 flaky, 19.1 minutes**; the slowest test 19.8s (a Document Center page's first compile).
+
+### Phase 12: reports (2 Nov 2026, branch `intake-residuals`)
+
+Built (`20261102160000_reports.sql`; no Edge Function changed):
+- **`rep_payout_summary(from, to, processor)`** (Report 1, §7.2 and §0b.7) and
+  **`merchant_processor_summary(from, to, processor)`** (Report 2): security invoker,
+  `search_path = public, pg_temp`, `is_admin()` first (PT403), months first-of-month with
+  `from <= to` (22023), revoke from PUBLIC and anon, EXECUTE for `authenticated` and
+  `service_role`. They read only lines of `committed` batches, plus adjustment lines (no batch),
+  and sum the ledger's own `rep_payout`; totals are their own `GROUPING SETS` rows. The
+  migration refuses, naming them, if a column the plpgsql bodies read is missing (a body is not
+  checked until called); it reads and writes no row, so it has no row guard.
+- **Report 1**: agent code, legal name (`llc_legal_name`, else `legal_name`, A17), full name,
+  sales volume (import lines; the signer's only on a shared account, A18), net residual, agent
+  split (import `rep_payout` + the rep's override debits, §4.5), **"Deductions (info only, not in
+  total)"** (§0c.1), override received (A4d) and total agent commission = split + received.
+- **Report 2**: processor, merchant, MID, owner (code and name), volume, the account residual
+  (never the partner's piece again), rep side, company share; a subtotal per processor-month with
+  its paid state, and a grand total.
+- **`/admin/reports`**: `requireAdmin()`, an `adminOnly` "Reports" item in the Admin nav group,
+  two `FilterTabs`, a GET form (From month, To month, Processor; the latest committed month and
+  all processors by default), the paid state of each covered processor-month, Print, a table from
+  `xl` up and on paper and one card per row below it, and Report 1's plus (§4.5's detail row).
+- Tests: `tests/rls/reports.test.ts` (32: catalog and grants, the rep / anon / bad-range
+  refusals, a worked month through the real v3 (override, clawback on a zero-volume line, a
+  shared account with the cent rule, the house profile at 0, Report 2's figures, the totals
+  rows), committed-only (review, abandoned, no batch; a real replace and a real period delete),
+  deductions against a real Mark paid + `post_payout_adjustment`, two seeds of random months
+  through the real v3 over three processors (rates 0-50, shares, overrides, clawbacks, zero
+  volume; non-vacuity asserted) reconciling `Σ(split + received) + Σ company share` with the
+  file residuals to the cent, every rep row with the statement's `payoutTotals`, Report 2's
+  total with the files, each processor alone and the two-month range, the migration's pass and
+  refusal, and 9 mutation proofs: admin-only in each function, committed-only in each, the
+  received and debit halves of the total, deductions subtracted from the total, adjustments
+  taken into the split, and a shared account's residual counted twice);
+  `tests/unit/reports.test.ts` (14: the URL filters and their refusals, the header words, the
+  nav item); `tests/live/reports.test.ts` (6: the wire over PostgREST, a review batch not
+  counted, rep PT403, anon 42501); e2e `admin-reports.spec.ts` (7: the nav link, Report 1's
+  columns and each rep's total against their ledger lines, the plus, Report 2's rows, subtotal
+  and paid state, 360px with every amount on screen and no sideways scroll, the empty and
+  unreadable-month states, and a rep with no link and redirected). Every e2e test failed under a
+  revert of what it protects (nav `adminOnly`, `requireAdmin()`, the cards, the plus, the
+  deductions header, the total column, the paid badge, the empty state).
+
+Where the memo was silent or said otherwise, and what was chosen (the conservative side each time):
+- **A rep is refused, not answered with their own rows** (§7.2 says a rep calling an invoker
+  function "would get their own rows only"; the phase 12 instruction says no rep): invoker AND
+  `is_admin()` first, so the refusal does not depend on RLS and RLS does not depend on it.
+- **A processor parameter on both functions** (§7.2's signatures have only the months). NULL
+  is every processor. Under a processor, an adjustment counts only if it carries that
+  processor, so a share correction (no processor) appears only under "all processors".
+- **Committed only, precisely**: an import or override line needs a `committed` batch; an
+  adjustment needs none. An import line with no batch (a legacy or hand-made line) is not
+  counted, though a statement would still show it. v3 writes none.
+- **The range option** (§7.2) is From and To months. Report 1 stays per rep per month (§7.2),
+  with a total per month only when the range spans more than one, and a grand total.
+- **Totals are computed in SQL** (`GROUPING SETS`), not in the page, so the page adds nothing.
+- **Report 2 is grouped by (month, processor, MID)**; the merchant name is the line's snapshot
+  (what the statement prints, not today's `dba`) and the owner the payee at commit (the
+  unshared or signer line), not today's owner. Its rep-side and company-share columns (§7.2
+  "optionally") are built.
+- **Only reps with a counted line in the selection appear** (an adjustment alone is enough); no
+  zero rows for the rest.
+- **No CSV or XLSX export.** §7.2 says printing covers the first need and an XLSX download is
+  built only if asked; the page has Print and a print layout (the table, no filters or toggles).
+- **The plus (§4.5's detail row)** lists each override line of the rep in the selection's
+  committed batches: a debit with percent, merchant, MID and recipient; a credit with percent,
+  merchant, MID and the rep(s) it came from. Display only, read in the page; nothing in it is
+  summed.
+- **Month choices are the committed months** (plus whatever month the address names), newest
+  first; the default is the latest committed month of any processor.
+- **A month or processor in the address that cannot be read is said so** in a Callout, never
+  replaced by the default (`parsePeriodParam`'s rule); a backwards range likewise.
+- **Negatives read `-$5.41`** (`formatMoney`), with no colour: red is the brand and destructive
+  colour, and the status colours are for badges.
+- **The table appears from `xl` (1280px)**, one card per row below it: nine columns do not fit
+  the content width below that without a sideways scroll.
+- **No row is returned for an empty selection** (not a zero totals row); the page says
+  "Nothing is committed for …".
+
+Not done here: real data (Owen's report) has not been put through it; the print layout was
+looked at only through the e2e's DOM, not on paper; widths between 360px and 1280px were not
+measured.
+
+Found while building:
+- `asUser(db, null)` in the hermetic helpers is the `authenticated` role with no user, not
+  `anon`; the anon test sets the role itself.
+- A helper exported from a `"use client"` module cannot be called from a server component (it
+  failed at runtime, not at type-check); `detailKey` lives in `lib/reports.ts`.
+- Playwright's Desktop Chrome viewport is 1280px wide, exactly the `xl` boundary, so the e2e
+  sees the table at desktop and the cards at 360px.
 
 ---
 
