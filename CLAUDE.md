@@ -10,8 +10,8 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 
 **Hosted projects and secrets**
 
-- **Never touch the live Supabase projects (dev or prod) without asking first**, and treat `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) as live production. Use the guarded `npm run` wrappers, never trust `npm run db:push -- --db-url <prod>`, and run `scripts/push-prod-migration.ps1 -DryRun` before a prod push. → "Hosted projects and deployment" below.
-- **Never run `npx supabase config push`** and **never run `supabase projects api-keys`** by hand. Set the prod DB password with `Read-Host -AsSecureString`, never a literal. → below.
+- **Never touch the live Supabase projects (dev or prod) without asking first**, and treat `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) as live production. Use the guarded `npm run` wrappers, never trust `npm run db:push -- --db-url <prod>`, and run `scripts/push-prod-migration.ps1 -DryRun` before a prod push. → `docs/claude/hosted-projects-and-deployment.md`.
+- **Never run `npx supabase config push`** and **never run `supabase projects api-keys`** by hand. Set the prod DB password with `Read-Host -AsSecureString`, never a literal. → "Commands" below, `docs/claude/hosted-projects-and-deployment.md`.
 - **The service-role key belongs in Edge Function secrets only**; the Next app holds the publishable key only, and `.env.deployed.local` stays publishable-keys-only. → "Next.js / auth wiring" below.
 - **`scripts/reset-business-data.sql`** (one-off, hand-run in the SQL Editor, dry run by default) empties every `public` table but `profiles` and `processors`. **A new `public` table must join its `keep_tables` or `clear_tables`** or it aborts. Never run it from here. → `docs/claude/reset-business-data.md`.
 - **SheetJS stays pinned to the cdn.sheetjs.com 0.20.3 build**, never `npm:xlsx` (two high-severity advisories). → `docs/claude/payouts-and-teardown.md`.
@@ -28,7 +28,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **`log_cross_agent_change()` fails closed on purpose** — never wrap its audit insert in an exception handler. A new table must have **every verb** audited somewhere. `audit_log` has no insert policy and `authenticated` holds `select` only. → `docs/claude/rpcs-profiles-audit.md`.
 - **A column that must be immutable is a GRANT, not a policy.** Column-level UPDATE grants: `quotes.status` only; `rep_payout_batches.status` only (a trigger admits only `review -> abandoned`; `replaced`/`deleted` are definer-only and final). `notes` and `rep_payout_rows` have no client UPDATE at either layer (the ledger also has a trigger refusing any client role, admin included, since `20261102140000`). → `docs/claude/proposals-and-catalog.md`, `docs/claude/payouts-and-teardown.md`.
 - **Any column the client supplies and no policy reads is unvalidated** (the `documents.file_key` lesson). Fix it at the layer that cannot be skipped: the price lock trigger `snapshot_quote_line_item()` overwrites every snapshot column; `enforce_quote_version()` assigns versions and refuses foreign groups; the browser sends only `product_id` and `quantity`; only `submit_pre_app()` writes a pre-app's split and rep names, from the profile. → `docs/claude/edge-functions-and-storage.md`, `docs/claude/proposals-and-catalog.md`, `docs/claude/rpcs-profiles-audit.md`.
-- **A committed processor-month changes only by replace or delete (until marked paid) or an adjustment line (after).** Replace is v3 on a batch with `replaces_batch_id`; delete is `delete_payout_period()` (no client DELETE on the ledger); `post_payout_adjustment()` needs a paid month; Mark paid / Reopen (typed phrase / written reason, on the one audit row) are `close_/reopen_payout_period()`. v3 never merges. The old `commit_residual_import(int)` keeps its `coalesce(excluded.<col>, rep_payout_rows.<col>)` until phase 13 — never reverse it, never copy it. Every `on conflict` on `rep_payout_rows` names `(period, processor, agent_id, mid)` and says `where line_kind = 'import'`; a negative `volume` only on a `volume_confirmed_negative` line. → "Three tiers" below, `docs/claude/payouts-and-teardown.md`.
+- **A committed processor-month changes only by replace (until paid) or an adjustment line (after).** Replace is `commit_residual_import_v3` on a batch with `replaces_batch_id`; `delete_payout_period()` (also refused once paid; no client DELETE on the ledger) removes a month so it can be imported again; `post_payout_adjustment()` needs a paid month; Mark paid / Reopen (typed phrase / written reason, on the one audit row) are `close_/reopen_payout_period()`. Nothing merges. Every `on conflict` on `rep_payout_rows` names `(period, processor, agent_id, mid)` and says `where line_kind = 'import'`; a negative `volume` only on a `volume_confirmed_negative` line. → "Three tiers" below, `docs/claude/payouts-and-teardown.md`.
 - **A merchant's rate (0-50) is written only by `set_merchant_split()`** (audited; refused while a share is live; a trigger refuses any other write); a merchant created without one takes its owner's profile rate (A31). A share's signer is the owner, its shares total the rate, and a shared merchant cannot be moved. **An override is at most the merchant's rate** (`set_merchant_override()`, re-checked by v3; the table's `<= 50` is only the outer bound), never paid to the owner or a share party, and a merchant with a live override cannot be moved either. → `docs/claude/payouts-and-teardown.md`.
 - **The legacy `documents` table and bucket are closed** (SELECT for admin only, no client write, its three functions removed). Do not reopen them. → `docs/claude/notes-tasks-documents.md`.
 
@@ -80,7 +80,7 @@ Postgres grants `EXECUTE` to `PUBLIC` on every new function, and `PUBLIC` includ
 
 1. **Normal tables via `supabase-js`** (`merchants`, `leads`, `ghost_sheets`, `pre_apps` + children, `support_tickets`, `notes`, `tasks`, `audit_log`, `rep_payout_rows` + the three other `rep_payout_*` tables, `payout_period_closures` (Mark paid, admin SELECT only), `merchant_overrides` (admin SELECT only; written by its three audited RPCs), the two `user_import_*` tables, and the reference-data tables `marketing_materials`, `business_documents`, `products`, `brands`, plus `processors`, which no client writes — `docs/claude/reference-data-and-marketing.md`). The legacy `documents` table is SELECT-only for `authenticated` and admits only an admin since 20261013121000. RLS does the enforcement; the client talks to Postgres directly. Note how little of that list is client-*writable*: the payout and user-import tables are read-only to `authenticated` apart from one status update each, because everything that creates their rows runs as service role.
 2. **Secrets tables — Edge Function only.** `pre_app_owner_secrets` (SSN), `pre_app_banking_secrets` (ABA routing / account number), `pre_app_terminal_secrets` (RP password), `pre_app_tax_secrets` (business tax ID, EIN or SSN; its kind must equal `pre_apps.ein_type`, and the plaintext `pre_apps.ein_number` is dropped, `20261026140000`) are locked twice over: RLS enabled with **zero policies**, *and* no grant to `anon` or `authenticated` at all. Either alone denies read and write; both means a policy added by mistake still opens nothing. Values are stored as `bytea` AES ciphertext; only a service-role Edge Function holding the encryption key can touch them. This includes the agent's initial submission — the browser must POST that data to `submit-pre-app-secrets`, never insert it via `supabase-js`. Never add a policy to these tables, and never grant them.
-3. **`commit_residual_import_v3(batch_id_input int, confirmed_input text[])` RPC** — `security definer`, `is_admin()` first; the commit the app calls. In one transaction it re-derives every refusal and warning from the database (refusing a type not confirmed), pays each row to its merchant's CURRENT owner at the MERCHANT's rate (a shared account as the signer/partner pair), and never merges; on a replacing batch it is the replace (refused once paid). Why an RPC, and its rules: `docs/claude/payouts-and-teardown.md`. The old `commit_residual_import(int)` and its merge go in phase 13.
+3. **`commit_residual_import_v3(batch_id_input int, confirmed_input text[])` RPC** — `security definer`, `is_admin()` first; the commit the app calls. In one transaction it re-derives every refusal and warning from the database (refusing a type not confirmed), pays each row to its merchant's CURRENT owner at the MERCHANT's rate (a shared account as the signer/partner pair), and never merges; on a replacing batch it is the replace (refused once paid). It is the only commit: the old `commit_residual_import(int)` and its merge were dropped in `20261104140000`. Why an RPC, and its rules: `docs/claude/payouts-and-teardown.md`.
 4. **`approve_pre_app(pre_app_id_input int)` RPC** — `security definer` plpgsql that creates a `merchants` row from a pre-app (address and `processor` copied), flips its status to `approved`, and writes `audit_log`. It guards itself with an explicit `is_admin()` check at the top; keep that check if you edit it.
 
 ### Edge Function authentication
@@ -106,57 +106,16 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Not built yet:** My Submissions.
 - **Still starter-kit template:** `README.md` only. Edge Functions: thirteen in the repo. Details of both → `docs/claude/project-state.md`.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Seventy-nine migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Eighty-one migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 ## Hosted projects and deployment
 
-Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. Linked Supabase project ref: `vdjtosofrimipklbdjbi` — and note **which** project that is: `tapswipe-crm-dev`. The second project `tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) is **not linked, but it is deployed and real**: `PRE_APP_SECRETS_KEY` is set and its private buckets exist (made by hand before `20261009170000_storage_buckets.sql`, which only fills in a missing one). Treat it as live production, not as a spare project.
+Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + Deno Edge Functions), Tailwind 3 + shadcn/ui (new-york, `neutral` base), TypeScript strict. The full text, the incidents behind each rule and the exact commands: **`docs/claude/hosted-projects-and-deployment.md`** (moved there verbatim on 4 Nov 2026; binding). In short:
 
-**Prod schema is caught up as of 18 Sep 2026 — all 30 migrations, verified against its own catalog** by `scripts/push-prod-migration.ps1`, which checks the migration rows AND the resulting objects rather than trusting the CLI's exit code. Log in `scripts/logs/`. Don't take that as standing parity: it was two behind for two days before this, and the only honest way to know is to run `scripts/diag-prod-trigger.ps1`, which says outright whether prod matches the repo.
-
-**Functions are a separate question from the schema, and a migration push does not carry them.** That is `functions deploy`, which is also the one command where `--project-ref` genuinely exists — so deploying to prod needs no relink and no database password, only a logged-in CLI.
-
-**As of 13 Oct 2026 the repo's functions and prod's are different sets** — which ones, and how a prod deploy is verified (401 from the function vs 404 for a missing slug): `docs/claude/project-state.md`.
-
-So `supabase db push`, `functions deploy` and `migration list --linked` target **dev**; `npm run test:deployed` is the exception — it reads `.env.deployed.local` and checks **every** project named there, dev and prod both, so it is the one command whose target does not depend on the link at all. Where this file says "production" of the linked project it means the hosted project — **dev is what those commands hit.**
-
-**Reaching prod is not one answer, and `--project-ref` is not it.** That flag exists on `functions deploy` — which is how the 4 Sep prod deploys were done, and for functions it genuinely is the form no one else's relink can invalidate. It does **not** exist on the migration commands. Verified 16 Sep 2026: `supabase db push --help` lists only `--linked`, `--local` and `--db-url` for targeting, and `migration list --project-ref …` fails outright with `UnrecognizedOption`. So for anything schema-related there are exactly two routes to prod, and both cost something:
-
-- **Relink** (`supabase link --project-ref zuvsdkjnfstrjahstsmg`, then `ALLOW_PROD_SUPABASE=1 npm run db:push`). This is the 2 Sep incident's own mechanism — it changes global CLI state, and until it is reversed the guard fails closed on every wrapped command, blocking unrelated work.
-- **`--db-url`** with the prod connection string. No relink and no global state, but it needs the prod Postgres password, which is deliberately nowhere in this repo — `.env.deployed.local` holds publishable keys only.
-
-**And the URL is not the obvious one:** `db.<ref>.supabase.co` is IPv6-only and fails at DNS without IPv6 egress (`docs/claude/project-state.md`). Use the pooler in **session** mode; the username carries the ref:
-
-```
-postgresql://postgres.zuvsdkjnfstrjahstsmg@aws-0-us-west-2.pooler.supabase.com:5432/postgres   # password in $env:PGPASSWORD, never in the URL (a command line is readable by other processes; scripts/prod-db.ps1)
-```
-
-Port 5432, not 6543: transaction mode breaks a migration partway through. Both projects are `us-west-2`, so dev's pooler host is prod's too.
-
-**Pooler host is `aws-0`, never `aws-1`:** the wrong one fails as `Tenant or user not found`, which reads like a bad password. History: `docs/claude/project-state.md`.
-
-**Don't hand-build that URL — use the scripts.** `scripts/diag-prod-trigger.ps1` reads prod's state read-only and says whether it matches the repo; `scripts/push-prod-migration.ps1` applies what is pending and verifies the result against the catalog. Both take the password from `$env:SUPABASE_DB_PASSWORD` (set it with `Read-Host -AsSecureString`, never a literal assignment — PSReadLine's sensitive-input filter catches the word "password" but *not* a credential embedded in a URL, which is how three of them ended up in shell history), both redact it out of everything they print, and both write a log to `scripts/logs/` because the answer has to outlive the terminal. Run the push with `-DryRun` first.
-
-Why they stream `db push --yes` and derive the migration check from the directory: `docs/claude/project-state.md`.
-
-**`npm run db:push -- --db-url <prod>` used to print `dev, ok` and go to prod** (npm appended the flag after the guard); since 21 Oct 2026 the wrappers launch the CLI from the guard, which refuses `--project-ref` and `--db-url` (`docs/claude/security-fixes.md`, phase 4). When targeting prod by URL, call `npx supabase` directly so nothing claims to have checked something it did not.
-
-**The linked-project claim above drifted once, silently, and the guard exists because of it.** On 2 Sep 2026 the CLI was relinked to **prod** while this file said dev for seven days (story: `docs/claude/project-state.md`). Now something does — `scripts/check-linked-project.mjs` prints the linked project and **fails closed** when it is prod, missing, or an unrecognised ref. Use the wrapped scripts for anything acting on the linked project:
-
-```bash
-npm run guard:linked      # print the linked project; exit 1 if prod or unrecognised
-npm run db:push           # guard, then supabase db push
-npm run db:dump           # guard, then db dump --linked
-npm run migration:list    # guard, then migration list --linked
-npm run functions:deploy  # guard, then functions deploy
-ALLOW_PROD_SUPABASE=1 npm run db:push   # act on prod on purpose
-```
-
-The guard reads `supabase/.temp/linked-project.json`, so it reports what the CLI will *actually* do rather than what any doc claims. Raw `npx supabase …` still bypasses it — prefer the npm scripts for anything aimed at the linked project, and pin `--project-ref` when you mean prod **on a command that has that flag** (`functions deploy` does; `db push` and `migration list` do not — see above for what to use instead). Dev is often `INACTIVE` (paused): `migration list` times out and `functions deploy` 404s with `status 'INACTIVE'`; restore it in the dashboard (no CLI equivalent).
-
-**Never run `supabase projects api-keys`.** It prints the project's service-role key to stdout, and stdout is a transcript — a terminal scrollback, a CI log, an agent session — that outlives the command. `scripts/load-hardware-catalog.mjs` is the one caller, and it captures the output and never prints it; anything you type by hand has no such guarantee.
-
-**The local stack's service versions follow the LINKED project**: after any `supabase link`, relink to dev and see `docs/claude/project-state.md` (the `42P10` fix).
+- **Linked project `vdjtosofrimipklbdjbi` is `tapswipe-crm-dev`.** `supabase db push`, `functions deploy` and `migration list --linked` hit dev; `npm run test:deployed` checks every project in `.env.deployed.local`, dev and prod both.
+- **`tapwipe-crm-prod` (`zuvsdkjnfstrjahstsmg`) is not linked, but it is deployed and real: live production.** Schema and functions are separate questions (a migration push does not carry functions). Know prod's state from `scripts/diag-prod-trigger.ps1`, never from a doc.
+- **Use the guarded wrappers** (`npm run guard:linked`, `db:push`, `db:dump`, `migration:list`, `functions:deploy`; `ALLOW_PROD_SUPABASE=1` only on purpose). They refuse `--project-ref` and `--db-url`. `--project-ref` exists on `functions deploy` only. Prod schema goes through `scripts/push-prod-migration.ps1` (`-DryRun` first): session pooler, host `aws-0` (never `aws-1`), port 5432, password in `$env:SUPABASE_DB_PASSWORD` set with `Read-Host -AsSecureString`.
+- Dev is often `INACTIVE` (paused): restore it in the dashboard. After any `supabase link`, relink to dev: the local stack's service versions follow the linked project.
 
 ## Commands
 
@@ -166,10 +125,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2941 tests, 123 files — every file must load)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2928 tests, 124 files — every file must load)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (353 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (383 tests, 6 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (380 tests, 6 of them the shared setup — arithmetic since phase 13 removed 3; last full run 383 at 12c)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -236,6 +195,7 @@ Thirteen functions, all registered in `supabase/config.toml` (unlisted ones won'
 | `stage-user-import` | admin-only; parses a rep CSV into `user_import_rows`, creating the batch on the way. One function where residuals needs two, because the text arrives in the request body rather than via Storage. **Idempotent** — clears the batch's rows first, so "fix something, then read again" is one code path run twice. Two modes: `source_text` starts an import, `batch_id` re-reads the text already stored on the batch |
 | `provision-user-batch` | admin-only; creates the accounts for a staged import, **a bounded chunk per call**. Calls the same `provisionUser` core as `create-user` and **discards the temporary password unread**. See the bulk-import section below for why the loop lives in the browser |
 | `marketing-material-file-url` | the one function whose two modes have **different authorization**: an admin stocks the library (upload), every active user reads it (download). Detail: `docs/claude/reference-data-and-marketing.md` |
+| `business-document-file-url` | the Document Center (`/documents`): the marketing library's shape and its two modes, an admin stocking it and every active user reading it. Detail: `docs/claude/notes-tasks-documents.md` |
 
 ### Next.js / auth wiring
 
@@ -255,18 +215,7 @@ Thirteen functions, all registered in `supabase/config.toml` (unlisted ones won'
 
 ### The design system is tokens, not classnames
 
-**Every colour comes from a CSS variable in `app/globals.css`.** No component names a palette colour (`bg-gray-100`) or a hex. Adding one is how the theme starts drifting, and there is nothing that will fail to warn you — so the check is: if you are about to type a Tailwind colour literal, the token you want either exists or should be added there.
-
-Two colour systems that must not mix:
-
-- **Brand and action** — `primary` (#DC2626: primary buttons, links, the sidebar's active accent and count pill, focus rings) and `destructive` (#B91C1C: delete/danger only, and always behind a confirmation step). They are deliberately different reds. A delete button that renders in the same red as the page's main create action invites the misclick the pair exists to prevent.
-- **Status** — `success`/`warning`/`neutral`, for state badges only, via `components/status-badge.tsx` and a `StatusIntent` mapper per domain (`statusIntent` in `lib/{merchants,pre-apps,leads}.ts`, `supportTicketStatusIntent`, `conversionIntent` in `lib/ghost-sheets.ts`). **Never** put brand or destructive red on a status badge, and never put a status colour on a button or in the nav. `leads.status` had no mapper until 20261002 because it was unconstrained text with no vocabulary to colour; it has seven values now, and `lost` is **grey, not red** — a lost lead is an inert record, and colouring it like the delete button puts every closed-out row in the palette reserved for irreversible actions. Every mapper must also survive a value outside its vocabulary: `leads_status_vocabulary` ships `NOT VALID`, so rows predating it still hold rep-typed strings and the list page has to render them rather than crash on a missing label.
-
-Shared structure lives in components, so page-level styling stays out of pages: `PageShell` (the three content widths), `PageHeader` (title row), `StatCard`, `StatusBadge`, `Callout`, `FilterTabs`. The `Table` primitive draws its own white card and uppercase muted headers — list pages don't wrap it.
-
-The sidebar is dark in every theme, so its tokens live only in `:root` and are never overridden in `.dark`. The app is pinned to light (`defaultTheme="light"`, `enableSystem={false}` in `app/layout.tsx`) because there is no dark palette yet; the `.dark` block is the stock shadcn scale, left in place so turning dark mode on later is filling in values rather than re-plumbing.
-
-Sidebar contents are data in `lib/nav.ts`, not JSX; the client nav sits inside `<Suspense>` and takes `pathname` as a prop (why, and the disabled-row mechanism: `docs/claude/project-state.md`).
+**Every colour comes from a CSS variable in `app/globals.css`**; no component names a palette colour or a hex. Brand and action red (`primary`) and `destructive` red are deliberately different, and neither ever goes on a status badge. Status colours (`success`/`warning`/`neutral`) are for badges only, through `components/status-badge.tsx` and a per-domain `StatusIntent` mapper that must survive a value outside its vocabulary (a `lost` lead is grey). Shared structure lives in `PageShell`, `PageHeader`, `StatCard`, `StatusBadge`, `Callout` and `FilterTabs`. The sidebar is dark in every theme and is data in `lib/nav.ts`, and the app is pinned to light. Full text: `docs/claude/design-system.md` (moved verbatim on 4 Nov 2026; binding).
 
 ## Docs index
 
@@ -276,7 +225,7 @@ Everything below was moved verbatim out of this file; one line each.
 - `docs/claude/project-state.md` — full route/helper inventory, removed starter scaffolding, Edge Function and `_shared` inventory, removed-but-still-deployed functions.
 - `docs/claude/testing.md` — the four suites in full: every test rule and the lessons behind it (revert experiments, timing, empty-state specs, leftovers).
 - `docs/claude/rpcs-profiles-audit.md` — invoker vs definer RPCs, `check_duplicates`, `accounts_in_city`, `my_share_partners`, pg_trgm, `migrationsBefore()`, profiles columns (`agent_number`, `territory`, `manager_id`), the cross-agent audit trigger.
-- `docs/claude/payouts-and-teardown.md` — `rep_payout_*` tables, merge key, shared accounts on the screens, batch status guard, the 25 `profiles` FKs and the four teardown lists, SheetJS pin, payout fixtures, audit consequences for fixtures.
+- `docs/claude/payouts-and-teardown.md` — `rep_payout_*` tables, merge key, shared accounts on the screens, batch status guard, commit v3 (the only commit since phase 13) and its warnings (`bad_numbers` never fires on a zero-volume line, phase 12c), replace / Mark paid / adjustments, overrides, the Reports and their Export Excel (`export-report`, phase 12b), the 26 `profiles` FKs and the four teardown lists, SheetJS pin, payout fixtures, audit consequences for fixtures.
 - `docs/claude/user-accounts.md` — bulk rep import (staging rows as progress ledger, blocking vs skippable, no bulk credentials), deactivation, global logout.
 - `docs/claude/reference-data-and-marketing.md` — tables with no owner (`products`, `marketing_materials`, `business_documents`), the marketing library, inline-URL allow-list, the Email button, `window.open` + `noopener`.
 - `docs/claude/edge-functions-and-storage.md` — the `file_key` consistency lesson, Deno runtime, parser-once vs validators-twice, the four buckets, upload size limits, signed-URL origin rewrite.
@@ -286,9 +235,13 @@ Everything below was moved verbatim out of this file; one line each.
 - `docs/claude/dashboard-followups-timeline.md` — dashboard filters (invoker, ANDed on policies), follow-ups in two places, the lead timeline.
 - `docs/claude/security-fixes.md` — the Oct 2026 outside-review fixes, all seven phases: (1) merchants admin-only to change, every MID change audited, backfill same-owner rule, owner picker; (2) pre-app children frozen once submitted; (3) anti-framing and hygiene headers on every route; (4) npm wrappers refuse `--project-ref`/`--db-url`, env/key gitignores, no `api-keys` advice; (5) `accounts_in_city` audited and rate-limited (30/hour); (6) the prod DB password passed in `PGPASSWORD`, never on a command line; (7) login CSRF closed — `GET /auth/confirm` verifies nothing, a Continue page POSTs to a Server Action, `recovery` is the only link type, and the reset email template.
 - `docs/claude/security-followups.md` — review findings recorded but deliberately not built, each with severity, evidence and a suggested fix.
+- `docs/claude/hosted-projects-and-deployment.md` — the dev and prod projects, the linked-project guard and its wrappers, the two routes to prod's schema (relink or `--db-url` over the `aws-0` session pooler), the prod scripts, `api-keys` (moved verbatim out of CLAUDE.md, 4 Nov 2026).
+- `docs/claude/design-system.md` — colour tokens, the brand/destructive/status split, the shared page components, the sidebar (moved verbatim out of CLAUDE.md, 4 Nov 2026).
+- `docs/claude/grants-inventory.md` — the exact `anon` / `authenticated` / `service_role` table grants for every table created after `20261023120000`, the migration setting each, and a read-only SQL Editor query comparing a project against them.
 - `docs/claude/reset-business-data.md` — runbook and design notes for the one-off business-data reset (written there, not moved).
 - `docs/claude/deploy-batch-1.md` — the plan for deploying `intake-and-reports` (Phases 1–5) to dev then prod: migrations and their guards, functions to redeploy, test checklist, failure table (written there, not moved).
 - `docs/design/residual-splits.md` — shared-account design memo.
+- `docs/design/intake-and-reports.md` — the intake, MID-based residual import, overrides and reports memo: Owen's binding decisions, the phased build plan and every phase's build notes.
 - `docs/tapswipe_crm_master_plan.md` — product master plan.
 
 Keep everything of ours **above** the marker below. `next dev` regenerates the block between `BEGIN:nextjs-agent-rules` and `END:nextjs-agent-rules` and deletes whatever else sits inside it — that is how this index went missing on 21 Oct 2026. `tests/unit/claude-md.test.ts` fails if a heading of ours is inside the block or a `docs/claude/*.md` file is missing from the index.

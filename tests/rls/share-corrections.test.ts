@@ -532,15 +532,18 @@ describe("catalog", () => {
     }
   });
 
-  it("widens the preview flag vocabulary to five, and keeps adjustment_rows_ignored out of the client's reach", async () => {
+  it("keeps share_not_in_force in the preview flag vocabulary, and adjustment_rows_ignored out of the client's reach", async () => {
     await asPlatform(db);
     const [{ def }] = await rows<{ def: string }>(
       db,
       `select pg_get_constraintdef(oid) as def from pg_constraint
         where conname = 'rep_payout_import_rows_preview_flag_check'`,
     );
-    for (const flag of ["share_not_applied", "partner_named", "line_not_shared", "share_not_in_force", "looks_shared"]) {
-      expect(def).toContain(`'${flag}'`);
+    // This migration widened the vocabulary to five; 20261104140000 narrowed it
+    // to the two notes the parser still writes, keeping this one.
+    expect(def).toContain("'share_not_in_force'");
+    for (const retired of ["share_not_applied", "partner_named", "line_not_shared", "looks_shared"]) {
+      expect(def).not.toContain(`'${retired}'`);
     }
     const [{ can }] = await rows<{ can: boolean }>(
       db,

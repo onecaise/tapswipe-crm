@@ -8,7 +8,6 @@ import {
   commitV3,
   createTestDb,
   insertBatch,
-  PAYOUT_PERIOD,
   resetData,
   rows,
   seedPayouts,
@@ -19,7 +18,7 @@ import {
 /**
  * guard_batch_status_transition() (20261016170000): a signed-in user may move
  * a residual import batch from review to abandoned, and nothing else. The
- * definer commits, the acknowledgement and the service role are unaffected.
+ * definer commit and the service role are unaffected.
  */
 
 type DbError = { code?: string; message: string };
@@ -104,26 +103,6 @@ describe("rep_payout_batches status transitions", () => {
     await stageForCommit(db, id, [{ mid: "MID-AGENT-1" }]);
     await commitV3(db, id);
     expect(await statusOf(id)).toBe("committed");
-  });
-
-  it("leaves the acknowledgement free to stamp a committed batch", async () => {
-    await asPlatform(db);
-    const id = await insertBatch(db, {
-      status: "committed",
-      fileName: "y.xlsx",
-      extra: {
-        skipped_rows: `'[{"row_number": 2, "period": "${PAYOUT_PERIOD}", "mid": "M", "agent_number": "1", "reason": "partner_named"}]'`,
-        committed_at: "now()",
-      },
-    });
-    await asUser(db, ADMIN_ID);
-    await db.query(`select acknowledge_residual_skips(${id})`);
-    await asPlatform(db);
-    const [{ ack }] = await rows<{ ack: string | null }>(
-      db,
-      `select skips_acknowledged_at::text as ack from rep_payout_batches where id = ${id}`,
-    );
-    expect(ack).not.toBeNull();
   });
 
   // The service role is the other unguarded writer (parse-residual-import's

@@ -160,14 +160,14 @@ test.describe("as an agent", () => {
     expect(token, "the signed-in page should hold an access token").toBeTruthy();
 
     const response = await request.post(
-      `${apiUrl}/rest/v1/rpc/commit_residual_import`,
+      `${apiUrl}/rest/v1/rpc/commit_residual_import_v3`,
       {
         headers: {
           apikey: publishableKey,
           Authorization: `Bearer ${token as string}`,
           "Content-Type": "application/json",
         },
-        data: { batch_id_input: 1 },
+        data: { batch_id_input: 1, confirmed_input: [] },
       },
     );
 

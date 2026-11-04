@@ -43,9 +43,6 @@ test("commits a clean batch and lands on its commit result", async ({ page }) =>
   await expect(
     page.locator('[data-slot="stat-card"]').filter({ hasText: "Rows imported" }),
   ).toContainText("3");
-  // Nothing was skipped, so there is nothing to review.
-  await expect(page.getByTestId("residual-skips-notice")).toHaveCount(0);
-  await expect(page.getByText("Rows skipped")).toHaveCount(0);
 
   const evidence = await commitEvidence(batchId);
   expect(evidence).toEqual({

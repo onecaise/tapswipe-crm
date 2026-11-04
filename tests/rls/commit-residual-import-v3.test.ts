@@ -697,10 +697,10 @@ describe("the commit's record", () => {
     ]);
     const [batch] = await rows<Record<string, unknown>>(
       db,
-      `select status, committed_at is not null as stamped, row_count, skipped_rows
+      `select status, committed_at is not null as stamped, row_count
          from rep_payout_batches where id = ${id}`,
     );
-    expect(batch).toEqual({ status: "committed", stamped: true, row_count: 2, skipped_rows: [] });
+    expect(batch).toEqual({ status: "committed", stamped: true, row_count: 2 });
     expect(await rows(db, `select count(*)::int as n from rep_payout_import_rows where batch_id = ${id}`)).toEqual([{ n: 0 }]);
     // Month and processor from the batch, name from the merchant.
     const lines = await rows(
@@ -898,9 +898,9 @@ describe("grants and catalog", () => {
     ]);
   });
 
-  it("v2 is gone; the old commit_residual_import(int) stays until phase 13", async () => {
+  it("v2 is gone, and since 20261104140000 the old commit_residual_import(int) too", async () => {
     expect(await rows(db, `select count(*)::int as n from pg_proc where proname = 'commit_residual_import_v2'`)).toEqual([{ n: 0 }]);
-    expect(await rows(db, `select count(*)::int as n from pg_proc where proname = 'commit_residual_import'`)).toEqual([{ n: 1 }]);
+    expect(await rows(db, `select count(*)::int as n from pg_proc where proname = 'commit_residual_import'`)).toEqual([{ n: 0 }]);
   });
 });
 

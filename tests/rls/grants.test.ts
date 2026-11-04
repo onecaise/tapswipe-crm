@@ -664,8 +664,6 @@ describe("grant surface after all migrations", () => {
       "public.commit_residual_import_v3(int, text[])",
       // The only write path to a merchant's rate, audited as the owner.
       "public.set_merchant_split(int, numeric)",
-      // Sets a batch's skips_acknowledged_at and writes audit_log as the owner.
-      "public.acknowledge_residual_skips(int)",
       // Reads merchant_rep_shares and other reps' names past RLS. Its guard
       // refuses a caller with no uid, but that is a second lock.
       "public.my_share_partners(int)",

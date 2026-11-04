@@ -13,18 +13,15 @@ import {
   blockerLabel,
   previewFlagLabel,
   reviewImportRows,
-  rowsWritten,
   warningLabel,
   warningQuestion,
   type PayoutBatch,
   type PayoutImportRow,
 } from "@/lib/payouts";
-import { loadSkipReviewers } from "@/lib/residual-skips";
 import { Callout } from "@/components/callout";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { ResidualBatchActions } from "@/components/residual-batch-actions";
-import { ResidualSkipsNotice } from "@/components/residual-skips-notice";
 import {
   ResidualWarningConfirmations,
   RowList,
@@ -107,11 +104,6 @@ async function BatchReview({
   // Advisory notes (a changed payee, a share that does not cover the month):
   // a flagged row is still ready, and the commit recomputes everything then.
   const flagged = rows.filter((row) => row.preview_flag !== null);
-
-  const reviewers =
-    batch.skipped_rows.length > 0
-      ? await loadSkipReviewers(supabase, [batch.id])
-      : new Map<number, string>();
 
   // The CRM side of each warned row: the merchant's own processor and name
   // ("the file says X, the merchant is set to Y").
@@ -234,14 +226,6 @@ async function BatchReview({
         </div>
       </PageHeader>
 
-      {/* The commit result's skipped rows, at the TOP: the first thing an
-          admin sees after committing, until they are reviewed. */}
-      <ResidualSkipsNotice
-        batch={batch}
-        reviewerName={reviewers.get(batch.id)}
-        linkToBatch={false}
-      />
-
       {/* The replace (phase 9): a batch that replaces another says so while
           it waits, and the one it replaced points to its successor. */}
       {batch.replaces_batch_id !== null && batch.status === "review" && (
@@ -327,35 +311,17 @@ async function BatchReview({
               />
             </div>
           ) : (
-            <div
-              className={
-                batch.skipped_rows.length > 0
-                  ? "grid gap-3 sm:grid-cols-3"
-                  : "grid gap-3 sm:grid-cols-2"
-              }
-            >
+            <div className="grid gap-3 sm:grid-cols-2">
               {/* What the commit recorded on the batch, read back so a reload
-                  agrees. v3 skips nothing; a skip count is only on a batch
-                  an earlier commit wrote. */}
+                  agrees. v3 imports every row of the file or none of them. */}
               <StatCard
                 label={
                   batch.status === "committed"
                     ? "Rows imported"
                     : "Rows in the file"
                 }
-                value={
-                  batch.status === "committed"
-                    ? rowsWritten(batch)
-                    : batch.row_count
-                }
+                value={batch.row_count}
               />
-              {batch.skipped_rows.length > 0 && (
-                <StatCard
-                  label="Rows skipped"
-                  value={batch.skipped_rows.length}
-                  accent
-                />
-              )}
               <StatCard
                 label="Committed"
                 value={
@@ -418,19 +384,6 @@ async function BatchReview({
                   </p>
                 )}
               </div>
-            </Callout>
-          )}
-
-          {/* Rows an earlier parser skipped as Line = Adjustment, kept on the
-              batch. The current parser reads a processor file, which has no
-              such column. */}
-          {batch.adjustment_rows_ignored > 0 && (
-            <Callout tone="warning">
-              <p className="font-medium" data-testid="adjustments-ignored">
-                {batch.adjustment_rows_ignored} adjustment line
-                {batch.adjustment_rows_ignored === 1 ? "" : "s"} ignored:
-                adjustments are entered in the CRM.
-              </p>
             </Callout>
           )}
 

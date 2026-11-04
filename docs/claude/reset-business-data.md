@@ -28,15 +28,16 @@ Do steps 1–10 on **dev**. Only when dev finished cleanly, do steps 1–10 on *
      npm run db:dump -- -f C:\Users\owen\tapswipe-backups\dev-schema-2026-MM-DD.sql
      npm run db:dump -- --data-only -f C:\Users\owen\tapswipe-backups\dev-data-2026-MM-DD.sql
      ```
-   - **Prod** (type the password at the prompt; never paste it into a command):
+   - **Prod** (type the password at the prompt; never paste it into a command). The password travels in `PGPASSWORD` and **never inside the URL**: a command line is readable by other processes, and with `--db-url` the CLI reads `PGPASSWORD` (`docs/claude/security-fixes.md`, phase 6; `scripts/prod-db.ps1`). The URL below carries no password; its username carries the project ref:
      ```powershell
      $sec = Read-Host -AsSecureString "prod database password"
-     $env:SUPABASE_DB_PASSWORD = [Net.NetworkCredential]::new('', $sec).Password
-     $url = "postgresql://postgres.zuvsdkjnfstrjahstsmg:$([uri]::EscapeDataString($env:SUPABASE_DB_PASSWORD))@aws-0-us-west-2.pooler.supabase.com:5432/postgres"
+     $env:PGPASSWORD = [Net.NetworkCredential]::new('', $sec).Password
+     $url = "postgresql://postgres.zuvsdkjnfstrjahstsmg@aws-0-us-west-2.pooler.supabase.com:5432/postgres"
      npx supabase db dump --db-url $url -f C:\Users\owen\tapswipe-backups\prod-schema-2026-MM-DD.sql
      npx supabase db dump --db-url $url --data-only -f C:\Users\owen\tapswipe-backups\prod-data-2026-MM-DD.sql
-     Remove-Item Env:SUPABASE_DB_PASSWORD; Remove-Variable url, sec
+     Remove-Item Env:PGPASSWORD; Remove-Variable url, sec
      ```
+     Until 4 Nov 2026 this step put the password, percent-encoded, inside the URL; do not go back to that form. That `db dump` takes the password from `PGPASSWORD` under `--db-url` is how the CLI was measured to behave (on `migration list`); this exact form has not been run against prod, so the check below is what tells you it worked. An authentication failure writes no file.
    - Check both files exist and are not empty. No backup, no reset.
 2. **Counts, before.** Run `reset-business-data-counts.sql`. Save the result (export/download it, or copy it into a text file next to the backup) as `<project>-counts-1-before.csv`.
 3. **Dry run.** Run `reset-business-data.sql` exactly as it is in the repo. You will get a **red error**. That is correct **only if it starts with `DRY RUN: rolled back, nothing was changed. Every check passed.`** Read its list: every table should go to `0`, `audit_log` to `1`, and `profiles`, `processors` (5) and `auth.users` should keep their numbers. Any other red error: **stop** and send it to Owen/Claude. Tables marked `absent, skipped` are normal on prod.

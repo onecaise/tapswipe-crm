@@ -1,0 +1,16 @@
+# The design system is tokens, not classnames
+
+Moved **verbatim** out of CLAUDE.md on 4 Nov 2026 (phase 13 of `docs/design/intake-and-reports.md`), to bring CLAUDE.md under its size limit. Binding rules, not history; CLAUDE.md keeps a summary.
+
+**Every colour comes from a CSS variable in `app/globals.css`.** No component names a palette colour (`bg-gray-100`) or a hex. Adding one is how the theme starts drifting, and there is nothing that will fail to warn you — so the check is: if you are about to type a Tailwind colour literal, the token you want either exists or should be added there.
+
+Two colour systems that must not mix:
+
+- **Brand and action** — `primary` (#DC2626: primary buttons, links, the sidebar's active accent and count pill, focus rings) and `destructive` (#B91C1C: delete/danger only, and always behind a confirmation step). They are deliberately different reds. A delete button that renders in the same red as the page's main create action invites the misclick the pair exists to prevent.
+- **Status** — `success`/`warning`/`neutral`, for state badges only, via `components/status-badge.tsx` and a `StatusIntent` mapper per domain (`statusIntent` in `lib/{merchants,pre-apps,leads}.ts`, `supportTicketStatusIntent`, `conversionIntent` in `lib/ghost-sheets.ts`). **Never** put brand or destructive red on a status badge, and never put a status colour on a button or in the nav. `leads.status` had no mapper until 20261002 because it was unconstrained text with no vocabulary to colour; it has seven values now, and `lost` is **grey, not red** — a lost lead is an inert record, and colouring it like the delete button puts every closed-out row in the palette reserved for irreversible actions. Every mapper must also survive a value outside its vocabulary: `leads_status_vocabulary` ships `NOT VALID`, so rows predating it still hold rep-typed strings and the list page has to render them rather than crash on a missing label.
+
+Shared structure lives in components, so page-level styling stays out of pages: `PageShell` (the three content widths), `PageHeader` (title row), `StatCard`, `StatusBadge`, `Callout`, `FilterTabs`. The `Table` primitive draws its own white card and uppercase muted headers — list pages don't wrap it.
+
+The sidebar is dark in every theme, so its tokens live only in `:root` and are never overridden in `.dark`. The app is pinned to light (`defaultTheme="light"`, `enableSystem={false}` in `app/layout.tsx`) because there is no dark palette yet; the `.dark` block is the stock shadcn scale, left in place so turning dark mode on later is filling in values rather than re-plumbing.
+
+Sidebar contents are data in `lib/nav.ts`, not JSX; the client nav sits inside `<Suspense>` and takes `pathname` as a prop (why, and the disabled-row mechanism: `docs/claude/project-state.md`).

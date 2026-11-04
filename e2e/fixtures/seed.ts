@@ -3019,7 +3019,7 @@ export async function preAppLocation(
  *
  * Until phase 8 this was createSkippingBatch, whose partner row v2 skipped.
  * Under the owner rule that row cannot exist (the file names no rep, and the
- * signer is the owner), so a skip record now comes only from plantLegacySkips.
+ * signer is the owner), and the skip record itself went in phase 13.
  */
 export async function createSharedBatch(label: string): Promise<{
   batchId: number;
@@ -3335,106 +3335,6 @@ export async function overridesOn(merchantId: number): Promise<
   }));
 }
 
-/**
- * A committed batch carrying a skip record in exactly the shape
- * commit_residual_import_v2 wrote one (phase 4b of
- * docs/design/residual-splits.md, §5.4): one partner row skipped, in `period`
- * (YYYY-MM, one per spec so no two specs' Callouts share a period page), plus
- * the signer's ordinary line in that period so a rep's page has a row to show.
- * v3 never skips, so this is the only way a skip record exists from phase 8 on;
- * the Callout and its review stay until the cleanup phase removes them, and
- * this is what keeps them tested. Clears an earlier run's first.
- */
-export async function plantLegacySkips(period: string): Promise<{
-  batchId: number;
-  sharedMid: string;
-}> {
-  const { apiUrl, serviceKey } = localStackConfig();
-  const db = createClient(apiUrl, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-
-  const sharedMid = `E2E-SKIP-${period}`;
-  const fileName = `e2e-skips-${period}.xlsx`;
-  const month = firstOfMonth(period);
-
-  const { data: reps, error: repsError } = await db
-    .from("profiles")
-    .select("id, email")
-    .in("email", [PERSONAS.admin.email, PERSONAS.agent.email]);
-  if (repsError || (reps ?? []).length !== 2) {
-    throw new Error(`skip reps: ${repsError?.message ?? "personas missing; run seedE2E() first"}`);
-  }
-  const idOf = (address: string) => reps!.find((rep) => rep.email === address)!.id as string;
-
-  await clearBatchesNamed(db, fileName, sharedMid);
-  await db.from("rep_payout_rows").delete().eq("mid", sharedMid);
-
-  const { data: batch, error: batchError } = await db
-    .from("rep_payout_batches")
-    .insert({
-      imported_by: idOf(PERSONAS.admin.email),
-      file_key: `e2e/${fileName}`,
-      file_name: fileName,
-      status: "committed",
-      committed_at: new Date().toISOString(),
-      row_count: 2,
-      skipped_rows: [
-        {
-          row_number: 3,
-          period: month,
-          mid: sharedMid,
-          agent_number: PERSONAS.agent2.agentNumber,
-          reason: "partner_named",
-        },
-      ],
-      ...(await freeBatchSlot(db)),
-    })
-    .select("id")
-    .single();
-  if (batchError || !batch) throw new Error(`batch: ${batchError?.message ?? "no row"}`);
-  const batchId = batch.id as number;
-
-  const { error: lineError } = await db.from("rep_payout_rows").insert({
-    agent_id: idOf(PERSONAS.agent.email),
-    period: month,
-    mid: sharedMid,
-    merchant_name: `E2E Shared ${period} Co`,
-    volume: 1000,
-    residual_income: 100,
-    rep_split_pct: 50,
-    batch_id: batchId,
-  });
-  if (lineError) throw new Error(`line: ${lineError.message}`);
-
-  return { batchId, sharedMid };
-}
-
-/** A batch's skip record and acknowledgement, read as the service role. */
-export async function skipEvidence(batchId: number): Promise<{
-  skipped: number;
-  acknowledged: boolean;
-  ackAudits: number;
-}> {
-  const { apiUrl, serviceKey } = localStackConfig();
-  const db = createClient(apiUrl, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-  const [batch, audits] = await Promise.all([
-    db.from("rep_payout_batches")
-      .select("skipped_rows, skips_acknowledged_at")
-      .eq("id", batchId)
-      .single(),
-    db.from("audit_log").select("id", { count: "exact", head: true })
-      .eq("action", "acknowledge_residual_skips").eq("row_id", String(batchId)),
-  ]);
-  return {
-    skipped: ((batch.data?.skipped_rows as unknown[] | undefined) ?? []).length,
-    acknowledged: batch.data?.skips_acknowledged_at != null,
-    ackAudits: audits.count ?? 0,
-  };
-}
-
 /** The note on the e2e adjustment pair: long, so the block has to wrap it. */
 export const ADJUSTMENT_NOTE =
   "Shared account agreed after February was committed: the partner is owed a fifth of that month's payout, moved here as an adjustment pair so no committed line changes.";
@@ -3447,14 +3347,14 @@ export const ADJUSTMENT_NOTE =
  * merchant table AND an Adjustments block. Written as the service role
  * directly -- the RPC needs an admin's auth.uid(), and its arithmetic is
  * pinned in tests/rls/share-corrections.test.ts; what this spec needs is the
- * rows. Also a review batch whose parse ignored two adjustment lines, for the
- * review screen's notice. Clears an earlier run's first.
+ * rows. Clears an earlier run's first, including the review batch earlier
+ * versions planted beside them (its "adjustment lines ignored" notice went in
+ * phase 13 of docs/design/intake-and-reports.md).
  */
 export async function plantAdjustments(period: string): Promise<{
   signerId: string;
   partnerId: string;
   mid: string;
-  batchId: number;
 }> {
   const { apiUrl, serviceKey } = localStackConfig();
   const db = createClient(apiUrl, serviceKey, {
@@ -3475,7 +3375,6 @@ export async function plantAdjustments(period: string): Promise<{
     throw new Error(`adjustment reps: ${repsError?.message ?? "personas missing; run seedE2E() first"}`);
   }
   const idOf = (address: string) => reps!.find((rep) => rep.email === address)!.id as string;
-  const adminId = idOf(PERSONAS.admin.email);
   const signerId = idOf(PERSONAS.agent.email);
   const partnerId = idOf(PERSONAS.agent2.email);
 
@@ -3521,33 +3420,7 @@ export async function plantAdjustments(period: string): Promise<{
   ]);
   if (linesError) throw new Error(`adjustment lines: ${linesError.message}`);
 
-  const { data: batch, error: batchError } = await db
-    .from("rep_payout_batches")
-    .insert({
-      imported_by: adminId,
-      file_key: `e2e/${fileName}`,
-      file_name: fileName,
-      status: "review",
-      row_count: 1,
-      adjustment_rows_ignored: 2,
-      ...(await freeBatchSlot(db)),
-    })
-    .select("id")
-    .single();
-  if (batchError || !batch) throw new Error(`adjustment batch: ${batchError?.message ?? "no row"}`);
-  const { error: rowError } = await db.from("rep_payout_import_rows").insert({
-    batch_id: batch.id,
-    row_number: 2,
-    period: month,
-    agent_id: signerId,
-    agent_number_raw: PERSONAS.agent.agentNumber,
-    mid_raw: mid,
-    merchant_name_raw: "E2E Adjusted Co",
-    volume: 1000,
-  });
-  if (rowError) throw new Error(`adjustment staging: ${rowError.message}`);
-
-  return { signerId, partnerId, mid, batchId: batch.id as number };
+  return { signerId, partnerId, mid };
 }
 
 /**

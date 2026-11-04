@@ -51,8 +51,11 @@ console.log(
 );
 
 // Batches carry a processor and month (required since 20261030140000), inside
-// the import window: last month for the committed one, this month for the one
-// in review. The ledger lines keep the fixed months the pages are read at.
+// the import window: one committed TSYS batch for each of the two months
+// before this one, each holding that month's ledger lines (a committed
+// processor-month is one batch, and the reports read lines through it), and
+// this month for the one in review. Until phase 13 one committed batch held
+// lines of two fixed months (2026-06 and 2026-07) that were not its own.
 const monthsBack = (n) => {
   const now = new Date();
   const index = now.getUTCFullYear() * 12 + now.getUTCMonth() - n;
@@ -60,29 +63,33 @@ const monthsBack = (n) => {
   return `${year}-${String(index - year * 12 + 1).padStart(2, "0")}-01`;
 };
 
-const { data: batch, error: batchError } = await db
-  .from("rep_payout_batches")
-  .insert({
-    imported_by: adminId,
-    file_key: "seed/June-2026.xlsx",
-    file_name: "June-2026.xlsx",
-    status: "committed",
-    row_count: 4,
-    committed_at: new Date().toISOString(),
-    processor: "TSYS",
-    period: monthsBack(1),
-  })
-  .select("id")
-  .single();
-if (batchError) throw new Error(`batch: ${batchError.message}`);
+const periods = [monthsBack(2), monthsBack(1)];
+const batchFor = new Map();
+for (const period of periods) {
+  const { data: batch, error: batchError } = await db
+    .from("rep_payout_batches")
+    .insert({
+      imported_by: adminId,
+      file_key: `seed/TSYS-${period}.xlsx`,
+      file_name: `TSYS-${period.slice(0, 7)}.xlsx`,
+      status: "committed",
+      row_count: (merchants ?? []).length + (period === periods[1] ? 1 : 0),
+      committed_at: new Date().toISOString(),
+      processor: "TSYS",
+      period,
+    })
+    .select("id")
+    .single();
+  if (batchError) throw new Error(`batch ${period}: ${batchError.message}`);
+  batchFor.set(period, batch.id);
+}
 
-// Two periods, and one row deliberately left without figures so the "awaiting
-// figures" states have something to show.
+// Two periods, and one row deliberately left without figures so the "lines
+// with no figure" states have something to show.
 const ledger = [];
-const periods = ["2026-06-01", "2026-07-01"];
 for (const period of periods) {
   for (const [index, merchant] of (merchants ?? []).entries()) {
-    const filled = !(period === "2026-07-01" && index === 0);
+    const filled = !(period === periods[1] && index === 0);
     ledger.push({
       agent_id: merchant.agent_id,
       period,
@@ -94,7 +101,7 @@ for (const period of periods) {
       total_cost: 190 + index * 35,
       residual_income: filled ? 60 + index * 14.5 : null,
       rep_split_pct: filled ? 60 : null,
-      batch_id: batch.id,
+      batch_id: batchFor.get(period),
       processor: "TSYS",
     });
   }
@@ -102,7 +109,7 @@ for (const period of periods) {
 // One clawback, so a negative renders somewhere.
 ledger.push({
   agent_id: agentId,
-  period: "2026-07-01",
+  period: periods[1],
   mid: "MID-CHARGEBACK",
   merchant_name: "Adjustment — chargeback",
   merchant_id: null,
@@ -111,7 +118,7 @@ ledger.push({
   total_cost: -12.5,
   residual_income: -18.5,
   rep_split_pct: 60,
-  batch_id: batch.id,
+  batch_id: batchFor.get(periods[1]),
   processor: "TSYS",
 });
 

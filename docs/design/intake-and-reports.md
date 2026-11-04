@@ -1,7 +1,8 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-12 built locally (§10).** Nothing has
-been run against dev or prod.
+Status: **Revision 3, 28 Oct 2026. Decisions taken. The build plan's phases 1 to 13 are complete
+(built locally, §10, last on 4 Nov 2026), except the merchant bulk import (Phase 14), which is
+still to come.** Nothing has been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
   below says **Recommend**, §0 is what was decided.
@@ -2340,6 +2341,129 @@ that one Yes per type also passed the rows the warning exists for. Owen decided 
   failed (8 in the new file, 1 unit), and passed again restored.
 - Suites: `npm test` 2925 → 2941 (122 → 123 files), `test:live` 353 (unchanged count), the full e2e
   suite 383 passed (17.0 min, none flaky; the first measured run of 12b's 383, which was arithmetic). Applied to the local stack only; nothing pushed, linked or deployed.
+
+### Phase 13: docs and cleanup (4 Nov 2026, branch `intake-residuals`)
+
+Built (`20261104140000_retire_legacy_import.sql`, `20261104150000_set_territory_ascii_trim.sql`; no
+Edge Function behaviour changed, one stale comment in `provision-user-batch`):
+- **The old commit is dropped.** A search of the app, the Edge Functions, both seed scripts and
+  the tests found nothing calling `commit_residual_import(int)` except its own tests, the historical
+  migration tests (which replay a migration prefix, so they still run it as it was), five live
+  calls and one e2e call. The e2e call and three of the live ones now call v3; the other two live
+  tests were deleted with v1. `acknowledge_residual_skips(int)`,
+  `rep_payout_batches.skipped_rows` and `.skips_acknowledged_at` went with it. v3 is re-created with
+  20261104120000's body minus its `skipped_rows = '[]'` line. The preview-flag CHECK keeps
+  `share_not_in_force` and `payee_changed`. **The migration refuses, naming them,** a batch holding a
+  skip record (what the column drop would lose), a staged row carrying one of the four retired flags,
+  and a v3 that is not the body it copied. It writes no row.
+- **The dead UI is gone**: `ResidualSkipsNotice`, `AcknowledgeSkipsButton`, `lib/residual-skips.ts`,
+  the import list's "N skipped" badge, the batch page's "Rows skipped" card and its "adjustment lines
+  ignored" Callout, and the period page's skip notice. Also `skipsOwed`, `rowsWritten`,
+  `skipReasonLabel`, `SkippedRow` and the four retired flag labels in `lib/payouts.ts`. The batch read
+  no longer selects the three columns.
+- **`set_territory()` trims ASCII whitespace** (`E' \t\n\r\f\x0b'`, `set_rep_identity()`'s set). It
+  is re-created with only the normalising line changed, and refuses unless the deployed function has
+  the old line exactly once. It writes no row: a territory already stored with a tab stays as it is
+  until it is set again (the header gives the query that lists any).
+- **Grants inventory**: `docs/claude/grants-inventory.md`. It covers the four tables created after
+  `20261023120000` (`processors`, `pre_app_tax_secrets`, `payout_period_closures`,
+  `merchant_overrides`): the exact grants per Data API role, the migration that sets them, the two
+  sequences, and one read-only `role_table_grants` query with an `expected` / `actual` / `matches`
+  column. `tests/rls/grants-inventory.test.ts` and `tests/live/grants-inventory.test.ts` run that query
+  as written in the doc. Both fail if a table the migrations create after the cutoff is not in it.
+  **No table relies on an automatic grant**: each migration revokes and grants its own, and the local
+  catalog matched before anything changed. So no fix migration.
+- **Docs**:
+  - CLAUDE.md: the retired merge rule and the "Three tiers" §3 remark are gone, so the only ledger rule
+    is "a committed processor-month changes only by replace (until paid) or an adjustment line
+    (after)". Size 45,224 → ~39,358 characters (39,582 bytes; 45,486 bytes before): "Hosted projects and deployment" and the
+    design-system section were moved verbatim to `docs/claude/hosted-projects-and-deployment.md` and
+    `docs/claude/design-system.md`, each with a summary left behind.
+  - The docs index gained those two files, `grants-inventory.md` and this memo.
+  - The Edge Functions table gained `business-document-file-url` (13 of 13).
+  - `payouts-and-teardown.md`, `project-state.md` (every route, the 12b export, the 12c rule),
+    `rpcs-profiles-audit.md`, `user-accounts.md` and `security-followups.md` were brought up to date.
+  - `reset-business-data.md` step 1: the prod backup passes the password in `PGPASSWORD`, never inside
+    the URL.
+  - `RESIDUALS_SPEC.md` gained the addendum §8.1 asks for.
+- **Schema doc**:
+  - Both blocks were added verbatim.
+  - The GRANTS section now shows `rep_payout_rows` as SELECT only (it still granted the DELETE and
+    UPDATE that phases 9 and 11 revoked) and lists the three post-cutoff tables it lacked.
+  - Three older drifts found by comparing the doc with the migrations were fixed:
+    `convert_ghost_sheet_to_lead` lacked `security invoker` / `set search_path = public`,
+    `enforce_compatibility_kinds` differed in wording, and `idx_products_brand` and six constraint
+    names (`pre_apps_est_*_non_negative`, `products_kind_vocabulary`, `products_billing_vocabulary`)
+    were missing.
+  - Now the latest definition of every function, and every policy, trigger, table, index and named
+    constraint, matches.
+- **Fixtures**:
+  - `seedPayouts()` stages its review batch's rows at the batch's month (the unaligned-month note is
+    gone).
+  - `seed-dev-payouts.mjs` makes one committed batch per ledger month instead of one batch holding two
+    months that were not its own.
+  - `plantAdjustments()` no longer plants the "ignored" review batch.
+  - `plantLegacySkips()` and `skipEvidence()` are deleted.
+
+Where the memo was silent or said otherwise, and what was chosen (the conservative side each time):
+- **The old commit is dropped before deployment**, against §8.1's "once the new app is on dev and
+  prod", because the phase 13 instruction says to drop it if nothing calls it. The migration says
+  it in a DEPLOY ORDER note: on a project whose app still calls the old function (prod today), it
+  ships with the app that calls v3, or that app's commit fails.
+- **The skip columns are dropped** (phase 8's note: "the skip UI and its columns"; §2.1 had called
+  it optional). That meant re-creating v3, done by a body diff with one line removed and pinned by
+  a test.
+- **`adjustment_rows_ignored` stays** (§2.1: "the column on batches stays and is written as 0"):
+  only its Callout and its place in the batch read went. The parser still writes 0, so no Edge
+  Function changed.
+- **A skip record refuses rather than being copied somewhere**: no table exists for it, and v2 ran
+  on no hosted project. The local stack held two (e2e leftovers from `plantLegacySkips`, batches
+  789 and 791). The real CLI refused them, naming both, and they were cleared by hand, as the
+  refusal says.
+- **The historical migration tests keep calling v1** (`import-merge-key`, `import-schema`,
+  `shared-lines-rewrite`). They run on a migration prefix where it exists, and test those
+  migrations, not the head.
+- **`pre_app_secrets_presence()` is kept** (phase 4 left dropping it as "a cleanup-phase choice").
+  It has tests, and the definer-function audit reads it. Keeping it changes nothing.
+- **The territory migration does not rewrite stored values** (no backfill without a decision). It
+  lists them in its header instead.
+- **The grants test is both hermetic and live.** PGlite proves what the migrations grant. The local
+  stack has Supabase's default ACL, which there still gives `service_role` TRUNCATE, REFERENCES,
+  TRIGGER and MAINTAIN on a table nobody revoked, so a table relying on automatic grants fails
+  there too.
+- **Not done**: the "not marked paid after 45 days" reminder (§9.1) and `replace_summary` (§3.2),
+  as phase 9 left them; the search_path follow-up for the remaining 27 definer functions
+  (`security-followups.md`).
+
+Tests deleted:
+- `tests/rls/commit-residual-import.test.ts`, the whole file (26).
+- From the renamed `tests/rls/acknowledge-residual-skips.test.ts` (now `residual-batch-grant.test.ts`):
+  - the nine acknowledgement tests and its three catalog tests;
+  - the two "cannot write `skipped_rows` / `skips_acknowledged_at`" cases;
+  - "no rep can read a batch's skip record". It became "no rep can read a batch", and two columns
+    were added to the cannot-write cases.
+- One case in `batch-status-transitions` (the acknowledgement stamps a batch).
+- The v1 case in `import-merge-key` (v3's twin stays).
+- Three in `unit/payouts` (skips owed, rows written, skip labels).
+- Three live: "refuses an agent over HTTP" (v1; v3's own test covers it), "the acknowledgement has
+  nothing to do", and "the old commit refuses a shared batch".
+- Three e2e: the "adjustment lines ignored" notice, and the planted skip record at both widths (the
+  rest of `residual-skips.spec.ts` is now `payouts-shared-commit.spec.ts`).
+
+Changed:
+- `unit/payouts` ("labels the two notes the parser writes, and only those"), `share-corrections` (the
+  vocabulary narrowed) and the v3 catalog test ("v1 gone").
+- Live:
+  - the v3 commit result no longer selects `skipped_rows`;
+  - "cannot be committed twice", "refuses while a row is still blocked" and "commits to the owner"
+    now commit through v3. The line now carries the merchant's rate (50, payout 12.50), where v1
+    left it null.
+  - The PATCH test pins `row_count` and `confirmed_warnings` instead of the dropped columns.
+- e2e: `payouts-roles` posts to v3's endpoint for the rep's PT403.
+- `grants` no longer lists the dropped function.
+
+Suites: `npm test` 2941 → 2928 (123 → 124 files); `test:live` 353 → 353 (22 → 23 files: three deleted, three added); e2e: only the twelve specs covering the changed pages (the nine `payouts-*`, `qa/residual-review`, `qa/residual-bad-import`, `qa/upload-labels`), 99 passed (6 setup), 4.9 min. The full e2e suite was not run; its baseline 383 → 380 is arithmetic.
+Applied to the local stack only; nothing pushed, linked or deployed.
 
 ---
 

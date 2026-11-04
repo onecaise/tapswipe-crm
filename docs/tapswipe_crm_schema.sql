@@ -626,6 +626,8 @@ $$;
 -- opposite of set_user_role, whose self-guard is what makes
 -- zero-active-admins unreachable.
 -- ---------------------------------------------------------------------
+-- Re-created by 20261104150000 (below), trimming every ASCII whitespace
+-- character rather than only spaces.
 create or replace function set_territory(
   target_user_id uuid,
   new_territory text
@@ -1464,10 +1466,14 @@ create table pre_apps (
   -- compared without a cast. Non-negative because a negative here is a typo and
   -- nothing else -- unlike total_cost and residual_income over there, which are
   -- deliberately signed because clawbacks make a negative month real.
-  est_annual_volume  numeric(14,2) check (est_annual_volume  >= 0),
-  est_monthly_volume numeric(14,2) check (est_monthly_volume >= 0),
-  est_average_ticket numeric(14,2) check (est_average_ticket >= 0),
-  est_high_ticket    numeric(14,2) check (est_high_ticket    >= 0),
+  est_annual_volume  numeric(14,2)
+    constraint pre_apps_est_annual_volume_non_negative check (est_annual_volume  >= 0),
+  est_monthly_volume numeric(14,2)
+    constraint pre_apps_est_monthly_volume_non_negative check (est_monthly_volume >= 0),
+  est_average_ticket numeric(14,2)
+    constraint pre_apps_est_average_ticket_non_negative check (est_average_ticket >= 0),
+  est_high_ticket    numeric(14,2)
+    constraint pre_apps_est_high_ticket_non_negative check (est_high_ticket    >= 0),
 
   -- Commission split between the rep and Tapswipe, copied into merchants by
   -- approve_pre_app(). Since 20261028120000 (memo §0b.4) it is a SNAPSHOT:
@@ -3871,6 +3877,8 @@ alter table rep_payout_rows
 -- can never reach a table in public.
 -- =====================================================================
 
+-- Both columns, and acknowledge_residual_skips(), were dropped by
+-- 20261104140000 (below), with the old commit.
 alter table rep_payout_batches
   add column skipped_rows jsonb not null default '[]'::jsonb,
   add column skips_acknowledged_at timestamptz;
@@ -6696,7 +6704,7 @@ create table products (
   -- stays visible in the store rather than vanishing into an add-on list
   -- under a device it was never linked to.
   kind text not null default 'device'
-    check (kind in ('device', 'addon')),
+    constraint products_kind_vocabulary check (kind in ('device', 'addon')),
 
   -- One-off hardware, or a recurring charge. Same closed vocabulary and
   -- the same reason: the proposal totals two columns off this value, and
@@ -6711,7 +6719,7 @@ create table products (
   -- Defaults to 'one_time' because every product predating this column is
   -- hardware.
   billing text not null default 'one_time'
-    check (billing in ('one_time', 'monthly')),
+    constraint products_billing_vocabulary check (billing in ('one_time', 'monthly')),
 
   -- NULLABLE, and null means "not priced yet" or "call for pricing" --
   -- never zero. The same distinction rep_payout_rows.rep_payout draws,
@@ -6771,6 +6779,14 @@ create unique index idx_products_sku on products(sku) where sku is not null;
 -- never in the picker -- so this is partial on exactly the rows that
 -- query reads, the same shape as idx_marketing_materials_category.
 create index idx_products_category on products(category, name)
+  where archived_at is null;
+
+-- Brand is the store's primary browse axis (20261007140000), so it gets the
+-- same shape of index idx_products_category has: partial on exactly the rows
+-- the rep-facing query reads, because an archived product is never in the
+-- store.
+create index if not exists idx_products_brand
+  on products(brand, name)
   where archived_at is null;
 
 alter table products enable row level security;
@@ -6920,15 +6936,17 @@ begin
   select kind into addon_kind  from products where id = NEW.addon_product_id;
   select kind into device_kind from products where id = NEW.device_product_id;
 
-  -- A missing row is left to the foreign key, which reports it precisely.
-  -- Raising here too would mean two messages for one cause, and this one
-  -- would be the vaguer of them.
+  -- A missing product is left to the foreign key, which names it
+  -- precisely. Raising here too would mean two messages for one cause,
+  -- and this one would be the vaguer of them.
   if addon_kind is not null and addon_kind <> 'addon' then
-    raise exception 'the add-on side of a compatibility row must be a product of kind addon';
+    raise exception
+      'the add-on side of a compatibility row must be a product of kind addon';
   end if;
 
   if device_kind is not null and device_kind <> 'device' then
-    raise exception 'the device side of a compatibility row must be a product of kind device';
+    raise exception
+      'the device side of a compatibility row must be a product of kind device';
   end if;
 
   return NEW;
@@ -14638,6 +14656,711 @@ revoke all on function commit_residual_import_v3(int, text[]) from anon;
 grant execute on function commit_residual_import_v3(int, text[]) to authenticated, service_role;
 
 -- =====================================================================
+-- THE OLD COMMIT AND THE SKIP RECORD RETIRED (20261104140000) — phase 13 of
+-- docs/design/intake-and-reports.md (§2.1, §8.1, §8.4).
+--
+-- commit_residual_import(int) is dropped. It was the last function carrying
+-- the coalesce merge (`coalesce(excluded.<col>, rep_payout_rows.<col>)`) and
+-- the last that filed a staged row by its own month. Nothing in the app, the
+-- Edge Functions or the seed scripts calls it; commit_residual_import_v3 is
+-- the commit, and a committed processor-month changes only by replace (v3,
+-- until marked paid) or an adjustment line (after). DEPLOY ORDER: on a project
+-- whose app still calls the old function (prod, as of this file), apply this
+-- only together with the app that calls v3, or that app's commit fails with
+-- "function does not exist".
+--
+-- acknowledge_residual_skips(int), rep_payout_batches.skipped_rows and
+-- rep_payout_batches.skips_acknowledged_at are dropped. Only
+-- commit_residual_import_v2 ever skipped a row (dropped in 20261030160000);
+-- v3 skips nothing and wrote '[]'. The screen that showed a skip record and
+-- the button that acknowledged it go in the same commit.
+-- rep_payout_batches.adjustment_rows_ignored STAYS (memo §2.1: the parser
+-- writes it as 0); only the screen that read it goes.
+--
+-- preview_flag keeps share_not_in_force and payee_changed. share_not_applied,
+-- partner_named and line_not_shared were v2's (removed from the parser in
+-- 20261030160000) and looks_shared was the Agent #-era heuristic (removed in
+-- 20261030140000).
+--
+-- REFUSES TO RUN, naming what it found, on exactly the rows it would lose:
+--   * a batch whose skipped_rows is not empty -- a record of file rows v2 did
+--     not pay, which the dropped column would take with it;
+--   * a staged row carrying one of the four retired flags (by batch id);
+-- and if the deployed v3 is not the 20261104120000 body (its skipped_rows
+-- line exactly once, and the zero-volume bad_numbers rule exactly once).
+-- No other row is in the way: no other column or constraint changes.
+-- =====================================================================
+
+-- 0. The rows this cannot carry, and the function it was copied from.
+do $$
+declare
+  skipped text;
+  flagged text;
+  body    text := pg_get_functiondef('public.commit_residual_import_v3(int, text[])'::regprocedure);
+  line    text := 'skipped_rows = ''[]''::jsonb,';
+  rule    text := '(''bad_numbers'', r.volume < 0 or (r.volume > 0 and r.residual_income > r.volume))';
+begin
+  select string_agg(id::text, ', ' order by id) into skipped
+    from rep_payout_batches
+   where jsonb_array_length(skipped_rows) > 0;
+  if skipped is not null then
+    raise exception 'retire_legacy_import refuses to run: rep_payout_batches % carry a skip record (rows commit_residual_import_v2 did not import), which dropping skipped_rows would lose. Copy each record out (select id, skipped_rows from rep_payout_batches where id in (%)) and clear it before applying 20261104140000.', skipped, skipped;
+  end if;
+
+  select string_agg(distinct batch_id::text, ', ') into flagged
+    from rep_payout_import_rows
+   where preview_flag in ('share_not_applied', 'partner_named', 'line_not_shared', 'looks_shared');
+  if flagged is not null then
+    raise exception 'retire_legacy_import refuses to run: staged rows of residual import batch(es) % carry a retired preview flag (share_not_applied, partner_named, line_not_shared or looks_shared). Read the batch again (parse-residual-import clears and restages its rows), or, for one that cannot be read again, delete its staged rows (delete from rep_payout_import_rows where batch_id = ...), then apply 20261104140000.', flagged;
+  end if;
+
+  if (length(body) - length(replace(body, line, ''))) / length(line) <> 1
+     or (length(body) - length(replace(body, rule, ''))) / length(rule) <> 1 then
+    raise exception 'commit_residual_import_v3 is not the 20261104120000 body here (its skipped_rows line and its bad_numbers rule, each exactly once). Inspect pg_get_functiondef before applying 20261104140000.';
+  end if;
+end $$;
+
+-- 1. The old commit and the acknowledgement.
+drop function commit_residual_import(int);
+drop function acknowledge_residual_skips(int);
+
+-- 2. v3, without step 7's skipped_rows line. Otherwise the body of
+-- 20261104120000.
+create or replace function commit_residual_import_v3(
+  batch_id_input  int,
+  confirmed_input text[]
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  batch       rep_payout_batches;
+  confirmed   text[] := coalesce(confirmed_input, '{}');
+  other       rep_payout_batches;
+  replaced    rep_payout_batches;
+  staged      int;
+  blocked     int;
+  problem     text;
+  unconfirmed text[];
+  covered     jsonb;
+  unshared    int;
+  signers     int;
+  partners    int;
+  overrides   int := 0;
+  removed     int := 0;
+begin
+  if not is_admin() then
+    raise exception 'admin only' using errcode = 'PT403';
+  end if;
+
+  if exists (select 1 from unnest(confirmed) as c(code)
+              where c.code is null
+                 or c.code not in ('processor_mismatch', 'inactive_merchant',
+                                   'bad_numbers')) then
+    raise exception 'Only processor_mismatch, inactive_merchant and bad_numbers can be confirmed.'
+      using errcode = '22023';
+  end if;
+
+  -- 1-2. Locks and guards.
+  select * into batch from rep_payout_batches where id = batch_id_input for update;
+  if not found then
+    raise exception 'import not found' using errcode = 'PT404';
+  end if;
+
+  if batch.status <> 'review' then
+    raise exception 'this import is already %', batch.status
+      using errcode = 'PT409';
+  end if;
+
+  if batch.processor is null or batch.period is null then
+    raise exception 'This import was started before the processor and month were chosen at upload, so it cannot be committed. Abandon it and upload the file again.'
+      using errcode = 'PT409';
+  end if;
+
+  -- One committed batch per processor-month, without a race between two
+  -- different batches for the same pair.
+  perform pg_advisory_xact_lock(hashtext(
+    'tapswipe.residual_month:' || batch.processor || '/' || batch.period::text));
+
+  -- A replacement: the batch it replaces must still be the committed one for
+  -- this processor-month, and the month must not be marked paid.
+  if batch.replaces_batch_id is not null then
+    select * into replaced
+      from rep_payout_batches where id = batch.replaces_batch_id for update;
+    if not found or replaced.status <> 'committed'
+       or replaced.processor is distinct from batch.processor
+       or replaced.period is distinct from batch.period then
+      raise exception 'This file was uploaded to replace import #%, which is no longer the committed import for % for %. Abandon it and upload the file again.',
+        batch.replaces_batch_id, batch.processor, to_char(batch.period, 'FMMonth YYYY')
+        using errcode = 'PT409';
+    end if;
+
+    if exists (select 1 from payout_period_closures
+                where period = batch.period and processor = batch.processor) then
+      raise exception '% for % is marked paid and cannot be replaced. Reopen it (with a reason), or post an adjustment instead.',
+        batch.processor, to_char(batch.period, 'FMMonth YYYY')
+        using errcode = 'PT409';
+    end if;
+  end if;
+
+  select * into other
+    from rep_payout_batches
+   where processor = batch.processor and period = batch.period
+     and status = 'committed' and id <> batch.id
+     and id is distinct from batch.replaces_batch_id;
+  if found then
+    raise exception '% for % is already committed (import #%). A second file for that month replaces it: upload it again and answer Yes to replace.',
+      batch.processor, to_char(batch.period, 'FMMonth YYYY'), other.id
+      using errcode = 'PT409';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtext('tapswipe.merchant_rep_shares'));
+
+  -- A replacement may not pull the month out from under an adjustment that
+  -- was worked out from the figures it replaces.
+  if batch.replaces_batch_id is not null then
+    select string_agg(distinct a.mid, ', ') into problem
+      from rep_payout_rows a
+     where a.line_kind = 'adjustment' and a.adjusts_period = batch.period
+       and (a.processor = batch.processor
+            or a.mid in (select l.mid from rep_payout_rows l
+                          where l.batch_id = replaced.id));
+    if problem is not null then
+      raise exception 'Adjustments already correct % for % (MIDs %). They were worked out from the committed figures, so the month cannot be replaced under them.',
+        batch.processor, to_char(batch.period, 'FMMonth YYYY'), problem
+        using errcode = 'PT409';
+    end if;
+  end if;
+
+  select count(*) into staged
+    from rep_payout_import_rows where batch_id = batch_id_input;
+
+  if staged = 0 then
+    raise exception 'this import has no rows' using errcode = 'PT409';
+  end if;
+
+  select count(*) into blocked
+    from rep_payout_import_rows
+   where batch_id = batch_id_input and blocker is not null;
+
+  if blocked > 0 then
+    raise exception '% of % rows are still blocked', blocked, staged
+      using errcode = 'PT409';
+  end if;
+
+  -- No owner, MID or rate of a merchant in this file changes until commit.
+  perform 1 from merchants m
+   where m.mid in (select r.mid_raw from rep_payout_import_rows r
+                    where r.batch_id = batch_id_input)
+   for share;
+
+  -- 3. Re-derived from the database.
+  select string_agg(r.row_number::text, ', ' order by r.row_number) into problem
+    from rep_payout_import_rows r
+   where r.batch_id = batch_id_input and r.period is distinct from batch.period;
+  if problem is not null then
+    raise exception 'Rows % were read for a different month than this import''s (%). Read the file again.',
+      problem, to_char(batch.period, 'FMMonth YYYY')
+      using errcode = 'PT409';
+  end if;
+
+  select string_agg(r.row_number::text, ', ' order by r.row_number) into problem
+    from rep_payout_import_rows r
+   where r.batch_id = batch_id_input
+     and (r.mid_raw is null or btrim(r.mid_raw) = '');
+  if problem is not null then
+    raise exception 'Rows % have no MID. Fix the file and upload it again.', problem
+      using errcode = 'PT409';
+  end if;
+
+  select string_agg(d.mid_raw || ' (rows ' || d.row_list || ')', '; ' order by d.mid_raw)
+    into problem
+    from (select r.mid_raw,
+                 string_agg(r.row_number::text, ', ' order by r.row_number) as row_list
+            from rep_payout_import_rows r
+           where r.batch_id = batch_id_input
+           group by r.mid_raw
+          having count(*) > 1) d;
+  if problem is not null then
+    raise exception 'A MID appears on more than one row: %. Fix the file and upload it again.', problem
+      using errcode = 'PT409';
+  end if;
+
+  select string_agg(r.mid_raw, ', ' order by r.row_number) into problem
+    from rep_payout_import_rows r
+   where r.batch_id = batch_id_input
+     and not exists (select 1 from merchants m where m.mid = r.mid_raw);
+  if problem is not null then
+    raise exception 'MIDs % are not merchants in the CRM. Add them (or correct their MID), then read the file again.', problem
+      using errcode = 'PT409';
+  end if;
+
+  select string_agg(r.row_number::text, ', ' order by r.row_number) into problem
+    from rep_payout_import_rows r
+   where r.batch_id = batch_id_input
+     and lower(regexp_replace(coalesce(r.income_type_raw, ''),
+                              '^[\s﻿]+|[\s﻿]+$', '', 'g')) <> 'residuals';
+  if problem is not null then
+    raise exception 'Rows % have an Income Type other than Residuals. Fix the file and upload it again.', problem
+      using errcode = 'PT409';
+  end if;
+
+  select string_agg(r.row_number::text, ', ' order by r.row_number) into problem
+    from rep_payout_import_rows r
+   where r.batch_id = batch_id_input
+     and (r.volume is null or r.residual_income is null);
+  if problem is not null then
+    raise exception 'Rows % have no Volume or no Residual. Fix the file and upload it again.', problem
+      using errcode = 'PT409';
+  end if;
+
+  select string_agg(r.mid_raw, ', ' order by r.row_number) into problem
+    from rep_payout_import_rows r
+    join merchants m on m.mid = r.mid_raw
+   where r.batch_id = batch_id_input
+     and (r.merchant_id is distinct from m.id
+          or r.agent_id is distinct from m.agent_id);
+  if problem is not null then
+    raise exception 'A merchant''s MID or owner changed after this file was read (MIDs %). Read it again.', problem
+      using errcode = 'PT409';
+  end if;
+
+  select string_agg(r.mid_raw, ', ' order by r.row_number) into problem
+    from rep_payout_import_rows r
+    join merchants m on m.mid = r.mid_raw
+   where r.batch_id = batch_id_input and m.split_agent_pct is null;
+  if problem is not null then
+    raise exception 'MIDs % belong to merchants with no split rate. Set each merchant''s rate, then commit.', problem
+      using errcode = 'PT409';
+  end if;
+
+  -- No merge. On a replacement, the lines of the batch being replaced are
+  -- about to go, so they are not "already there".
+  select string_agg(distinct r.mid_raw, ', ') into problem
+    from rep_payout_import_rows r
+    join rep_payout_rows l
+      on l.mid = r.mid_raw and l.period = batch.period and l.line_kind = 'import'
+   where r.batch_id = batch_id_input
+     and (batch.replaces_batch_id is null
+          or l.batch_id is distinct from batch.replaces_batch_id);
+  if problem is not null then
+    raise exception 'MIDs % already have a line for %. A committed month is never merged into: read the file again.',
+      problem, to_char(batch.period, 'FMMonth YYYY')
+      using errcode = 'PT409';
+  end if;
+
+  select string_agg(r.mid_raw, ', ' order by r.row_number) into problem
+    from rep_payout_import_rows r
+    join merchants m on m.mid = r.mid_raw
+    join merchant_rep_shares s
+      on s.merchant_id = m.id
+     and batch.period >= s.effective_from
+     and (s.effective_to is null or batch.period < s.effective_to)
+   where r.batch_id = batch_id_input
+     and (s.primary_agent_id <> m.agent_id
+          or s.primary_rep_pct + s.secondary_rep_pct <> m.split_agent_pct);
+  if problem is not null then
+    raise exception 'MIDs % have a shared-account split whose signer is not the merchant''s owner, or whose shares do not total the merchant''s rate. End the share and set it again, then commit.', problem
+      using errcode = 'PT409';
+  end if;
+
+  -- Overrides in force for the month (phase 10). The functions that set
+  -- them hold these rules; a rate, an owner, a share or a person can change
+  -- after that, so the commit checks them again.
+  select string_agg(r.mid_raw || ' (override #' || o.id || ')', ', ' order by r.row_number)
+    into problem
+    from rep_payout_import_rows r
+    join merchants m on m.mid = r.mid_raw
+    join merchant_overrides o
+      on o.merchant_id = m.id
+     and batch.period >= o.effective_from
+     and (o.effective_to is null or batch.period < o.effective_to)
+   where r.batch_id = batch_id_input
+     and o.override_pct > m.split_agent_pct;
+  if problem is not null then
+    raise exception 'MIDs % have an override above the merchant''s rate. An override comes out of the rep side: end or change it, then commit.', problem
+      using errcode = 'PT409';
+  end if;
+
+  select string_agg(r.mid_raw || ' (override #' || o.id || ')', ', ' order by r.row_number)
+    into problem
+    from rep_payout_import_rows r
+    join merchants m on m.mid = r.mid_raw
+    join merchant_overrides o
+      on o.merchant_id = m.id
+     and batch.period >= o.effective_from
+     and (o.effective_to is null or batch.period < o.effective_to)
+   where r.batch_id = batch_id_input
+     and (o.recipient_id = m.agent_id
+          or exists (select 1 from merchant_rep_shares s
+                      where s.merchant_id = m.id
+                        and batch.period >= s.effective_from
+                        and (s.effective_to is null or batch.period < s.effective_to)
+                        and o.recipient_id in (s.primary_agent_id, s.secondary_agent_id)));
+  if problem is not null then
+    raise exception 'MIDs % have an override paid to the merchant''s owner or to a party of its shared account. End the override and set it again, then commit.', problem
+      using errcode = 'PT409';
+  end if;
+
+  select string_agg(r.mid_raw || ' (override #' || o.id || ' to ' || p.full_name || ')', ', '
+                    order by r.row_number)
+    into problem
+    from rep_payout_import_rows r
+    join merchants m on m.mid = r.mid_raw
+    join merchant_overrides o
+      on o.merchant_id = m.id
+     and batch.period >= o.effective_from
+     and (o.effective_to is null or batch.period < o.effective_to)
+    join profiles p on p.id = o.recipient_id
+   where r.batch_id = batch_id_input
+     and not p.is_active;
+  if problem is not null then
+    raise exception 'Overrides on MIDs % pay someone who is deactivated. End each override (or reactivate the person), then commit.', problem
+      using errcode = 'PT409';
+  end if;
+
+  -- 4. The warnings, recomputed: the parser's rowWarnings().
+  with flagged as (
+    select r.row_number, w.code
+      from rep_payout_import_rows r
+      join merchants m on m.mid = r.mid_raw
+      cross join lateral (values
+        ('processor_mismatch',
+         r.processor_raw is null
+         or lower(btrim(regexp_replace(r.processor_raw, '[\s﻿]+', ' ', 'g')))
+            <> lower(btrim(regexp_replace(batch.processor, '[\s﻿]+', ' ', 'g')))
+         or (m.processor is not null and m.processor <> batch.processor)),
+        ('inactive_merchant', m.status = 'inactive'),
+        ('bad_numbers', r.volume < 0 or (r.volume > 0 and r.residual_income > r.volume))
+      ) as w(code, hit)
+     where r.batch_id = batch_id_input and w.hit
+  )
+  select jsonb_object_agg(f.code, f.row_list),
+         array_agg(f.code order by f.code)
+           filter (where not (f.code = any(confirmed)))
+    into covered, unconfirmed
+    from (select code, jsonb_agg(row_number order by row_number) as row_list
+            from flagged group by code) f;
+
+  if cardinality(unconfirmed) > 0 then
+    select string_agg(replace(u.code, '_', ' ') || ' (rows '
+                      || (select string_agg(x.value, ', ')
+                            from jsonb_array_elements_text(covered -> u.code) as x(value))
+                      || ')', '; ' order by u.code)
+      into problem
+      from unnest(unconfirmed) as u(code);
+    raise exception 'These warnings were not confirmed: %. Confirm them on the review screen, or fix the data and read the file again.', problem
+      using errcode = 'PT409',
+            detail = array_to_string(unconfirmed, ',');
+  end if;
+
+  -- 5. The replace, then the lines. Every refusal is behind us: from here
+  -- on, the commit writes.
+  if batch.replaces_batch_id is not null then
+    -- The old batch's lines: its import lines, the shared lines derived from
+    -- them, and its override lines, which step 6 writes again. Adjustments
+    -- carry no batch and stay.
+    delete from rep_payout_rows where batch_id = replaced.id;
+    get diagnostics removed = row_count;
+
+    update rep_payout_batches
+       set status = 'replaced', replaced_by_batch_id = batch_id_input
+     where id = replaced.id;
+  end if;
+
+  -- Plain inserts, never a merge.
+  -- Unshared: the owner's one line at the merchant's rate.
+  insert into rep_payout_rows (
+    agent_id, period, processor, mid, merchant_name, merchant_id,
+    volume, average_ticket, total_cost, volume_confirmed_negative,
+    residual_income, rep_split_pct, batch_id
+  )
+  select
+    m.agent_id, batch.period, batch.processor, m.mid,
+    coalesce(m.dba, r.merchant_name_raw), m.id,
+    r.volume, r.average_ticket, r.total_cost, r.volume < 0,
+    r.residual_income, m.split_agent_pct, batch_id_input
+    from rep_payout_import_rows r
+    join merchants m on m.mid = r.mid_raw
+   where r.batch_id = batch_id_input
+     and not exists (
+       select 1 from merchant_rep_shares s
+        where s.merchant_id = m.id
+          and batch.period >= s.effective_from
+          and (s.effective_to is null or batch.period < s.effective_to));
+
+  get diagnostics unshared = row_count;
+
+  -- Shared, the signer's line: the volume, and the account residual less the
+  -- partner's piece.
+  insert into rep_payout_rows (
+    agent_id, period, processor, mid, merchant_name, merchant_id,
+    volume, average_ticket, total_cost, volume_confirmed_negative,
+    residual_income, rep_split_pct, batch_id,
+    rep_share_id, share_role, primary_rep_pct, secondary_rep_pct,
+    account_residual_income
+  )
+  select
+    m.agent_id, batch.period, batch.processor, m.mid,
+    coalesce(m.dba, r.merchant_name_raw), m.id,
+    r.volume, r.average_ticket, r.total_cost, r.volume < 0,
+    r.residual_income
+      - shared_part(r.residual_income, s.secondary_rep_pct,
+                    s.primary_rep_pct + s.secondary_rep_pct),
+    m.split_agent_pct, batch_id_input,
+    s.id, 'primary', s.primary_rep_pct, s.secondary_rep_pct,
+    r.residual_income
+    from rep_payout_import_rows r
+    join merchants m on m.mid = r.mid_raw
+    join merchant_rep_shares s
+      on s.merchant_id = m.id
+     and batch.period >= s.effective_from
+     and (s.effective_to is null or batch.period < s.effective_to)
+   where r.batch_id = batch_id_input;
+
+  get diagnostics signers = row_count;
+
+  -- Shared, the partner's line: no volume (it is counted once, on the
+  -- signer's line), the partner's piece of the residual.
+  insert into rep_payout_rows (
+    agent_id, period, processor, mid, merchant_name, merchant_id,
+    volume, average_ticket, total_cost,
+    residual_income, rep_split_pct, batch_id,
+    rep_share_id, share_role, primary_rep_pct, secondary_rep_pct,
+    account_residual_income
+  )
+  select
+    s.secondary_agent_id, batch.period, batch.processor, m.mid,
+    coalesce(m.dba, r.merchant_name_raw), m.id,
+    null, null, null,
+    shared_part(r.residual_income, s.secondary_rep_pct,
+                s.primary_rep_pct + s.secondary_rep_pct),
+    m.split_agent_pct, batch_id_input,
+    s.id, 'secondary', s.primary_rep_pct, s.secondary_rep_pct,
+    r.residual_income
+    from rep_payout_import_rows r
+    join merchants m on m.mid = r.mid_raw
+    join merchant_rep_shares s
+      on s.merchant_id = m.id
+     and batch.period >= s.effective_from
+     and (s.effective_to is null or batch.period < s.effective_to)
+   where r.batch_id = batch_id_input;
+
+  get diagnostics partners = row_count;
+
+  -- 6. The override lines (phase 10). X = round(R * o / 100, 2), once, from
+  -- the account residual; on a shared account the partner's piece of the
+  -- deduction is shared_part(X, b, a + b) and the signer's the rest (the
+  -- payout's own cent rule). Debits -piece, the credit +X: they net to zero,
+  -- and the reps' nets plus the credit are exactly T. On a replacement this
+  -- is what rebuilds them.
+  with applied as (
+    select m.id as merchant_id, m.agent_id as owner_id, m.mid,
+           coalesce(m.dba, r.merchant_name_raw) as merchant_name,
+           o.id as override_id, o.recipient_id,
+           round(r.residual_income * o.override_pct / 100, 2) as x,
+           s.secondary_agent_id, s.primary_rep_pct, s.secondary_rep_pct
+      from rep_payout_import_rows r
+      join merchants m on m.mid = r.mid_raw
+      join merchant_overrides o
+        on o.merchant_id = m.id
+       and batch.period >= o.effective_from
+       and (o.effective_to is null or batch.period < o.effective_to)
+      left join merchant_rep_shares s
+        on s.merchant_id = m.id
+       and batch.period >= s.effective_from
+       and (s.effective_to is null or batch.period < s.effective_to)
+     where r.batch_id = batch_id_input
+  ),
+  pieces as (
+    select a.*,
+           case when a.secondary_agent_id is null then 0
+                else shared_part(a.x, a.secondary_rep_pct,
+                                 a.primary_rep_pct + a.secondary_rep_pct)
+           end as partner_piece
+      from applied a
+  ),
+  lines as (
+    select owner_id as agent_id, merchant_id, mid, merchant_name, override_id,
+           'debit' as role, -(x - partner_piece) as amount
+      from pieces
+    union all
+    select secondary_agent_id, merchant_id, mid, merchant_name, override_id,
+           'debit', -partner_piece
+      from pieces
+     where secondary_agent_id is not null
+    union all
+    select recipient_id, merchant_id, mid, merchant_name, override_id,
+           'credit', x
+      from pieces
+  )
+  insert into rep_payout_rows (
+    agent_id, period, processor, mid, merchant_name, merchant_id,
+    batch_id, line_kind, override_id, override_role, override_amount
+  )
+  select
+    l.agent_id, batch.period, batch.processor, l.mid, l.merchant_name, l.merchant_id,
+    batch_id_input, 'override', l.override_id, l.role, l.amount
+    from lines l;
+
+  select count(*) into overrides
+    from rep_payout_rows
+   where batch_id = batch_id_input and line_kind = 'override'
+     and override_role = 'credit';
+
+  -- 7. Close the batch, and the audit rows.
+  delete from rep_payout_import_rows where batch_id = batch_id_input;
+
+  update rep_payout_batches
+     set status = 'committed', committed_at = now(), row_count = staged,
+         confirmed_warnings = coalesce(covered, '{}'::jsonb)
+   where id = batch_id_input;
+
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (auth.uid(), 'commit_residual_import', 'rep_payout_batches',
+          batch_id_input::text);
+
+  if batch.replaces_batch_id is not null then
+    insert into audit_log (actor_id, action, table_name, row_id)
+    values (auth.uid(), 'replace_residual_import', 'rep_payout_batches',
+            replaced.id::text);
+  end if;
+
+  return jsonb_build_object(
+    'written', unshared + signers + partners,
+    'rows', staged,
+    'shared', signers,
+    'overrides', overrides,
+    'replaced_lines', removed
+  );
+end;
+$$;
+
+-- PUBLIC (which includes anon) gets EXECUTE on every new function and nothing
+-- declarative revokes it. Re-stated: create or replace keeps the existing ACL,
+-- but these lines are what the grants test reads.
+revoke all on function commit_residual_import_v3(int, text[]) from public;
+revoke all on function commit_residual_import_v3(int, text[]) from anon;
+grant execute on function commit_residual_import_v3(int, text[]) to authenticated, service_role;
+
+-- 3. The skip record's columns (the CHECK rep_payout_batches_skipped_rows_array
+-- goes with skipped_rows).
+alter table rep_payout_batches
+  drop column skipped_rows,
+  drop column skips_acknowledged_at;
+
+-- 4. The preview-flag vocabulary: the two notes the parser still writes.
+alter table rep_payout_import_rows
+  drop constraint rep_payout_import_rows_preview_flag_check;
+
+alter table rep_payout_import_rows
+  add constraint rep_payout_import_rows_preview_flag_check check (
+    preview_flag in ('share_not_in_force', 'payee_changed')
+  );
+
+-- =====================================================================
+-- SET_TERRITORY TRIMS ASCII WHITESPACE (20261104150000) — phase 13 of
+-- docs/design/intake-and-reports.md, carried over from phase 2.
+--
+-- set_territory() normalised with plain btrim(x), which strips spaces only, so
+-- "\tSoutheast" was stored with its tab: a value that renders like
+-- "Southeast", compares unequal to it, and splits one territory into two in
+-- any grouping. It now trims E' \t\n\r\f\x0b' -- space, tab, newline,
+-- carriage return, form feed and vertical tab -- the set set_rep_identity()
+-- (20261026120000) and the profiles_legal_name_format CHECK use. A value that
+-- is only those characters clears the territory, as a blank one always did.
+--
+-- Re-created whole from 20261002143000 with ONLY the normalising line
+-- changed (security definer, search_path, guards, audit verbs and grants as
+-- they were). REFUSES TO RUN unless the deployed function carries the old
+-- line exactly once.
+--
+-- No row guard and no backfill: the migration writes no row. A territory
+-- already stored with a tab or newline at either end (none is expected; the
+-- Manage Users cell sends what was typed) stays as it is until an admin sets
+-- it again, which now trims it. This query lists any:
+--   select id, territory from profiles
+--    where territory <> btrim(territory, E' \t\n\r\f\x0b');
+-- =====================================================================
+
+-- 0. The function this replaces is the one it was copied from.
+do $$
+declare
+  body text := pg_get_functiondef('public.set_territory(uuid, text)'::regprocedure);
+  old  text := 'normalised := nullif(btrim(coalesce(new_territory, '''')), '''');';
+begin
+  if (length(body) - length(replace(body, old, ''))) / length(old) <> 1 then
+    raise exception 'set_territory does not carry the 20261002143000 normalising line exactly once here. Inspect pg_get_functiondef before applying 20261104150000.';
+  end if;
+end $$;
+
+-- 1. set_territory, the normalising line changed. Otherwise the body of
+-- 20261002143000.
+create or replace function set_territory(
+  target_user_id uuid,
+  new_territory text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  normalised text;
+  target profiles;
+begin
+  if not is_admin() then
+    raise exception 'admin only' using errcode = 'PT403';
+  end if;
+
+  normalised := nullif(btrim(coalesce(new_territory, ''), E' \t\n\r\f\x0b'), '');
+
+  if normalised is not null and length(normalised) > 64 then
+    raise exception 'territory must be 64 characters or fewer'
+      using errcode = 'PT400';
+  end if;
+
+  select * into target from profiles where id = target_user_id;
+  if not found then
+    raise exception 'user not found' using errcode = 'PT404';
+  end if;
+
+  -- `is not distinct from` rather than `=`, so clearing an already-empty
+  -- territory is the no-op it looks like rather than falling through to an
+  -- audit row claiming something changed.
+  if target.territory is not distinct from normalised then
+    return;
+  end if;
+
+  update profiles set territory = normalised where id = target_user_id;
+
+  -- Distinct verbs rather than one action, for the reason set_user_role gives:
+  -- audit_log has no detail column, so the direction lives in `action` or is
+  -- lost.
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (
+    auth.uid(),
+    case when normalised is null
+         then 'clear_territory'
+         else 'set_territory' end,
+    'profiles',
+    target_user_id::text
+  );
+end;
+$$;
+
+-- Postgres grants EXECUTE to PUBLIC (which includes anon) on every new
+-- function, and there is no declarative backstop for it -- `alter default
+-- privileges ... revoke execute on functions from public` is a verified no-op
+-- here, which is why tests/rls/grants.test.ts pins the gap instead. Without
+-- these two lines this RPC is callable unauthenticated from the moment it
+-- exists, and it writes profiles.
+revoke all on function set_territory(uuid, text) from public;
+grant execute on function set_territory(uuid, text) to authenticated, service_role;
+
+-- =====================================================================
 -- GHOST SHEET CONVERSION — Tier 2. Plain function, NOT security definer:
 -- the caller owns both rows, so letting their own RLS scope the reads and
 -- writes is safer than re-implementing the ownership check by hand. One
@@ -14646,6 +15369,8 @@ grant execute on function commit_residual_import_v3(int, text[]) to authenticate
 create or replace function convert_ghost_sheet_to_lead(ghost_sheet_id_input int)
 returns int
 language plpgsql
+security invoker
+set search_path = public
 as $$
 declare
   sheet ghost_sheets;
@@ -15604,8 +16329,14 @@ grant select, insert, update on bug_reports to authenticated;
 --
 -- Two statements for the same reason as quotes below: `grant select, update
 -- (a, b), delete` would read as if the column list applied to all three.
-grant select, delete on rep_payout_rows to authenticated;
-grant update (residual_income, rep_split_pct) on rep_payout_rows to authenticated;
+--
+-- SELECT ONLY, as of 20261102140000. Both writes above are gone: DELETE was
+-- revoked by 20261030190000 (a period is deleted by delete_payout_period(),
+-- audited), and the two-column UPDATE by 20261102140000 (no client edits a
+-- committed line, admin included; guard_client_payout_update() refuses one
+-- even if a grant is added back). The two statements this section used to
+-- carry are kept in those migrations' blocks above, as history.
+grant select on rep_payout_rows to authenticated;
 
 -- rep_payout_batches: SELECT to list them, UPDATE to abandon one. No INSERT (the
 -- Storage key contains the batch id, so residual-import-file-url creates the row
@@ -15615,9 +16346,9 @@ grant update (residual_income, rep_split_pct) on rep_payout_rows to authenticate
 -- UPDATE ON (status) ONLY, as of 20261016140000 (phase 4b of
 -- docs/design/residual-splits.md). Abandon writes status and nothing else; every
 -- other column is written by the service role or a definer function. Table-wide,
--- an admin's session could PATCH skipped_rows to '[]' or set
--- skips_acknowledged_at with no audit row -- clearing the skip record the
--- acknowledgement exists to keep honest. Two statements, as for rep_payout_rows.
+-- an admin's session could PATCH the skip record (skipped_rows,
+-- skips_acknowledged_at; both dropped by 20261104140000) or any other column
+-- with no audit row. Two statements, as for rep_payout_rows.
 -- WHICH status change that UPDATE may make is a trigger's job, not a grant's
 -- (a grant cannot see values): guard_batch_status_transition(), 20261016170000,
 -- admits a signed-in user's review -> abandoned and nothing else.
@@ -15681,6 +16412,33 @@ grant select, insert, update, delete on brands to authenticated;
 revoke all on processors from anon, authenticated, service_role;
 grant select on processors to authenticated;
 grant select on processors to service_role;
+
+-- The three other tables created since 20261023120000 revoke and grant their
+-- own, in their own migrations, and are restated here so this section is the
+-- whole surface. The exact expected grants, which migration sets each, and a
+-- read-only query that compares a project against them:
+-- docs/claude/grants-inventory.md (pinned by tests/rls/grants-inventory.test.ts
+-- and tests/live/grants-inventory.test.ts).
+--
+-- pre_app_tax_secrets (20261026140000): the fourth secrets table -- nothing
+-- for anon or authenticated, everything for the service role (the two
+-- secrets functions), its sequence likewise.
+revoke all on pre_app_tax_secrets from public, anon, authenticated, service_role;
+revoke all on sequence pre_app_tax_secrets_id_seq from public, anon, authenticated, service_role;
+grant all on pre_app_tax_secrets to service_role;
+grant all on sequence pre_app_tax_secrets_id_seq to service_role;
+-- payout_period_closures (20261030120000): admin SELECT by policy; written
+-- only by close_/reopen_payout_period() (definer). No sequence.
+revoke all on payout_period_closures from anon, authenticated, service_role;
+grant select on payout_period_closures to authenticated;
+grant select on payout_period_closures to service_role;
+-- merchant_overrides (20261102120000): admin SELECT by policy; written only by
+-- its three definer RPCs. The service role reads and deletes (the teardowns);
+-- nobody is granted the sequence.
+revoke all on merchant_overrides from public, anon, authenticated, service_role;
+revoke all on sequence merchant_overrides_id_seq from public, anon, authenticated, service_role;
+grant select on merchant_overrides to authenticated;
+grant select, delete on merchant_overrides to service_role;
 
 -- product_compatibility: products' three verbs plus DELETE, which products
 -- deliberately withholds. The difference is not an inconsistency -- see the
@@ -15804,6 +16562,12 @@ to authenticated;
 -- service_role bypasses RLS and is the only role that may reach the
 -- secrets tables — via the submit-pre-app-secrets / read-pre-app-secrets
 -- Edge Functions, which hold the encryption key.
+--
+-- `all tables` means the tables that existed when 20260805200000 ran. It
+-- grants nothing on a table created later: each of those carries its own
+-- grants in its own migration (several give the service role less than all,
+-- on purpose), listed for every table since 20261023120000 in
+-- docs/claude/grants-inventory.md.
 grant all on all tables in schema public to service_role;
 grant all on all sequences in schema public to service_role;
 

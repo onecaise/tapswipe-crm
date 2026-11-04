@@ -3,7 +3,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   ADMIN_ID,
   AGENT_ID,
-  AGENT_NUMBER,
   asPlatform,
   asUser,
   commitV3,
@@ -430,65 +429,10 @@ describe("an import never merges into an adjustment, and an adjustment never int
     return id;
   }
 
-  async function stage(
-    staged: { agentId: string; agentNumber: string; mid: string; period: string; volume: string; residual?: string; split?: string }[],
-  ): Promise<number> {
-    await asPlatform(db);
-    const id = await insertBatch(db, { fileName: "f.xlsx" });
-    for (const [index, r] of staged.entries()) {
-      await db.exec(`
-        insert into rep_payout_import_rows
-          (batch_id, row_number, agent_number_raw, mid_raw, merchant_name_raw, period,
-           agent_id, merchant_id, volume, residual_income, rep_split_pct)
-        values (${id}, ${index + 2}, '${r.agentNumber}', '${r.mid}', 'File Co', '${r.period}',
-                '${r.agentId}', (select id from merchants where mid = '${r.mid}'), ${r.volume},
-                ${r.residual ?? "null"}, ${r.split ?? "null"});`);
-    }
-    return id;
-  }
-
-  async function commit(fn: "commit_residual_import", batch: number): Promise<unknown> {
-    await asUser(db, ADMIN_ID);
-    try {
-      const [{ r }] = await rows<{ r: unknown }>(db, `select ${fn}(${batch}) as r`);
-      return r;
-    } finally {
-      await asPlatform(db);
-    }
-  }
-
-  // v2 ran here too until 20261030160000 dropped it; v3, which never merges,
-  // has its own case below.
-  it.each(["commit_residual_import"] as const)(
-    "%s: importing a key that holds only an adjustment inserts a new import line beside it, twice over",
-    async (fn) => {
-      const adj = await adjustment(AGENT_ID, AUG, "MID-AGENT-1", "12.34");
-      const adjBefore = await lines(`id = ${adj}`);
-
-      const first = await stage([
-        { agentId: AGENT_ID, agentNumber: AGENT_NUMBER, mid: "MID-AGENT-1", period: AUG, volume: "100.00", residual: "40.00", split: "50.00" },
-      ]);
-      await commit(fn, first);
-      const second = await stage([
-        { agentId: AGENT_ID, agentNumber: AGENT_NUMBER, mid: "MID-AGENT-1", period: AUG, volume: "200.00", residual: "60.00" },
-      ]);
-      await commit(fn, second);
-
-      const onKey = await lines(`period = '${AUG}' and agent_id = '${AGENT_ID}' and mid = 'MID-AGENT-1'`);
-      expect(onKey).toHaveLength(2);
-      // The adjustment, byte-identical through both commits.
-      expect(onKey.find((l) => l.id === adj)).toEqual(adjBefore[0]);
-      // The import line took both commits, merged by THE COALESCE as always.
-      expect(onKey.find((l) => l.id !== adj)).toMatchObject({
-        line_kind: "import",
-        volume: 200,
-        residual_income: 60,
-        rep_split_pct: 50,
-        rep_payout: 30,
-        adjustment_amount: null,
-      });
-    },
-  );
+  // The old commit_residual_import(int) ran a case here too, merging the
+  // import line by THE COALESCE beside an untouched adjustment, until
+  // 20261104140000 dropped it; v2 went in 20261030160000. v3, which never
+  // merges, has its own case below.
 
   it("an adjustment on a key that holds an import line is a second line, even through an upsert naming the merge key", async () => {
     const [importBefore] = await lines(`period = '${PAYOUT_PERIOD}' and agent_id = '${AGENT_ID}' and mid = 'MID-AGENT-1'`);

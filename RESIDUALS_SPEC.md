@@ -3,6 +3,23 @@
 Status: **built, as of 2026-08-21.** All six commits in §11 have landed. Every decision in §3
 was settled by interview on 2026-08-17 and is recorded here as a decision, not a suggestion.
 
+> **Addendum, 4 Nov 2026: much of this spec is superseded.** `docs/design/intake-and-reports.md`
+> (phases 6-13) rebuilt the import, and where the two differ, that memo and CLAUDE.md win.
+>
+> - **The file:** the processor's six columns (Processor, Merchant Number, Merchant Name, Income
+>   Type, Volume, Residual), one file per processor and month, chosen at upload.
+> - **The payee:** each row is paid to the owner of the merchant its MID names. `agent_number` is
+>   a display code, never the join.
+> - **The commit:** `commit_residual_import_v3`, which never merges. The `commit_residual_import`
+>   this spec describes (§7.3), with its coalesce merge, was dropped in `20261104140000`.
+> - **Corrections:** a committed processor-month changes only by replace (until marked paid) or
+>   an adjustment line (after). No figure is edited inline any more (§8.4 is retired, since
+>   `20261102140000`).
+> - **The export:** a download, not an import format. Decision 12's round trip is gone, and the
+>   parser refuses an export.
+>
+> The sections below are kept as the record of what was built in August.
+
 Three places where what shipped deviates from what is written below, each deliberate and each
 documented at the point it applies:
 

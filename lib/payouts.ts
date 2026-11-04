@@ -225,20 +225,6 @@ export type PayoutBatch = {
   uploaded_at: string | null;
   committed_at: string | null;
   /**
-   * What commit_residual_import_v2 did not apply, in sheet-row order. v3
-   * (20261030160000) skips nothing and writes [], so only a batch an earlier
-   * commit wrote carries one.
-   */
-  skipped_rows: SkippedRow[];
-  /** Null while skipped rows are still owed a review. */
-  skips_acknowledged_at: string | null;
-  /**
-   * Rows the file marked `Line = Adjustment` that parse-residual-import did
-   * not stage (20261016161000): adjustments are entered in the CRM, never
-   * imported.
-   */
-  adjustment_rows_ignored: number;
-  /**
    * The processor and month chosen at upload (20261030120000). Required on
    * every batch since 20261030140000; null only on one started before.
    */
@@ -252,7 +238,7 @@ export type PayoutBatch = {
 };
 
 export const PAYOUT_BATCH_COLUMNS =
-  "id, imported_by, file_key, file_name, status, row_count, uploaded_at, committed_at, skipped_rows, skips_acknowledged_at, adjustment_rows_ignored, processor, period, replaces_batch_id, replaced_by_batch_id";
+  "id, imported_by, file_key, file_name, status, row_count, uploaded_at, committed_at, processor, period, replaces_batch_id, replaced_by_batch_id";
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
@@ -271,57 +257,9 @@ export function payoutMonthLabel(processor: string, period: string): string {
   return `${processor} ${MONTH_NAMES[Number(month) - 1]} ${year}`;
 }
 
-/**
- * One row commit_residual_import_v2 did not apply, as it records it on the
- * batch (20261016120000). Identifiers from the admin's own file only -- no
- * figure, no name -- plus the period, because a batch can span months and each
- * period page lists the skips that touch it.
- */
-export type SkippedRow = {
-  row_number: number;
-  period: string;
-  mid: string;
-  agent_number: string | null;
-  reason: string;
-};
-
-const SKIP_REASONS: Record<string, string> = {
-  partner_named: "Names the partner on a shared account",
-  line_not_shared: "A line for this rep and MID is not part of the share",
-};
-
-export function skipReasonLabel(reason: string): string {
-  return SKIP_REASONS[reason] ?? reason;
-}
-
-/**
- * Rows a committed batch skipped and nobody has reviewed yet. Zero for a batch
- * that skipped nothing, a reviewed one, and any batch not committed.
- */
-export function skipsOwed(batch: Pick<PayoutBatch, "status" | "skipped_rows" | "skips_acknowledged_at">): number {
-  if (batch.status !== "committed" || batch.skips_acknowledged_at !== null) return 0;
-  return batch.skipped_rows.length;
-}
-
-/**
- * The file rows the batch imported. row_count is the staged count; v2
- * recorded what it skipped, so its rows written were row_count less those. v3
- * and the old function skip nothing (skipped_rows is []), so this is
- * row_count. (v3's partner lines are extra LINES, not extra file rows.)
- */
-export function rowsWritten(batch: Pick<PayoutBatch, "row_count" | "skipped_rows">): number {
-  return batch.row_count - batch.skipped_rows.length;
-}
-
 /** The advisory notes (rep_payout_import_rows.preview_flag) as prose. */
 const PREVIEW_FLAGS: Record<string, string> = {
-  share_not_applied: "Share not applied",
-  partner_named: "Partner row will be skipped",
-  line_not_shared: "Will be skipped: existing line is not shared",
   share_not_in_force: "Share does not cover this month",
-  // Written by the parser before 20261030140000 only (it read who the file
-  // named); kept so a row staged then still renders.
-  looks_shared: "Looks shared, no share set",
   payee_changed: "Pays a different rep than last month",
 };
 

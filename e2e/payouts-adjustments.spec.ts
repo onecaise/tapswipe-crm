@@ -9,8 +9,9 @@ import {
 
 /**
  * Adjustment lines on the payout pages (phase 5 of
- * docs/design/residual-splits.md, §6), and the review screen's notice for
- * adjustment rows a re-import ignored.
+ * docs/design/residual-splits.md, §6). (The review screen's notice for
+ * adjustment rows a re-import ignored went in phase 13 of
+ * docs/design/intake-and-reports.md: no parser since phase 7 ignores one.)
  *
  * The arithmetic is pinned in tests/rls/share-corrections.test.ts and
  * tests/unit/payouts.test.ts. What only a browser shows:
@@ -90,15 +91,6 @@ test.describe("as an admin", () => {
       await expectNoSideScroll(page, width, "the period page");
     });
   }
-
-  test("the review screen says how many adjustment lines a re-import ignored", async ({ page }) => {
-    await page.goto(`/payouts/import/${planted.batchId}`);
-    await expect(page.getByTestId("adjustments-ignored")).toHaveText(
-      "2 adjustment lines ignored: adjustments are entered in the CRM.",
-    );
-    await page.setViewportSize({ width: 375, height: 812 });
-    await expectNoSideScroll(page, 375, "the review screen");
-  });
 });
 
 test.describe("as the signer", () => {

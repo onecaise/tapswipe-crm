@@ -1064,23 +1064,11 @@ let scopePeriod = "";
 
 describe("committing over HTTP", () => {
   // The RPC's guards are covered exhaustively in
-  // tests/rls/commit-residual-import*.test.ts. What only this suite proves is
+  // tests/rls/commit-residual-import-v3.test.ts. What only this suite proves is
   // that it is reachable over the Data API with a real JWT and that
   // `authenticated` actually holds EXECUTE on it -- a missing grant is invisible
   // below PostgREST, which is exactly how this repo once shipped with no Data
   // API grants at all.
-  it("refuses an agent over HTTP", async () => {
-    const { batchId } = await importFile([HEADER, line(newMidKnown())]);
-
-    const { error } = await userClient(fixtures.tokens.owner).rpc(
-      "commit_residual_import",
-      { batch_id_input: batchId },
-    );
-
-    expect(error).not.toBeNull();
-    expect(error?.message).toMatch(/admin only/i);
-  });
-
   // commit_residual_import_v3 is what the commit button calls (phase 8). This
   // proves PostgREST exposes it with the right grant: anon holds no EXECUTE, an
   // agent meets the hand-written guard, and an admin gets the jsonb shape back.
@@ -1103,11 +1091,12 @@ describe("committing over HTTP", () => {
     expect(admin.error).toBeNull();
     expect(admin.data).toEqual({ written: 1, rows: 1, shared: 0, overrides: 0, replaced_lines: 0 });
 
-    // v2 is gone from the Data API (20261030160000).
-    const v2 = await userClient(fixtures.tokens.admin).rpc("commit_residual_import_v2", {
-      batch_id_input: batchId,
-    });
-    expect(v2.error?.code).toBe("PGRST202");
+    // v2 is gone from the Data API (20261030160000), and the old
+    // commit_residual_import(int) since 20261104140000.
+    for (const retired of ["commit_residual_import_v2", "commit_residual_import"]) {
+      const gone = await userClient(fixtures.tokens.admin).rpc(retired, { batch_id_input: batchId });
+      expect(gone.error?.code, retired).toBe("PGRST202");
+    }
   });
 
   it("v3 pays each line at its MERCHANT's rate: 30 pays 30%, the house at 0 still writes its line", async () => {
@@ -1138,12 +1127,10 @@ describe("committing over HTTP", () => {
   it("refuses while a row is still blocked", async () => {
     const { batchId } = await importFile([HEADER, line(newMid())]);
 
-    const { error } = await userClient(fixtures.tokens.admin).rpc(
-      "commit_residual_import",
-      { batch_id_input: batchId },
-    );
+    const { error } = await commitV3(batchId);
 
-    expect(error?.message).toMatch(/blocked/i);
+    expect(error?.code).toBe("PT409");
+    expect(error?.message).toBe("1 of 1 rows are still blocked");
   });
 
   it("commits to the owner; nobody edits the line after (20261102140000); a second file for the month is the replace prompt", async () => {
@@ -1154,22 +1141,21 @@ describe("committing over HTTP", () => {
     // 1. Import and commit a clean file (TSYS, in a month Square is free too).
     const slot = await freeSlot({ processor: PROCESSOR, also: ["Square"] });
     const first = await importFile([HEADER, line(mid, { volume: "1,000.00", residual: "$25.00" })], slot);
-    const { data: imported, error: commitError } = await asAdmin.rpc(
-      "commit_residual_import",
-      { batch_id_input: first.batchId },
-    );
+    const { data: imported, error: commitError } = await commitV3(first.batchId);
     expect(commitError).toBeNull();
-    expect(imported).toBe(1);
+    expect(imported).toMatchObject({ written: 1, rows: 1 });
 
     const row = await ledgerFor(mid, first.period);
     expect(row).toMatchObject({
       agent_id: fixtures.userIds.owner,
       processor: PROCESSOR,
       volume: 1000,
-      // The file's Residual, pre-split; the split is not the parser's to write.
+      // The file's Residual, pre-split, and the MERCHANT's rate (v3; the old
+      // commit_residual_import(int) this test used until phase 13 left the
+      // split for the admin to fill in).
       residual_income: 25,
-      rep_split_pct: null,
-      rep_payout: null,
+      rep_split_pct: 50,
+      rep_payout: 12.5,
     });
 
     // 2. Nobody edits a committed line, an admin included, through PostgREST:
@@ -1218,14 +1204,16 @@ describe("committing over HTTP", () => {
     const { batchId } = await importFile([HEADER, line(newMidKnown())]);
 
     expect(
-      (await asAdmin.rpc("commit_residual_import", { batch_id_input: batchId }))
+      (await asAdmin.rpc("commit_residual_import_v3", { batch_id_input: batchId, confirmed_input: [] }))
         .error,
     ).toBeNull();
 
-    const { error } = await asAdmin.rpc("commit_residual_import", {
+    const { error } = await asAdmin.rpc("commit_residual_import_v3", {
       batch_id_input: batchId,
+      confirmed_input: [],
     });
-    expect(error?.message).toMatch(/already committed/i);
+    expect(error?.code).toBe("PT409");
+    expect(error?.message).toBe("this import is already committed");
   });
 });
 
@@ -1706,10 +1694,10 @@ describe("a shared account, through upload, preview and commit (v3)", () => {
 
     const { data: batch } = await adminClient()
       .from("rep_payout_batches")
-      .select("status, row_count, skipped_rows, confirmed_warnings")
+      .select("status, row_count, confirmed_warnings")
       .eq("id", batchId)
       .single();
-    expect(batch).toEqual({ status: "committed", row_count: 2, skipped_rows: [], confirmed_warnings: {} });
+    expect(batch).toEqual({ status: "committed", row_count: 2, confirmed_warnings: {} });
 
     const { data: lines } = await adminClient()
       .from("rep_payout_rows")
@@ -1789,62 +1777,34 @@ describe("a shared account, through upload, preview and commit (v3)", () => {
     expect(direct.data ?? []).toEqual([]);
   });
 
-  it("will not let an admin's session write the skip record over PATCH", async () => {
+  it("will not let an admin's session write the commit's record over PATCH", async () => {
+    // The batch UPDATE grant is (status) alone (20261016140000). This pinned
+    // the skip record until phase 13 dropped it; the commit's other two
+    // fields are the same grant's business.
     const asAdmin = userClient(fixtures.tokens.admin);
     for (const patch of [
-      { skipped_rows: [{ row_number: 2 }] },
-      { skips_acknowledged_at: new Date().toISOString() },
+      { row_count: 0 },
+      { confirmed_warnings: { bad_numbers: [2] } },
     ]) {
       const { error } = await asAdmin.from("rep_payout_batches").update(patch).eq("id", batchId);
       expect(error?.code, JSON.stringify(patch)).toBe("42501");
     }
     const { data } = await adminClient()
       .from("rep_payout_batches")
-      .select("skipped_rows, skips_acknowledged_at")
+      .select("row_count, confirmed_warnings")
       .eq("id", batchId)
       .single();
-    expect(data).toEqual({ skipped_rows: [], skips_acknowledged_at: null });
+    expect(data).toEqual({ row_count: 2, confirmed_warnings: {} });
   });
 
   it("keeps the batch record from every rep, including the ones it pays", async () => {
     for (const persona of ["owner", "intruder"] as const) {
       const { data } = await userClient(fixtures.tokens[persona])
         .from("rep_payout_batches")
-        .select("skipped_rows")
+        .select("status, confirmed_warnings")
         .eq("id", batchId);
       expect(data ?? [], persona).toEqual([]);
     }
-  });
-
-  it("leaves the acknowledgement nothing to do on a v3 batch: agent and anon refused, the admin told so", async () => {
-    const agent = await userClient(fixtures.tokens.owner).rpc("acknowledge_residual_skips", {
-      batch_id_input: batchId,
-    });
-    expect(agent.error?.message).toMatch(/admin only/i);
-
-    const anon = await anonClient().rpc("acknowledge_residual_skips", { batch_id_input: batchId });
-    expect(anon.error?.code).toBe("42501");
-
-    const admin = await userClient(fixtures.tokens.admin).rpc("acknowledge_residual_skips", {
-      batch_id_input: batchId,
-    });
-    expect(admin.error?.message).toBe("this import skipped no rows");
-  });
-
-  it("the old commit refuses a shared batch with the reworded message", async () => {
-    // A later month the share still covers, under the same processor.
-    expect(later.period > period).toBe(true);
-    const { batchId: other } = await importFile(
-      [HEADER, line(mids.shared, { name: "Live Shared Co" })],
-      { fileName: "live-shared-old.xlsx", ...later },
-    );
-    const { error } = await userClient(fixtures.tokens.admin).rpc("commit_residual_import", {
-      batch_id_input: other,
-    });
-    expect(error?.code).toBe("PT409");
-    expect(error?.message).toBe(
-      "This import contains shared accounts, which this version of the CRM cannot commit. It needs the current version of the app.",
-    );
   });
 });
 

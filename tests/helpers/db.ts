@@ -604,13 +604,13 @@ export const PAYOUT_PERIOD_PRIOR = "2026-06-01";
  * relative to now -- the review batch last month, the committed one the month
  * before -- because a batch month must sit inside the import window
  * (guard_payout_batch_period), which moves; a fixed month would start failing
- * in two years. The STAGED and ledger rows keep PAYOUT_PERIOD, deliberately:
- * the only commit that takes this review batch as seeded is the old
- * commit_residual_import(int), which files a row by its own month and whose
- * tests (tests/rls/commit-residual-import.test.ts) merge into the seeded
- * ledger lines; both go in phase 13. commit_residual_import_v3 refuses a
- * staged row whose month is not its batch's, so every v3 caller stages its
- * own rows at the batch's month with stageForCommit().
+ * in two years. The LEDGER rows keep PAYOUT_PERIOD and PAYOUT_PERIOD_PRIOR,
+ * the fixed months the payout suites read. The review batch's STAGED rows
+ * take the batch's own month wherever the batch has one, as the parser stages
+ * them; until phase 13 they kept PAYOUT_PERIOD for the old
+ * commit_residual_import(int), which filed a row by its own month and is
+ * dropped by 20261104140000. (Its blocked row means no commit takes this batch
+ * as seeded: every v3 caller stages its own rows with stageForCommit().)
  */
 export const SEED_BATCH_PROCESSOR = "TSYS";
 
@@ -895,6 +895,15 @@ export async function seedPayouts(db: TestDb): Promise<PayoutFixtures> {
     await db.exec(
       `update rep_payout_import_rows set blockers = array['unknown_mid']
         where batch_id = ${reviewBatch} and blocker = 'unknown_mid'`,
+    );
+  }
+  // Staged at the batch's month, as the parser stages a row (phase 13; see
+  // SEED_BATCH_PROCESSOR). A database from before the batch month has none.
+  if (hasBatchMonth) {
+    await db.exec(
+      `update rep_payout_import_rows r set period = b.period
+         from rep_payout_batches b
+        where b.id = r.batch_id and r.batch_id = ${reviewBatch}`,
     );
   }
 

@@ -25,15 +25,11 @@ import {
   previewFlagLabel,
   splitPayoutLines,
   reviewImportRows,
-  rowsWritten,
-  skipReasonLabel,
-  skipsOwed,
   summarizeByPeriod,
   warningLabel,
   warningQuestion,
   warningsConfirmed,
   type PayoutImportRow,
-  type SkippedRow,
 } from "@/lib/payouts";
 import {
   RESIDUAL_BLOCKERS,
@@ -390,7 +386,7 @@ describe("reviewImportRows", () => {
 
   it("an advisory note never blocks: the row is still clean and the batch ready", () => {
     const review = reviewImportRows([
-      staged({ preview_flag: "partner_named", preview_note: "skipped" }),
+      staged({ preview_flag: "share_not_in_force", preview_note: "x" }),
       staged({ id: 2, mid_raw: "2", preview_flag: "payee_changed", preview_note: "x" }),
     ]);
     expect(review).toMatchObject({ total: 2, clean: 2, blocked: 0, ready: true });
@@ -608,36 +604,6 @@ describe("importMonths: the upload page's months (memo A11)", () => {
   });
 });
 
-describe("skipped rows on a committed batch (phase 4b)", () => {
-  const skip = (n: number): SkippedRow => ({
-    row_number: n,
-    period: "2026-07-01",
-    mid: `MID-${n}`,
-    agent_number: "5555",
-    reason: "partner_named",
-  });
-
-  it("are owed a review only on a committed, unacknowledged batch that skipped something", () => {
-    const base = { status: "committed" as const, skipped_rows: [skip(2), skip(3)], skips_acknowledged_at: null };
-    expect(skipsOwed(base)).toBe(2);
-    expect(skipsOwed({ ...base, skips_acknowledged_at: "2026-10-16T10:00:00Z" })).toBe(0);
-    expect(skipsOwed({ ...base, skipped_rows: [] })).toBe(0);
-    expect(skipsOwed({ ...base, status: "review" })).toBe(0);
-    expect(skipsOwed({ ...base, status: "abandoned" })).toBe(0);
-  });
-
-  it("written is row_count less the skips, so v2's {written, skipped} survives a reload", () => {
-    expect(rowsWritten({ row_count: 5, skipped_rows: [skip(2), skip(3)] })).toBe(3);
-    expect(rowsWritten({ row_count: 5, skipped_rows: [] })).toBe(5);
-  });
-
-  it("labels v2's two skip reasons and passes an unknown one through", () => {
-    expect(skipReasonLabel("partner_named")).toBe("Names the partner on a shared account");
-    expect(skipReasonLabel("line_not_shared")).toMatch(/not part of the share/);
-    expect(skipReasonLabel("something_new")).toBe("something_new");
-  });
-});
-
 describe("adjustment lines (phase 5)", () => {
   const importLine = (over: Partial<{ volume: number | null; residual_income: number | null; rep_split_pct: number | null; rep_payout: number | null }> = {}) => ({
     line_kind: "import" as const,
@@ -719,7 +685,11 @@ describe("adjustment lines (phase 5)", () => {
     for (const column of ["line_kind", "adjustment_amount", "adjusts_period", "adjustment_note", "rep_payout"]) {
       expect(columns).toContain(column);
     }
-    expect(PAYOUT_BATCH_COLUMNS.split(", ")).toContain("adjustment_rows_ignored");
+    // Not on a batch read: only the retired Line = Adjustment parser wrote a
+    // non-zero count, and the skip record went in 20261104140000.
+    for (const column of ["adjustment_rows_ignored", "skipped_rows", "skips_acknowledged_at"]) {
+      expect(PAYOUT_BATCH_COLUMNS.split(", ")).not.toContain(column);
+    }
   });
 
   it("reads a line's own share key on every payout read, and the partner's figures on none a rep sees", () => {
@@ -742,9 +712,23 @@ describe("adjustment lines (phase 5)", () => {
     expect(isPartnerLine({ share_role: null })).toBe(false);
   });
 
-  it("labels the two phase-5 preview flags", () => {
+  it("labels the two notes the parser writes, and only those", async () => {
     expect(previewFlagLabel("share_not_in_force")).toBe("Share does not cover this month");
-    expect(previewFlagLabel("looks_shared")).toBe("Looks shared, no share set");
+    expect(previewFlagLabel("payee_changed")).toBe("Pays a different rep than last month");
+    // The CHECK (20261104140000) allows exactly these two; a retired flag has
+    // no label left and passes through as its code.
+    const migration = await readFile(
+      new URL("../../supabase/migrations/20261104140000_retire_legacy_import.sql", import.meta.url),
+      "utf8",
+    );
+    const check = /rep_payout_import_rows_preview_flag_check check \(\s*preview_flag in \(([^)]*)\)/.exec(migration);
+    expect(check).not.toBeNull();
+    const codes = [...check![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+    expect(codes).toEqual(["share_not_in_force", "payee_changed"]);
+    for (const code of codes) expect(previewFlagLabel(code)).not.toBe(code);
+    for (const retired of ["share_not_applied", "partner_named", "line_not_shared", "looks_shared"]) {
+      expect(previewFlagLabel(retired)).toBe(retired);
+    }
   });
 });
 

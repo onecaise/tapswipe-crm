@@ -9,7 +9,6 @@ import {
   PAYOUT_BATCH_COLUMNS,
   batchStatusIntent,
   importMonths,
-  skipsOwed,
   type PayoutBatch,
 } from "@/lib/payouts";
 import { loadProcessors } from "@/lib/processors";
@@ -95,23 +94,9 @@ async function ImportBatches() {
                   {formatPeriod(batch.period)}
                 </TableCell>
                 <TableCell>
-                  <div className="flex items-center gap-2">
-                    <StatusBadge intent={batchStatusIntent(batch.status)}>
-                      {batch.status}
-                    </StatusBadge>
-                    {/* Skipped rows (phase 4b): a warning badge while owed a
-                        review, a muted note once reviewed, so the record stays
-                        findable from the list. */}
-                    {skipsOwed(batch) > 0 ? (
-                      <StatusBadge intent="warning">
-                        {skipsOwed(batch)} skipped, not reviewed
-                      </StatusBadge>
-                    ) : batch.skipped_rows.length > 0 ? (
-                      <span className="text-xs text-muted-foreground">
-                        {batch.skipped_rows.length} skipped, reviewed
-                      </span>
-                    ) : null}
-                  </div>
+                  <StatusBadge intent={batchStatusIntent(batch.status)}>
+                    {batch.status}
+                  </StatusBadge>
                 </TableCell>
                 {/* A `review` batch with no rows got as far as being started and
                     then failed to upload or parse. Shown rather than hidden: the

@@ -6,7 +6,7 @@
 //
 // WHY A CHUNK PER CALL RATHER THAN THE WHOLE BATCH, AND WHY NOT AN RPC.
 //
-// commit_residual_import is a security definer RPC that moves a whole batch in
+// commit_residual_import_v3 is a security definer RPC that moves a whole batch in
 // one transaction. That is not available here: each account is a GoTrue write
 // plus a Postgres write, in two different systems, with nothing spanning them.
 // Two hundred accounts is four hundred operations that can stop anywhere, so
