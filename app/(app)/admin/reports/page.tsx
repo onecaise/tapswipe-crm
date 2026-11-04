@@ -20,6 +20,7 @@ import { MerchantProcessorReport } from "@/components/merchant-processor-report"
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { PrintButton } from "@/components/print-button";
+import { ReportExportButton } from "@/components/report-export-button";
 import { ReportFilterBar } from "@/components/report-filters";
 import { RepPayoutReport } from "@/components/rep-payout-report";
 import { StatusBadge } from "@/components/status-badge";
@@ -35,8 +36,8 @@ import { StatusBadge } from "@/components/status-badge";
  *
  * Committed months only, read from the ledger (memo §7.2): never a batch in
  * review, abandoned, replaced or deleted. The figures and totals are the
- * functions' rows; this page formats them. Printing is the export (§7.2: an
- * XLSX download only if asked).
+ * functions' rows; this page formats them. Print, and Export Excel (phase
+ * 12b: the export-report function writes the same functions' rows).
  */
 
 type SearchParams = { report?: string; from?: string; to?: string; processor?: string };
@@ -112,10 +113,12 @@ async function Reports({ searchParams }: { searchParams: Promise<SearchParams> }
   };
 
   let body: React.ReactNode;
+  let hasRows = false;
   if (filters.report === "reps") {
     const { data, error } = await supabase.rpc("rep_payout_summary", args);
     if (error) return <p className="text-sm text-destructive">Could not load the report: {error.message}</p>;
     const rows = (data ?? []) as RepSummaryRow[];
+    hasRows = rows.length > 0;
     const details = rows.length === 0 ? {} : await loadOverrideDetail(supabase, inRange.map((b) => b.id), filters);
     body = rows.length === 0
       ? <EmptySelection range={range} scope={scope} />
@@ -124,6 +127,7 @@ async function Reports({ searchParams }: { searchParams: Promise<SearchParams> }
     const { data, error } = await supabase.rpc("merchant_processor_summary", args);
     if (error) return <p className="text-sm text-destructive">Could not load the report: {error.message}</p>;
     const rows = (data ?? []) as MerchantSummaryRow[];
+    hasRows = rows.length > 0;
     body = rows.length === 0
       ? <EmptySelection range={range} scope={scope} />
       : <MerchantProcessorReport rows={rows} paid={paid} multiMonth={multiMonth} />;
@@ -141,9 +145,12 @@ async function Reports({ searchParams }: { searchParams: Promise<SearchParams> }
       <ReportFilterBar filters={filters} months={months} processors={processors} />
 
       <div className="flex flex-col gap-2">
-        <h2 className="text-lg font-semibold" data-testid="report-heading">
-          {REPORT_TABS.find((t) => t.value === filters.report)!.label} · {range} · {scope}
-        </h2>
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <h2 className="text-lg font-semibold" data-testid="report-heading">
+            {REPORT_TABS.find((t) => t.value === filters.report)!.label} · {range} · {scope}
+          </h2>
+          {hasRows && <ReportExportButton filters={filters} />}
+        </div>
         {inRange.length > 0 && (
           <ul className="flex flex-wrap gap-2 text-xs" aria-label="Paid state of each processor-month" data-testid="report-paid-states">
             {inRange.map((b) => {

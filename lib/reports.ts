@@ -1,5 +1,6 @@
 import { periodParam } from "@/lib/format";
 import { parsePeriodParam } from "@/lib/payouts";
+import { REPORT_TITLES, type ReportKind } from "@/supabase/functions/_shared/report-sheets";
 
 /**
  * The two admin reports at /admin/reports (phase 12 of
@@ -10,48 +11,24 @@ import { parsePeriodParam } from "@/lib/payouts";
  * which read the committed ledger only and sum its own generated rep_payout.
  * Nothing here adds money up: the totals rows are the functions' own
  * GROUPING SETS rows, so the page cannot disagree with a statement. This file
- * holds the row types and the URL's filters, nothing else.
+ * holds the URL's filters; the row types, the column lists and the Excel
+ * sheet are in supabase/functions/_shared/report-sheets.ts (phase 12b), so the
+ * page and the export-report download read one list of columns.
  */
 
-export type ReportKind = "reps" | "merchants";
-
+export {
+  DEDUCTIONS_HEADER,
+  MERCHANT_FIGURES,
+  REP_FIGURES,
+  reportFileName,
+  type MerchantSummaryRow,
+  type RepSummaryRow,
+  type ReportKind,
+} from "@/supabase/functions/_shared/report-sheets";
 export const REPORT_TABS = [
-  { value: "reps", label: "Rep payout summary" },
-  { value: "merchants", label: "Merchants by processor" },
+  { value: "reps", label: REPORT_TITLES.reps },
+  { value: "merchants", label: REPORT_TITLES.merchants },
 ] as const satisfies readonly { value: ReportKind; label: string }[];
-
-/** Report 1, one row: a rep in a month ('rep'), a month's total, or the grand total. */
-export type RepSummaryRow = {
-  row_kind: "rep" | "month" | "total";
-  period: string | null;
-  agent_id: string | null;
-  agent_code: string | null;
-  legal_name: string | null;
-  full_name: string | null;
-  sales_volume: number;
-  net_residual: number;
-  agent_split: number;
-  deductions: number;
-  overrides_received: number;
-  total_commission: number;
-};
-
-/** Report 2, one row: a MID in a processor-month, a processor-month subtotal, or the grand total. */
-export type MerchantSummaryRow = {
-  row_kind: "merchant" | "processor" | "total";
-  period: string | null;
-  processor: string | null;
-  merchant_id: number | null;
-  mid: string | null;
-  merchant_name: string | null;
-  owner_id: string | null;
-  owner_code: string | null;
-  owner_name: string | null;
-  volume: number;
-  residual: number;
-  rep_side: number;
-  company_share: number;
-};
 
 /**
  * One override line behind Report 1's plus (memo §4.5's detail row), for
@@ -70,12 +47,6 @@ export type OverrideDetail = {
 
 /** The detail map's key: one rep in one month. */
 export const detailKey = (agentId: string, period: string) => `${agentId}|${period}`;
-
-/**
- * The column header for deductions, word for word from Owen's answer (§0c.1):
- * a reader must not take the column as part of the total.
- */
-export const DEDUCTIONS_HEADER = "Deductions (info only, not in total)";
 
 export type ReportFilters = {
   report: ReportKind;

@@ -2210,6 +2210,7 @@ Where the memo was silent or said otherwise, and what was chosen (the conservati
   zero rows for the rest.
 - **No CSV or XLSX export.** §7.2 says printing covers the first need and an XLSX download is
   built only if asked; the page has Print and a print layout (the table, no filters or toggles).
+  (Asked for since: phase 12b below.)
 - **The plus (§4.5's detail row)** lists each override line of the rep in the selection's
   committed batches: a debit with percent, merchant, MID and recipient; a credit with percent,
   merchant, MID and the rep(s) it came from. Display only, read in the page; nothing in it is
@@ -2236,6 +2237,72 @@ Found while building:
   failed at runtime, not at type-check); `detailKey` lives in `lib/reports.ts`.
 - Playwright's Desktop Chrome viewport is 1280px wide, exactly the `xl` boundary, so the e2e
   sees the table at desktop and the cards at 360px.
+
+### Phase 12b: Excel export of the reports (4 Nov 2026, branch `intake-residuals`)
+
+Asked for, so §7.2's "XLSX download only if asked" is now built, as §7.2 recommends: a new
+caller-scoped Edge Function. No migration; no new dependency (SheetJS stays the pinned 0.20.3).
+
+Built:
+- **`export-report`** (the thirteenth function, `verify_jwt = false`): `withSupabase` (401) →
+  `callerIsActive` → `callerIsAdmin` (403 "Admin only", before the body is read) → the selection
+  `{report, from, to, processor}` (400; an unknown processor is refused, as the page refuses it) →
+  the same SQL function with the same three arguments the page passes, plus the covered
+  processor-months' paid state, all through the **caller-scoped** client → 404 for an empty
+  selection → one `audit_log` row → the file.
+- **`_shared/report-sheets.ts`**, dependency-free: the row types, the two column lists (the
+  components now render from them, through `lib/reports.ts`), the file name, and the sheet. It writes
+  the functions' rows as they came back, totals rows included, and adds nothing.
+- **"Export Excel"** next to the report heading, only when the selection has rows; it downloads
+  `residual-report-{1|2}-{2026-07 | 2026-06-to-2026-07}-{all-processors | processor slug}.xlsx`.
+- Tests: `tests/unit/report-sheets.test.ts` (16), `tests/live/report-export.test.ts` (6),
+  e2e `admin-reports-export.spec.ts` (4). Mutation-checked: the quote prefix (2 unit tests fail),
+  text typing (4), recomputed totals (1), the function's admin check (the live rep test fails: the
+  rep gets the SQL's own refusal as a 500 instead of a 403), and the audit write (1). Each e2e test
+  failed under a revert of what it protects: the button removed (Report 1 and Report 2, each run
+  alone), the has-rows guard removed (the empty selection), the function's admin check removed (the
+  rep), and the file's figure columns reversed against the page's (Report 1).
+- Suites: `npm test` 2909 → 2925 (121 → 122 files), `test:live` 347 → 353, the two named e2e specs
+  17 passed (6 setup + 7 + 4). The full e2e suite was not run; its baseline 379 → 383 is the
+  arithmetic, not a run.
+
+Where the memo was silent, and what was chosen (the conservative side each time):
+- **An Edge Function, not a route handler**, because `export-residuals` is one, §7.2 names one, and
+  the audit row is a write no client role holds: the function has `supabaseAdmin` for it, the Next
+  app holds no service key, and a route handler would have needed a new definer RPC (a migration).
+- **An audit row**, though `export-residuals` writes none: `action = 'export_report'`,
+  `table_name` = the SQL function's name, `row_id` = `from..to processor` (`audit_log` has no
+  detail column). After the reads, before the response, **failing closed**: no row, no file.
+- **A rep, a deactivated account, no session or a bad token** get what every admin-only function
+  gives: 403 or 401, with no file and no audit row. The page itself still redirects a rep.
+- **Formula injection: typed string AND a leading `'`.** Every text cell is `t: "s"` with no
+  formula; text whose first character is `= + - @`, tab or CR is also prefixed with a single quote.
+  The string type alone stops evaluation on open, but Excel re-parses the cell as a formula when it is
+  edited, and a copy to CSV carries it raw; SheetJS CE cannot write the hidden `quotePrefix`, so the
+  quote is visible in such a cell. Applied to every text cell, header block included.
+- **Money cells** use `"$"#,##0.00;-"$"#,##0.00`: a minus sign, no red, as the page writes it. A
+  figure that is not a finite number aborts the export rather than writing NaN. A null is a blank
+  cell, and so is a missing name (the page prints a dash).
+- **Report 2's columns are split** where the page stacks two values in one cell: Merchant, MID,
+  Owner code, Owner name, so the MID and the owner's code are text columns of their own (the
+  instruction's "MID and agent code columns"). Otherwise both reports keep the page's columns in the
+  page's order, Report 1's month heading rows over a range, its month totals and grand total, and
+  Report 2's subtotal per processor-month (its paid state in the label) and grand total.
+- **Months are text** (`2026-07`), in the header block, the month rows and the totals labels; the
+  page's "July 2026" is not copied.
+- **The header block** holds the report name, months, processor, each covered processor-month's
+  paid state (as the page's list shows) and "Committed months only". The sheet is named after the
+  report; the selection is in the header block and the file name.
+- **Not exported:** the override detail behind Report 1's plus (collapsed on the page, display
+  only), and an empty selection (no button; the function answers 404).
+- **`Cache-Control: no-store`** on the file, and `application/octet-stream` for supabase-js's Blob
+  branch (`export-residuals` explains why the spreadsheet type corrupts the download).
+
+Not verified: an actually expired session against the function (the local stack signs ES256 and
+the private key is not reachable; a legacy-HS256 token is refused outright, so it cannot stand in);
+the withSupabase expiry check is trusted, and the forged-signature and no-session cases are tested.
+The file was opened only by SheetJS, not in Excel, LibreOffice or Google Sheets, so how each one
+shows the quoted cells and the number format was not looked at. Nothing was deployed.
 
 ---
 

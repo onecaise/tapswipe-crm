@@ -5,7 +5,7 @@ import { MinusIcon, PlusIcon } from "lucide-react";
 
 import { EMPTY, formatMoney, formatPeriod, formatText } from "@/lib/format";
 import {
-  DEDUCTIONS_HEADER,
+  REP_FIGURES as FIGURES,
   detailKey,
   type OverrideDetail,
   type RepSummaryRow,
@@ -57,15 +57,6 @@ function DetailList({ lines, testId }: { lines: readonly OverrideDetail[]; testI
     </ul>
   );
 }
-
-const FIGURES = [
-  ["sales_volume", "Sales volume"],
-  ["net_residual", "Net residual"],
-  ["agent_split", "Agent split"],
-  ["deductions", DEDUCTIONS_HEADER],
-  ["overrides_received", "Override received"],
-  ["total_commission", "Total agent commission"],
-] as const;
 
 function totalLabel(row: RepSummaryRow): string {
   return row.row_kind === "month" ? `${formatPeriod(row.period)} total` : "Total";

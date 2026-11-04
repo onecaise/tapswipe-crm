@@ -528,6 +528,16 @@ verify_jwt = false
 import_map = "./functions/export-residuals/deno.json"
 entrypoint = "./functions/export-residuals/index.ts"
 
+# The two /admin/reports reports as an .xlsx (phase 12b). ADMIN-ONLY, unlike
+# export-residuals: refused before anything is read. The reads are still
+# caller-scoped (both SQL functions are invoker and is_admin() first); the
+# service role writes only the audit_log row, which fails closed.
+[functions.export-report]
+enabled = true
+verify_jwt = false
+import_map = "./functions/export-report/deno.json"
+entrypoint = "./functions/export-report/index.ts"
+
 [functions.stage-user-import]
 enabled = true
 verify_jwt = false

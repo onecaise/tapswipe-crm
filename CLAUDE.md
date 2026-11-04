@@ -22,7 +22,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **A new table needs RLS *and* explicit grants** (the four-step checklist below); **a new function needs `revoke all … from public` + `grant execute … to authenticated, service_role`** in the same migration. Never grant `anon` anything. **Do not rely on `ensure_rls`.** → below.
 - **The four `*_secrets` tables: zero policies, zero grants, Edge Function only** — including the agent's first submission. Never add a policy or a grant. → "Three tiers" below.
 - **`security invoker` is the default for RPCs.** `definer` only when the function must reach what the caller may not, and then it owes a hand-written guard first (`is_admin()` / `is_active_agent()`) plus `set search_path`. `search_crm`, `dashboard_counts` and the two report functions must stay invoker (tests assert `prosecdef` false). → `docs/claude/rpcs-profiles-audit.md`.
-- **`/admin/reports` reads only the committed ledger** via the invoker `rep_payout_summary()` / `merchant_processor_summary()` (`is_admin()` first): the ledger's `rep_payout` and each line's `rep_split_pct`, never `profiles.split_rate_pct`. Total = split + overrides received; deductions never in it. → `docs/claude/payouts-and-teardown.md`.
+- **`/admin/reports` reads only the committed ledger** via the invoker `rep_payout_summary()` / `merchant_processor_summary()` (`is_admin()` first): the ledger's `rep_payout` and each line's `rep_split_pct`, never `profiles.split_rate_pct`. Total = split + overrides received; deductions never in it. Export Excel is `export-report`: admin-only, audited (fails closed), those rows as given, user text quoted against formulas. → `docs/claude/payouts-and-teardown.md`.
 - **The cross-book definer functions return redacted shapes, built with `jsonb_build_object` so hidden fields are ABSENT, not null**: `check_duplicates()` (warns only — **must never become a block**), `accounts_in_city()` (equality on `norm_city()` only; never a prefix/autocomplete for non-admins), `my_share_partners()` (party-only for every caller; a rep never sees the partner's share, rate or payout, and gets no access to the partner's merchant), `my_override_recipients()` (the caller's own debits only; the recipient gets the merchant's name as text, never the merchant). → `docs/claude/rpcs-profiles-audit.md`.
 - **`profiles` has no client write path**: new columns are set only by a `security definer` RPC with `is_admin()` first (`set_user_role`, `set_agent_number`, `set_territory`, `set_manager`, `set_rep_identity`, `set_rep_split`). **`territory`, `manager_id`, `legal_name`, `llc_legal_name` and `split_rate_pct` must never appear in a policy**; `role` stays `'agent' | 'admin'`; manager graph is one hop. → `docs/claude/rpcs-profiles-audit.md`.
 - **`log_cross_agent_change()` fails closed on purpose** — never wrap its audit insert in an exception handler. A new table must have **every verb** audited somewhere. `audit_log` has no insert policy and `authenticated` holds `select` only. → `docs/claude/rpcs-profiles-audit.md`.
@@ -34,7 +34,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 
 **Edge Functions, Storage and the app**
 
-- **All twelve functions are `verify_jwt = false`, so each authenticates itself in a fixed order**: `withSupabase` → `callerIsActive` on the caller-scoped client → authorization through RLS → only then `supabaseAdmin`. Return **404, never 403**, for "not yours". → "Edge Function authentication" below.
+- **All thirteen functions are `verify_jwt = false`, so each authenticates itself in a fixed order**: `withSupabase` → `callerIsActive` on the caller-scoped client → authorization through RLS → only then `supabaseAdmin`. Return **404, never 403**, for "not yours". → "Edge Function authentication" below.
 - **`export-residuals` must never use `supabaseAdmin`** — RLS is its whole authorization. → Edge Functions table below.
 - **Bulk provisioning never hands out a credential**: `provision-user-batch` discards the temporary password unread. **Deactivation is two layers** (ban in GoTrue first, then `profiles.is_active`). `create-user` must delete the `auth.users` row if the `profiles` insert fails. → `docs/claude/user-accounts.md`, "Three tiers" below.
 - **Inline signed URLs are allow-listed by type** (PDF, plain text, three raster images; **never SVG**); everything else is forced to attachment. → `docs/claude/reference-data-and-marketing.md`.
@@ -85,7 +85,7 @@ Postgres grants `EXECUTE` to `PUBLIC` on every new function, and `PUBLIC` includ
 
 ### Edge Function authentication
 
-**All twelve are `verify_jwt = false` in `config.toml`** — verified, every one of the twelve `[functions.*]` blocks sets it. The platform therefore performs **no** auth check before your handler runs, so **each function is responsible for authenticating the caller itself**. `functions deploy` carries this setting up with the code, so it holds in production too.
+**Every `[functions.*]` block in `config.toml` sets `verify_jwt = false`.** The platform performs **no** auth check first, so **each function authenticates the caller itself**; `functions deploy` carries the setting, so prod is the same.
 
 Every one of them follows the same shape, and the order matters:
 
@@ -104,7 +104,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 
 - **Built:** every CRM route under `app/(app)/`, the `lib/*` data-access helpers, notes/tasks panels, the Document Center (a company library, not per-record), Proposals at `/proposals`, and the payout Reports at `/admin/reports`. Full route and helper inventory → `docs/claude/project-state.md`.
 - **Not built yet:** My Submissions.
-- **Still starter-kit template:** `README.md` only. Edge Functions: twelve in the repo. Details of both → `docs/claude/project-state.md`.
+- **Still starter-kit template:** `README.md` only. Edge Functions: thirteen in the repo. Details of both → `docs/claude/project-state.md`.
 
 **`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Seventy-seven migrations exist; `20260804201300_initial_schema.sql` is the first.
 
@@ -118,7 +118,7 @@ Stack: Next.js 16 (App Router, React 19), Supabase (Postgres + Auth + Storage + 
 
 **As of 13 Oct 2026 the repo's functions and prod's are different sets** — which ones, and how a prod deploy is verified (401 from the function vs 404 for a missing slug): `docs/claude/project-state.md`.
 
-So `supabase db push`, `functions deploy` and `migration list --linked` target **dev**; `npm run test:deployed` is the exception — it reads `.env.deployed.local` and checks **every** project named there, dev and prod both, so it is the one command whose target does not depend on the link at all. Wording below that says "production" of the linked project means "the hosted project" and is loose — **dev is what those commands hit, and that looseness is exactly what went wrong once.**
+So `supabase db push`, `functions deploy` and `migration list --linked` target **dev**; `npm run test:deployed` is the exception — it reads `.env.deployed.local` and checks **every** project named there, dev and prod both, so it is the one command whose target does not depend on the link at all. Where this file says "production" of the linked project it means the hosted project — **dev is what those commands hit.**
 
 **Reaching prod is not one answer, and `--project-ref` is not it.** That flag exists on `functions deploy` — which is how the 4 Sep prod deploys were done, and for functions it genuinely is the form no one else's relink can invalidate. It does **not** exist on the migration commands. Verified 16 Sep 2026: `supabase db push --help` lists only `--linked`, `--local` and `--db-url` for targeting, and `migration list --project-ref …` fails outright with `UnrecognizedOption`. So for anything schema-related there are exactly two routes to prod, and both cost something:
 
@@ -152,7 +152,7 @@ npm run functions:deploy  # guard, then functions deploy
 ALLOW_PROD_SUPABASE=1 npm run db:push   # act on prod on purpose
 ```
 
-The guard reads `supabase/.temp/linked-project.json`, so it reports what the CLI will *actually* do rather than what any doc claims. Raw `npx supabase …` still bypasses it — prefer the npm scripts for anything aimed at the linked project, and pin `--project-ref` when you mean prod **on a command that has that flag** (`functions deploy` does; `db push` and `migration list` do not — see above for what to use instead). Dev is also frequently `INACTIVE` (paused), in which case `migration list` fails with a connection timeout and `functions deploy` bundles fine but then 404s with `Cannot retrieve service for project … status 'INACTIVE'`; restoring it is a dashboard action, with no CLI equivalent under `supabase projects`.
+The guard reads `supabase/.temp/linked-project.json`, so it reports what the CLI will *actually* do rather than what any doc claims. Raw `npx supabase …` still bypasses it — prefer the npm scripts for anything aimed at the linked project, and pin `--project-ref` when you mean prod **on a command that has that flag** (`functions deploy` does; `db push` and `migration list` do not — see above for what to use instead). Dev is often `INACTIVE` (paused): `migration list` times out and `functions deploy` 404s with `status 'INACTIVE'`; restore it in the dashboard (no CLI equivalent).
 
 **Never run `supabase projects api-keys`.** It prints the project's service-role key to stdout, and stdout is a transcript — a terminal scrollback, a CI log, an agent session — that outlives the command. `scripts/load-hardware-catalog.mjs` is the one caller, and it captures the output and never prints it; anything you type by hand has no such guarantee.
 
@@ -166,10 +166,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2909 tests, 121 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (347 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (2925 tests, 122 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (353 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (379 tests, 6 of them the shared setup)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (383 tests, 6 of them the shared setup)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -223,7 +223,7 @@ A feature isn't done when it compiles — it's done when it's verified and commi
 
 ### Edge Functions
 
-Twelve functions, all registered in `supabase/config.toml` (a function not listed there won't deploy or serve):
+Thirteen functions, all registered in `supabase/config.toml` (unlisted ones won't deploy or serve):
 
 | Function | Purpose |
 | --- | --- |
@@ -231,7 +231,8 @@ Twelve functions, all registered in `supabase/config.toml` (a function not liste
 | `submit-pre-app-secrets`, `read-pre-app-secrets` | encrypt/decrypt the four secrets tables |
 | `residual-import-file-url` | admin-only; two modes — `{file_name, processor, period}` creates a `rep_payout_batches` row (both required, the month in the window) and signs an upload into `residual-imports`, or, for a committed processor-month, answers `{exists}` and creates nothing; `replace_batch_id` (the prompt's Yes) creates a replacing batch, 409 once paid; `{batch_id}` signs a download of the stored file |
 | `parse-residual-import` | admin-only; reads a batch's six-column XLSX (Merchant Number as text) and stages each row for the owner of the merchant its MID names, with every refusal (`blockers`), the three `warnings` and advisory notes (`preview_flag`). **Idempotent** — clears the batch's staging rows first, so "add the merchant, then Read again" is one code path |
-| `export-residuals` | **not admin-only, deliberately.** Reads every row through the *caller-scoped* client, so RLS is the whole authorization and a rep's export is their own book; `supabaseAdmin` anywhere in it, even to join names, would make it the company's. Paginates with `.range()`, or PostgREST's `max_rows` exports a silent prefix. Not an import format since phase 7 |
+| `export-residuals` | **not admin-only, deliberately.** Reads through the *caller-scoped* client, so RLS is the whole authorization and a rep's export is their own book; `supabaseAdmin` anywhere in it would make it the company's. Paginates with `.range()` (or `max_rows` exports a silent prefix). Not an import format |
+| `export-report` | admin-only; one `/admin/reports` report as .xlsx from the SQL functions' rows, caller-scoped; `supabaseAdmin` only for its audit row |
 | `stage-user-import` | admin-only; parses a rep CSV into `user_import_rows`, creating the batch on the way. One function where residuals needs two, because the text arrives in the request body rather than via Storage. **Idempotent** — clears the batch's rows first, so "fix something, then read again" is one code path run twice. Two modes: `source_text` starts an import, `batch_id` re-reads the text already stored on the batch |
 | `provision-user-batch` | admin-only; creates the accounts for a staged import, **a bounded chunk per call**. Calls the same `provisionUser` core as `create-user` and **discards the temporary password unread**. See the bulk-import section below for why the loop lives in the browser |
 | `marketing-material-file-url` | the one function whose two modes have **different authorization**: an admin stocks the library (upload), every active user reads it (download). Detail: `docs/claude/reference-data-and-marketing.md` |

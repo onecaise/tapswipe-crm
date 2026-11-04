@@ -1,7 +1,7 @@
 import { Fragment } from "react";
 
 import { EMPTY, formatMoney, formatPeriod, formatText } from "@/lib/format";
-import type { MerchantSummaryRow } from "@/lib/reports";
+import { MERCHANT_FIGURES as FIGURES, type MerchantSummaryRow } from "@/lib/reports";
 import { StatusBadge } from "@/components/status-badge";
 import {
   Table,
@@ -24,13 +24,6 @@ import {
  * A table from `xl` up and on paper; one card per merchant below it, so at
  * 360px every amount is on screen.
  */
-
-const FIGURES = [
-  ["volume", "Volume"],
-  ["residual", "Residual"],
-  ["rep_side", "Rep side"],
-  ["company_share", "Company share"],
-] as const;
 
 type Group = { period: string; processor: string | null; lines: MerchantSummaryRow[]; subtotal?: MerchantSummaryRow };
 
