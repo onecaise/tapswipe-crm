@@ -928,7 +928,7 @@ beforeAll(async () => {
 });
 
 describe("the three warnings are stored per row, once per type, and block nothing", () => {
-  it("processor mismatch (file or merchant), inactive merchant, bad numbers; A6, A25 and A26 silent", async () => {
+  it("processor mismatch (file or merchant), inactive merchant, bad numbers; A6, A25, A26 and zero volume silent", async () => {
     const mids = {
       fileSays: newMid(),
       merchantSays: newMid(),
@@ -938,6 +938,7 @@ describe("the three warnings are stored per row, once per type, and block nothin
       zeroVolume: newMid(),
       overVolume: newMid(),
       clawback: newMid(),
+      negativeVolume: newMid(),
     };
     await merchantFor("owner", mids.fileSays, { processor: PROCESSOR });
     await merchantFor("owner", mids.merchantSays, { processor: "Square" });
@@ -947,6 +948,7 @@ describe("the three warnings are stored per row, once per type, and block nothin
     await merchantFor("owner", mids.zeroVolume);
     await merchantFor("owner", mids.overVolume);
     await merchantFor("owner", mids.clawback);
+    await merchantFor("owner", mids.negativeVolume);
 
     const { batchId, parse } = await importFile([
       HEADER,
@@ -958,11 +960,12 @@ describe("the three warnings are stored per row, once per type, and block nothin
       line(mids.zeroVolume, { volume: "$0.00", residual: "$1.50" }),
       line(mids.overVolume, { volume: "100", residual: "100.01" }),
       line(mids.clawback, { volume: "$500.00", residual: "-$11.76" }),
+      line(mids.negativeVolume, { volume: "-$500.00", residual: "-$11.76" }),
     ], { processor: PROCESSOR });
 
     expect(parse.status, parse.raw).toBe(200);
     expect(parse.body).toMatchObject({
-      row_count: 8,
+      row_count: 9,
       blocked_count: 0,
       warning_counts: { processor_mismatch: 2, inactive_merchant: 1, bad_numbers: 2 },
     });
@@ -976,10 +979,13 @@ describe("the three warnings are stored per row, once per type, and block nothin
       [mids.inactive, ["inactive_merchant"]],
       // 'other' is not inactive (A26).
       [mids.other, []],
-      [mids.zeroVolume, ["bad_numbers"]],
+      // A zero-volume row is not a bad number, whatever its residual (20261104120000).
+      [mids.zeroVolume, []],
       [mids.overVolume, ["bad_numbers"]],
       // A clawback on a positive volume is not a bad number (A25).
       [mids.clawback, []],
+      // A negative volume (a refund month) still is.
+      [mids.negativeVolume, ["bad_numbers"]],
     ]);
 
     // THE PARSER AND v3 AGREE (memo §2.4): with nothing confirmed, v3 refuses,
@@ -997,14 +1003,14 @@ describe("the three warnings are stored per row, once per type, and block nothin
     // merchant's rate (50 here), and keeps what was confirmed.
     const { data, error } = await commitV3(batchId, stored);
     expect(error, error?.message).toBeNull();
-    expect(data).toEqual({ written: 8, rows: 8, shared: 0, overrides: 0, replaced_lines: 0 });
+    expect(data).toEqual({ written: 9, rows: 9, shared: 0, overrides: 0, replaced_lines: 0 });
     const { data: batch } = await adminClient()
       .from("rep_payout_batches")
       .select("confirmed_warnings")
       .eq("id", batchId)
       .single();
     expect(batch?.confirmed_warnings).toEqual({
-      bad_numbers: [7, 8],
+      bad_numbers: [8, 10],
       inactive_merchant: [5],
       processor_mismatch: [2, 3],
     });

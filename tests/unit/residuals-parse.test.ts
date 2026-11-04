@@ -505,7 +505,7 @@ describe("parseResidualSheet", () => {
     expect(rows[1].blockers).toEqual(["duplicate_mid", "wrong_income_type", "missing_figure"]);
   });
 
-  it("does not block a negative residual or a zero volume: those are warnings", () => {
+  it("does not block a negative residual, a zero volume or a negative volume (at most a warning)", () => {
     const rows = parsed([HEADER, row({ 4: "$0.00", 5: "-$11.76" }), row({ 1: "2", 4: "-5", 5: "1" })]);
     expect(rows.map((r) => r.blockers)).toEqual([[], []]);
   });
@@ -581,12 +581,21 @@ describe("rowWarnings", () => {
     expect(rowWarnings({ ...base, merchant: { status: "other", processor: null } })).toEqual([]);
   });
 
-  it("bad_numbers: volume zero or less, or residual over volume", () => {
-    expect(rowWarnings({ ...base, volume: 0, residual: 1.5 })).toEqual(["bad_numbers"]);
-    expect(rowWarnings({ ...base, volume: 0, residual: -1.5 })).toEqual(["bad_numbers"]);
+  it("bad_numbers: a negative volume, or residual over a positive volume", () => {
     expect(rowWarnings({ ...base, volume: -10, residual: 1 })).toEqual(["bad_numbers"]);
+    expect(rowWarnings({ ...base, volume: -500, residual: -11.76 })).toEqual(["bad_numbers"]);
     expect(rowWarnings({ ...base, volume: 100, residual: 100.01 })).toEqual(["bad_numbers"]);
     expect(rowWarnings({ ...base, volume: 100, residual: 100 })).toEqual([]);
+  });
+
+  it("a zero-volume row raises no warning, whatever its residual (20261104120000)", () => {
+    expect(rowWarnings({ ...base, volume: 0, residual: -11.76 })).toEqual([]); // chargeback, closing fee
+    expect(rowWarnings({ ...base, volume: 0, residual: 0 })).toEqual([]);
+    expect(rowWarnings({ ...base, volume: 0, residual: 25 })).toEqual([]); // monthly fee, no sales
+  });
+
+  it("a positive volume with a zero residual raises no warning", () => {
+    expect(rowWarnings({ ...base, volume: 1000, residual: 0 })).toEqual([]);
   });
 
   it("a clawback (negative residual on a positive volume) imports with no warning (A25)", () => {
@@ -603,7 +612,7 @@ describe("rowWarnings", () => {
         fileProcessor: "Square",
         batchProcessor: "TSYS",
         merchant: { status: "inactive", processor: "TSYS" },
-        volume: 0,
+        volume: -5,
         residual: 0,
       }),
     ).toEqual(["processor_mismatch", "inactive_merchant", "bad_numbers"]);

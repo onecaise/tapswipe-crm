@@ -57,12 +57,12 @@ test("commits a clean batch and lands on its commit result", async ({ page }) =>
 });
 
 test("a Yes on the review screen is what lets the commit through", async ({ page }) => {
-  // The first row is a zero-volume fee line: the bad_numbers warning.
+  // The first row is a negative-volume refund month: the bad_numbers warning.
   const batchId = await createCommittableBatch("2027-09", 2, { badNumbers: true });
   await page.goto(`/payouts/import/${batchId}`);
 
   const block = page.getByRole("group", {
-    name: "Volume is zero or less, or the residual is more than the volume",
+    name: "Volume is negative, or the residual is more than the volume",
   });
   await expect(block).toContainText("Row 2");
   // No commit until the type is answered.

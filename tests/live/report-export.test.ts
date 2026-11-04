@@ -135,7 +135,9 @@ beforeAll(async () => {
   const lines = (scale: number) => [
     { merchantId: plain, mid: MIDS.plain, name: HOSTILE_NAME, owner, volume: 40000 * scale, residual: 200 * scale },
     { merchantId: shared, mid: MIDS.shared, name: "Live Export Shared", owner, volume: 50000, residual: 1234.56 * scale },
-    { merchantId: clawback, mid: MIDS.clawback, name: "Live Export Clawback", owner, volume: 5000, residual: -11.76 },
+    // A clawback on a ZERO-volume line, committed with nothing confirmed: the
+    // regression check for 20261104120000 (zero volume is not a bad number).
+    { merchantId: clawback, mid: MIDS.clawback, name: "Live Export Clawback", owner, volume: 0, residual: -11.76 },
     { merchantId: house, mid: MIDS.house, name: "Live Export House", owner: intruder, volume: 20000, residual: 500.01 },
   ];
   await commitMonth(first, lines(1));

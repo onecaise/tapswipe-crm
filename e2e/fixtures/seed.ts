@@ -2448,8 +2448,8 @@ async function fixtureMerchant(
  * rows, each on its own merchant (owned by the e2e agent, rate 50), staged at
  * the batch's month as parse-residual-import leaves them. `label` names the
  * file (one per spec, so reruns clear their own). `badNumbers` makes the first
- * row a zero-volume fee line, the bad_numbers warning the review screen asks
- * about once.
+ * row a negative-volume refund month, the bad_numbers warning the review screen
+ * asks about once (a zero-volume line raises none since 20261104120000).
  *
  * Returned rather than created in a fixture, because a commit is destructive to
  * its own batch: each commit spec needs its own, and reusing one would make the
@@ -2508,7 +2508,7 @@ export async function createCommittableBatch(
       period: slot.period,
       agent_id: agentId,
       merchant_id: merchantId,
-      volume: fee ? 0 : 1000 * (i + 1),
+      volume: fee ? -500 : 1000 * (i + 1),
       residual_income: fee ? -4.95 : 200 * (i + 1),
       warnings: fee ? ["bad_numbers"] : [],
     });

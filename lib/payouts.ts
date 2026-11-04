@@ -378,7 +378,7 @@ export function blockerLabel(blocker: string): string {
 const WARNING_LABELS: Record<PayoutWarning, string> = {
   processor_mismatch: "Processor does not match",
   inactive_merchant: "Merchant is inactive",
-  bad_numbers: "Volume is zero or less, or the residual is more than the volume",
+  bad_numbers: "Volume is negative, or the residual is more than the volume",
 };
 
 /** Warning types as the question the review screen asks, once per import. */

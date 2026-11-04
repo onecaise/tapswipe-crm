@@ -662,11 +662,15 @@ export function sameProcessor(a: string | null, b: string | null): boolean {
  *                       processor is not a mismatch (A6). Confirming never
  *                       changes the merchant's processor.
  *   inactive_merchant   merchants.status = 'inactive'; 'other' is not (A26).
- *   bad_numbers         volume <= 0, or residual > volume. A negative residual
- *                       on a positive volume is a clawback, not a bad number
- *                       (A25), and imports with no warning; a zero-volume row
- *                       is common (fees, clawbacks), which is why one "yes" per
- *                       import covers every such row (§0b.3).
+ *   bad_numbers         volume < 0, or volume > 0 and residual > volume. A
+ *                       negative residual on a positive volume is a clawback,
+ *                       not a bad number (A25), and imports with no warning.
+ *                       A ZERO-volume row imports with no warning whatever its
+ *                       residual (fees, chargebacks, closing fees on a closed
+ *                       merchant; 20261104120000): they are on most files,
+ *                       and the yes is one per type (§0b.3), so counting them
+ *                       made the admin's routine yes also pass the rows this
+ *                       warning is for.
  *
  * A figure that is blank or unreadable is a blocker, not a bad number, so
  * bad_numbers needs both figures read.
@@ -690,7 +694,7 @@ export function rowWarnings(input: {
   if (
     input.volume !== null &&
     input.residual !== null &&
-    (input.volume <= 0 || input.residual > input.volume)
+    (input.volume < 0 || (input.volume > 0 && input.residual > input.volume))
   ) {
     warnings.push("bad_numbers");
   }

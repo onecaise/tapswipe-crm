@@ -492,7 +492,8 @@ describe("replace (commit_residual_import_v3 on a replacement batch)", () => {
   it("still re-derives every refusal and warning: an unconfirmed warning refuses the replace and changes nothing", async () => {
     const old = await committed();
     const next = await replacement(old.id, [{ mid: "MID-AGENT-1", residual: "-3.00" }]);
-    await db.exec(`update rep_payout_import_rows set volume = 0 where batch_id = ${next}`);
+    // A negative volume: a bad number (zero volume is not one since 20261104120000).
+    await db.exec(`update rep_payout_import_rows set volume = -5 where batch_id = ${next}`);
     const error = await attempt(() => commitV3(db, next));
     expect(error?.message).toMatch(/^These warnings were not confirmed: bad numbers/);
     expect(await batchState(old.id)).toMatchObject({ status: "committed" });

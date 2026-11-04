@@ -144,13 +144,14 @@ test("one Yes per warning type opens the commit; a No closes it again", async ({
   const mids = [newMid(), newMid(), newMid()];
   for (const mid of mids) await merchantFor(PREFIX, mid);
   const slot = await freeSlot();
-  // Two zero-volume rows (one type, two lines) and one row whose file Processor
-  // is not the one chosen.
+  // Two bad-numbers rows (one type, two lines: a negative volume, and a
+  // residual over its volume; zero volume raises nothing since 20261104120000)
+  // and one row whose file Processor is not the one chosen.
   const other = slot.processor === "TSYS" ? "Square" : "TSYS";
   const rows = [
     HEADER,
-    [slot.processor, mids[0], "QA Fee", "Residuals", "$0.00", "$1.50"],
-    [slot.processor, mids[1], "QA Clawback", "Residuals", "$0.00", "-$2.00"],
+    [slot.processor, mids[0], "QA Refund", "Residuals", "-$500.00", "-$2.00"],
+    [slot.processor, mids[1], "QA Swapped", "Residuals", "$1.50", "$100.00"],
     [other, mids[2], "QA Elsewhere", "Residuals", "$500.00", "$5.00"],
   ];
   await upload(page, { name: `${PREFIX}warnings.xlsx`, buffer: workbook(rows) }, slot);
@@ -159,7 +160,7 @@ test("one Yes per warning type opens the commit; a No closes it again", async ({
   const warnings = page.getByTestId("import-warnings");
   const bad = warnings.locator('[data-warning="bad_numbers"]');
   const mismatch = warnings.locator('[data-warning="processor_mismatch"]');
-  // One block per TYPE: two, not three -- the two zero-volume rows share one.
+  // One block per TYPE: two, not three -- the two bad-numbers rows share one.
   await expect(warnings.locator("[data-warning]")).toHaveCount(2);
   await expect(bad).toContainText("2 rows");
   await expect(bad.getByRole("button", { name: "Yes" })).toHaveCount(1);

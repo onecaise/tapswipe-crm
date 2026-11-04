@@ -57,8 +57,10 @@ each phase in §8 edits it before the migration.
    - These are **confirmable** (yes/no):
      - processor mismatch
      - inactive merchant
-     - bad numbers: volume ≤ 0, or residual > volume. This is the only path by which a negative
-       volume can enter.
+     - bad numbers: volume < 0, or volume > 0 and residual > volume. This is the only path by
+       which a negative volume can enter. *(Amended 4 Nov 2026: was "volume ≤ 0, or residual >
+       volume". A zero-volume line is not a bad number, whatever its residual; §0b.3, and the
+       Phase 12c build notes.)*
    - Every confirmation is recomputed and enforced in the database at commit.
 5. **Residuals are not editable after commit.** A fix is either a **replace** of that processor and
    month, allowed until the month is marked paid, or an **adjustment line** once it is paid.
@@ -92,10 +94,13 @@ each phase in §8 edits it before the migration.
      five real processor names; Owen's sample uses a placeholder, so **tests use real names**.
 2. **One merchant per MID.** Several MIDs can share one merchant name: a business with 7 locations is
    7 merchant records, each with its own MID. No schema change (§2.0).
-3. **Warnings come in bulk.** Rows with zero volume and a small or negative residual are common
-   (monthly fees, clawbacks). The yes/no confirmation is **one per warning type per import**, not
+3. **Warnings come in bulk.** The yes/no confirmation is **one per warning type per import**, not
    per line. The commit still recomputes every warning in the database and refuses any type the
-   admin did not confirm.
+   admin did not confirm. *(Amended 4 Nov 2026.)* Rows with zero volume and a negative, zero or
+   positive residual are common (monthly fees, chargebacks, closing fees on a closed merchant), so
+   they raise **no** warning: with one yes per type, counting them meant the admin answered yes on
+   every import, and that yes also passed the rows `bad_numbers` exists for (a negative volume, or
+   a residual above a positive volume).
 4. **A split rate replaces "fixed 50".**
    - Each rep profile has a rate: default 50, `CHECK` between 0 and 50, set **only** by a new
      admin-only, audited, `security definer` function `set_rep_split`, never by a direct update.
@@ -470,8 +475,8 @@ locations, not a duplicate.
    - Blocked rows, starting with unknown or repeated MIDs, mean **Commit is disabled**, with the
      list and "Read again".
    - Otherwise, **one confirmation block per warning type present in the import** (never one per
-     line, §0b.3), each listing its rows (collapsed past the first few, since zero-volume fee and
-     clawback rows are common), with **Yes / No** buttons.
+     line, §0b.3), each listing its rows (collapsed past the first few, since one type can cover
+     many rows), with **Yes / No** buttons.
    - Commit is enabled only when every type present has a Yes. A No on any type means the admin
      abandons the batch or fixes the data and reads again.
 4. **Commit**: `commit_residual_import_v3(batch_id_input int, confirmed_input text[])`
@@ -532,7 +537,7 @@ and override edits cannot interleave with a commit. Its own `revoke` / `grant ex
 | `missing_mid`, `missing_figure`, `unreadable_number` | Blockers | As today, plus a blank Volume or Residual. `unreadable_number` is today's `bad_number`, renamed so that "bad numbers" means only the confirmable warning below. Currency text (`$76,877.18`, `-$11.76`) is readable; anything else is not. | Not confirmable. |
 | `processor_mismatch` | Warning | The row's `Processor` cell differs from the batch processor (§0b.1), **or** `merchants.processor` is set and differs from it. **A merchant with no processor is not a mismatch** (§9, A6). | The lines are recorded under the **batch's** processor. The merchant's processor is not changed automatically; the review screen links to the merchant. |
 | `inactive_merchant` | Warning | `merchants.status = 'inactive'`. `'other'` does not trigger it. | Paid to the owner as normal. |
-| `bad_numbers` | Warning | `volume <= 0`, or `residual > volume`. Common on real files: zero-volume rows with a small or negative residual are monthly fees and clawbacks (§0b.3), so one "yes" per import covers them all. | Imported as read. **Needs a schema change:** `rep_payout_rows_volume_check` (`volume >= 0`) would refuse a negative volume. It becomes `volume >= 0 or volume_confirmed_negative`, where `volume_confirmed_negative` is a boolean only v3 sets, and only for a row whose `bad_numbers` warning was confirmed. So a negative volume can enter **only** through this path (§0.4), and the column records which lines did. |
+| `bad_numbers` | Warning | `volume < 0`, or `volume > 0` and `residual > volume` (amended 4 Nov 2026, `20261104120000`; was `volume <= 0`, or `residual > volume`). A **zero-volume** row raises nothing, whatever its residual: those are monthly fees, chargebacks and closing fees, common on real files (§0b.3). A negative residual on a positive volume raises nothing either (A25). | Imported as read. **Needs a schema change:** `rep_payout_rows_volume_check` (`volume >= 0`) would refuse a negative volume. It becomes `volume >= 0 or volume_confirmed_negative`, where `volume_confirmed_negative` is a boolean only v3 sets, and only for a row whose `bad_numbers` warning was confirmed. So a negative volume can enter **only** through this path (§0.4), and the column records which lines did. |
 
 The warning codes live in a CHECKed vocabulary on `rep_payout_import_rows.warnings` (each element
 `in (…)`, enforced by a trigger or a CHECK over `array <@`). The rule for each lives **once**, in
@@ -2303,6 +2308,38 @@ the private key is not reachable; a legacy-HS256 token is refused outright, so i
 the withSupabase expiry check is trusted, and the forged-signature and no-session cases are tested.
 The file was opened only by SheetJS, not in Excel, LibreOffice or Google Sheets, so how each one
 shows the quoted cells and the number format was not looked at. Nothing was deployed.
+
+### Phase 12c: zero volume is not a bad number (4 Nov 2026, branch `intake-residuals`)
+
+Found in 12b: the export test's clawback line at volume 0 was refused by v3 as an unconfirmed
+`bad_numbers`, and the seed was moved to 5,000 volume to get past it. Investigated on the local
+stack (real parse, real v3) before any change: every zero-volume line (residual negative, zero or
+positive) raised `bad_numbers`, and one such row held up the whole file until the admin's Yes. A
+Yes did let it through, so real data was never blocked, but it was asked on almost every file, and
+that one Yes per type also passed the rows the warning exists for. Owen decided (§0.4, §0b.3 and
+§2.4 amended):
+
+- **`bad_numbers` = `volume < 0` or (`volume > 0` and `residual > volume`).** Zero volume raises
+  nothing, whatever the residual; a negative volume (a refund month) is still confirmable only
+  through it and still marked `volume_confirmed_negative`; volume > 0 with a zero or negative
+  residual stays silent (A25). No zero-volume note was added (the optional `preview_flag` was
+  declined).
+- **`20261104120000`** re-creates `commit_residual_import_v3` with `20261102120000`'s body and only
+  step 4's `bad_numbers` line changed, and refuses to run unless the deployed v3 carries the old
+  rule exactly once. `rowWarnings()` in `_shared/residuals.ts` changes with it; the review screen's
+  label reads "Volume is negative, or the residual is more than the volume".
+- Tests: `tests/rls/zero-volume-lines.test.ts` (14: shapes a–e through the real v3, a mixed file, a
+  zero-volume row beside real bad numbers, a 35-cell grid where `rowWarnings()` and v3 must flag the
+  same rows, the migration's body diff against `20261102120000`, its refusal, the grants, and a
+  mutation proof that the old rule refuses a, b and c). The unit, v3, replace and live
+  warning tests moved their bad-numbers trigger from zero volume to a negative volume or a residual
+  over volume; the e2e seed (`createCommittableBatch`'s `badNumbers`) and
+  `qa/residual-review.spec.ts` the same; `report-export.test.ts` is back to its clawback at
+  volume 0 with nothing confirmed, as the regression check.
+- Revert experiment: with `<= 0` put back in both the migration and `rowWarnings()`, 9 tests
+  failed (8 in the new file, 1 unit), and passed again restored.
+- Suites: `npm test` 2925 → 2941 (122 → 123 files), `test:live` 353 (unchanged count), the full e2e
+  suite 383 passed (17.0 min, none flaky; the first measured run of 12b's 383, which was arithmetic). Applied to the local stack only; nothing pushed, linked or deployed.
 
 ---
 

@@ -422,7 +422,7 @@ describe("confirmations", () => {
     ["processor_mismatch (a blank cell)", { mid: "MID-AGENT-1", processor: null }, "processor_mismatch"],
     ["processor_mismatch (the merchant's own processor)", { mid: "MID-OTHER-2" }, "processor_mismatch"],
     ["inactive_merchant", { mid: "MID-AGENT-2", processor: "TSYS" }, "inactive_merchant"],
-    ["bad_numbers (volume 0)", { mid: "MID-AGENT-1", volume: "0.00", residual: "-3.00" }, "bad_numbers"],
+    ["bad_numbers (negative volume, negative residual)", { mid: "MID-AGENT-1", volume: "-500.00", residual: "-11.76" }, "bad_numbers"],
     ["bad_numbers (residual over volume)", { mid: "MID-AGENT-1", volume: "10.00", residual: "11.00" }, "bad_numbers"],
     ["bad_numbers (negative volume)", { mid: "MID-AGENT-1", volume: "-5.00", residual: "1.00" }, "bad_numbers"],
   ];
@@ -463,8 +463,8 @@ describe("confirmations", () => {
 
   it("one yes per type covers every row of it, and the batch keeps what was confirmed", async () => {
     const { id } = await batchWith(db, [
-      { mid: "MID-AGENT-1", volume: "0.00", residual: "-1.00" },
-      { mid: "MID-OTHER-1", volume: "0.00", residual: "-2.00" },
+      { mid: "MID-AGENT-1", volume: "-1.00", residual: "-1.00" },
+      { mid: "MID-OTHER-1", volume: "10.00", residual: "12.00" },
       { mid: "MID-OTHER-2" },
     ]);
     const error = await refused(db, id, ["bad_numbers"]);
