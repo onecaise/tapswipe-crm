@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Suspense } from "react";
-import { PlusIcon } from "lucide-react";
+import { PlusIcon, UploadIcon } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
@@ -152,12 +152,21 @@ async function HeaderActions() {
   if (profile.role !== "admin") return null;
 
   return (
-    <Button asChild size="sm">
-      <Link href="/merchants/new">
-        <PlusIcon size={16} />
-        New merchant
-      </Link>
-    </Button>
+    <div className="flex flex-wrap gap-2">
+      {/* The merchant bulk import (phase 14 of docs/design/intake-and-reports.md). */}
+      <Button asChild size="sm" variant="outline">
+        <Link href="/admin/merchants/import">
+          <UploadIcon size={16} />
+          Import merchants
+        </Link>
+      </Button>
+      <Button asChild size="sm">
+        <Link href="/merchants/new">
+          <PlusIcon size={16} />
+          New merchant
+        </Link>
+      </Button>
+    </div>
   );
 }
 

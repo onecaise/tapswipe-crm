@@ -544,6 +544,12 @@ verify_jwt = false
 import_map = "./functions/stage-user-import/deno.json"
 entrypoint = "./functions/stage-user-import/index.ts"
 
+[functions.stage-merchant-import]
+enabled = true
+verify_jwt = false
+import_map = "./functions/stage-merchant-import/deno.json"
+entrypoint = "./functions/stage-merchant-import/index.ts"
+
 [functions.provision-user-batch]
 enabled = true
 verify_jwt = false

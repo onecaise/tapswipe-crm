@@ -30,11 +30,12 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **Any column the client supplies and no policy reads is unvalidated** (the `documents.file_key` lesson). Fix it at the layer that cannot be skipped: the price lock trigger `snapshot_quote_line_item()` overwrites every snapshot column; `enforce_quote_version()` assigns versions and refuses foreign groups; the browser sends only `product_id` and `quantity`; only `submit_pre_app()` writes a pre-app's split and rep names, from the profile. → `docs/claude/edge-functions-and-storage.md`, `docs/claude/proposals-and-catalog.md`, `docs/claude/rpcs-profiles-audit.md`.
 - **A committed processor-month changes only by replace (until paid) or an adjustment line (after).** Replace is `commit_residual_import_v3` on a batch with `replaces_batch_id`; `delete_payout_period()` (also refused once paid; no client DELETE on the ledger) removes a month so it can be imported again; `post_payout_adjustment()` needs a paid month; Mark paid / Reopen (typed phrase / written reason, on the one audit row) are `close_/reopen_payout_period()`. Nothing merges. Every `on conflict` on `rep_payout_rows` names `(period, processor, agent_id, mid)` and says `where line_kind = 'import'`; a negative `volume` only on a `volume_confirmed_negative` line. → "Three tiers" below, `docs/claude/payouts-and-teardown.md`.
 - **A merchant's rate (0-50) is written only by `set_merchant_split()`** (audited; refused while a share is live; a trigger refuses any other write); a merchant created without one takes its owner's profile rate (A31). A share's signer is the owner, its shares total the rate, and a shared merchant cannot be moved. **An override is at most the merchant's rate** (`set_merchant_override()`, re-checked by v3; the table's `<= 50` is only the outer bound), never paid to the owner or a share party, and a merchant with a live override cannot be moved either. → `docs/claude/payouts-and-teardown.md`.
+- **Merchants are bulk-imported only by `commit_merchant_import()`** (definer, `is_admin()` first, all or nothing): it re-derives every check from the staged raw cells, never the parser's verdict, and its flag is the only exemption from a new merchant's location. → `docs/claude/merchant-import.md`.
 - **The legacy `documents` table and bucket are closed** (SELECT for admin only, no client write, its three functions removed). Do not reopen them. → `docs/claude/notes-tasks-documents.md`.
 
 **Edge Functions, Storage and the app**
 
-- **All thirteen functions are `verify_jwt = false`, so each authenticates itself in a fixed order**: `withSupabase` → `callerIsActive` on the caller-scoped client → authorization through RLS → only then `supabaseAdmin`. Return **404, never 403**, for "not yours". → "Edge Function authentication" below.
+- **All fourteen functions are `verify_jwt = false`, so each authenticates itself in a fixed order**: `withSupabase` → `callerIsActive` on the caller-scoped client → authorization through RLS → only then `supabaseAdmin`. Return **404, never 403**, for "not yours". → "Edge Function authentication" below.
 - **`export-residuals` must never use `supabaseAdmin`** — RLS is its whole authorization. → Edge Functions table below.
 - **Bulk provisioning never hands out a credential**: `provision-user-batch` discards the temporary password unread. **Deactivation is two layers** (ban in GoTrue first, then `profiles.is_active`). `create-user` must delete the `auth.users` row if the `profiles` insert fails. → `docs/claude/user-accounts.md`, "Three tiers" below.
 - **Inline signed URLs are allow-listed by type** (PDF, plain text, three raster images; **never SVG**); everything else is forced to attachment. → `docs/claude/reference-data-and-marketing.md`.
@@ -78,7 +79,7 @@ Postgres grants `EXECUTE` to `PUBLIC` on every new function, and `PUBLIC` includ
 
 ### Three tiers of data access — pick the right one
 
-1. **Normal tables via `supabase-js`** (`merchants`, `leads`, `ghost_sheets`, `pre_apps` + children, `support_tickets`, `notes`, `tasks`, `audit_log`, `rep_payout_rows` + the three other `rep_payout_*` tables, `payout_period_closures` (Mark paid, admin SELECT only), `merchant_overrides` (admin SELECT only; written by its three audited RPCs), the two `user_import_*` tables, and the reference-data tables `marketing_materials`, `business_documents`, `products`, `brands`, plus `processors`, which no client writes — `docs/claude/reference-data-and-marketing.md`). The legacy `documents` table is SELECT-only for `authenticated` and admits only an admin since 20261013121000. RLS does the enforcement; the client talks to Postgres directly. Note how little of that list is client-*writable*: the payout and user-import tables are read-only to `authenticated` apart from one status update each, because everything that creates their rows runs as service role.
+1. **Normal tables via `supabase-js`** (`merchants`, `leads`, `ghost_sheets`, `pre_apps` + children, `support_tickets`, `notes`, `tasks`, `audit_log`, `rep_payout_rows` + the three other `rep_payout_*` tables, `payout_period_closures` (Mark paid, admin SELECT only), `merchant_overrides` (admin SELECT only; written by its three audited RPCs), the two `user_import_*` and two `merchant_import_*` tables, and the reference-data tables `marketing_materials`, `business_documents`, `products`, `brands`, plus `processors`, which no client writes — `docs/claude/reference-data-and-marketing.md`). The legacy `documents` table is SELECT-only for `authenticated` and admits only an admin since 20261013121000. RLS does the enforcement; the client talks to Postgres directly. Note how little of that list is client-*writable*: the payout and both import pairs are read-only to `authenticated` apart from one status update each, because their rows are created as service role or by a definer RPC.
 2. **Secrets tables — Edge Function only.** `pre_app_owner_secrets` (SSN), `pre_app_banking_secrets` (ABA routing / account number), `pre_app_terminal_secrets` (RP password), `pre_app_tax_secrets` (business tax ID, EIN or SSN; its kind must equal `pre_apps.ein_type`, and the plaintext `pre_apps.ein_number` is dropped, `20261026140000`) are locked twice over: RLS enabled with **zero policies**, *and* no grant to `anon` or `authenticated` at all. Either alone denies read and write; both means a policy added by mistake still opens nothing. Values are stored as `bytea` AES ciphertext; only a service-role Edge Function holding the encryption key can touch them. This includes the agent's initial submission — the browser must POST that data to `submit-pre-app-secrets`, never insert it via `supabase-js`. Never add a policy to these tables, and never grant them.
 3. **`commit_residual_import_v3(batch_id_input int, confirmed_input text[])` RPC** — `security definer`, `is_admin()` first; the commit the app calls. In one transaction it re-derives every refusal and warning from the database (refusing a type not confirmed), pays each row to its merchant's CURRENT owner at the MERCHANT's rate (a shared account as the signer/partner pair), and never merges; on a replacing batch it is the replace (refused once paid). It is the only commit: the old `commit_residual_import(int)` and its merge were dropped in `20261104140000`. Why an RPC, and its rules: `docs/claude/payouts-and-teardown.md`.
 4. **`approve_pre_app(pre_app_id_input int)` RPC** — `security definer` plpgsql that creates a `merchants` row from a pre-app (address and `processor` copied), flips its status to `approved`, and writes `audit_log`. It guards itself with an explicit `is_admin()` check at the top; keep that check if you edit it.
@@ -104,9 +105,9 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 
 - **Built:** every CRM route under `app/(app)/`, the `lib/*` data-access helpers, notes/tasks panels, the Document Center (a company library, not per-record), Proposals at `/proposals`, and the payout Reports at `/admin/reports`. Full route and helper inventory → `docs/claude/project-state.md`.
 - **Not built yet:** My Submissions.
-- **Still starter-kit template:** `README.md` only. Edge Functions: thirteen in the repo. Details of both → `docs/claude/project-state.md`.
+- **Still starter-kit template:** `README.md` only. Edge Functions: fourteen in the repo. Details of both → `docs/claude/project-state.md`.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Eighty-one migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. Eighty-two migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 ## Hosted projects and deployment
 
@@ -125,10 +126,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (2928 tests, 124 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (353 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (3038 tests, 127 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (362 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (380 tests, 6 of them the shared setup — arithmetic since phase 13 removed 3; last full run 383 at 12c)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (384 tests, 6 of them the shared setup — arithmetic: phase 13 removed 3, phase 14 added 4; last full run 383 at 12c)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
@@ -182,20 +183,7 @@ A feature isn't done when it compiles — it's done when it's verified and commi
 
 ### Edge Functions
 
-Thirteen functions, all registered in `supabase/config.toml` (unlisted ones won't deploy or serve):
-
-| Function | Purpose |
-| --- | --- |
-| `create-user`, `deactivate-user`, `admin-reset-password` | admin user management via `auth.admin` + `profiles`, each writing `audit_log` |
-| `submit-pre-app-secrets`, `read-pre-app-secrets` | encrypt/decrypt the four secrets tables |
-| `residual-import-file-url` | admin-only; two modes — `{file_name, processor, period}` creates a `rep_payout_batches` row (both required, the month in the window) and signs an upload into `residual-imports`, or, for a committed processor-month, answers `{exists}` and creates nothing; `replace_batch_id` (the prompt's Yes) creates a replacing batch, 409 once paid; `{batch_id}` signs a download of the stored file |
-| `parse-residual-import` | admin-only; reads a batch's six-column XLSX (Merchant Number as text) and stages each row for the owner of the merchant its MID names, with every refusal (`blockers`), the three `warnings` and advisory notes (`preview_flag`). **Idempotent** — clears the batch's staging rows first, so "add the merchant, then Read again" is one code path |
-| `export-residuals` | **not admin-only, deliberately.** Reads through the *caller-scoped* client, so RLS is the whole authorization and a rep's export is their own book; `supabaseAdmin` anywhere in it would make it the company's. Paginates with `.range()` (or `max_rows` exports a silent prefix). Not an import format |
-| `export-report` | admin-only; one `/admin/reports` report as .xlsx from the SQL functions' rows, caller-scoped; `supabaseAdmin` only for its audit row |
-| `stage-user-import` | admin-only; parses a rep CSV into `user_import_rows`, creating the batch on the way. One function where residuals needs two, because the text arrives in the request body rather than via Storage. **Idempotent** — clears the batch's rows first, so "fix something, then read again" is one code path run twice. Two modes: `source_text` starts an import, `batch_id` re-reads the text already stored on the batch |
-| `provision-user-batch` | admin-only; creates the accounts for a staged import, **a bounded chunk per call**. Calls the same `provisionUser` core as `create-user` and **discards the temporary password unread**. See the bulk-import section below for why the loop lives in the browser |
-| `marketing-material-file-url` | the one function whose two modes have **different authorization**: an admin stocks the library (upload), every active user reads it (download). Detail: `docs/claude/reference-data-and-marketing.md` |
-| `business-document-file-url` | the Document Center (`/documents`): the marketing library's shape and its two modes, an admin stocking it and every active user reading it. Detail: `docs/claude/notes-tasks-documents.md` |
+Fourteen functions, all registered in `supabase/config.toml` (unlisted ones won't deploy or serve). The full table (moved verbatim on 6 Nov 2026): `docs/claude/edge-functions-and-storage.md`. In short: `create-user` / `deactivate-user` / `admin-reset-password` (admin user management, audited); `submit-` / `read-pre-app-secrets` (the four secrets tables); `residual-import-file-url` + `parse-residual-import` (residual upload, idempotent staging); `export-residuals` (**not admin-only: caller-scoped, never `supabaseAdmin`**); `export-report` (admin, audited); `stage-user-import` + `provision-user-batch` (bulk reps, password discarded unread); `stage-merchant-import` (bulk merchants, idempotent staging; the commit is `commit_merchant_import()`); `marketing-material-file-url` and `business-document-file-url` (admin uploads, every active user downloads).
 
 ### Next.js / auth wiring
 
@@ -230,6 +218,7 @@ Everything below was moved verbatim out of this file; one line each.
 - `docs/claude/reference-data-and-marketing.md` — tables with no owner (`products`, `marketing_materials`, `business_documents`), the marketing library, inline-URL allow-list, the Email button, `window.open` + `noopener`.
 - `docs/claude/edge-functions-and-storage.md` — the `file_key` consistency lesson, Deno runtime, parser-once vs validators-twice, the four buckets, upload size limits, signed-URL origin rewrite.
 - `docs/claude/notes-tasks-documents.md` — polymorphic `owner_type` + `owner_id`, notes append-only, the Document Center and the closed legacy `documents` path.
+- `docs/claude/merchant-import.md` — the merchant bulk import: file rules, the commit that re-derives every check, the location exception.
 - `docs/claude/merchant-location.md` — location required for new merchants only, the NOT VALID lesson, format CHECK + guard trigger, `norm_city()`, the four hand-run SQL files, dev's hosted state.
 - `docs/claude/proposals-and-catalog.md` — append-only quotes, column grants, line-item snapshots and the price lock, the catalog loader script, proposals as their own record, the store, brands, the printed proposal.
 - `docs/claude/dashboard-followups-timeline.md` — dashboard filters (invoker, ANDed on policies), follow-ups in two places, the lead timeline.

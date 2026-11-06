@@ -1,8 +1,8 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken. The build plan's phases 1 to 13 are complete
-(built locally, §10, last on 4 Nov 2026), except the merchant bulk import (Phase 14), which is
-still to come.** Nothing has been run against dev or prod.
+Status: **Revision 3, 28 Oct 2026. Decisions taken. The build plan is complete: phases 1 to 14,
+the merchant bulk import included, are built locally (§10, last on 6 Nov 2026).** Nothing has been
+run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
   below says **Recommend**, §0 is what was decided.
@@ -12,7 +12,8 @@ still to come.** Nothing has been run against dev or prod.
   a constant 50, and the file has six columns. §11 lists the questions still open.
 - §9 lists the remaining defaults this memo assumes. The ones marked **[CONFIRM]** affect money,
   security or what reps can see, and are waiting for Owen's confirmation.
-- §8 is the 13-phase build plan, and §8.4 lists the CLAUDE.md rules each phase must change.
+- §8 is the build plan (13 phases, and the merchant bulk import added as 14), and §8.4 lists the
+  CLAUDE.md rules each phase must change.
 
 Inputs: Owen's requirements A-H (23 Oct 2026), `CLAUDE.md`, `docs/claude/*.md`,
 `docs/design/residual-splits.md` (the shared-account memo, phases 1-8 built locally) and
@@ -1100,6 +1101,7 @@ Thirteen phases, one prompt and one commit each, with the schema doc edited firs
 | 11 | Residual lock and payout UI cleanup | Revoke client UPDATE on `rep_payout_rows`; remove `PayoutFigureCell`, `PayoutBulkSplit`, `SharedResidualControl` and the round-trip copy; drop `set_shared_residual()`; new export header. | **R** (§0.5: not editable from the first import) | `rls/rep-payout-update-grant` (inverted: no UPDATE), `rls/shared-lines` (`set_shared_residual` tests retired), `rls/payout-history-trigger` (no client edit path; trigger kept as backstop), `unit/payout-figure-cell` (deleted), `unit/payouts`, `live/residual-import` (export header, 42501 test inverted), `e2e/payouts-editing` (retired or rewritten), `e2e/payouts-shares`, `e2e/payouts-states`, `e2e/qa/payout-figure-comma` (retired) |
 | 12 | Reports | `rep_payout_summary()` (Owen's nine columns, §7.2; the rate read from each line's `rep_split_pct`) and `merchant_processor_summary()` (both `security invoker`), `/admin/reports` page, admin nav item. | none (after 10) | none existing; `unit/` nav test only if one asserts the Admin group's items |
 | 13 | Docs and the old commit | CLAUDE.md, `docs/claude/*`, `RESIDUALS_SPEC.md` addendum, a docs-index line for this memo, and `commit_residual_import(int)` dropped once the new app is on dev and prod. | after deploy | `rls/commit-residual-import` (deleted with the function), `unit/claude-md` (index) |
+| 14 | Merchant bulk import | The ISO Hub merchants export (CSV or XLSX) staged by `stage-merchant-import`, reviewed, and committed all-or-nothing by `commit_merchant_import()`, which re-derives every check; the sixth processor, 365 Pay. Built 6 Nov 2026 (§10). | before the first real residual import (its MIDs must exist) | `rls/processors` + `unit/processors` + `live/grant-surface` (six processors), `rls/reset-business-data` + `live/reset-business-data` (39 tables, six processors), the grants inventory |
 
 ### 8.2 Size and order notes
 
@@ -2464,6 +2466,102 @@ Changed:
 
 Suites: `npm test` 2941 → 2928 (123 → 124 files); `test:live` 353 → 353 (22 → 23 files: three deleted, three added); e2e: only the twelve specs covering the changed pages (the nine `payouts-*`, `qa/residual-review`, `qa/residual-bad-import`, `qa/upload-labels`), 99 passed (6 setup), 4.9 min. The full e2e suite was not run; its baseline 383 → 380 is arithmetic.
 Applied to the local stack only; nothing pushed, linked or deployed.
+
+### Phase 14: merchant bulk import (6 Nov 2026, branch `intake-residuals`)
+
+Built (`20261106120000_merchant_import.sql`; new Edge Function `stage-merchant-import` and
+`_shared/merchant-imports.ts`; no other function's source changed — `_shared/user-imports.ts` is
+imported, unchanged, for its CSV tokenizer):
+- **The import**: the ISO Hub merchants export (CSV or XLSX, at most 2,000 rows and 2 MiB) at
+  `/admin/merchants/import`, linked from Merchants. `stage-merchant-import` keeps the file on the batch
+  and stages every row with its refusals and notes; the review page (`/admin/merchants/import/[id]`)
+  groups each refusal with its offending values and row numbers, lists the notes, and disables Commit
+  while any refusal stands; Read again re-stages the stored file; Abandon is the one client write.
+- **`commit_merchant_import(batch_id)`**: definer, `search_path = public, pg_temp`, `is_admin()` first,
+  an advisory lock, the batch `for update`, review only, 1-2,000 rows; re-derives EVERY check from the
+  staged raw cells (`merchant_import_findings()`, internal) and also refuses any blocker the parser
+  staged; one merchant per MID, all or nothing; returns `{created, rows, merged}`; one
+  `commit_merchant_import` audit row (file name and counts) beside each merchant's own
+  `cross_agent_insert`.
+- **The rules** (`docs/claude/merchant-import.md`): MID as text (6-20 letters and digits; an XLSX number
+  that may have lost digits refused, a short one noted); owner by `llc_legal_name` (none, several,
+  deactivated or admin refused); Split a fraction or a percentage, hundredths, at most 50, blank = the
+  owner's rate (A31), a different rate noted; processor by code or label, blank allowed (A6); Status
+  Active / Inactive; repeats merged or refused; an existing MID refused, case-insensitively.
+- **The rate**: carried by the INSERT, or NULL for `default_merchant_split()`; the split guard's flag is
+  never set and no merchant is updated.
+- **The sixth processor, `365 Pay`** (sort order 60): idempotent insert. The dropdowns already read the
+  table (`ProcessorSelect`, the residual upload, the reports filter); the paper form's static list
+  (`PAPER_PROCESSOR_CODES`) gained it, pinned to both migrations' inserts.
+- **Tables** `merchant_import_batches` / `merchant_import_rows`: revoke all, then grants (inventory),
+  RLS on in the migration text, admin SELECT, a status-only client UPDATE guarded by a trigger, no
+  `profiles` reference. Added to the grants inventory, the CLAUDE.md normal-tables list and the reset
+  script's `clear_tables` (39 tables).
+- **Docs**: CLAUDE.md (the Edge Functions table moved verbatim to `edge-functions-and-storage.md` to make
+  room; one new rule; counts), `docs/claude/merchant-import.md` (new), `merchant-location.md`,
+  `reset-business-data.md`, `grants-inventory.md`, `project-state.md`, the schema doc.
+
+Step 0, the merchants table: NOT NULL are `agent_id` (FK profiles), `dba`, `status` (default `active`,
+CHECK active / inactive / other); `id` serial. Nullable: `mid` (UNIQUE), `legal_business_name`,
+`processor` (FK processors), the split pair (CHECK both NULL or 0-50 with company = 100 minus it; A31
+fills a NULL pair from the owner on INSERT; the guard trigger refuses any UPDATE outside
+`set_merchant_split`), `pre_app_id`, `street`, `city`, `state` (format CHECK), `zip`, `date_added`
+(default today), timestamps. The admin merchant form carries owner, DBA, legal name, MID, status,
+processor, and a required city and state (+ street, zip); its insert gets the A31 rate. **The one
+obstacle**: `merchants_location_guard` refuses any new merchant without a city and state, and the file
+has no address. Chosen: the columns are nullable and the app already handles location-less merchants
+(the missing-location screen, the dashboard notice, the form's legacy mode), so the import creates them
+with neither, under a flag only its commit sets. `legal_business_name` stays NULL (the file's name is
+the DBA); `date_added` is the import date.
+
+Where the memo was silent, and what was chosen (the conservative side each time):
+- **No `profiles` reference** on either table (no `imported_by`): who committed is the audit row (the
+  phase 8 rule), the staged `owner_id` is a display hint re-derived at commit. So no 27th FK.
+- **The file is kept on the batch** (`source_bytes`, both formats), not in a Storage bucket: Read again
+  needs it, and a new bucket would need out-of-band hosted setup.
+- **A staged row's parser blockers refuse at commit too**, even when SQL finds nothing (the parser alone
+  sees how an XLSX cell was typed; `mid_source` carries that).
+- **Type must be MERCHANT** (any case); anything else, blank included, refuses. **All seven columns are
+  required**; a repeated column fails the file; the first non-blank row is the header.
+- **An admin profile matching Agent refuses** (`agent_not_rep`), as a deactivated one does.
+- **Two profiles matching refuse even if one is deactivated** (ambiguous counts every profile).
+- **A MID is 6-20 ASCII letters and digits**; other characters refuse. MIDs compare case-insensitively
+  for repeats and for "already a merchant"; the merchant keeps the file's spelling.
+- **Text that looks like a spreadsheet number** (`4.001E+11`, `400100200300.0`) refuses as
+  `mid_precision`, as an unsafe XLSX number does. An XLSX number shown in exponent form refuses even when
+  its value is exact (the instruction's "in exponent form"; the admin cannot check it).
+- **A repeat with a different STATUS refuses** like a different owner or rate. Owner and rate compare as
+  written to the merchant (a blank Split equals the owner's rate written out).
+- **A rate not in hundredths refuses** (`12.344%`; the column would round it).
+- **A merchant name is at most 200 characters.**
+- **Commit is refused for more than 2,000 staged rows** as well as by the parser.
+- **Staging rows are kept after the commit** (the user-import rule: the record of the file), and Abandon
+  exists, as for the user import.
+- **Status `Inactive`** is accepted now (the instruction maps it), though the export has only Active.
+- **No per-merchant audit of the rate**: the commit's own audit row and each merchant's
+  `cross_agent_insert` record the import (an approval's snapshot is not audited per rate either).
+
+Tests: `tests/unit/merchant-import-parse.test.ts` (32), `tests/unit/merchant-import-lib.test.ts` (7),
+`tests/rls/merchant-import.test.ts` (71: access, grants and privileges; the commit's results,
+audit, atomicity and refusals; every refusal re-derived with the staged rows "clean"; TS/SQL parity
+over a file raising all 18 codes; 22 mutation proofs, one per protection, including the batch guard and
+the location flag; the migration's three refusals and its pass), `tests/live/merchant-import.test.ts`
+(9: auth over HTTP, CSV and XLSX staging, Read again after a CRM fix, commit and its refusals over
+HTTP, tampered rows, 500 rows, and two real-connection races), `e2e/merchant-import.spec.ts` (4).
+Changed, never weakened: `rls/processors`, `unit/processors`, `live/grant-surface` (five → six, and the
+paper-form test reads both migrations' inserts), `rls/reset-business-data` and
+`live/reset-business-data` (37 → 39 tables, five → six processors, the two new tables asserted
+cleared), `e2e/processor-select` (six options).
+
+Suites: `npm test` 2928 → 3038 (124 → 127 files); `test:live` 353 → 362 (23 → 24 files); e2e: only the four specs
+covering the changed pages (`merchant-import`, `processor-select`, `merchant-location`, `merchant-owner`), 24 passed
+(6 setup), 1.9 min; the full e2e suite was not run, and its baseline 380 → 384 is arithmetic. Each new e2e
+test was proven by reverting what it guards (Commit enabled while refused, the rep's link, the table's
+scroll wrapper, the success state, the page's `requireAdmin()`, the settled page's Read again): each
+failed at its own assertion. Applied to the local stack only (`supabase migration up --local`).
+
+Not done: no deploy plan (as instructed); nothing pushed, linked or deployed; the reset script was not
+run.
 
 ---
 

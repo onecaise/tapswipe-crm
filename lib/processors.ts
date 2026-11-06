@@ -71,4 +71,5 @@ export const PAPER_PROCESSOR_CODES = [
   "PayBright",
   "Netevia HQ",
   "Square",
+  "365 Pay",
 ] as const;

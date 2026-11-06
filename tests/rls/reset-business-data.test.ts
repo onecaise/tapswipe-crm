@@ -110,7 +110,7 @@ describe("dry run (as shipped)", () => {
     );
     expect(error).toMatch(/^DRY RUN: rolled back, nothing was changed\. Every check passed\./);
     expect(error).toMatch(/\n {2}profiles: 3 -> 3\n/);
-    expect(error).toMatch(/\n {2}processors: 5 -> 5\n/);
+    expect(error).toMatch(/\n {2}processors: 6 -> 6\n/);
     expect(error).toMatch(/\n {2}pre_app_tax_secrets: 1 -> 0\n/);
     expect(error).toMatch(/\n {2}payout_period_closures: 1 -> 0\n/);
     expect(error).toMatch(/\n {2}auth\.users: 3 -> 3\n/);
@@ -134,12 +134,13 @@ describe("commit", () => {
     // 35 since the intake-and-reports merge: processors (kept) and
     // pre_app_tax_secrets (cleared); 36 since phase 6 added
     // payout_period_closures (cleared); 37 since phase 10 added
-    // merchant_overrides (cleared).
-    expect(tables.length).toBe(37);
+    // merchant_overrides (cleared); 39 since phase 14 added the two
+    // merchant_import_* staging tables (cleared).
+    expect(tables.length).toBe(39);
     for (const { t } of tables) {
       const n = await count(db, t);
       if (t === "profiles") expect(n, t).toBe(3);
-      else if (t === "processors") expect(n, t).toBe(5);
+      else if (t === "processors") expect(n, t).toBe(6);
       else if (t === "audit_log") expect(n, t).toBe(1);
       else expect(n, t).toBe(0);
     }
@@ -152,21 +153,23 @@ describe("commit", () => {
     expect(marker).toEqual({ id: 1, actor_id: null, action: "business_data_reset" });
 
     // The grid: one row per kept and cleared table, plus auth.users and storage.
-    expect(grid.length).toBe(2 + 1 + 35 + 1);
+    expect(grid.length).toBe(2 + 1 + 37 + 1);
     expect(grid.find((r) => r.table_name === "brands")?.status).toBe("cleared");
     expect(grid.find((r) => r.table_name === "profiles")?.status).toBe("kept, unchanged");
     expect(grid.find((r) => r.table_name === "processors")?.status).toBe("kept, unchanged");
     expect(grid.find((r) => r.table_name === "pre_app_tax_secrets")?.status).toBe("cleared");
     expect(grid.find((r) => r.table_name === "payout_period_closures")?.status).toBe("cleared");
     expect(grid.find((r) => r.table_name === "merchant_overrides")?.status).toBe("cleared");
+    expect(grid.find((r) => r.table_name === "merchant_import_batches")?.status).toBe("cleared");
+    expect(grid.find((r) => r.table_name === "merchant_import_rows")?.status).toBe("cleared");
   });
 
-  it("keeps processors' five rows exactly, and the new pre-app tax secrets go", async () => {
+  it("keeps processors' six rows exactly, and the new pre-app tax secrets go", async () => {
     const before = await rows<{ code: string; label: string; sort_order: number }>(
       db,
       `select code, label, sort_order from processors order by code`,
     );
-    expect(before.map((r) => r.code)).toEqual(["Netevia HQ", "PayBright", "Red Fynn", "Square", "TSYS"]);
+    expect(before.map((r) => r.code)).toEqual(["365 Pay", "Netevia HQ", "PayBright", "Red Fynn", "Square", "TSYS"]);
     expect(await count(db, "pre_app_tax_secrets")).toBe(1);
 
     await db.exec(await script({ commit: true }));
@@ -248,15 +251,15 @@ describe("scripts/reset-business-data-counts.sql", () => {
     const before = await snapshot(db);
     const pre = await counts();
     expect(await snapshot(db)).toEqual(before);
-    expect(Object.keys(pre).length).toBe(37 + 2);
+    expect(Object.keys(pre).length).toBe(39 + 2);
     expect(pre).toMatchObject({
-      leads: 2, profiles: 3, processors: 5, pre_app_tax_secrets: 1, "auth.users": 3, "storage.objects": null,
+      leads: 2, profiles: 3, processors: 6, pre_app_tax_secrets: 1, "auth.users": 3, "storage.objects": null,
     });
 
     await db.exec(await script({ commit: true }));
     const post = await counts();
     expect(post).toMatchObject({
-      leads: 0, brands: 0, pre_app_tax_secrets: 0, audit_log: 1, profiles: 3, processors: 5, "auth.users": 3,
+      leads: 0, brands: 0, pre_app_tax_secrets: 0, audit_log: 1, profiles: 3, processors: 6, "auth.users": 3,
     });
   });
 });
@@ -318,7 +321,7 @@ describe("every guard fails the run and rolls back", () => {
     `);
     await refuses(
       await script({ commit: true }),
-      /kept table public\.processors changed during the run \(count 5, was 5\)/,
+      /kept table public\.processors changed during the run \(count 6, was 6\)/,
     );
   });
 

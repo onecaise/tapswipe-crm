@@ -3926,3 +3926,69 @@ export async function clearAdminReveals(): Promise<void> {
     .eq("actor_id", admin.id)
     .like("action", "read_pre_app_secrets:reveal:%");
 }
+
+/**
+ * The merchant bulk import (phase 14 of docs/design/intake-and-reports.md).
+ * A rep's two identity names, read as the service role, and set the only way
+ * the app can: set_rep_identity() as the e2e admin (no signOut, for the reason
+ * stampAdminTimelineEdits gives).
+ */
+export async function repIdentity(
+  persona: PersonaKey,
+): Promise<{ id: string; legal_name: string | null; llc_legal_name: string | null }> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await db
+    .from("profiles")
+    .select("id, legal_name, llc_legal_name")
+    .eq("email", PERSONAS[persona].email)
+    .single();
+  if (error || !data) throw new Error(`profile ${persona}: ${error?.message}`);
+  return data;
+}
+
+export async function setRepIdentity(
+  persona: PersonaKey,
+  legalName: string | null,
+  llcLegalName: string | null,
+): Promise<void> {
+  const { id } = await repIdentity(persona);
+  const { apiUrl, publishableKey } = publicStackConfig();
+  const asAdmin = createClient(apiUrl, publishableKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { error: signInError } = await asAdmin.auth.signInWithPassword({
+    email: PERSONAS.admin.email,
+    password: E2E_PASSWORD,
+  });
+  if (signInError) throw new Error(`admin sign-in: ${signInError.message}`);
+  const { error } = await asAdmin.rpc("set_rep_identity", {
+    user_id: id,
+    legal_name: legalName,
+    llc_legal_name: llcLegalName,
+  });
+  if (error) throw new Error(`set_rep_identity: ${error.message}`);
+}
+
+/**
+ * Removes what an e2e merchant import made: its merchants by MID prefix, and
+ * its batches still in review abandoned. A committed batch stays (no role may
+ * delete one from here); its rows hold only this spec's invented values.
+ */
+export async function clearMerchantImport(fileNamePrefix: string, midPrefix: string): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  // By prefix, not by this run's values: Playwright re-imports a spec after a
+  // failed test, so a leftover from an earlier stamp must go too.
+  const { error } = await db.from("merchants").delete().like("mid", `${midPrefix}%`);
+  if (error) throw new Error(`clear imported merchants: ${error.message}`);
+  await db
+    .from("merchant_import_batches")
+    .update({ status: "abandoned" })
+    .like("file_name", `${fileNamePrefix}%`)
+    .eq("status", "review");
+}

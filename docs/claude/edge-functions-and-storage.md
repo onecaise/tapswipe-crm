@@ -35,3 +35,23 @@ Storage: **four** private buckets — `documents` (legacy, closed), `residual-im
 ## Why `lib/edge-functions.ts` exists (moved verbatim from CLAUDE.md, 30 Oct 2026)
 
 Never show a `functions.invoke()` error's `.message` to a user. Three call sites had each grown their own copy of that unwrapping before it was extracted, and the two document components had not — which is how the panel shipped reporting a deactivated account, a record that wasn't yours, and a real fault as one identical sentence.
+
+## The Edge Functions table (moved verbatim from CLAUDE.md, 6 Nov 2026)
+
+Moved in phase 14 of `docs/design/intake-and-reports.md` to keep CLAUDE.md from growing; `stage-merchant-import` was added in the same change. Binding, like the rest of this file.
+
+Fourteen functions, all registered in `supabase/config.toml` (unlisted ones won't deploy or serve):
+
+| Function | Purpose |
+| --- | --- |
+| `create-user`, `deactivate-user`, `admin-reset-password` | admin user management via `auth.admin` + `profiles`, each writing `audit_log` |
+| `submit-pre-app-secrets`, `read-pre-app-secrets` | encrypt/decrypt the four secrets tables |
+| `residual-import-file-url` | admin-only; two modes — `{file_name, processor, period}` creates a `rep_payout_batches` row (both required, the month in the window) and signs an upload into `residual-imports`, or, for a committed processor-month, answers `{exists}` and creates nothing; `replace_batch_id` (the prompt's Yes) creates a replacing batch, 409 once paid; `{batch_id}` signs a download of the stored file |
+| `parse-residual-import` | admin-only; reads a batch's six-column XLSX (Merchant Number as text) and stages each row for the owner of the merchant its MID names, with every refusal (`blockers`), the three `warnings` and advisory notes (`preview_flag`). **Idempotent** — clears the batch's staging rows first, so "add the merchant, then Read again" is one code path |
+| `export-residuals` | **not admin-only, deliberately.** Reads through the *caller-scoped* client, so RLS is the whole authorization and a rep's export is their own book; `supabaseAdmin` anywhere in it would make it the company's. Paginates with `.range()` (or `max_rows` exports a silent prefix). Not an import format |
+| `export-report` | admin-only; one `/admin/reports` report as .xlsx from the SQL functions' rows, caller-scoped; `supabaseAdmin` only for its audit row |
+| `stage-user-import` | admin-only; parses a rep CSV into `user_import_rows`, creating the batch on the way. One function where residuals needs two, because the text arrives in the request body rather than via Storage. **Idempotent** — clears the batch's rows first, so "fix something, then read again" is one code path run twice. Two modes: `source_text` starts an import, `batch_id` re-reads the text already stored on the batch |
+| `provision-user-batch` | admin-only; creates the accounts for a staged import, **a bounded chunk per call**. Calls the same `provisionUser` core as `create-user` and **discards the temporary password unread**. See the bulk-import section below for why the loop lives in the browser |
+| `stage-merchant-import` | admin-only; the merchant bulk import (phase 14). Takes the ISO Hub export as `file_base64` (CSV or XLSX, read from the bytes), keeps it on the batch, and stages `merchant_import_rows` with every refusal and note. **Idempotent**: `batch_id` re-reads the stored file after clearing the rows. Marks problems only; `commit_merchant_import()` re-derives them. Detail: `docs/claude/merchant-import.md` |
+| `marketing-material-file-url` | the one function whose two modes have **different authorization**: an admin stocks the library (upload), every active user reads it (download). Detail: `docs/claude/reference-data-and-marketing.md` |
+| `business-document-file-url` | the Document Center (`/documents`): the marketing library's shape and its two modes, an admin stocking it and every active user reading it. Detail: `docs/claude/notes-tasks-documents.md` |

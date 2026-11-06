@@ -24,6 +24,12 @@ export type InventoryRow = {
 const ALL = "DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE";
 
 export const EXPECTED: InventoryRow[] = [
+  { table_name: "merchant_import_batches", grantee: "anon", set_by: "20261106120000", expected: "none" },
+  { table_name: "merchant_import_batches", grantee: "authenticated", set_by: "20261106120000", expected: "SELECT" },
+  { table_name: "merchant_import_batches", grantee: "service_role", set_by: "20261106120000", expected: "INSERT, SELECT, UPDATE" },
+  { table_name: "merchant_import_rows", grantee: "anon", set_by: "20261106120000", expected: "none" },
+  { table_name: "merchant_import_rows", grantee: "authenticated", set_by: "20261106120000", expected: "SELECT" },
+  { table_name: "merchant_import_rows", grantee: "service_role", set_by: "20261106120000", expected: "DELETE, INSERT, SELECT" },
   { table_name: "merchant_overrides", grantee: "anon", set_by: "20261102120000", expected: "none" },
   { table_name: "merchant_overrides", grantee: "authenticated", set_by: "20261102120000", expected: "SELECT" },
   { table_name: "merchant_overrides", grantee: "service_role", set_by: "20261102120000", expected: "DELETE, SELECT" },
@@ -46,6 +52,12 @@ export const EXPECTED_SEQUENCES: [string, InventoryRow["grantee"], boolean][] = 
   ["merchant_overrides_id_seq", "anon", false],
   ["merchant_overrides_id_seq", "authenticated", false],
   ["merchant_overrides_id_seq", "service_role", false],
+  ["merchant_import_batches_id_seq", "anon", false],
+  ["merchant_import_batches_id_seq", "authenticated", false],
+  ["merchant_import_batches_id_seq", "service_role", true],
+  ["merchant_import_rows_id_seq", "anon", false],
+  ["merchant_import_rows_id_seq", "authenticated", false],
+  ["merchant_import_rows_id_seq", "service_role", true],
 ];
 
 const DOC = new URL("../../docs/claude/grants-inventory.md", import.meta.url);

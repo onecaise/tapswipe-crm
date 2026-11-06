@@ -12,13 +12,15 @@ Written in phase 13 of `docs/design/intake-and-reports.md` (4 Nov 2026). Pinned 
 stack). Both run the query below **as written here**, and both fail on any table created after the
 cutoff that is not in it.
 
-## The four tables
+## The six tables
 
 "none" means no privilege at all. "ALL" is `grant all`, which `information_schema` lists as the
 seven privileges DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE and UPDATE.
 
 | Table | Migration that sets the grants | `anon` | `authenticated` | `service_role` | Why |
 | --- | --- | --- | --- | --- | --- |
+| `merchant_import_batches` | `20261106120000_merchant_import.sql` | none | SELECT (+ column UPDATE on `status`, which `role_table_grants` does not list) | INSERT, SELECT, UPDATE | The merchant import's batches. Admin SELECT and Abandon by policy; `stage-merchant-import` writes as the service role; `commit_merchant_import()` (definer) commits. |
+| `merchant_import_rows` | `20261106120000_merchant_import.sql` | none | SELECT | DELETE, INSERT, SELECT | The staged rows. Admin SELECT by policy; the service role stages them and clears them before a re-read. |
 | `processors` | `20261023130000_processors.sql` | none | SELECT | SELECT | Reference list, changed only by migration. The service role reads it to check a chosen processor. |
 | `pre_app_tax_secrets` | `20261026140000_pre_app_tax_secrets.sql` | none | none | ALL | The fourth secrets table: zero policies, no client grant, Edge Function only (CLAUDE.md, "Three tiers"). |
 | `payout_period_closures` | `20261030120000_import_schema.sql` | none | SELECT | SELECT | Mark paid. Admin SELECT by policy; written only by `close_payout_period()` / `reopen_payout_period()` (definer). |
@@ -35,14 +37,17 @@ Sequences are not in `role_table_grants`, so they are not in the query.
 - `pre_app_tax_secrets_id_seq`: `service_role` only (`grant all on sequence`).
 - `merchant_overrides_id_seq`: no Data API role. Its inserts run as the owner inside definer
   functions.
+- `merchant_import_batches_id_seq`, `merchant_import_rows_id_seq`: USAGE for `service_role` only
+  (`stage-merchant-import` inserts).
 - `processors` and `payout_period_closures` have no sequence (natural keys).
 
-The tests check the two sequences too.
+The tests check the four sequences too.
 
 ## Does any table rely on an automatic grant?
 
 **No.** Checked 4 Nov 2026 in three ways:
-- Each of the four migrations above writes every grant the table needs.
+- Each of the four migrations above writes every grant the table needs. (Phase 14 added
+  `20261106120000`, which does the same for its two tables.)
 - The local stack's catalog matched this list before phase 13 changed anything.
 - No migration since the cutoff creates a table any other way (no `create table … as`, and no
   `like … including all`, which would copy a privilege).
@@ -60,6 +65,12 @@ from `20261014120000` on.)
 ```sql
 with expected (table_name, grantee, privileges, set_by) as (
   values
+    ('merchant_import_batches', 'anon',         '',                                                              '20261106120000'),
+    ('merchant_import_batches', 'authenticated', 'SELECT',                                                       '20261106120000'),
+    ('merchant_import_batches', 'service_role',  'INSERT, SELECT, UPDATE',                                       '20261106120000'),
+    ('merchant_import_rows',    'anon',          '',                                                              '20261106120000'),
+    ('merchant_import_rows',    'authenticated', 'SELECT',                                                        '20261106120000'),
+    ('merchant_import_rows',    'service_role',  'DELETE, INSERT, SELECT',                                        '20261106120000'),
     ('merchant_overrides',     'anon',          '',                                                              '20261102120000'),
     ('merchant_overrides',     'authenticated', 'SELECT',                                                        '20261102120000'),
     ('merchant_overrides',     'service_role',  'DELETE, SELECT',                                                '20261102120000'),

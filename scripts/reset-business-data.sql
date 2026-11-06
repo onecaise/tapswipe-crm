@@ -2,8 +2,8 @@
 --
 -- Empties every table in `public` EXCEPT `profiles` and `processors`, and
 -- leaves auth.users and both kept tables byte-for-byte unchanged. `processors`
--- is the fixed list of five processors that merchants and pre-apps point at
--- (20261023130000): configuration, not business data. Other reference data (brands, products,
+-- is the fixed list of six processors that merchants and pre-apps point at
+-- (20261023130000, plus 365 Pay from 20261106120000): configuration, not business data. Other reference data (brands, products,
 -- product_compatibility, marketing_materials, marketing_material_events,
 -- business_documents) is cleared too. Schema, functions, policies and grants
 -- are not touched. Nothing in auth.* or storage.* is touched.
@@ -75,7 +75,7 @@ declare
   expected_emails text[]  := array[]::text[];  -- <<< optional, e.g. array['a@x.com','b@y.com']
   -- ===================================================================
 
-  -- processors: reference data the schema itself seeds (five rows), kept.
+  -- processors: reference data the schema itself seeds (six rows), kept.
   keep_tables constant text[] := array['profiles', 'processors'];
   clear_tables constant text[] := array[
     -- sales pipeline
@@ -100,6 +100,9 @@ declare
     'payout_period_closures',
     -- bulk user import staging
     'user_import_batches', 'user_import_rows',
+    -- Merchant import staging (20261106120000): the uploaded files and their
+    -- rows. Business data: they hold merchant names, MIDs and rep names.
+    'merchant_import_batches', 'merchant_import_rows',
     -- reference data
     'brands', 'products', 'product_compatibility',
     'marketing_materials', 'marketing_material_events', 'business_documents'

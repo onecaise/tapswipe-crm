@@ -132,6 +132,12 @@ insert into user_import_batches (imported_by, file_name, source_text) values
 insert into user_import_rows (batch_id, row_number) values
   ((select id from user_import_batches where file_name = 'fake.csv'), 1);
 
+-- Merchant import staging (20261106120000). Invented.
+insert into merchant_import_batches (file_name, file_kind, source_bytes) values
+  ('fake-merchants.csv', 'csv', 'A');
+insert into merchant_import_rows (batch_id, row_number, mid_raw) values
+  ((select id from merchant_import_batches where file_name = 'fake-merchants.csv'), 2, '400100200399');
+
 -- Reference data: catalog, marketing library, company documents.
 insert into brands (name) values ('Reset Brand');
 insert into products (name, category, brand, kind, list_price) values
