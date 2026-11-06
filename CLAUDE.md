@@ -228,7 +228,7 @@ Everything below was moved verbatim out of this file; one line each.
 - `docs/claude/design-system.md` — colour tokens, the brand/destructive/status split, the shared page components, the sidebar (moved verbatim out of CLAUDE.md, 4 Nov 2026).
 - `docs/claude/grants-inventory.md` — the exact `anon` / `authenticated` / `service_role` table grants for every table created after `20261023120000`, the migration setting each, and a read-only SQL Editor query comparing a project against them.
 - `docs/claude/reset-business-data.md` — runbook and design notes for the one-off business-data reset (written there, not moved).
-- `docs/claude/deploy-batch-1.md` — the plan for deploying `intake-and-reports` (Phases 1–5) to dev then prod: migrations and their guards, functions to redeploy, test checklist, failure table (written there, not moved).
+- `docs/claude/deploy-batch-1.md`, `docs/claude/deploy-residuals.md` — deploy plans, dev then prod, for Phases 1–5, then 6–14b and the real-data load: guards, pre-check, functions, checklists, failures.
 - `docs/design/residual-splits.md` — shared-account design memo.
 - `docs/design/intake-and-reports.md` — the intake, MID-based residual import, overrides and reports memo: Owen's binding decisions, the phased build plan and every phase's build notes.
 - `docs/tapswipe_crm_master_plan.md` — product master plan.

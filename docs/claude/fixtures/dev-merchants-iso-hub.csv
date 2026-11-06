@@ -1,0 +1,33 @@
+#,Type,Merchant ID,MerchantÂ Name,Split,Agent,Processor,Added By,Override Agent,Status
+1,MERCHANT,990000000101,Test Diner One,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+2,MERCHANT,990000000102,Test Bakery Two,,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+3,MERCHANT,990000000103,Test Garage Three,35%,Sampleton Merchant Services LLC,TSYS,Test Admin,,Active
+4,MERCHANT,SQTEST0001ABC,Test Coffee Cart Four,0.3,Sampleton Merchant Services LLC,Square,Test Admin,,Active
+5,MERCHANT,990000000105,Test Closed Shop Five,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Inactive
+6,MERCHANT,990000000106,Test House Account Six,0,Tapswipe Test House,TSYS,Test Admin,,Active
+7,MERCHANT,990000000107,Test Override Store Seven,0.4,Fakerep Avery Payments LLC,Red Fynn,Test Admin,Overrider Test LLC,Active
+8,MERCHANT,990000000108,Test Merge Eight,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+9,Merchant,990000000108,Test Merge Eight (second line),40%,Fakerep Avery Payments LLC,,Test Admin,,active
+10,MERCHANT,990000000110,Test 365 Ten,0.4,Fakerep Avery Payments LLC,365 Pay,Test Admin,,Active
+11,MERCHANT,990000000111,Test No Processor Eleven,0.3,Sampleton Merchant Services LLC,,Test Admin,,Active
+12,MERCHANT,990000000113,=1+1,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+13,RESIDUAL,990000000112,Test Wrong Type,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+14,MERCHANT,,Test No MID,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+15,MERCHANT,4001-0020,Test Dashed MID,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+16,MERCHANT,4.001E+11,Test Exponent MID,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+17,MERCHANT,990000000116,,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+18,MERCHANT,990000000117,Test Very Long Name Very Long Name Very Long Name Very Long Name Very Long Name Very Long Name Very Long Name Very Long Name Very Long Name Very Long Name Very Long Name Very Long Name Very Long Name Very Long Name,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+19,MERCHANT,990000000118,Test No Agent,0.4,,TSYS,Test Admin,,Active
+20,MERCHANT,990000000119,Test Unknown Agent,0.4,Nobody Test LLC,TSYS,Test Admin,,Active
+21,MERCHANT,990000000120,Test Twin Agent,0.4,Twinner Test Group LLC,TSYS,Test Admin,,Active
+22,MERCHANT,990000000121,Test Dormant Agent,0.4,Dormant Test Holdings LLC,TSYS,Test Admin,,Active
+23,MERCHANT,990000000122,Test Admin Agent,0.4,Adminson Test Holdings LLC,TSYS,Test Admin,,Active
+24,MERCHANT,990000000123,Test Odd Split,12.344%,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+25,MERCHANT,990000000124,Test High Split,0.6,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+26,MERCHANT,990000000125,Test Unknown Processor,0.4,Fakerep Avery Payments LLC,Fiserv Nova,Test Admin,,Active
+27,MERCHANT,990000000126,Test Closed Status,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Closed
+28,MERCHANT,990000000127,Test Two Owners,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+29,MERCHANT,990000000127,Test Two Owners,0.4,Sampleton Merchant Services LLC,TSYS,Test Admin,,Active
+30,MERCHANT,990000000129,Test Two Processors,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
+31,MERCHANT,990000000129,Test Two Processors,0.4,Fakerep Avery Payments LLC,Square,Test Admin,,Active
+32,MERCHANT,exist0000001,Test Already Here,0.4,Fakerep Avery Payments LLC,TSYS,Test Admin,,Active
