@@ -2633,6 +2633,11 @@ specs for the import pages (`residual-review`, `residual-bad-import`, `residual-
 `upload-labels`), 18 passed (6 setup), 1.2 min; no e2e test was added, so the baseline stays 384. Build,
 lint and type-check pass. Applied to the local stack only (`supabase migration up --local`).
 
+Full e2e on `5cee38b` (this change plus the deploy plan `docs/claude/deploy-residuals.md`), alone, after
+`supabase stop` / `start`, a fresh `functions serve`, `.next` deleted and port 3000 free: **384 passed**
+(6 setup), 0 failed, 0 flaky, 17.0 min, `retries: 0`. On the same commit: `npm test` 3072 passed (128 files),
+`test:live` 368 passed (24 files); build, lint and type-check pass.
+
 ---
 
 ## 11. Open questions (28 Oct 2026)

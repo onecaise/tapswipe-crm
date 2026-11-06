@@ -129,7 +129,7 @@ npx tsc --noEmit       # type-check only
 npm test               # hermetic suite — PGlite + pure logic, no Docker (3072 tests, 128 files — every file must load)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (368 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (384 tests, 6 of them setup; arithmetic since the last full run, 383 at 12c)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (384 tests, 6 of them setup; last full run 384, 6 Nov 2026)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)
