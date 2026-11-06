@@ -123,7 +123,7 @@ order by label;
 
 The query reads `skipped_rows`, which #10 drops: after the push, that line errors. Expected; it is a before-the-push query. To list the rows behind a non-zero count: row 2 `select id, file_name, committed_at from rep_payout_batches where status = 'committed'`; row 4 `select id, mid, dba, split_agent_pct, split_company_pct from merchants where …` (the same predicate); row 9 is the query in #13's header comment.
 
-**If row 2 is not 0.** The batches cannot be fixed before the push (the column does not exist yet). On **dev**: run the reset (`docs/claude/reset-business-data.md`, dev steps) — dev holds test data. On **prod**: stop and ask. The repair, if wanted, is to let the push stop at #2 (#1 stays applied), set `processor` and `period` on each named batch by hand in the SQL Editor, and run the push again.
+**If row 2 is not 0.** The batches cannot be fixed before the push (the column does not exist yet). On **dev**: run the reset (`docs/claude/reset-business-data.md`, dev steps) — dev holds test data. The current `scripts/reset-business-data.sql` works at this point, with dev still at `20261028140000`: it skips the four tables that do not exist yet (`merchant_overrides`, `payout_period_closures`, `merchant_import_batches`, `merchant_import_rows`) and reports them "absent (skipped)" (checked 6 Nov 2026 on PGlite at the batch 1 schema: dry run passed, commit cleared the other 32 tables). On **prod**: stop and ask. The repair, if wanted, is to let the push stop at #2 (#1 stays applied), set `processor` and `period` on each named batch by hand in the SQL Editor, and run the push again.
 
 ## 2. Edge Functions changed since `40c02d9`
 
@@ -246,7 +246,7 @@ npx supabase db dump --db-url $prod --data-only -f C:\Users\owen\tapswipe-backup
 
 Both non-empty.
 
-**P3. Pre-check.** §1 pre-check in the prod SQL Editor (top-left **`tapwipe-crm-prod`**). All 0. Anything else: stop and ask; no reset is planned on prod this time (it holds the batch 1 state only, and the real data comes after).
+**P3. Pre-check.** §1 pre-check in the prod SQL Editor (top-left **`tapwipe-crm-prod`**: no "s", the project's real name, not a typo). All 0. Anything else: stop and ask; no reset is planned on prod this time (it holds the batch 1 state only, and the real data comes after).
 
 **P4. Dry run.** Local stack running (the script borrows its DB container as a psql client).
 
@@ -301,14 +301,14 @@ foreach ($f in 'create-user','deactivate-user','admin-reset-password','submit-pr
 }
 ```
 
-Fourteen `ACTIVE`, updated today; every curl **401** (each function's own guard; 404 = slug missing).
+Fourteen `ACTIVE`, updated today; every curl **401** (each function's own guard). A **401, 400 or 405** is fine: the function exists and answered. A **404 or any 5xx** means the function is missing or broken: redeploy it (§6). The same rule as `deploy-batch-1.md`.
 
 **P8. Merge to master and deploy the app.**
 
 ```powershell
 git checkout master
 git pull --ff-only
-git merge --no-ff intake-residuals
+git merge --no-ff intake-residuals -m "Merge intake-residuals (residual build)"
 git push origin master
 ```
 
@@ -327,7 +327,7 @@ Browser, as admin on prod: Dashboard loads; `/payouts/import` shows the processo
 **P10. The real data, in this order.** Each step's precondition is the step before.
 
 1. **Real reps first, through the user bulk import** (`/admin/users/import`), each with **LLC legal name exactly as ISO Hub's Legal Name text** (the merchant import matches the file's Agent column against `llc_legal_name`: case, runs of spaces and the mojibake/NBSP are forgiven, nothing else). A rep with no LLC gets their own legal name in both columns (A16). **The house profile "Tapswipe" included**: if it already exists (batch 1's agent 122), do not import it again (the row would be skipped as `email_exists`); set its LLC legal name to `Tapswipe` in Manage Users. Then set **every rep's rate** in Manage Users (the house **0**): a blank Split in the merchants file takes the profile rate, and a different explicit rate is only noted.
-2. **The merchants file: the original ISO Hub CSV export, not an .xlsx** (an XLSX can lose MID digits, and a numeric MID is refused or loses leading zeros). Do not open and save it in Excel.
+2. **The merchants file: the original ISO Hub CSV export, not an .xlsx** (an XLSX can lose MID digits, and a numeric MID is refused or loses leading zeros). Do not open and save it in Excel. Obtain it as a real CSV export from ISO Hub; if only an .xlsx exists, stop and ask before loading.
 3. **Remove the rows Owen has marked as tests** from that CSV (in a text editor), and nothing else.
 4. **A MID repeated with two different owners must be resolved in the file first** (`duplicate_mid_conflict` refuses every row involved, and the import is all or nothing). Same owner, rate and status merge on their own.
 5. **Load the merchants**: upload, read every refusal and note, fix the file (never the CRM to fit the file), Read again / re-upload, Commit. Merchants arrive with no address (they are listed on `/admin/merchants/missing-location`).
@@ -366,5 +366,6 @@ Plain rule: **nothing before P5 changes prod.** After that, cannot be undone wit
 - [ ] **Env vars cleared** in the PowerShell window: `Get-ChildItem Env: | Where-Object Name -in 'ALLOW_PROD_SUPABASE','SUPABASE_DB_PASSWORD','PGPASSWORD','ALLOW_REMOTE_SUPABASE_IN_DEV'` prints nothing (P1 sets two deliberately, later).
 - [ ] **Branch:** `git branch --show-current` → `intake-residuals`.
 - [ ] **Clean tree:** `git status --short` → empty.
+- [ ] **Storage accepts CSV on both projects** (§3), checked before D6 / P10: Dashboard → Storage → `residual-imports` → settings, "Allowed MIME types" is empty (or includes `text/csv`), on `tapswipe-crm-dev` and on `tapwipe-crm-prod`.
 - [ ] **Batch 1 is on both projects** (§0): `npm run migration:list` on dev ends at `20261028140000`.
 - [ ] **One clean full e2e pass on the final commit**, alone, after `supabase stop` / `supabase start`, `functions serve` up, port 3000 free, `.next` deleted; plus `npm test` and `npm run test:live` green. The result is recorded in `docs/design/intake-and-reports.md` (phase 14b notes) for the commit it was run on; a later commit needs its own run.
