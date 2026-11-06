@@ -1022,7 +1022,7 @@ describe("mutation proofs: each protection is what stops its case", () => {
   });
 
   it("the existing-line (no merge) check", async () => {
-    await without("on l.mid = r.mid_raw and l.period = batch.period", "on false");
+    await without("on mid_key(l.mid) = mid_key(r.mid_raw) and l.period = batch.period", "on false");
     await swap(async () => {
       const { id, period } = await batchWith(db, [{ mid: "MID-AGENT-1" }]);
       await db.exec(`insert into rep_payout_rows (agent_id, period, processor, mid, residual_income, rep_split_pct)
@@ -1160,7 +1160,7 @@ describe("mutation proofs: each protection is what stops its case", () => {
     },
     {
       label: "unknown-MID check (the row would be dropped silently)",
-      fragment: "and not exists (select 1 from merchants m where m.mid = r.mid_raw);",
+      fragment: "and not exists (select 1 from merchants m where mid_key(m.mid) = mid_key(r.mid_raw));",
       replacement: "and false;",
       make: async () => ({ id: (await batchWith(db, [{ mid: "NOPE-1", agentId: null }])).id }),
       refusal: /are not merchants in the CRM/,

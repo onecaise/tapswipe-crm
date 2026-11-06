@@ -60,5 +60,5 @@ the batch; Commit calls `commit_merchant_import(batch_id)`. It is the user bulk 
   (so no 27th FK and no teardown list changes; who committed is the audit row). Staging rows are kept
   after the commit as the record of the file. Both are cleared by `scripts/reset-business-data.sql`.
 - **Not imported**: overrides, addresses, inactive/closed merchants beyond `Inactive` (a later file).
-  The residual import reads digit-only MIDs (`parseMidCell`), so an alphanumeric Square MID imported here
-  is not yet matchable by a residual file.
+  A residual file matches these MIDs since 20261106140000: 6-20 letters and digits, compared by
+  `mid_key()` (trimmed, upper case), and `merchants` is unique on that key (`merchants_mid_key_ci`).

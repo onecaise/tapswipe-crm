@@ -2563,6 +2563,76 @@ failed at its own assertion. Applied to the local stack only (`supabase migratio
 Not done: no deploy plan (as instructed); nothing pushed, linked or deployed; the reset script was not
 run.
 
+### Phase 14b: alphanumeric MIDs in the residual parser (6 Nov 2026, branch `intake-residuals`)
+
+Phase 14 loads merchants whose MID has letters (Square: 13 letters and digits); the residual parser
+read a Merchant Number as digits only and every match was exact, so a Square file could not pay them.
+
+Built (`20261106140000_alphanumeric_mids.sql`; Edge Function `parse-residual-import` and
+`_shared/residuals.ts`; no other function's source changed):
+- **The MID** (`parseMidCell`): text, 6-20 ASCII letters and digits, trimmed, apostrophe and BOM
+  dropped, kept as written. A spreadsheet NUMBER cell over 15 digits, shown in exponent form or beyond
+  2^53 refuses (`missing_mid` with the use-the-CSV sentence), and so does text a spreadsheet wrote for a
+  number (`4.001E+11`, `400100200300.0`) — the phase 14 rule. A zero-padded number format still gives
+  its leading zeros.
+- **A CSV is read as text.** The upload accepts `.csv`; `isSpreadsheetContainer()` (zip or compound
+  file) tells an XLSX/XLS from text, and for text the Merchant Number is each cell's own text (SheetJS
+  keeps it in `w`), so 19 digits or leading zeros survive. The figures are read as before.
+- **One key**: `midKey()` / `mid_key()` = trimmed, upper case. A repeated MID (two spellings are one,
+  both named), the lookup by MID (`ilikeAnyOf`: equality ignoring case, and a validated MID holds no
+  wildcard), `mid_in_other_batch`, payee_changed and share_not_in_force all compare keys; the review's
+  unknown-MID list is de-duplicated by key.
+- **`merchants_mid_key_ci`**: unique on `mid_key(mid)`. Without it a key could name two merchants and a
+  case-insensitive match would be ambiguous. The merchant form's 23505 sentence covers it; the merchant
+  import's `mid_exists` check now has it as a backstop.
+- **SQL**: `commit_residual_import_v3` (the row lock, unknown MID, the repeat, owner/MID changed, no
+  rate, the share and override checks, the warnings, the three inserts, no-merge, the replace's
+  adjustment check), `delete_payout_period` (its adjustment check) and `post_payout_adjustment` (the
+  merchant lookup) re-created from their latest bodies with ONLY the MID comparisons changed (generated
+  by text substitution and checked: no plain `m.mid =` / `= r.mid_raw` / `l.mid =` left in v3).
+- **Display**: ledger lines carry the MERCHANT's spelling (`m.mid`, as before), so statements, both
+  reports and both exports show it; they read the ledger and needed no change (a test reads Report 2).
+  The review screen shows the file's own text for each row (it is the file's row).
+
+The migration refuses, naming them, merchants whose MIDs differ only in case or surrounding spaces,
+and a function body it did not copy; it passes over a populated database and writes no row.
+
+Where the instruction was silent, and what was chosen:
+- **Exponent form refuses even for an exact 12-digit number** (Excel's General format). The parser used
+  to write such a number out digit for digit (two tests said so). The instruction's "a number over 15
+  digits or in exponent form is refused" was followed, as the merchant import does; the two tests now
+  assert the refusal and the CSV route.
+- **The unique index**, rather than refusing an ambiguous match at commit: a key naming two merchants
+  is never a state worth keeping, and the merchant import already treated it as a duplicate.
+- **The review screen shows the file's spelling**, the ledger the merchant's.
+- **No new blocker code**: an unreadable or precision-damaged MID is still `missing_mid` (no CHECK
+  change), with its own sentence.
+- **The upload label** is now "Residual report (XLSX or CSV)"; two e2e helpers that find it by label
+  changed with it.
+
+Tests: `tests/rls/alphanumeric-mids.test.ts` (new: the key and index, the commit in lower and mixed
+case, the repeat in another case, unknown, no-merge, replace and its adjustment check, Report 2, the
+adjustment lookup, the delete's check, the migration's refusals and pass, and seven mutation proofs),
+unit tests for the parser (alphanumeric, lengths, precision, CSV through SheetJS, the container sniff,
+the case repeat, the key helpers, the preview helpers, the review's unknown list) and six live tests
+through the real function and commit (lettered MIDs stored and written in different cases, the case
+repeat, unknown and short MIDs, `mid_in_other_batch` in another case, a CSV with 19 digits, leading zeros
+and letters, the General-format refusal). Mutation checks: each of 13 parser changes reverted alone
+failed a unit test; each of the five Edge Function changes reverted alone (a fresh `functions serve`
+each time, with a passing control run) failed a live test, after one live test was strengthened for the
+merchant stored in lower case.
+Changed, never weakened: `unit/residuals-parse` (`precision` in the result shape; one-character MID
+stand-ins became 12-digit ones; the General-format test now asserts the refusal; the missing-MID
+sentence), `live/residual-import` (its number-cell row carries a "0" format, the General case is its
+own test), `rls/commit-residual-import-v3` (two mutation fragments follow the new text),
+`rls/merchant-import` (the case mutation is now caught by the index as backstop), two e2e helpers (the
+label).
+
+Suites: `npm test` 3038 → 3072 (127 → 128 files); `test:live` 362 → 368 (24 files); e2e: only the four
+specs for the import pages (`residual-review`, `residual-bad-import`, `residual-import-comma`,
+`upload-labels`), 18 passed (6 setup), 1.2 min; no e2e test was added, so the baseline stays 384. Build,
+lint and type-check pass. Applied to the local stack only (`supabase migration up --local`).
+
 ---
 
 ## 11. Open questions (28 Oct 2026)

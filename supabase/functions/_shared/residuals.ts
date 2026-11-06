@@ -155,6 +155,8 @@ export function blockerMessage(
   context: {
     mid?: string | null;
     midCell?: string | null;
+    /** The cell was a spreadsheet number that may have lost digits. */
+    midPrecision?: boolean;
     rows?: readonly number[];
     incomeType?: string | null;
     period?: string;
@@ -163,8 +165,11 @@ export function blockerMessage(
   const mid = context.mid ?? "";
   switch (blocker) {
     case "missing_mid":
+      if (context.midCell && context.midPrecision) {
+        return `Merchant Number "${context.midCell}" was stored as a spreadsheet number, which may have lost digits (more than 15, or shown in exponent form). Upload the processor's original CSV, or format the column as text, and upload it again.`;
+      }
       return context.midCell
-        ? `Merchant Number "${context.midCell}" is not a number made of digits only, so there is nothing to file it against.`
+        ? `Merchant Number "${context.midCell}" is not 6 to 20 letters and digits, so there is nothing to file it against.`
         : "This row has no Merchant Number, so there is nothing to file it against.";
     case "duplicate_mid":
       return `MID ${mid} appears on rows ${(context.rows ?? []).join(", ")}. Fix the file and upload it again.`;
@@ -357,52 +362,102 @@ export function parseTextCell(value: unknown): string | null {
 }
 
 export type MidCell = {
-  /** The MID as text, digits only; null when blank or unreadable. */
+  /** The MID as written, 6-20 letters and digits; null when blank or unreadable. */
   mid: string | null;
   /** What the cell held, when it held something that is not a MID. */
   unreadable: string | null;
+  /** The cell was (or looks like) a spreadsheet number that may have lost digits. */
+  precision: boolean;
 };
+
+/** A MID: 6 to 20 ASCII letters and digits (a Square MID has letters). */
+export const MID_PATTERN = /^[A-Za-z0-9]{6,20}$/;
+
+/**
+ * The key two MIDs are compared by: trimmed, upper case. The SQL twin is
+ * mid_key() (20261106140000); merchants are unique on it, so a key names at
+ * most one merchant. Display keeps the spelling as written.
+ */
+export function midKey(mid: string): string {
+  return mid.trim().toUpperCase();
+}
+
+/** Text a spreadsheet wrote for a number: "4.001E+11", "400100200300.0". */
+function looksLikeSpreadsheetNumber(text: string): boolean {
+  return /^\d*\.\d*$/.test(text) || /^\d*\.?\d+e[+-]?\d+$/i.test(text);
+}
 
 /**
  * Reads a Merchant Number as TEXT, never as a number (memo §0b.1).
  *
- * Real MIDs are 11 to 12 digits with leading zeros possible. `raw` is the
- * cell's value, `formatted` its displayed text (SheetJS `w`):
+ * A MID is 6 to 20 letters and digits, leading zeros possible. `raw` is the
+ * cell's value, `formatted` its displayed text (SheetJS `w`); `textFile` is
+ * true for a CSV, where SheetJS keeps the file's own text in `w`:
  *
- *   - a text cell is used as written, after a leading apostrophe (Excel's text
- *     marker), a BOM and surrounding whitespace are stripped;
- *   - a NUMERIC cell is read from its formatted text when that is all digits --
- *     a "000000000000" number format is the only place a stored-as-number MID's
- *     leading zeros survive -- and otherwise from the integer itself, written
- *     out digit for digit (never through exponent notation: Excel's General
- *     format shows a 12-digit number as "1.23457E+11");
- *   - anything that is not all digits after that (a fraction, a negative, a
- *     number beyond 2^53, "4400-1234") is unreadable, which is missing_mid with
- *     the cell quoted. The length is not checked: the unknown_mid refusal is
- *     what catches a MID the CRM does not hold.
+ *   - a text cell (and every cell of a CSV) is used as written, after a
+ *     leading apostrophe (Excel's text marker), a BOM and surrounding
+ *     whitespace are stripped;
+ *   - a NUMERIC spreadsheet cell may already have lost digits (Excel keeps
+ *     15), so one over 15 digits, shown in exponent form or beyond 2^53 is
+ *     refused with the use-the-CSV message (phase 14's rule for the merchant
+ *     import). Otherwise its formatted text when that is all digits (a
+ *     "000000000000" number format is the only place a stored-as-number MID's
+ *     leading zeros survive), else the integer written out;
+ *   - text that looks like a spreadsheet number ("4.001E+11", "400100200300.0")
+ *     gets the same message: it was a number before it was text.
+ *
+ * Anything else that is not 6-20 letters and digits (a fraction, a negative,
+ * "4400-1234") is missing_mid with the cell quoted. The unknown_mid refusal is
+ * what catches a MID the CRM does not hold; case is compared by midKey().
  */
-export function parseMidCell(raw: unknown, formatted?: unknown): MidCell {
-  if (raw === null || raw === undefined) return { mid: null, unreadable: null };
-
-  if (typeof raw === "number") {
-    const shown = typeof formatted === "string" ? formatted.trim() : "";
-    if (/^\d+$/.test(shown)) return { mid: shown, unreadable: null };
-    // String() of a safe integer is its digits: exponent notation starts at
-    // 1e21, far beyond Number.MAX_SAFE_INTEGER.
-    if (Number.isSafeInteger(raw) && raw >= 0) {
-      return { mid: String(raw), unreadable: null };
-    }
-    return { mid: null, unreadable: shown || String(raw) };
+export function parseMidCell(
+  raw: unknown,
+  formatted?: unknown,
+  textFile = false,
+): MidCell {
+  if (raw === null || raw === undefined) {
+    return { mid: null, unreadable: null, precision: false };
   }
 
-  const text = String(raw)
-    .replace(/\uFEFF/g, "")
-    .trim()
-    .replace(/^'/, "")
-    .trim();
-  if (text === "") return { mid: null, unreadable: null };
-  if (/^\d+$/.test(text)) return { mid: text, unreadable: null };
-  return { mid: null, unreadable: text };
+  let text: string;
+  if (typeof raw === "number" && !(textFile && typeof formatted === "string")) {
+    const shown = typeof formatted === "string" ? formatted.trim() : "";
+    const unsafe: MidCell = { mid: null, unreadable: shown || String(raw), precision: true };
+    if (!Number.isSafeInteger(raw)) {
+      return Number.isInteger(raw) ? unsafe : invalid(shown || String(raw));
+    }
+    if (raw < 0) return invalid(shown || String(raw));
+    if (/e[+-]?\d/i.test(shown)) return unsafe;
+    text = /^\d+$/.test(shown) ? shown : String(raw);
+    if (text.length > 15) return unsafe;
+  } else {
+    text = String(textFile && typeof formatted === "string" ? formatted : raw)
+      .replace(/\uFEFF/g, "")
+      .trim()
+      .replace(/^'/, "")
+      .trim();
+    if (text === "") return { mid: null, unreadable: null, precision: false };
+    if (looksLikeSpreadsheetNumber(text)) {
+      return { mid: null, unreadable: text, precision: true };
+    }
+  }
+  return MID_PATTERN.test(text)
+    ? { mid: text, unreadable: null, precision: false }
+    : invalid(text);
+}
+
+function invalid(text: string): MidCell {
+  return { mid: null, unreadable: text, precision: false };
+}
+
+/**
+ * Whether uploaded bytes are a spreadsheet container (XLSX is a zip, the old
+ * .xls a compound file) rather than text. Anything else SheetJS reads as CSV,
+ * and a CSV's Merchant Number is its own text (parseMidCell's `textFile`).
+ */
+export function isSpreadsheetContainer(bytes: Uint8Array): boolean {
+  const starts = (...sig: number[]) => sig.every((b, i) => bytes[i] === b);
+  return starts(0x50, 0x4b, 0x03, 0x04) || starts(0xd0, 0xcf, 0x11, 0xe0);
 }
 
 /** True when an Income Type cell says Residuals (case-insensitive, trimmed). */
@@ -449,6 +504,7 @@ export type ParseResult =
 export function parseResidualSheet(
   sheet: readonly (readonly unknown[])[],
   formatted?: readonly (readonly unknown[])[],
+  options: { textFile?: boolean } = {},
 ): ParseResult {
   if (sheet.length === 0) {
     return { ok: false, error: "That file has no rows." };
@@ -491,8 +547,10 @@ export function parseResidualSheet(
   };
 
   const rows: ParsedResidualRow[] = [];
-  /** MID -> every sheet row it is on, for duplicate_mid. */
+  /** midKey -> every sheet row it is on, for duplicate_mid. */
   const seen = new Map<string, number[]>();
+  /** midKey -> each spelling the file uses for it, in order. */
+  const spellings = new Map<string, string[]>();
 
   for (let offset = 1; offset < sheet.length; offset += 1) {
     const raw = sheet[offset];
@@ -501,7 +559,11 @@ export function parseResidualSheet(
 
     if (isBlankRow(raw)) continue;
 
-    const midCell = parseMidCell(at(sheet, offset, "mid"), at(formatted, offset, "mid"));
+    const midCell = parseMidCell(
+      at(sheet, offset, "mid"),
+      at(formatted, offset, "mid"),
+      options.textFile ?? false,
+    );
     const incomeType = parseTextCell(at(sheet, offset, "income_type"));
     const volume = parseNumberCell(at(sheet, offset, "volume"));
     const residual = parseNumberCell(at(sheet, offset, "residual_income"));
@@ -514,9 +576,18 @@ export function parseResidualSheet(
     };
 
     if (midCell.mid === null) {
-      block("missing_mid", blockerMessage("missing_mid", { midCell: midCell.unreadable }));
+      block(
+        "missing_mid",
+        blockerMessage("missing_mid", {
+          midCell: midCell.unreadable,
+          midPrecision: midCell.precision,
+        }),
+      );
     } else {
-      seen.set(midCell.mid, [...(seen.get(midCell.mid) ?? []), rowNumber]);
+      const key = midKey(midCell.mid);
+      seen.set(key, [...(seen.get(key) ?? []), rowNumber]);
+      const written = spellings.get(key) ?? [];
+      if (!written.includes(midCell.mid)) spellings.set(key, [...written, midCell.mid]);
     }
 
     if (!isResidualIncomeType(incomeType)) {
@@ -577,14 +648,16 @@ export function parseResidualSheet(
   }
 
   // Every row of a repeated MID is refused, the first one included: which copy
-  // is right is not something to guess (memo §0.4).
+  // is right is not something to guess (memo §0.4). Case is not a difference:
+  // "abc123" and "ABC123" are one MID.
   for (const row of rows) {
     if (row.blockers.includes("missing_mid") || row.mid_raw === null) continue;
-    const onRows = seen.get(row.mid_raw) ?? [];
+    const key = midKey(row.mid_raw);
+    const onRows = seen.get(key) ?? [];
     if (onRows.length > 1) {
       row.blockers.push("duplicate_mid");
       row.messages.duplicate_mid = blockerMessage("duplicate_mid", {
-        mid: row.mid_raw,
+        mid: (spellings.get(key) ?? [row.mid_raw]).join(" / "),
         rows: onRows,
       });
     }
@@ -633,7 +706,7 @@ export type MonthLine = { mid: string; processor: string | null };
  * processor's batch: mid_in_other_batch (memo §2.4). A line with no processor
  * -- everything committed before phase 7 -- counts as another processor's
  * (phase 6 build notes): it cannot be told apart from one, and a second line
- * for the MID would pay it twice.
+ * for the MID would pay it twice. The set holds midKey()s.
  */
 export function midsInOtherBatches(
   lines: readonly MonthLine[],
@@ -642,7 +715,7 @@ export function midsInOtherBatches(
   return new Set(
     lines
       .filter((line) => line.processor === null || line.processor !== batchProcessor)
-      .map((line) => line.mid),
+      .map((line) => midKey(line.mid)),
   );
 }
 
@@ -733,7 +806,7 @@ export function previousPayees(
   const payees = [
     ...new Set(
       lines
-        .filter((line) => line.mid === mid && line.shareRole !== "secondary")
+        .filter((line) => midKey(line.mid) === midKey(mid) && line.shareRole !== "secondary")
         .map((line) => line.agentId),
     ),
   ];
@@ -795,7 +868,7 @@ export function shareCovering(
   return (
     shares.find(
       (share) =>
-        share.mid === mid &&
+        midKey(share.mid) === midKey(mid) &&
         period >= share.effectiveFrom &&
         (share.effectiveTo === null || period < share.effectiveTo),
     ) ?? null
@@ -824,7 +897,8 @@ export function previewUnsharedRow(
     return null;
   }
   if (shareCovering(shares, row.mid, row.period) !== null) return null;
-  const onMid = shares.filter((share) => share.mid === row.mid);
+  const mid = row.mid;
+  const onMid = shares.filter((share) => midKey(share.mid) === midKey(mid));
   return onMid.length > 0 ? { flag: "share_not_in_force", shares: onMid } : null;
 }
 

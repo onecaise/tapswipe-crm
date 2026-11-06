@@ -37,6 +37,8 @@ import {
 } from "../_shared/residual-imports.ts";
 import {
   blockerMessage,
+  isSpreadsheetContainer,
+  midKey,
   midsInOtherBatches,
   monthsBefore,
   orderBlockers,
@@ -152,8 +154,12 @@ export default {
 
     let sheet: unknown[][];
     let formatted: unknown[][];
+    // A CSV: SheetJS keeps each cell's own text in `w`, so a long or
+    // lettered Merchant Number is read as written (parseMidCell).
+    let textFile = false;
     try {
       const bytes = new Uint8Array(await blob.arrayBuffer());
+      textFile = !isSpreadsheetContainer(bytes);
       const workbook = XLSX.read(bytes, { type: "array" });
 
       const first = workbook.SheetNames[0];
@@ -197,7 +203,7 @@ export default {
       );
     }
 
-    const parsed = parseResidualSheet(sheet, formatted);
+    const parsed = parseResidualSheet(sheet, formatted, { textFile });
     if (!parsed.ok) {
       return json({ error: parsed.error }, 400);
     }
@@ -221,18 +227,21 @@ export default {
     ];
 
     // The payee lookup: MID -> merchant -> owner (memo §2.1, "kept and
-    // widened").
+    // widened"). Case-insensitive (20261106140000): `ilike` with no wildcard
+    // is equality ignoring case, and a MID here is letters and digits only
+    // (parseMidCell), so nothing in it is a pattern. merchants is unique on
+    // mid_key(), so a key finds at most one; the map is keyed by midKey().
     const merchants = new Map<string, MerchantByMid>();
     for (const part of chunks(mids)) {
       const { data, error } = await ctx.supabaseAdmin
         .from("merchants")
         .select("id, mid, agent_id, status, processor")
-        .in("mid", part);
+        .ilikeAnyOf("mid", part);
       if (error) {
         return json({ error: `Could not look up MIDs: ${error.message}` }, 500);
       }
       for (const merchant of data ?? []) {
-        merchants.set(merchant.mid as string, {
+        merchants.set(midKey(merchant.mid as string), {
           id: merchant.id as number,
           mid: merchant.mid as string,
           agentId: merchant.agent_id as string,
@@ -260,7 +269,7 @@ export default {
             .select("mid, processor, agent_id, share_role")
             .eq("line_kind", "import")
             .eq("period", period)
-            .in("mid", part)
+            .ilikeAnyOf("mid", part)
             .order("id", { ascending: true })
             .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
           if (error) return { error: error.message, lines };
@@ -364,7 +373,7 @@ export default {
       const merchant =
         row.mid_raw === null || row.blockers.includes("missing_mid")
           ? null
-          : (merchants.get(row.mid_raw) ?? null);
+          : (merchants.get(midKey(row.mid_raw)) ?? null);
 
       const codes: ResidualBlocker[] = [...row.blockers];
       const messages = { ...row.messages };
@@ -373,7 +382,7 @@ export default {
           codes.push("unknown_mid");
           messages.unknown_mid = blockerMessage("unknown_mid", { mid: row.mid_raw });
         }
-        if (otherBatchMids.has(row.mid_raw)) {
+        if (otherBatchMids.has(midKey(row.mid_raw))) {
           codes.push("mid_in_other_batch");
           messages.mid_in_other_batch = blockerMessage("mid_in_other_batch", {
             mid: row.mid_raw,

@@ -584,8 +584,14 @@ export function reviewImportRows(
         detail: row.error ?? code,
       });
       refusals.set(code, list);
-      if (code === "unknown_mid" && row.mid_raw !== null && !unknownMids.includes(row.mid_raw)) {
-        unknownMids.push(row.mid_raw);
+      // Listed once per MID, and "abc123" is the same MID as "ABC123".
+      const raw = row.mid_raw;
+      if (
+        code === "unknown_mid" &&
+        raw !== null &&
+        !unknownMids.some((mid) => mid.trim().toUpperCase() === raw.trim().toUpperCase())
+      ) {
+        unknownMids.push(raw);
       }
     }
     for (const warning of row.warnings ?? []) {

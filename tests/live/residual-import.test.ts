@@ -653,14 +653,25 @@ describe("it reads a real workbook end to end", () => {
     const ownerMerchant = await merchantFor("owner", zeroLed);
     const intruderMerchant = await merchantFor("intruder", twelve);
 
-    const { batchId, period, processor, parse } = await importFile([
+    const sheet = XLSX.utils.aoa_to_sheet([
       // A BOM, an apostrophe and stray whitespace on the headers, in any case.
       ["\uFEFFprocessor", "'Merchant Number", "  merchant name ", "INCOME TYPE", "Volume", " Residual"],
       // Text MID with a leading zero; currency text.
       line(zeroLed, { volume: "$76,877.18", residual: "-$11.76", incomeType: " residuals " }),
-      // A 12-digit MID stored as a NUMBER cell.
+      // A 12-digit MID stored as a NUMBER cell, shown in full by a "0" format
+      // (in General format it shows as 7.12345E+11 and is refused: below).
       line(Number(twelve), { volume: 12400, residual: 310.5 }),
     ]);
+    sheet.B3.z = "0";
+    delete sheet.B3.w;
+    const slot = await freeSlot();
+    for (const cell of ["A2", "A3"]) sheet[cell].v = slot.processor;
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, sheet, "Residuals");
+    const { batchId, period, processor, parse } = await importFile([], {
+      ...slot,
+      bytes: XLSX.write(book, { type: "buffer", bookType: "xlsx" }) as Buffer,
+    });
 
     expect(parse.status, parse.raw).toBe(200);
     expect(parse.body).toEqual({
@@ -908,6 +919,117 @@ describe("it reads a real workbook end to end", () => {
     expect(response.status, response.raw).toBe(200);
     expect(String(response.body.signedUrl)).toContain(RESIDUAL_BUCKET);
     expect(response.body.fileName).toBe("traceable.xlsx");
+  });
+});
+
+/** A 13-character lettered MID unique to this run, as a Square MID looks (invented). */
+function newLetteredMid(): string {
+  midCounter += 1;
+  return `SQ${RUN}K${String(midCounter).padStart(4, "0")}`;
+}
+
+describe("MIDs with letters, matched in any case (20261106140000)", () => {
+  it("reads lettered MIDs written in lower and mixed case, and commits each to its merchant at the merchant's spelling", async () => {
+    const lettered = newLetteredMid();
+    const mixed = newLetteredMid();
+    // Stored in lower case: the file's upper case must still find it.
+    const storedLower = newLetteredMid().toLowerCase();
+    const a = await merchantFor("owner", lettered);
+    const b = await merchantFor("intruder", mixed);
+    const c = await merchantFor("owner", storedLower);
+    const mixedInFile = mixed
+      .split("")
+      .map((ch, i) => (i % 2 === 0 ? ch.toLowerCase() : ch))
+      .join("");
+
+    const { batchId, period, parse } = await importFile([
+      HEADER,
+      line(lettered.toLowerCase()),
+      line(` ${mixedInFile} `),
+      line(storedLower.toUpperCase()),
+    ]);
+    expect(parse.body).toMatchObject({ row_count: 3, blocked_count: 0 });
+    const staged = await stagedRows(batchId);
+    expect(staged.map((r) => [r.mid_raw, r.merchant_id, r.agent_id, r.blockers])).toEqual([
+      [lettered.toLowerCase(), a, fixtures.userIds.owner, []],
+      [mixedInFile, b, fixtures.userIds.intruder, []],
+      [storedLower.toUpperCase(), c, fixtures.userIds.owner, []],
+    ]);
+
+    const { data, error } = await commitV3(batchId);
+    expect(error, error?.message).toBeNull();
+    expect(data).toMatchObject({ written: 3, rows: 3 });
+    expect(await ledgerFor(lettered, period)).toMatchObject({ mid: lettered, agent_id: fixtures.userIds.owner, rep_payout: 12.5 });
+    expect(await ledgerFor(mixed, period)).toMatchObject({ mid: mixed, agent_id: fixtures.userIds.intruder });
+    expect(await ledgerFor(storedLower, period)).toMatchObject({ mid: storedLower, agent_id: fixtures.userIds.owner });
+  });
+
+  it("refuses a MID repeated in another case on every row, naming both spellings", async () => {
+    const mid = newLetteredMid();
+    await merchantFor("owner", mid);
+    const { batchId, parse } = await importFile([HEADER, line(mid), line(newMidKnown()), line(mid.toLowerCase())]);
+    expect(parse.body).toMatchObject({ row_count: 3, blocked_count: 2 });
+    const staged = await stagedRows(batchId);
+    expect(staged.map((r) => r.blocker)).toEqual(["duplicate_mid", null, "duplicate_mid"]);
+    expect(staged[0].error).toBe(
+      `MID ${mid} / ${mid.toLowerCase()} appears on rows 2, 4. Fix the file and upload it again.`,
+    );
+  });
+
+  it("refuses an unknown lettered MID, and a short or punctuated one as unreadable", async () => {
+    const unknown = newLetteredMid();
+    const { batchId } = await importFile([HEADER, line(unknown), line("SQ12"), line("SQ-1234-5678")]);
+    const staged = await stagedRows(batchId);
+    expect(staged.map((r) => [r.mid_raw, r.blockers])).toEqual([
+      [unknown, ["unknown_mid"]],
+      ["SQ12", ["missing_mid"]],
+      ["SQ-1234-5678", ["missing_mid"]],
+    ]);
+    expect(staged[1].error).toMatch(/"SQ12" is not 6 to 20 letters and digits/);
+  });
+
+  it("refuses a MID another processor's import already paid this month, whatever the case", async () => {
+    const mid = newLetteredMid();
+    await merchantFor("owner", mid);
+    const slot = await freeSlot({ processor: PROCESSOR, also: ["Square"] });
+    const first = await importFile([HEADER, line(mid)], slot);
+    expect((await commitV3(first.batchId)).error).toBeNull();
+    const elsewhere = await importFile([HEADER, line(mid.toLowerCase(), { processor: "Square" })], {
+      processor: "Square",
+      period: first.period,
+    });
+    expect((await stagedRows(elsewhere.batchId))[0].blockers).toEqual(["mid_in_other_batch"]);
+  });
+
+  it("reads a CSV's Merchant Number as its own text: 19 digits, leading zeros and letters", async () => {
+    const long = `4${RUN}${String((midCounter += 1)).padStart(12, "0")}`;
+    const zeroLed = newMid("0");
+    const lettered = newLetteredMid();
+    for (const mid of [long, zeroLed, lettered]) await merchantFor("owner", mid);
+    const slot = await freeSlot();
+    const csv = [
+      HEADER.join(","),
+      `${slot.processor},${long},Long Co,Residuals,1000,25`,
+      `${slot.processor},${zeroLed},Zero Co,Residuals,"1,000.00",25`,
+      `${slot.processor},${lettered.toLowerCase()},Lettered Co,Residuals,1000,25`,
+    ].join("\n");
+    const { batchId, parse } = await importFile([], { ...slot, fileName: "live-residuals.csv", bytes: Buffer.from(csv) });
+    expect(parse.status, parse.raw).toBe(200);
+    expect(parse.body).toMatchObject({ row_count: 3, blocked_count: 0 });
+    expect((await stagedRows(batchId)).map((r) => [r.mid_raw, r.volume])).toEqual([
+      [long, 1000],
+      [zeroLed, 1000],
+      [lettered.toLowerCase(), 1000],
+    ]);
+  });
+
+  it("refuses a 12-digit NUMBER cell in General format (shown in exponent form) with the use-the-CSV message", async () => {
+    const twelve = newMid("8");
+    await merchantFor("owner", twelve);
+    const { batchId } = await importFile([HEADER, line(Number(twelve))]);
+    const [row] = await stagedRows(batchId);
+    expect(row.blockers).toEqual(["missing_mid"]);
+    expect(row.error).toMatch(/was stored as a spreadsheet number.*original CSV/);
   });
 });
 

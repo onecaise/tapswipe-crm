@@ -38,7 +38,7 @@ export async function upload(
   await page.getByLabel("Year").selectOption(slot.period.slice(0, 4));
   await page.getByLabel("Month").selectOption(slot.period.slice(5, 7));
   await page
-    .getByLabel("Residual report (XLSX)")
+    .getByLabel("Residual report (XLSX or CSV)")
     .setInputFiles({ name: file.name, mimeType: file.mimeType ?? XLSX_TYPE, buffer: file.buffer });
   await page.getByRole("button", { name: "Upload" }).click();
 }

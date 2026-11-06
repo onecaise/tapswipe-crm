@@ -64,6 +64,11 @@ describe("shareCovering", () => {
   it("matches on the MID", () => {
     expect(shareCovering([SHARE], "MID-2", JUL)).toBeNull();
   });
+
+  it("matches the MID in any case (20261106140000): the share carries the merchant's spelling", () => {
+    expect(shareCovering([SHARE], " mid-1 ", JUL)).toBe(SHARE);
+    expect(previewUnsharedRow(row(SIGNER, { period: SEP, mid: "mid-1" }), [SHARE])?.flag).toBe("share_not_in_force");
+  });
 });
 
 describe("monthLabel", () => {

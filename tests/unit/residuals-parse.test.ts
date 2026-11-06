@@ -8,7 +8,9 @@ import {
   RESIDUAL_COLUMNS,
   blockerMessage,
   isResidualIncomeType,
+  isSpreadsheetContainer,
   mapHeaders,
+  midKey,
   midsInOtherBatches,
   monthsBefore,
   normalizeHeader,
@@ -17,6 +19,7 @@ import {
   parseNumberCell,
   parseResidualSheet,
   pickBlocker,
+  previousPayees,
   rowWarnings,
   sameProcessor,
 } from "../../supabase/functions/_shared/residuals";
@@ -176,41 +179,38 @@ describe("mapHeaders: header tolerance", () => {
 
 describe("parseMidCell: the Merchant Number is text", () => {
   it("keeps a text MID exactly, leading zeros included", () => {
-    expect(parseMidCell("012345678901")).toEqual({ mid: "012345678901", unreadable: null });
-    expect(parseMidCell("00012345678")).toEqual({ mid: "00012345678", unreadable: null });
+    expect(parseMidCell("012345678901")).toEqual({ mid: "012345678901", unreadable: null, precision: false });
+    expect(parseMidCell("00012345678")).toEqual({ mid: "00012345678", unreadable: null, precision: false });
   });
 
   it("strips a leading apostrophe, a BOM and whitespace", () => {
-    expect(parseMidCell("'012345678901")).toEqual({ mid: "012345678901", unreadable: null });
-    expect(parseMidCell("\uFEFF 012345678901 ")).toEqual({ mid: "012345678901", unreadable: null });
-    expect(parseMidCell("  ' 4400123456789 ")).toEqual({ mid: "4400123456789", unreadable: null });
+    expect(parseMidCell("'012345678901")).toEqual({ mid: "012345678901", unreadable: null, precision: false });
+    expect(parseMidCell("\uFEFF 012345678901 ")).toEqual({ mid: "012345678901", unreadable: null, precision: false });
+    expect(parseMidCell("  ' 4400123456789 ")).toEqual({ mid: "4400123456789", unreadable: null, precision: false });
   });
 
   it("writes a numeric 12-digit cell out digit for digit, never in exponent form", () => {
-    // Excel's General format DISPLAYS 123456789012 as 1.23457E+11; that text
-    // must not become the MID.
-    expect(parseMidCell(123456789012, "1.23457E+11")).toEqual({ mid: "123456789012", unreadable: null });
-    expect(parseMidCell(987654321098)).toEqual({ mid: "987654321098", unreadable: null });
-    expect(parseMidCell(12345678901, "12345678901")).toEqual({ mid: "12345678901", unreadable: null });
+    expect(parseMidCell(987654321098)).toEqual({ mid: "987654321098", unreadable: null, precision: false });
+    expect(parseMidCell(12345678901, "12345678901")).toEqual({ mid: "12345678901", unreadable: null, precision: false });
   });
 
   it("takes a numeric cell's leading zeros from its displayed text", () => {
     // A "000000000000" number format is the only place they survive.
-    expect(parseMidCell(12345678901, "012345678901")).toEqual({ mid: "012345678901", unreadable: null });
+    expect(parseMidCell(12345678901, "012345678901")).toEqual({ mid: "012345678901", unreadable: null, precision: false });
   });
 
-  it("refuses what is not all digits, quoting the cell", () => {
-    expect(parseMidCell("4400-1234-5678")).toEqual({ mid: null, unreadable: "4400-1234-5678" });
-    expect(parseMidCell("MID-1")).toEqual({ mid: null, unreadable: "MID-1" });
-    expect(parseMidCell(1234.5, "1234.5")).toEqual({ mid: null, unreadable: "1234.5" });
-    expect(parseMidCell(-12345, "-12345")).toEqual({ mid: null, unreadable: "-12345" });
-    expect(parseMidCell(2 ** 60, "1.15292E+18")).toEqual({ mid: null, unreadable: "1.15292E+18" });
+  it("refuses what is not 6-20 letters and digits, quoting the cell", () => {
+    expect(parseMidCell("4400-1234-5678")).toEqual({ mid: null, unreadable: "4400-1234-5678", precision: false });
+    expect(parseMidCell("MID-1")).toEqual({ mid: null, unreadable: "MID-1", precision: false });
+    expect(parseMidCell(1234.5, "1234.5")).toEqual({ mid: null, unreadable: "1234.5", precision: false });
+    expect(parseMidCell(-12345, "-12345")).toEqual({ mid: null, unreadable: "-12345", precision: false });
+    expect(parseMidCell(2 ** 60, "1.15292E+18")).toEqual({ mid: null, unreadable: "1.15292E+18", precision: true });
   });
 
   it("treats a blank cell as no MID, not as unreadable", () => {
-    expect(parseMidCell(null)).toEqual({ mid: null, unreadable: null });
-    expect(parseMidCell("   ")).toEqual({ mid: null, unreadable: null });
-    expect(parseMidCell("'")).toEqual({ mid: null, unreadable: null });
+    expect(parseMidCell(null)).toEqual({ mid: null, unreadable: null, precision: false });
+    expect(parseMidCell("   ")).toEqual({ mid: null, unreadable: null, precision: false });
+    expect(parseMidCell("'")).toEqual({ mid: null, unreadable: null, precision: false });
   });
 });
 
@@ -229,11 +229,15 @@ describe("Merchant Number through a real workbook (SheetJS 0.20.3)", () => {
     ]);
   });
 
-  it("reads a 12-digit NUMBER cell in General format as its digits", () => {
+  it("refuses a 12-digit NUMBER cell in General format, shown in exponent form, with the use-the-CSV message", () => {
     const { raw, formatted } = throughSheetJS(() => {}, [HEADER, row({ 1: 123456789012 })]);
-    // What SheetJS shows for it, so the test proves the fallback is needed.
+    // What SheetJS shows for it: the admin cannot check the digits.
     expect(typeof raw[1][1]).toBe("number");
-    expect(parsed(raw, formatted)[0].mid_raw).toBe("123456789012");
+    expect(formatted[1][1]).toBe("1.23457E+11");
+    const [only] = parsed(raw, formatted);
+    expect(only.blockers).toEqual(["missing_mid"]);
+    expect(only.mid_raw).toBe("1.23457E+11");
+    expect(only.messages.missing_mid).toMatch(/original CSV/);
   });
 
   it("recovers leading zeros from a zero-padded number format", () => {
@@ -394,7 +398,10 @@ describe("blockerMessage", () => {
     expect(blockerMessage("unknown_mid", { mid: "4400" })).toMatch(/MID 4400 is not a merchant in the CRM/);
     expect(blockerMessage("duplicate_mid", { mid: "4400", rows: [7, 31] })).toMatch(/appears on rows 7, 31/);
     expect(blockerMessage("wrong_income_type", { incomeType: "Fees" })).toMatch(/"Fees", not Residuals/);
-    expect(blockerMessage("missing_mid", { midCell: "MID-1" })).toMatch(/"MID-1" is not a number/);
+    expect(blockerMessage("missing_mid", { midCell: "MID-1" })).toMatch(/"MID-1" is not 6 to 20 letters and digits/);
+    expect(blockerMessage("missing_mid", { midCell: "1.23457E+11", midPrecision: true })).toMatch(
+      /"1\.23457E\+11" was stored as a spreadsheet number.*original CSV/,
+    );
     expect(blockerMessage("mid_in_other_batch", { mid: "4400", period: "2026-07-01" })).toMatch(
       /line for July 2026 from another processor/,
     );
@@ -457,7 +464,7 @@ describe("parseResidualSheet", () => {
   });
 
   it("refuses a row whose Income Type is not Residuals, quoting what it says", () => {
-    const rows = parsed([HEADER, row(), row({ 1: "2", 3: "Fees" }), row({ 1: "3", 3: null })]);
+    const rows = parsed([HEADER, row(), row({ 1: "222222222222", 3: "Fees" }), row({ 1: "333333333333", 3: null })]);
     expect(rows.map((r) => r.blockers)).toEqual([[], ["wrong_income_type"], ["wrong_income_type"]]);
     expect(rows[1].messages.wrong_income_type).toBe(
       'Income Type is "Fees", not Residuals. A residual file holds residuals only.',
@@ -466,7 +473,7 @@ describe("parseResidualSheet", () => {
   });
 
   it("refuses EVERY row of a repeated MID, the first one too, listing the rows", () => {
-    const rows = parsed([HEADER, row(), row({ 1: "999" }), row(), row()]);
+    const rows = parsed([HEADER, row(), row({ 1: "999999999999" }), row(), row()]);
     expect(rows.map((r) => r.blockers)).toEqual([["duplicate_mid"], [], ["duplicate_mid"], ["duplicate_mid"]]);
     expect(rows[0].messages.duplicate_mid).toBe(
       "MID 012345678901 appears on rows 2, 4, 5. Fix the file and upload it again.",
@@ -479,14 +486,14 @@ describe("parseResidualSheet", () => {
   });
 
   it("refuses a blank Volume or Residual as missing_figure, not as zero", () => {
-    const rows = parsed([HEADER, row({ 4: null }), row({ 1: "2", 5: "" }), row({ 1: "3", 4: "-", 5: "N/A" })]);
+    const rows = parsed([HEADER, row({ 4: null }), row({ 1: "222222222222", 5: "" }), row({ 1: "333333333333", 4: "-", 5: "N/A" })]);
     expect(rows.map((r) => r.blockers)).toEqual([["missing_figure"], ["missing_figure"], ["missing_figure"]]);
     expect(rows[2].messages.missing_figure).toBe("Volume and Residual are blank on this row.");
     expect(rows[0].volume).toBeNull();
   });
 
   it("refuses an unreadable figure, quoting the cell, and a decimal comma with its reason", () => {
-    const rows = parsed([HEADER, row({ 4: "12abc" }), row({ 1: "2", 5: "12,99" })]);
+    const rows = parsed([HEADER, row({ 4: "12abc" }), row({ 1: "222222222222", 5: "12,99" })]);
     expect(rows.map((r) => r.blockers)).toEqual([["unreadable_number"], ["unreadable_number"]]);
     expect(rows[0].messages.unreadable_number).toBe('Volume "12abc" could not be read as a number.');
     expect(rows[1].messages.unreadable_number).toMatch(/^Residual "12,99" has a comma that is not a thousands separator/);
@@ -506,12 +513,12 @@ describe("parseResidualSheet", () => {
   });
 
   it("does not block a negative residual, a zero volume or a negative volume (at most a warning)", () => {
-    const rows = parsed([HEADER, row({ 4: "$0.00", 5: "-$11.76" }), row({ 1: "2", 4: "-5", 5: "1" })]);
+    const rows = parsed([HEADER, row({ 4: "$0.00", 5: "-$11.76" }), row({ 1: "222222222222", 4: "-5", 5: "1" })]);
     expect(rows.map((r) => r.blockers)).toEqual([[], []]);
   });
 
   it("skips entirely blank rows instead of refusing them, keeping sheet row numbers", () => {
-    const rows = parsed([HEADER, row(), [null, "", "  ", null, null, null], row({ 1: "2" })]);
+    const rows = parsed([HEADER, row(), [null, "", "  ", null, null, null], row({ 1: "222222222222" })]);
     expect(rows.map((r) => r.row_number)).toEqual([2, 4]);
   });
 
@@ -623,5 +630,117 @@ describe("monthsBefore", () => {
   it("steps back across a year", () => {
     expect(monthsBefore("2026-01-01", 1)).toBe("2025-12-01");
     expect(monthsBefore("2026-07-01", 1)).toBe("2026-06-01");
+  });
+});
+
+/**
+ * 20261106140000: a MID is 6-20 letters and digits (a Square MID has letters),
+ * compared trimmed and case-insensitively, and written as the file wrote it.
+ * Every MID here is invented.
+ */
+describe("alphanumeric MIDs", () => {
+  it("reads a lettered MID as written, mixed case included", () => {
+    expect(parseMidCell("SQ7K2M9QX4B1Z")).toEqual({ mid: "SQ7K2M9QX4B1Z", unreadable: null, precision: false });
+    expect(parseMidCell(" sq7k2m9qx4b1z ")).toEqual({ mid: "sq7k2m9qx4b1z", unreadable: null, precision: false });
+    expect(parseMidCell("'Ab12Cd")).toEqual({ mid: "Ab12Cd", unreadable: null, precision: false });
+  });
+
+  it("refuses fewer than 6 or more than 20 characters, and anything but ASCII letters and digits", () => {
+    expect(parseMidCell("AB12C")).toEqual({ mid: null, unreadable: "AB12C", precision: false });
+    expect(parseMidCell("A".repeat(21))).toEqual({ mid: null, unreadable: "A".repeat(21), precision: false });
+    expect(parseMidCell("A".repeat(20)).mid).toBe("A".repeat(20));
+    expect(parseMidCell("SQ7K 2M9Q").mid).toBeNull();
+    expect(parseMidCell("SQ7K2M9QX4B1É").mid).toBeNull();
+    expect(parseMidCell(12345, "12345")).toEqual({ mid: null, unreadable: "12345", precision: false });
+  });
+
+  it("refuses a spreadsheet number over 15 digits, or shown in exponent form, with the use-the-CSV message", () => {
+    // 16 digits shown in full by a "0" format: Excel already kept only 15.
+    expect(parseMidCell(4400123456789012, "4400123456789012")).toEqual({
+      mid: null,
+      unreadable: "4400123456789012",
+      precision: true,
+    });
+    expect(parseMidCell(440012345678, "4.40012E+11")).toEqual({ mid: null, unreadable: "4.40012E+11", precision: true });
+    // 15 digits is the most Excel keeps exactly.
+    expect(parseMidCell(440012345678901, "440012345678901").mid).toBe("440012345678901");
+  });
+
+  it("refuses text that a spreadsheet wrote for a number, with the same message", () => {
+    expect(parseMidCell("4.001E+11")).toEqual({ mid: null, unreadable: "4.001E+11", precision: true });
+    expect(parseMidCell("400100200300.0")).toEqual({ mid: null, unreadable: "400100200300.0", precision: true });
+  });
+
+  it("reads a CSV's Merchant Number from its own text, however long, and never as a number", () => {
+    // SheetJS parses a CSV cell of digits as a number, and keeps the file's text in `w`.
+    expect(parseMidCell(4400123456789012000, "4400123456789012345", true)).toEqual({
+      mid: "4400123456789012345",
+      unreadable: null,
+      precision: false,
+    });
+    expect(parseMidCell(123456789, "000123456789", true).mid).toBe("000123456789");
+    expect(parseMidCell(440012345678, "4.40012E+11", true)).toEqual({ mid: null, unreadable: "4.40012E+11", precision: true });
+  });
+
+  it("through SheetJS: a CSV keeps a 19-digit MID, leading zeros and letters; the same as XLSX refuses the 19 digits", () => {
+    const csv = [
+      HEADER.join(","),
+      "TSYS,4400123456789012345,Long Co,Residuals,100,1",
+      "TSYS,000123456789,Zero Co,Residuals,100,1",
+      "Square,SQ7K2M9QX4B1Z,Lettered Co,Residuals,100,1",
+    ].join("\n");
+    const bytes = new TextEncoder().encode(csv);
+    expect(isSpreadsheetContainer(bytes)).toBe(false);
+    const read = XLSX.read(bytes, { type: "array" });
+    const first = read.Sheets[read.SheetNames[0]];
+    const options = { header: 1 as const, defval: null, blankrows: true };
+    const raw = XLSX.utils.sheet_to_json(first, { ...options, raw: true }) as unknown[][];
+    const formatted = XLSX.utils.sheet_to_json(first, { ...options, raw: false }) as unknown[][];
+
+    const asCsv = parseResidualSheet(raw, formatted, { textFile: true });
+    expect(asCsv.ok && asCsv.rows.map((r) => [r.mid_raw, r.blockers])).toEqual([
+      ["4400123456789012345", []],
+      ["000123456789", []],
+      ["SQ7K2M9QX4B1Z", []],
+    ]);
+    const asSheet = parseResidualSheet(raw, formatted);
+    expect(asSheet.ok && asSheet.rows.map((r) => r.blockers)).toEqual([["missing_mid"], [], []]);
+  });
+
+  it("knows an XLSX (zip) and an old .xls (compound file) from text", () => {
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([HEADER]), "R");
+    expect(isSpreadsheetContainer(new Uint8Array(XLSX.write(book, { type: "buffer", bookType: "xlsx" })))).toBe(true);
+    expect(isSpreadsheetContainer(new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1]))).toBe(true);
+    expect(isSpreadsheetContainer(new TextEncoder().encode("Processor,Merchant Number"))).toBe(false);
+    expect(isSpreadsheetContainer(new Uint8Array([]))).toBe(false);
+  });
+
+  it("refuses EVERY row of a MID repeated in another case, naming both spellings", () => {
+    const rows = parsed([
+      HEADER,
+      row({ 0: "Square", 1: "SQ7K2M9QX4B1Z" }),
+      row({ 0: "Square", 1: "AB12CD34EF56" }),
+      row({ 0: "Square", 1: "sq7k2m9qx4b1z" }),
+    ]);
+    expect(rows.map((r) => r.blockers)).toEqual([["duplicate_mid"], [], ["duplicate_mid"]]);
+    expect(rows[0].messages.duplicate_mid).toBe(
+      "MID SQ7K2M9QX4B1Z / sq7k2m9qx4b1z appears on rows 2, 4. Fix the file and upload it again.",
+    );
+    expect(rows.map((r) => r.mid_raw)).toEqual(["SQ7K2M9QX4B1Z", "AB12CD34EF56", "sq7k2m9qx4b1z"]);
+  });
+
+  it("compares MIDs by midKey: trimmed, upper case", () => {
+    expect(midKey(" sq7k2m9qx4b1z ")).toBe("SQ7K2M9QX4B1Z");
+    expect(midKey("012345678901")).toBe("012345678901");
+  });
+
+  it("finds this month's other-processor line and last month's payee whatever the case", () => {
+    expect(midsInOtherBatches([{ mid: "sq7k2m9qx4b1z", processor: "TSYS" }], "Square")).toEqual(
+      new Set(["SQ7K2M9QX4B1Z"]),
+    );
+    expect(
+      previousPayees([{ mid: "sq7k2m9qx4b1z", agentId: "rep-a", shareRole: null }], "SQ7K2M9QX4B1Z", "rep-b"),
+    ).toEqual(["rep-a"]);
   });
 });

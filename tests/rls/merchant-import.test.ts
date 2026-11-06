@@ -749,9 +749,14 @@ describe("mutation proofs: each protection is what stops its case", () => {
     }
   });
 
-  it("a MID already in the CRM in another case (the unique index sees only the exact spelling)", () =>
-    proves("mid_exists", [raw({ mid_raw: "EXISTSX001" })], () =>
-      without("findings", "case when gr.exists_already then 'mid_exists' end", "null")));
+  // Until 20261106140000 the unique index saw only the exact spelling and the
+  // mutant committed a second merchant; merchants_mid_key_ci is the backstop now.
+  it("a MID already in the CRM in another case (merchants_mid_key_ci is the backstop)", async () => {
+    await proves("mid_exists", [raw({ mid_raw: "EXISTSX001" })], () =>
+      without("findings", "case when gr.exists_already then 'mid_exists' end", "null"), { commits: false });
+    const id = await stage(mutant, [raw({ mid_raw: "EXISTSX001" })], { clean: true });
+    expect(await commitError(mutant, id)).toMatch(/merchants_mid_key_ci/);
+  });
 });
 
 // -------------------------------------------------------------------------

@@ -430,6 +430,14 @@ describe("reviewImportRows", () => {
     expect(review.refusals[0].rows.map((r) => r.rowNumber)).toEqual([2, 3, 5]);
   });
 
+  it("lists an unknown MID written in two cases once, as first written (20261106140000)", () => {
+    const review = reviewImportRows([
+      refused("unknown_mid", { id: 1, row_number: 2, mid_raw: "SQ7K2M9QX4B1Z" }),
+      refused("unknown_mid", { id: 2, row_number: 3, mid_raw: "sq7k2m9qx4b1z" }),
+    ]);
+    expect(review.unknownMids).toEqual(["SQ7K2M9QX4B1Z"]);
+  });
+
   it("lists a row under EVERY refusal it trips, so none is hidden behind another", () => {
     const review = reviewImportRows([
       staged({

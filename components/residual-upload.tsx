@@ -204,7 +204,7 @@ export function ResidualUpload({
       <div>
         <p className="text-sm font-medium">Upload a residual report</p>
         <p className="mt-1 text-xs text-muted-foreground">
-          The processor&apos;s monthly XLSX, with the six columns Processor,
+          The processor&apos;s monthly XLSX or CSV, with the six columns Processor,
           Merchant Number, Merchant Name, Income Type, Volume and Residual. Each
           line is paid to the owner of the merchant its Merchant Number names.
         </p>
@@ -275,11 +275,12 @@ export function ResidualUpload({
           ref={fileRef}
           type="file"
           // The heading above is a <p>, so the input needs its own name (QA-005).
-          aria-label="Residual report (XLSX)"
+          aria-label="Residual report (XLSX or CSV)"
           // Advisory only, and the reason the parse step reports its own error:
-          // an accept attribute filters a file picker, it does not stop a .csv
-          // renamed to .xlsx from being chosen.
-          accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          // an accept attribute filters a file picker, it does not stop a .txt
+          // renamed to .xlsx from being chosen. A CSV is read as text, so its
+          // Merchant Number keeps every digit and letter (parseMidCell).
+          accept=".xlsx,.xls,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
           disabled={busy !== null}
           className="max-w-sm"
         />
