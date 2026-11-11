@@ -399,6 +399,7 @@ export default {
         merchant,
         volume: row.volume,
         residual: row.residual_income,
+        incomeType: row.income_type_raw,
       });
 
       // Notes: a changed payee (A10), then a share that does not cover the
@@ -527,6 +528,11 @@ export default {
       blocked_count: blockedCount,
       flagged_count: flaggedCount,
       warning_counts: warningCounts,
+      // Phase 15. Filler rows are not staged; a blank figure read as 0 is
+      // (the review screen counts those from volume_raw / residual_income_raw).
+      skipped_count: parsed.skipped,
+      blank_as_zero_count: parsed.rows.filter((row) => row.blank_as_zero.length > 0)
+        .length,
     });
   }),
 };
@@ -542,7 +548,7 @@ export default {
     --data '{"batch_id":1}'
 
   Expected: 200 with { batch_id, row_count, blocked_count, flagged_count,
-            warning_counts }
+            warning_counts, skipped_count, blank_as_zero_count }
             400 if the file is unreadable, a required column is missing or
                 repeated, or it is a CRM export
             404 if the batch does not exist, or has no uploaded file

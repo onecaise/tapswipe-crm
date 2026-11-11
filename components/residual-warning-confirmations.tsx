@@ -11,6 +11,8 @@ export type WarningBlock = {
   warning: string;
   label: string;
   question: string;
+  /** A count-and-sums line, where a type has one (other_income_type). */
+  summary?: string;
   rows: { rowNumber: number; text: string }[];
 };
 
@@ -70,6 +72,14 @@ export function ResidualWarningConfirmations({
                     {block.rows.length} row{block.rows.length === 1 ? "" : "s"}
                   </span>
                 </p>
+                {block.summary && (
+                  <p
+                    className="text-xs text-muted-foreground"
+                    data-testid="warning-summary"
+                  >
+                    {block.summary}
+                  </p>
+                )}
                 <RowList rows={block.rows} />
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-sm">{block.question}</span>

@@ -40,7 +40,7 @@ Each line is the rule; the full reasoning is in the linked file or in the sectio
 - **Bulk provisioning never hands out a credential**: `provision-user-batch` discards the temporary password unread. **Deactivation is two layers** (ban in GoTrue first, then `profiles.is_active`). `create-user` must delete the `auth.users` row if the `profiles` insert fails. → `docs/claude/user-accounts.md`, "Three tiers" below.
 - **Inline signed URLs are allow-listed by type** (PDF, plain text, three raster images; **never SVG**); everything else is forced to attachment. → `docs/claude/reference-data-and-marketing.md`.
 - **The per-bucket 50 MiB limit is the real upload ceiling**; `config.toml`'s `file_size_limit` limits nothing. Hosted buckets need it set out-of-band. → `docs/claude/edge-functions-and-storage.md`.
-- **The secrets validators exist twice and must change together** (`lib/masks.ts` and `_shared/pre-app-secrets.ts`, tax-ID pair `isTaxEin`/`isTaxSsn` included); the residual parser exists **once** — do not create a browser twin — and pays each row to the owner of the merchant its MID names (`agent_number` is a display code, never the join); MIDs (6-20 letters/digits) match only by `mid_key()`, unique on `merchants`. → `docs/claude/edge-functions-and-storage.md`.
+- **The secrets validators exist twice and must change together** (`lib/masks.ts` and `_shared/pre-app-secrets.ts`, tax-ID pair `isTaxEin`/`isTaxSsn` included); the residual parser exists **once** — do not create a browser twin — and pays each row to the owner of the merchant its MID names (`agent_number` is a display code, never the join); MIDs (6-20 letters/digits) match only by `mid_key()`, unique on `merchants`; ISO Hub files (phase 15): filler rows skipped, a blank figure is 0, ACH is the `other_income_type` warning, processors match by `processor_key()`. → `docs/claude/edge-functions-and-storage.md`.
 - **Never show a `functions.invoke()` error's `.message` to a user** — use `lib/edge-functions.ts`. → "Next.js / auth wiring" below.
 - **`read-pre-app-secrets` returns last four to everyone, admin included.** A full value leaves only on a one-field `reveal`: admin-only, audited first by `record_pre_app_secret_reveal()` (fails closed, 30/hour), shown client-side and never printed. → `docs/claude/edge-functions-and-storage.md`.
 - **"Email" on marketing materials sends nothing** and must say so; when sending lands it goes next to that log line. → `docs/claude/reference-data-and-marketing.md`.
@@ -107,7 +107,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Not built yet:** My Submissions.
 - **Still starter-kit template:** `README.md` only. Edge Functions: fourteen in the repo. Details of both → `docs/claude/project-state.md`.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. 83 migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. 84 migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 ## Hosted projects and deployment
 
@@ -126,10 +126,10 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (3072 tests, 128 files — every file must load)
-npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (368 tests)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (3090 tests, 129 files — every file must load)
+npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (369 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
-npm run test:e2e       # Playwright, real browser against the app on the local stack (384 tests, 6 of them setup; last full run 384, 6 Nov 2026)
+npm run test:e2e       # Playwright, real browser against the app on the local stack (385 tests, 6 of them setup; last full run 385, 11 Nov 2026)
 npm run test:e2e:ui    # the same, in Playwright's watch/inspect UI
 
 npx supabase start                       # local stack (API :54321, DB :54322, Studio :54323, mail :54324)

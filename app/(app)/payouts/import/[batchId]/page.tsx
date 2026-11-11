@@ -5,7 +5,13 @@ import { ArrowLeftIcon } from "lucide-react";
 
 import { requireAdmin } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
-import { EMPTY, formatDate, formatPeriod, formatText } from "@/lib/format";
+import {
+  EMPTY,
+  formatDate,
+  formatMoney,
+  formatPeriod,
+  formatText,
+} from "@/lib/format";
 import {
   PAYOUT_BATCH_COLUMNS,
   PAYOUT_IMPORT_ROW_COLUMNS,
@@ -15,9 +21,12 @@ import {
   reviewImportRows,
   warningLabel,
   warningQuestion,
+  warningTotals,
   type PayoutBatch,
   type PayoutImportRow,
 } from "@/lib/payouts";
+import { blankFigureRows } from "@/lib/residual-review";
+import { sameProcessor } from "@/supabase/functions/_shared/residuals";
 import { Callout } from "@/components/callout";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
@@ -146,14 +155,15 @@ async function BatchReview({
     if (warning === "processor_mismatch") {
       const parts: string[] = [];
       const fileSays = (row.processor_raw ?? "").replace(/\s+/g, " ").trim();
-      if (fileSays.toLowerCase() !== (batch.processor ?? "").toLowerCase()) {
-        parts.push(
-          fileSays === ""
-            ? "the file's Processor cell is blank"
-            : `the file says "${fileSays}"`,
-        );
+      // Compared as the parser does (phase 15): case, spaces, punctuation and
+      // the aliases ignored, and a blank cell is not a mismatch.
+      if (fileSays !== "" && !sameProcessor(fileSays, batch.processor)) {
+        parts.push(`the file says "${fileSays}"`);
       }
-      if (merchant?.processor && merchant.processor !== batch.processor) {
+      if (
+        merchant?.processor &&
+        !sameProcessor(merchant.processor, batch.processor)
+      ) {
         parts.push(
           `the merchant is set to ${merchant.processor} (importing does not change it)`,
         );
@@ -165,6 +175,11 @@ async function BatchReview({
         merchant?.dba ?? row.merchant_name_raw ?? "this merchant"
       } is inactive. The line is still paid to its owner.`;
     }
+    if (warning === "other_income_type") {
+      return `${mid}: Income Type "${row.income_type_raw ?? ""}", volume ${
+        row.volume_raw ?? EMPTY
+      }, residual ${row.residual_income_raw ?? EMPTY}.`;
+    }
     if (warning === "bad_numbers") {
       return `${mid}: volume ${row.volume_raw ?? EMPTY}, residual ${
         row.residual_income_raw ?? EMPTY
@@ -173,10 +188,21 @@ async function BatchReview({
     return mid;
   };
 
+  // Phase 15: how much the lines of another Income Type add, so the yes is
+  // given knowing it (ISO Hub's monthly Net includes them).
+  const summaryOf = (warning: string): string | undefined => {
+    if (warning !== "other_income_type") return undefined;
+    const totals = warningTotals(rows, warning);
+    return `${totals.count} row${totals.count === 1 ? "" : "s"}: volume ${formatMoney(
+      totals.volume,
+    )}, residual ${formatMoney(totals.residual)}.`;
+  };
+
   const blocks: WarningBlock[] = review.warnings.map((group) => ({
     warning: group.warning,
     label: warningLabel(group.warning),
     question: warningQuestion(group.warning),
+    summary: summaryOf(group.warning),
     rows: group.rows.map((line) => ({
       rowNumber: line.rowNumber,
       text: warningText(group.warning, line.rowNumber),
@@ -203,6 +229,9 @@ async function BatchReview({
       .eq("is_active", false);
     inactive = (reps ?? []) as typeof inactive;
   }
+
+  // Phase 15: a blank Volume or Residual on a row with a MID is read as 0.
+  const zeroed = blankFigureRows(rows);
 
   const fileProblems = review.refusals.filter(
     (refusal) => refusal.blocker !== "unknown_mid",
@@ -422,6 +451,23 @@ async function BatchReview({
                 ))}
               </ul>
             </section>
+          )}
+
+          {zeroed.length > 0 && batch.status === "review" && (
+            <Callout tone="warning">
+              <div data-testid="blank-figures">
+                <p className="font-medium">
+                  {zeroed.length === 1
+                    ? "1 row has a blank Volume or Residual, read as 0"
+                    : `${zeroed.length} rows have a blank Volume or Residual, read as 0`}
+                  .
+                </p>
+                <p className="mt-1 text-muted-foreground">
+                  Row{zeroed.length === 1 ? "" : "s"} {zeroed.join(", ")}. This
+                  does not stop the import.
+                </p>
+              </div>
+            </Callout>
           )}
 
           {inactive.length > 0 && (

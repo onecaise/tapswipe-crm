@@ -215,7 +215,7 @@ describe("the parser and the commit agree", () => {
     const expected = grid
       .map((g, i) => ({ row: i + 2, flagged: rowWarnings({
         fileProcessor: "TSYS", batchProcessor: "TSYS", merchant: { status: "active", processor: "TSYS" },
-        volume: g.volume, residual: g.residual,
+        volume: g.volume, residual: g.residual, incomeType: "Residuals",
       }).includes("bad_numbers") }))
       .filter((r) => r.flagged)
       .map((r) => r.row);

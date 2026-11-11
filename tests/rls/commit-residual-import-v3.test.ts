@@ -23,13 +23,16 @@ import {
  *   1. commit_residual_import_v3 refuses, by name, every shape the memo lists:
  *      a batch not in review, without a month, or beside a committed batch for
  *      its processor-month; a staged row read for another month, a blank,
- *      repeated or unknown MID, a wrong Income Type, a missing figure, an owner
+ *      repeated or unknown MID, a missing figure, an owner
  *      or MID that changed after the read, a merchant with no rate, a MID that
  *      already has a line this month (no merge), and a share whose signer is
  *      not the owner or whose shares do not total the rate.
  *   2. Every warning is recomputed, and a type not confirmed refuses -- one
  *      yes per type covers its rows; a warning that appeared after the review
  *      is not covered by an old yes.
+ *      Since phase 15 (20261111120000) another Income Type is the fourth
+ *      warning, other_income_type, not a refusal; a blank Processor cell and
+ *      the aliases Goat (TSYS) and Netevia (Netevia HQ) warn of nothing.
  *   3. The money: rep amount from the MERCHANT's rate, company the rest, a
  *      house merchant at 0 still gets its line, a shared account divides the
  *      merchant's rate in the share ratio by the cent rule -- a grid.
@@ -271,8 +274,6 @@ describe("refusals: re-derived from the database, each listing what it found", (
       /^A MID appears on more than one row: MID-AGENT-1 \(rows 2, 3\)\./],
     ["an unknown MID", async () => (await batchWith(db, [{ mid: "NOPE-1", agentId: null }])).id,
       /^MIDs NOPE-1 are not merchants in the CRM\./],
-    ["a wrong Income Type", async () => (await batchWith(db, [{ mid: "MID-AGENT-1", incomeType: "Bonus" }])).id,
-      /^Rows 2 have an Income Type other than Residuals\./],
     ["a missing Residual", async () => (await batchWith(db, [{ mid: "MID-AGENT-1", residual: null }])).id,
       /^Rows 2 have no Volume or no Residual\./],
     ["a missing Volume", async () => (await batchWith(db, [{ mid: "MID-AGENT-1", volume: null }])).id,
@@ -293,9 +294,21 @@ describe("refusals: re-derived from the database, each listing what it found", (
     expect(status).toBe("review");
   });
 
-  it("accepts an Income Type in another case with surrounding space, as the parser does", async () => {
-    const { id } = await batchWith(db, [{ mid: "MID-AGENT-1", incomeType: "  RESIDUALS " }]);
-    expect((await commit(db, id)).written).toBe(1);
+  it("accepts Residual, Residuals and blank in any case and spacing, with no warning, as the parser does (phase 15)", async () => {
+    await merchant(db, "BLANKTYPE");
+    const { id } = await batchWith(db, [
+      { mid: "MID-AGENT-1", incomeType: "  RESIDUALS " },
+      { mid: "MID-OTHER-1", incomeType: "Residual " },
+      { mid: "BLANKTYPE", incomeType: null },
+    ]);
+    expect((await commit(db, id)).written).toBe(3);
+  });
+
+  it("no longer refuses another Income Type: it is the other_income_type warning (phase 15)", async () => {
+    const { id } = await batchWith(db, [{ mid: "MID-AGENT-1", incomeType: "ACH" }]);
+    const error = await refused(db, id);
+    expect(error.message).toMatch(/^These warnings were not confirmed: other income type \(rows 2\)\./);
+    expect((await commit(db, id, ["other_income_type"])).written).toBe(1);
   });
 });
 
@@ -419,8 +432,8 @@ describe("confirmations", () => {
 
   const warned: [string, Staged, string][] = [
     ["processor_mismatch (the file's cell)", { mid: "MID-AGENT-1", processor: "Square" }, "processor_mismatch"],
-    ["processor_mismatch (a blank cell)", { mid: "MID-AGENT-1", processor: null }, "processor_mismatch"],
     ["processor_mismatch (the merchant's own processor)", { mid: "MID-OTHER-2" }, "processor_mismatch"],
+    ["other_income_type", { mid: "MID-AGENT-1", incomeType: "ACH" }, "other_income_type"],
     ["inactive_merchant", { mid: "MID-AGENT-2", processor: "TSYS" }, "inactive_merchant"],
     ["bad_numbers (negative volume, negative residual)", { mid: "MID-AGENT-1", volume: "-500.00", residual: "-11.76" }, "bad_numbers"],
     ["bad_numbers (residual over volume)", { mid: "MID-AGENT-1", volume: "10.00", residual: "11.00" }, "bad_numbers"],
@@ -430,7 +443,7 @@ describe("confirmations", () => {
   it.each(warned)("refuses %s unconfirmed, naming the type and its rows, then commits on a yes", async (_l, row, code) => {
     // MID-AGENT-2 is inactive AND a Square merchant; MID-OTHER-2 is PayBright.
     // Confirm whatever else the row trips, so only `code` is at issue.
-    const all = ["processor_mismatch", "inactive_merchant", "bad_numbers"];
+    const all = ["processor_mismatch", "inactive_merchant", "bad_numbers", "other_income_type"];
     const others = row.mid === "MID-AGENT-2" ? all.filter((c) => c !== code) : [];
     const { id } = await batchWith(db, [row]);
     const error = await refused(db, id, others);
@@ -459,6 +472,32 @@ describe("confirmations", () => {
       `select confirmed_warnings as confirmed from rep_payout_batches where id = ${id}`,
     );
     expect(confirmed).toEqual({});
+  });
+
+  it("is silent on a blank Processor cell, punctuation, and the aliases Goat and Netevia (phase 15)", async () => {
+    await merchant(db, "NETEVIA-1", { processor: "Netevia HQ" });
+    const tsys = await batchWith(db, [
+      { mid: "MID-AGENT-1", processor: null },
+      { mid: "MID-OTHER-1", processor: "Goat " },
+    ]);
+    expect((await commit(db, tsys.id)).written).toBe(2);
+    const netevia = await batchWith(db, [{ mid: "NETEVIA-1", processor: "Netevia" }], { processor: "Netevia HQ" });
+    expect((await commit(db, netevia.id)).written).toBe(1);
+    const punctuated = await batchWith(db, [{ mid: "MID-AGENT-1", processor: "T.S.Y.S" }]);
+    expect((await commit(db, punctuated.id)).written).toBe(1);
+  });
+
+  it("processor_key: letters and digits, the two aliases, NULL when blank; callable by authenticated only", async () => {
+    await asUser(db, ADMIN_ID);
+    expect(
+      await rows(db, `select processor_key('  Goat ') as a, processor_key('Netevia') as b, processor_key('Red-Fynn') as c,
+                             processor_key(' ') as d, processor_key(null) as e, processor_key('Netevia HQ') as f`),
+    ).toEqual([{ a: "tsys", b: "neteviahq", c: "redfynn", d: null, e: null, f: "neteviahq" }]);
+    await asPlatform(db);
+    expect(
+      await rows(db, `select has_function_privilege('anon', 'processor_key(text)', 'execute') as anon,
+                             has_function_privilege('authenticated', 'processor_key(text)', 'execute') as auth`),
+    ).toEqual([{ anon: false, auth: true }]);
   });
 
   it("one yes per type covers every row of it, and the batch keeps what was confirmed", async () => {
@@ -1090,7 +1129,7 @@ describe("mutation proofs: each protection is what stops its case", () => {
       fragment: "if exists (select 1 from unnest(confirmed) as c(code)",
       replacement: "if false and exists (select 1 from unnest(confirmed) as c(code)",
       make: async () => ({ id: (await batchWith(db, [{ mid: "MID-AGENT-1" }])).id, confirmed: ["looks_shared"] }),
-      refusal: /^Only processor_mismatch, inactive_merchant and bad_numbers can be confirmed\.$/,
+      refusal: /^Only processor_mismatch, inactive_merchant, bad_numbers and other_income_type can be confirmed\.$/,
     },
     {
       label: "status (an abandoned batch)",
@@ -1166,11 +1205,20 @@ describe("mutation proofs: each protection is what stops its case", () => {
       refusal: /are not merchants in the CRM/,
     },
     {
-      label: "Income Type check",
-      fragment: "<> 'residuals';",
-      replacement: "<> 'residuals' and false;",
-      make: async () => ({ id: (await batchWith(db, [{ mid: "MID-AGENT-1", incomeType: "Bonus" }])).id }),
-      refusal: /Income Type other than Residuals/,
+      // Phase 15: another Income Type is a warning; without its line the
+      // row would commit unconfirmed.
+      label: "other_income_type warning",
+      fragment: "not in ('', 'residual', 'residuals'))",
+      replacement: "not in ('', 'residual', 'residuals') and false)",
+      make: async () => ({ id: (await batchWith(db, [{ mid: "MID-AGENT-1", incomeType: "ACH" }])).id }),
+      refusal: /not confirmed: other income type \(rows 2\)/,
+    },
+    {
+      label: "processor_mismatch on a named processor (the file's cell)",
+      fragment: "and processor_key(r.processor_raw) is distinct from processor_key(batch.processor))",
+      replacement: "and false)",
+      make: async () => ({ id: (await batchWith(db, [{ mid: "MID-AGENT-1", processor: "Square" }])).id }),
+      refusal: /not confirmed: processor mismatch \(rows 2\)/,
     },
     {
       label: "missing-figure check",
@@ -1213,6 +1261,38 @@ describe("mutation proofs: each protection is what stops its case", () => {
       const mutated = await attempt(() => commit(db, id, confirmed));
       await asPlatform(db);
       expect(mutated?.message ?? "committed", "without the check, that sentence is gone").not.toMatch(refusal);
+    });
+  });
+
+  // Phase 15's two relaxations, the other way round: each test above that
+  // commits a blank Processor cell or an alias silently fails without its rule.
+  it("the blank-cell exemption (a blank Processor cell would warn again)", async () => {
+    await swap(async () => {
+      const { id } = await batchWith(db, [{ mid: "MID-AGENT-1", processor: null }]);
+      await without("(processor_key(r.processor_raw) is not null\n          and ", "(");
+      const error = await attempt(() => commit(db, id));
+      await asPlatform(db);
+      expect(error?.message).toMatch(/not confirmed: processor mismatch \(rows 2\)/);
+    });
+  });
+
+  it("the alias map (Goat on a TSYS file would warn)", async () => {
+    await swap(async () => {
+      const { id } = await batchWith(db, [{ mid: "MID-AGENT-1", processor: "Goat" }]);
+      const [{ def }] = await rows<{ def: string }>(
+        db,
+        `select pg_get_functiondef('processor_key(text)'::regprocedure) as def`,
+      );
+      expect(def).toContain("when 'goat' then 'tsys'");
+      await db.exec(def.replace("when 'goat' then 'tsys'", "when 'never' then 'tsys'"));
+      try {
+        const error = await attempt(() => commit(db, id));
+        await asPlatform(db);
+        expect(error?.message).toMatch(/not confirmed: processor mismatch \(rows 2\)/);
+      } finally {
+        await asPlatform(db);
+        await db.exec(def);
+      }
     });
   });
 

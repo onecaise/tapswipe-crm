@@ -680,6 +680,8 @@ describe("it reads a real workbook end to end", () => {
       blocked_count: 0,
       flagged_count: 0,
       warning_counts: {},
+      skipped_count: 0,
+      blank_as_zero_count: 0,
     });
 
     const staged = await stagedRows(batchId);
@@ -766,7 +768,7 @@ describe("it reads a real workbook end to end", () => {
     expect(staged[0].error).toBe(`MID ${mid} appears on rows 2, 4. Fix the file and upload it again.`);
   });
 
-  it("refuses the whole file when any Income Type is not Residuals, listing the rows", async () => {
+  it("stages another Income Type for the other_income_type warning, not a refusal (phase 15)", async () => {
     const a = newMid();
     const b = newMid();
     await merchantFor("owner", a);
@@ -774,33 +776,38 @@ describe("it reads a real workbook end to end", () => {
     const { batchId, parse } = await importFile([
       HEADER,
       line(a),
-      line(b, { incomeType: "Fees" }),
+      line(b, { incomeType: "ACH" }),
     ]);
-    expect(parse.body).toMatchObject({ row_count: 2, blocked_count: 1 });
+    expect(parse.body).toMatchObject({ row_count: 2, blocked_count: 0, warning_counts: { other_income_type: 1 } });
     const staged = await stagedRows(batchId);
-    expect(staged[1]).toMatchObject({
-      blocker: "wrong_income_type",
-      income_type_raw: "Fees",
-      error: 'Income Type is "Fees", not Residuals. A residual file holds residuals only.',
-    });
-    expect((await commitV3(batchId)).error?.message).toMatch(/still blocked/);
+    expect(staged[1]).toMatchObject({ blocker: null, income_type_raw: "ACH", warnings: ["other_income_type"] });
+    expect((await commitV3(batchId)).error?.details).toBe("other_income_type");
+    expect((await commitV3(batchId, ["other_income_type"])).error).toBeNull();
   });
 
-  it("refuses a blank or unreadable figure, and keeps every problem a row has", async () => {
+  it("reads a blank figure on a row with a MID as 0, refuses an unreadable one, and keeps every problem a row has", async () => {
     const a = newMid();
     await merchantFor("owner", a);
     const stranger = newMid();
-    const { batchId } = await importFile([
+    const { batchId, parse } = await importFile([
       HEADER,
       line(a, { residual: null }),
       line(stranger, { incomeType: "Bonus", volume: "12,99" }),
     ]);
+    expect(parse.body).toMatchObject({ blank_as_zero_count: 1 });
     const staged = await stagedRows(batchId);
-    expect(staged[0]).toMatchObject({ blocker: "missing_figure", blockers: ["missing_figure"] });
-    expect(staged[1].blockers).toEqual(["unknown_mid", "wrong_income_type", "unreadable_number"]);
+    expect(staged[0]).toMatchObject({ blocker: null, blockers: [], residual_income: 0 });
+    // The raw cell stays blank: the review screen counts blank-as-zero rows by it.
+    const { data: raw } = await adminClient()
+      .from("rep_payout_import_rows")
+      .select("residual_income_raw")
+      .eq("batch_id", batchId)
+      .eq("row_number", 2)
+      .single();
+    expect(raw?.residual_income_raw).toBeNull();
+    expect(staged[1].blockers).toEqual(["unknown_mid", "unreadable_number"]);
     expect(staged[1].blocker).toBe("unknown_mid");
     expect(staged[1].error).toContain(`MID ${stranger} is not a merchant in the CRM.`);
-    expect(staged[1].error).toContain('Income Type is "Bonus"');
     expect(staged[1].error).toContain('Volume "12,99" has a comma that is not a thousands separator');
   });
 
@@ -1023,10 +1030,17 @@ describe("MIDs with letters, matched in any case (20261106140000)", () => {
     ]);
   });
 
-  it("refuses a 12-digit NUMBER cell in General format (shown in exponent form) with the use-the-CSV message", async () => {
+  it("reads a 12-digit NUMBER cell in General format (shown in exponent form) by its stored value (phase 15)", async () => {
     const twelve = newMid("8");
     await merchantFor("owner", twelve);
     const { batchId } = await importFile([HEADER, line(Number(twelve))]);
+    const [row] = await stagedRows(batchId);
+    expect(row.blockers).toEqual([]);
+    expect(row.mid_raw).toBe(twelve);
+  });
+
+  it("still refuses a 16-digit NUMBER cell with the use-the-CSV message", async () => {
+    const { batchId } = await importFile([HEADER, line(4400123456789012)]);
     const [row] = await stagedRows(batchId);
     expect(row.blockers).toEqual(["missing_mid"]);
     expect(row.error).toMatch(/was stored as a spreadsheet number.*original CSV/);
@@ -1049,8 +1063,8 @@ beforeAll(async () => {
   }
 });
 
-describe("the three warnings are stored per row, once per type, and block nothing", () => {
-  it("processor mismatch (file or merchant), inactive merchant, bad numbers; A6, A25, A26 and zero volume silent", async () => {
+describe("the four warnings are stored per row, once per type, and block nothing", () => {
+  it("processor mismatch (file or merchant), inactive merchant, bad numbers, other income type; A6, A25, A26, zero volume and phase 15 silent", async () => {
     const mids = {
       fileSays: newMid(),
       merchantSays: newMid(),
@@ -1061,6 +1075,10 @@ describe("the three warnings are stored per row, once per type, and block nothin
       overVolume: newMid(),
       clawback: newMid(),
       negativeVolume: newMid(),
+      blankProcessor: newMid(),
+      goat: newMid(),
+      ach: newMid(),
+      blankVolume: newMid(),
     };
     await merchantFor("owner", mids.fileSays, { processor: PROCESSOR });
     await merchantFor("owner", mids.merchantSays, { processor: "Square" });
@@ -1071,6 +1089,9 @@ describe("the three warnings are stored per row, once per type, and block nothin
     await merchantFor("owner", mids.overVolume);
     await merchantFor("owner", mids.clawback);
     await merchantFor("owner", mids.negativeVolume);
+    for (const mid of [mids.blankProcessor, mids.goat, mids.ach, mids.blankVolume]) {
+      await merchantFor("owner", mid);
+    }
 
     const { batchId, parse } = await importFile([
       HEADER,
@@ -1083,13 +1104,22 @@ describe("the three warnings are stored per row, once per type, and block nothin
       line(mids.overVolume, { volume: "100", residual: "100.01" }),
       line(mids.clawback, { volume: "$500.00", residual: "-$11.76" }),
       line(mids.negativeVolume, { volume: "-$500.00", residual: "-$11.76" }),
+      // Phase 15: a blank Processor cell and the alias Goat (TSYS) are silent,
+      // ACH is other_income_type, a blank Volume is 0, a filler row is skipped.
+      line(mids.blankProcessor, { processor: null }),
+      line(mids.goat, { processor: "Goat " }),
+      line(mids.ach, { incomeType: "ACH" }),
+      line(mids.blankVolume, { volume: null }),
+      ["Goat", null, null, "ACH", null, null],
     ], { processor: PROCESSOR });
 
     expect(parse.status, parse.raw).toBe(200);
     expect(parse.body).toMatchObject({
-      row_count: 9,
+      row_count: 13,
       blocked_count: 0,
-      warning_counts: { processor_mismatch: 2, inactive_merchant: 1, bad_numbers: 2 },
+      warning_counts: { processor_mismatch: 2, inactive_merchant: 1, bad_numbers: 2, other_income_type: 1 },
+      skipped_count: 1,
+      blank_as_zero_count: 1,
     });
     const staged = await stagedRows(batchId);
     expect(staged.map((r) => [r.mid_raw, r.warnings])).toEqual([
@@ -1108,6 +1138,10 @@ describe("the three warnings are stored per row, once per type, and block nothin
       [mids.clawback, []],
       // A negative volume (a refund month) still is.
       [mids.negativeVolume, ["bad_numbers"]],
+      [mids.blankProcessor, []],
+      [mids.goat, []],
+      [mids.ach, ["other_income_type"]],
+      [mids.blankVolume, []],
     ]);
 
     // THE PARSER AND v3 AGREE (memo §2.4): with nothing confirmed, v3 refuses,
@@ -1125,7 +1159,7 @@ describe("the three warnings are stored per row, once per type, and block nothin
     // merchant's rate (50 here), and keeps what was confirmed.
     const { data, error } = await commitV3(batchId, stored);
     expect(error, error?.message).toBeNull();
-    expect(data).toEqual({ written: 9, rows: 9, shared: 0, overrides: 0, replaced_lines: 0 });
+    expect(data).toEqual({ written: 13, rows: 13, shared: 0, overrides: 0, replaced_lines: 0 });
     const { data: batch } = await adminClient()
       .from("rep_payout_batches")
       .select("confirmed_warnings")
@@ -1135,6 +1169,7 @@ describe("the three warnings are stored per row, once per type, and block nothin
       bad_numbers: [8, 10],
       inactive_merchant: [5],
       processor_mismatch: [2, 3],
+      other_income_type: [13],
     });
 
     // Confirming never changed the merchant's processor.

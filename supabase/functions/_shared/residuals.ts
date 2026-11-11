@@ -88,10 +88,23 @@ export const EXPORT_HEADER = [
  */
 export const CRM_EXPORT_MARKERS = ["Agent #", "Rep payout"] as const;
 
-/** The one Income Type a residual file may carry (§0b.1). */
+/** The Income Type a residual file carries (§0b.1), as messages spell it. */
 export const RESIDUAL_INCOME_TYPE = "Residuals";
 
 /**
+ * The Income Type cells that are residuals, by nameKey(): "Residual",
+ * "Residuals" and blank (phase 15; ISO Hub's files carry all three, "Residual "
+ * and "Residuals " with a trailing space among them). Anything else -- ACH on
+ * the TSYS files -- imports under the confirmable other_income_type warning,
+ * because ISO Hub's own monthly Net includes those rows (phase 15, step 0).
+ */
+export const RESIDUAL_INCOME_TYPE_KEYS: readonly string[] = ["", "residual", "residuals"];
+
+/**
+ * wrong_income_type is no longer raised (phase 15: another Income Type is the
+ * other_income_type warning). It stays in the vocabulary because the staging
+ * CHECK still admits it and a row read before 20261111120000 may carry it.
+ *
  * Why a row cannot be imported, in precedence order (memo §2.4). Every code a
  * row trips is kept (rep_payout_import_rows.blockers); `blocker` is the first of
  * them in this order. Identity first: a row with no readable MID cannot be
@@ -111,15 +124,16 @@ export const RESIDUAL_BLOCKERS = [
 export type ResidualBlocker = (typeof RESIDUAL_BLOCKERS)[number];
 
 /**
- * The three confirmable warnings (memo §2.4, §0b.3), stored on the staged row
- * (rep_payout_import_rows.warnings). Confirmed once per TYPE per import, never
- * per line; commit v3 (phase 8) recomputes them and refuses a type nobody
- * confirmed.
+ * The four confirmable warnings (memo §2.4, §0b.3; other_income_type since
+ * phase 15), stored on the staged row (rep_payout_import_rows.warnings).
+ * Confirmed once per TYPE per import, never per line; commit v3 (phase 8)
+ * recomputes them and refuses a type nobody confirmed.
  */
 export const RESIDUAL_WARNINGS = [
   "processor_mismatch",
   "inactive_merchant",
   "bad_numbers",
+  "other_income_type",
 ] as const;
 
 export type ResidualWarning = (typeof RESIDUAL_WARNINGS)[number];
@@ -166,7 +180,7 @@ export function blockerMessage(
   switch (blocker) {
     case "missing_mid":
       if (context.midCell && context.midPrecision) {
-        return `Merchant Number "${context.midCell}" was stored as a spreadsheet number, which may have lost digits (more than 15, or shown in exponent form). Upload the processor's original CSV, or format the column as text, and upload it again.`;
+        return `Merchant Number "${context.midCell}" was stored as a spreadsheet number, which may have lost digits (more than 15). Upload the processor's original CSV, or format the column as text, and upload it again.`;
       }
       return context.midCell
         ? `Merchant Number "${context.midCell}" is not 6 to 20 letters and digits, so there is nothing to file it against.`
@@ -295,7 +309,7 @@ export function parseNumberCell(value: unknown): NumberCell {
   // "1e+21", which the cleanup would mangle.
   if (typeof value === "number") {
     return Number.isFinite(value)
-      ? { value: round2(value), ok: true }
+      ? { value: round2(decimalText(value)), ok: true }
       : { value: null, ok: false };
   }
 
@@ -325,7 +339,17 @@ export function parseNumberCell(value: unknown): NumberCell {
     return { value: null, ok: false, problem: MISPLACED_COMMA };
   }
 
-  return { value: round2(negative ? -parsed : parsed), ok: true };
+  return { value: round2(negative ? `-${cleaned}` : cleaned), ok: true };
+}
+
+/**
+ * Whether a figure cell is blank (null, empty, "-", "n/a"...), as distinct
+ * from zero. The review screen counts the staged rows whose blank figure the
+ * parser read as 0 (phase 15) by this, from volume_raw / residual_income_raw.
+ */
+export function isBlankFigure(value: unknown): boolean {
+  const cell = parseNumberCell(value);
+  return cell.ok && cell.value === null;
 }
 
 /** Why a figure with a misplaced comma was refused, for the review screen. */
@@ -348,10 +372,45 @@ function isThousandsGrouped(text: string): boolean {
   return /^\d{1,3}(,\d{3})+(\.\d+)?$/.test(body);
 }
 
-/** Half-away-from-zero, matching Postgres's round() on numeric. */
-function round2(value: number): number {
-  const scaled = Math.round(Math.abs(value) * 100) / 100;
-  return value < 0 ? -scaled : scaled;
+/**
+ * Rounds a plain decimal STRING to the cent, half away from zero, matching
+ * Postgres's round() on numeric -- in decimal, never in binary floating point
+ * (phase 15). Math.round(value * 100) / 100 read a half cent like 1.005 as
+ * 100.49999999999999 cents and rounded it down, which put TSYS January and
+ * September a cent off ISO Hub. The result is the double
+ * nearest the rounded decimal, which prints as it. "--5" (a minus inside
+ * accounting parentheses) is 5.
+ */
+export function round2(text: string): number {
+  const match = /^(-*)(\d*)(?:\.(\d*))?$/.exec(text);
+  if (match === null || (match[2] === "" && !match[3])) return Number.NaN;
+  const [, minus, whole, fraction = ""] = match;
+  const digits = BigInt((whole || "0") + (fraction + "00").slice(0, 2));
+  // BigInt(1), not 1n: the Next app's tsconfig targets ES2017.
+  const cents = (fraction[2] ?? "0") >= "5" ? digits + BigInt(1) : digits;
+  if (cents === BigInt(0)) return 0;
+  const abs = cents.toString().padStart(3, "0");
+  const sign = minus.length % 2 === 1 ? "-" : "";
+  return Number(`${sign}${abs.slice(0, -2)}.${abs.slice(-2)}`);
+}
+
+/**
+ * A double as the shortest decimal that reads back as it -- what the
+ * spreadsheet wrote in the cell -- with exponent form written out:
+ * 1e-7 -> "0.0000001", 1.5e+21 -> "1500000000000000000000".
+ */
+export function decimalText(value: number): string {
+  const text = String(value);
+  const match = /^(-?)(\d)(?:\.(\d+))?e([+-]\d+)$/.exec(text);
+  if (match === null) return text;
+  const [, sign, lead, rest = "", exp] = match;
+  const digits = lead + rest;
+  const point = 1 + Number(exp);
+  if (point <= 0) return `${sign}0.${"0".repeat(-point)}${digits}`;
+  if (point >= digits.length) {
+    return `${sign}${digits}${"0".repeat(point - digits.length)}`;
+  }
+  return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
 }
 
 /** Reads a cell as trimmed text, or null when it is empty. */
@@ -398,11 +457,14 @@ function looksLikeSpreadsheetNumber(text: string): boolean {
  *     leading apostrophe (Excel's text marker), a BOM and surrounding
  *     whitespace are stripped;
  *   - a NUMERIC spreadsheet cell may already have lost digits (Excel keeps
- *     15), so one over 15 digits, shown in exponent form or beyond 2^53 is
- *     refused with the use-the-CSV message (phase 14's rule for the merchant
- *     import). Otherwise its formatted text when that is all digits (a
- *     "000000000000" number format is the only place a stored-as-number MID's
- *     leading zeros survive), else the integer written out;
+ *     15), so one over 15 digits or beyond 2^53 is refused with the
+ *     use-the-CSV message (phase 14's rule for the merchant import), and a
+ *     fraction is refused as not a MID. A whole number of 15 digits or fewer
+ *     is exact, so it is read by its STORED value even when Excel shows it in
+ *     exponent form (phase 15: ISO Hub's General-format columns do). Its
+ *     formatted text is used when that is all digits (a "000000000000" number
+ *     format is the only place a stored-as-number MID's leading zeros
+ *     survive), else the integer written out;
  *   - text that looks like a spreadsheet number ("4.001E+11", "400100200300.0")
  *     gets the same message: it was a number before it was text.
  *
@@ -427,7 +489,6 @@ export function parseMidCell(
       return Number.isInteger(raw) ? unsafe : invalid(shown || String(raw));
     }
     if (raw < 0) return invalid(shown || String(raw));
-    if (/e[+-]?\d/i.test(shown)) return unsafe;
     text = /^\d+$/.test(shown) ? shown : String(raw);
     if (text.length > 15) return unsafe;
   } else {
@@ -460,12 +521,18 @@ export function isSpreadsheetContainer(bytes: Uint8Array): boolean {
   return starts(0x50, 0x4b, 0x03, 0x04) || starts(0xd0, 0xcf, 0x11, 0xe0);
 }
 
-/** True when an Income Type cell says Residuals (case-insensitive, trimmed). */
+/**
+ * A name reduced to lower-case ASCII letters and digits: case, spaces and
+ * punctuation ignored. The SQL twin, in commit v3 and processor_key()
+ * (20261111120000), is regexp_replace(lower(x), '[^a-z0-9]', '', 'g').
+ */
+export function nameKey(value: string | null): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/** True when an Income Type cell is a residual: Residual, Residuals or blank. */
 export function isResidualIncomeType(value: string | null): boolean {
-  return (
-    value !== null &&
-    value.trim().toLowerCase() === RESIDUAL_INCOME_TYPE.toLowerCase()
-  );
+  return RESIDUAL_INCOME_TYPE_KEYS.includes(nameKey(value));
 }
 
 /** One staging row, before the database lookups. */
@@ -480,6 +547,8 @@ export type ParsedResidualRow = {
   residual_income_raw: string | null;
   volume: number | null;
   residual_income: number | null;
+  /** Figures blank on a row with a MID, read as 0 (phase 15). */
+  blank_as_zero: ("volume" | "residual_income")[];
   /** The refusals the file alone shows, before the MID lookup. */
   blockers: ResidualBlocker[];
   /** One sentence per blocker, worded for the review screen. */
@@ -488,7 +557,12 @@ export type ParsedResidualRow = {
 
 export type ParseResult =
   | { ok: false; error: string }
-  | { ok: true; rows: ParsedResidualRow[] };
+  | {
+      ok: true;
+      rows: ParsedResidualRow[];
+      /** Filler rows skipped: no MID, merchant name, Volume or Residual. */
+      skipped: number;
+    };
 
 /**
  * Turns a sheet -- a header row followed by data rows -- into staging rows.
@@ -497,9 +571,12 @@ export type ParseResult =
  * same grid as displayed text (SheetJS `w`), which is only read for the
  * Merchant Number (parseMidCell).
  *
- * `rows[0]` is the header. Entirely blank rows are skipped rather than blocked:
- * processor exports routinely carry trailing empties and a footer gap, and forty
- * "this row has no MID" blockers over blank lines would bury the one that matters.
+ * `rows[0]` is the header. FILLER rows are skipped rather than blocked: no
+ * MID, no merchant name, no Volume and no Residual, whatever the Processor or
+ * Income Type cells say (phase 15: ISO Hub pads every file to ~995 rows, most
+ * carrying only a Processor, a few only "ACH"). Forty "this row has no MID"
+ * blockers over empty lines would bury the one that matters. A row with a
+ * figure or a name but no MID is still refused (missing_mid).
  */
 export function parseResidualSheet(
   sheet: readonly (readonly unknown[])[],
@@ -547,6 +624,7 @@ export function parseResidualSheet(
   };
 
   const rows: ParsedResidualRow[] = [];
+  let skipped = 0;
   /** midKey -> every sheet row it is on, for duplicate_mid. */
   const seen = new Map<string, number[]>();
   /** midKey -> each spelling the file uses for it, in order. */
@@ -567,6 +645,32 @@ export function parseResidualSheet(
     const incomeType = parseTextCell(at(sheet, offset, "income_type"));
     const volume = parseNumberCell(at(sheet, offset, "volume"));
     const residual = parseNumberCell(at(sheet, offset, "residual_income"));
+    const name = parseTextCell(at(sheet, offset, "merchant_name"));
+
+    const isBlank = (cell: NumberCell) => cell.ok && cell.value === null;
+    if (
+      midCell.mid === null && midCell.unreadable === null && name === null &&
+      isBlank(volume) && isBlank(residual)
+    ) {
+      skipped += 1;
+      continue;
+    }
+
+    // A blank figure on a row with a MID is 0 (phase 15), counted on the
+    // review screen. Without a MID the row is refused anyway, and a blank
+    // stays missing_figure beside missing_mid.
+    const blankAsZero: ("volume" | "residual_income")[] = [];
+    if (midCell.mid !== null) {
+      for (const [column, cell] of [
+        ["volume", volume],
+        ["residual_income", residual],
+      ] as const) {
+        if (isBlank(cell)) {
+          cell.value = 0;
+          blankAsZero.push(column);
+        }
+      }
+    }
 
     const blockers: ResidualBlocker[] = [];
     const messages: Partial<Record<ResidualBlocker, string>> = {};
@@ -588,10 +692,6 @@ export function parseResidualSheet(
       seen.set(key, [...(seen.get(key) ?? []), rowNumber]);
       const written = spellings.get(key) ?? [];
       if (!written.includes(midCell.mid)) spellings.set(key, [...written, midCell.mid]);
-    }
-
-    if (!isResidualIncomeType(incomeType)) {
-      block("wrong_income_type", blockerMessage("wrong_income_type", { incomeType }));
     }
 
     const unreadable: string[] = [];
@@ -632,12 +732,13 @@ export function parseResidualSheet(
       // nothing has been interpreted destructively.
       processor_raw: parseTextCell(at(sheet, offset, "processor")),
       mid_raw: midCell.mid ?? midCell.unreadable,
-      merchant_name_raw: parseTextCell(at(sheet, offset, "merchant_name")),
+      merchant_name_raw: name,
       income_type_raw: incomeType,
       volume_raw: rawText(at(sheet, offset, "volume")),
       residual_income_raw: rawText(at(sheet, offset, "residual_income")),
       volume: volume.value,
       residual_income: residual.value,
+      blank_as_zero: blankAsZero,
       blockers,
       messages,
     });
@@ -664,7 +765,7 @@ export function parseResidualSheet(
   }
   for (const row of rows) row.blockers = orderBlockers(row.blockers);
 
-  return { ok: true, rows };
+  return { ok: true, rows, skipped };
 }
 
 /** A Date has to be rendered deliberately, or the raw column reads "[object Date]". */
@@ -719,21 +820,38 @@ export function midsInOtherBatches(
   );
 }
 
-/** Compares two processor names: case, and runs of whitespace, ignored. */
+/**
+ * Other names a processor's file uses for it, by nameKey(), and the processor
+ * each means (phase 15: ISO Hub writes "Goat" on TSYS files and "Netevia" on
+ * Netevia HQ's). The SQL twin is processor_key() (20261111120000).
+ */
+export const PROCESSOR_ALIASES: Readonly<Record<string, string>> = {
+  goat: "tsys",
+  netevia: "neteviahq",
+};
+
+/** A processor name by nameKey(), then the alias map; null when blank. */
+export function processorKey(value: string | null): string | null {
+  const key = nameKey(value);
+  return key === "" ? null : (PROCESSOR_ALIASES[key] ?? key);
+}
+
+/** Compares two processor names by processorKey(); a blank never matches. */
 export function sameProcessor(a: string | null, b: string | null): boolean {
-  const norm = (value: string | null) =>
-    (value ?? "").replace(/[\s\uFEFF]+/g, " ").trim().toLowerCase();
-  return a !== null && b !== null && norm(a) === norm(b);
+  const left = processorKey(a);
+  return left !== null && left === processorKey(b);
 }
 
 /**
- * The three confirmable warnings for one row (memo §2.4):
+ * The four confirmable warnings for one row (memo §2.4):
  *
- *   processor_mismatch  the file's Processor cell is not the batch's processor
- *                       (a blank cell included), or the merchant has a saved
- *                       processor that is not it. A merchant with NO saved
- *                       processor is not a mismatch (A6). Confirming never
- *                       changes the merchant's processor.
+ *   processor_mismatch  the file's Processor cell names another processor, or
+ *                       the merchant has a saved processor that is not it,
+ *                       compared by processorKey() (case, spaces, punctuation
+ *                       and the alias map ignored). A BLANK cell is not a
+ *                       mismatch (phase 15: ISO Hub leaves most blank), nor is
+ *                       a merchant with NO saved processor (A6). Confirming
+ *                       never changes the merchant's processor.
  *   inactive_merchant   merchants.status = 'inactive'; 'other' is not (A26).
  *   bad_numbers         volume < 0, or volume > 0 and residual > volume. A
  *                       negative residual on a positive volume is a clawback,
@@ -745,8 +863,11 @@ export function sameProcessor(a: string | null, b: string | null): boolean {
  *                       made the admin's routine yes also pass the rows this
  *                       warning is for.
  *
- * A figure that is blank or unreadable is a blocker, not a bad number, so
- * bad_numbers needs both figures read.
+ *   other_income_type   the Income Type is not Residual, Residuals or blank
+ *                       (phase 15; ACH on the TSYS files).
+ *
+ * A figure that is unreadable is a blocker, not a bad number, so bad_numbers
+ * needs both figures read.
  */
 export function rowWarnings(input: {
   fileProcessor: string | null;
@@ -754,13 +875,17 @@ export function rowWarnings(input: {
   merchant: Pick<MerchantByMid, "status" | "processor"> | null;
   volume: number | null;
   residual: number | null;
+  incomeType: string | null;
 }): ResidualWarning[] {
   const warnings: ResidualWarning[] = [];
+  const fileDiffers =
+    processorKey(input.fileProcessor) !== null &&
+    !sameProcessor(input.fileProcessor, input.batchProcessor);
   const merchantDiffers =
     input.merchant !== null &&
     input.merchant.processor !== null &&
-    input.merchant.processor !== input.batchProcessor;
-  if (!sameProcessor(input.fileProcessor, input.batchProcessor) || merchantDiffers) {
+    !sameProcessor(input.merchant.processor, input.batchProcessor);
+  if (fileDiffers || merchantDiffers) {
     warnings.push("processor_mismatch");
   }
   if (input.merchant?.status === "inactive") warnings.push("inactive_merchant");
@@ -770,6 +895,9 @@ export function rowWarnings(input: {
     (input.volume < 0 || (input.volume > 0 && input.residual > input.volume))
   ) {
     warnings.push("bad_numbers");
+  }
+  if (!isResidualIncomeType(input.incomeType)) {
+    warnings.push("other_income_type");
   }
   return warnings;
 }

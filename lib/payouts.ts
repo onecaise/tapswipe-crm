@@ -78,15 +78,16 @@ export const PAYOUT_BLOCKERS = [
 export type PayoutBlocker = (typeof PAYOUT_BLOCKERS)[number];
 
 /**
- * The three confirmable warnings (rep_payout_import_rows.warnings,
- * 20261030120000), confirmed with one yes PER TYPE per import, never per line
- * (memo §0b.3). The yes is the review screen's; commit v3 (phase 8) recomputes
+ * The four confirmable warnings (rep_payout_import_rows.warnings,
+ * 20261030120000; other_income_type since 20261111120000), confirmed with
+ * one yes PER TYPE per import, never per line (memo §0b.3). The yes is the review screen's; commit v3 (phase 8) recomputes
  * every warning and refuses a type the admin did not confirm.
  */
 export const PAYOUT_WARNINGS = [
   "processor_mismatch",
   "inactive_merchant",
   "bad_numbers",
+  "other_income_type",
 ] as const;
 
 export type PayoutWarning = (typeof PAYOUT_WARNINGS)[number];
@@ -317,6 +318,7 @@ const WARNING_LABELS: Record<PayoutWarning, string> = {
   processor_mismatch: "Processor does not match",
   inactive_merchant: "Merchant is inactive",
   bad_numbers: "Volume is negative, or the residual is more than the volume",
+  other_income_type: "Income Type is not Residuals",
 };
 
 /** Warning types as the question the review screen asks, once per import. */
@@ -325,6 +327,8 @@ const WARNING_QUESTIONS: Record<PayoutWarning, string> = {
     "Import these lines under the processor chosen for this import?",
   inactive_merchant: "Pay these inactive merchants' lines to their owners?",
   bad_numbers: "Import these figures exactly as the file has them?",
+  other_income_type:
+    "Import these lines with the residuals, as the processor's own monthly total does?",
 };
 
 export function warningLabel(warning: string): string {
@@ -624,6 +628,27 @@ export function reviewImportRows(
     // of an empty month.
     ready: rows.length > 0 && blocked === 0,
   };
+}
+
+/**
+ * The count and sums of the rows carrying one warning, for its block on the
+ * review screen (phase 15: other_income_type shows how much the ACH lines
+ * add). Summed in whole cents; staged figures are already rounded to them.
+ */
+export function warningTotals(
+  rows: readonly PayoutImportRow[],
+  warning: string,
+): { count: number; volume: number; residual: number } {
+  let count = 0;
+  let volume = 0;
+  let residual = 0;
+  for (const row of rows) {
+    if (!(row.warnings ?? []).includes(warning)) continue;
+    count += 1;
+    volume += Math.round((row.volume ?? 0) * 100);
+    residual += Math.round((row.residual_income ?? 0) * 100);
+  }
+  return { count, volume: volume / 100, residual: residual / 100 };
 }
 
 /** One period's worth of rows, as the periods list shows it. */

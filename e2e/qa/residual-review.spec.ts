@@ -125,7 +125,7 @@ test("a refused import lists every unknown MID at the top and offers no commit",
     HEADER,
     [slot.processor, known, "QA Known", "Residuals", "$1,000.00", "$5.00"],
     [slot.processor, unknownA, "QA Stranger A", "Residuals", "$1,000.00", "$5.00"],
-    [slot.processor, unknownB, "QA Stranger B", "Fees", "$1,000.00", "$5.00"],
+    [slot.processor, unknownB, "QA Stranger B", "Residuals", "12,99", "$5.00"],
   ];
   await upload(page, { name: `${PREFIX}refused.xlsx`, buffer: workbook(rows) }, slot);
   await expect(page).toHaveURL(/\/payouts\/import\/\d+$/);
@@ -133,11 +133,43 @@ test("a refused import lists every unknown MID at the top and offers no commit",
   const refused = page.getByTestId("import-refused");
   await expect(refused).toContainText("This import is refused.");
   await expect(refused).toContainText(`2 MIDs are not merchants in the CRM: ${unknownA}, ${unknownB}.`);
-  // The wrong Income Type on the same row is listed too, not hidden behind it.
-  await expect(refused).toContainText("Income Type is not Residuals");
+  // The unreadable figure on the same row is listed too, not hidden behind it.
+  await expect(refused).toContainText("A figure could not be read");
   await expect(refused).toContainText('Row 4 — ');
   await expect(page.getByTestId("import-warnings")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^commit/i })).toHaveCount(0);
+});
+
+test("an ISO Hub file: ACH asks once with its count and sums, a blank Volume is counted as 0, blank and aliased Processor cells and filler rows say nothing", async ({ page }) => {
+  // Phase 15 of docs/design/intake-and-reports.md. Every figure is invented.
+  const mids = [newMid(), newMid(), newMid()];
+  for (const mid of mids) await merchantFor(PREFIX, mid);
+  const slot = await freeSlot();
+  // Goat on a TSYS file, Netevia on Netevia HQ's; otherwise the name in capitals.
+  const alias = slot.processor === "TSYS" ? "Goat " : slot.processor === "Netevia HQ" ? "Netevia" : slot.processor.toUpperCase();
+  const rows = [
+    HEADER,
+    [null, mids[0], "QA Blank Cell", "Residual ", "$1,000.00", "$5.00"],
+    [alias, mids[1], "QA Ach", "ACH", "$2,695.16", "$49.51"],
+    [slot.processor, mids[2], "QA No Volume", "Residuals ", null, "$1.25"],
+    [alias, null, null, "ACH", null, null],
+    [null, null, null, null, null, null],
+  ];
+  await upload(page, { name: `${PREFIX}iso-hub.xlsx`, buffer: workbook(rows) }, slot);
+  await expect(page).toHaveURL(/\/payouts\/import\/\d+$/);
+
+  const warnings = page.getByTestId("import-warnings");
+  await expect(warnings.locator("[data-warning]")).toHaveCount(1);
+  const other = warnings.locator('[data-warning="other_income_type"]');
+  await expect(other).toContainText("Income Type is not Residuals");
+  await expect(other.getByTestId("warning-summary")).toHaveText("1 row: volume $2,695.16, residual $49.51.");
+  await expect(other).toContainText('Income Type "ACH"');
+  await expect(page.getByTestId("blank-figures")).toContainText("1 row has a blank Volume or Residual, read as 0.");
+  await expect(page.getByTestId("blank-figures")).toContainText("Row 4.");
+  await expect(page.getByTestId("import-refused")).toHaveCount(0);
+
+  await other.getByRole("button", { name: "Yes" }).click();
+  await expect(page.getByRole("button", { name: /^commit 3 rows/i })).toBeVisible();
 });
 
 test("one Yes per warning type opens the commit; a No closes it again", async ({ page }) => {

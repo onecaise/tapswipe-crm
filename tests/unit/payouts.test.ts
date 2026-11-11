@@ -29,8 +29,10 @@ import {
   warningLabel,
   warningQuestion,
   warningsConfirmed,
+  warningTotals,
   type PayoutImportRow,
 } from "@/lib/payouts";
+import { blankFigureRows } from "@/lib/residual-review";
 import {
   RESIDUAL_BLOCKERS,
   RESIDUAL_WARNINGS,
@@ -384,6 +386,28 @@ describe("reviewImportRows", () => {
   const refused = (code: string, over: Partial<PayoutImportRow> = {}) =>
     staged({ blocker: code, blockers: [code], error: `msg ${code}`, ...over });
 
+  it("warningTotals: the count and sums of one warning's rows, in whole cents (phase 15)", () => {
+    const rows = [
+      staged({ warnings: ["other_income_type"], volume: 2695.16, residual_income: 49.51 }),
+      staged({ id: 2, warnings: ["other_income_type", "bad_numbers"], volume: 0.1, residual_income: -6.07 }),
+      staged({ id: 3, warnings: ["bad_numbers"], volume: 5, residual_income: 9 }),
+      staged({ id: 4, warnings: ["other_income_type"], volume: 0.2, residual_income: null }),
+    ];
+    expect(warningTotals(rows, "other_income_type")).toEqual({ count: 3, volume: 2695.46, residual: 43.44 });
+    expect(warningTotals(rows, "inactive_merchant")).toEqual({ count: 0, volume: 0, residual: 0 });
+  });
+
+  it("blankFigureRows: a MID, a 0, and a blank raw cell -- not a typed zero (phase 15)", () => {
+    const rows = [
+      staged({ row_number: 2, volume_raw: null, volume: 0 }),
+      staged({ row_number: 3, residual_income_raw: "-", residual_income: 0 }),
+      staged({ row_number: 4, volume_raw: "0.00", volume: 0 }),
+      staged({ row_number: 5, mid_raw: null, volume_raw: null, volume: null, blocker: "missing_mid" }),
+      staged({ row_number: 6 }),
+    ];
+    expect(blankFigureRows(rows)).toEqual([2, 3]);
+  });
+
   it("an advisory note never blocks: the row is still clean and the batch ready", () => {
     const review = reviewImportRows([
       staged({ preview_flag: "share_not_in_force", preview_note: "x" }),
@@ -537,7 +561,8 @@ describe("the import vocabularies match the parser and the database", () => {
     );
 
     const schema = await readFile(
-      new URL("../../supabase/migrations/20261030120000_import_schema.sql", import.meta.url),
+      // The CHECK as 20261111120000 (phase 15) re-created it, other_income_type added.
+      new URL("../../supabase/migrations/20261111120000_iso_hub_files.sql", import.meta.url),
       "utf8",
     );
     const warningCheck = /check \(warnings <@ array\[([^\]]*)\]/.exec(schema);

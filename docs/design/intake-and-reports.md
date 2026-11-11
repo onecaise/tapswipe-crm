@@ -1,12 +1,14 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
 Status: **Revision 3, 28 Oct 2026. Decisions taken. The build plan is complete: phases 1 to 14,
-the merchant bulk import included, are built locally (§10, last on 6 Nov 2026).** Nothing has been
-run against dev or prod.
+the merchant bulk import included, are built locally (§10), and phase 15 (the real ISO Hub files,
+§0d) on 11 Nov 2026.** Nothing has been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
   below says **Recommend**, §0 is what was decided.
 - Owen's later answers of 28 Oct 2026 (§0c) close two §11 questions (deductions, the 50 cap).
+- Owen's decisions of 11 Nov 2026 (§0d), from the real ISO Hub files, supersede §0b.1 and §2.4
+  where they differ: a fourth warning (`other_income_type`), filler rows skipped, blank figures 0.
 - Owen's decisions of 28 Oct 2026 (§0b), taken from his real residual file and his current payout
   report, are also binding and **supersede §0 where they differ**: the split is a per-rep rate, not
   a constant 50, and the file has six columns. §11 lists the questions still open.
@@ -135,6 +137,35 @@ each phase in §8 edits it before the migration.
    part of the total: **"Deductions (info only, not in total)"**. Closes §11 Q4.
 2. **50 is the maximum rep rate.** The 0-50 limit stays on the profile, pre-app and merchant rates
    and on the override's outer bound. Closes §11 Q2.
+
+---
+
+## 0d. Owen's decisions (11 Nov 2026), binding; the real ISO Hub files (phase 15)
+
+Taken against the 33 files chosen in `load-manifest.csv` (Jan-Sep 2026, five processors), which
+stay outside the repo. They supersede §0b.1 and §2.4 where they differ:
+
+1. **Income Type** "Residual", "Residuals" (case and spaces ignored) and blank are residuals.
+   Anything else is decided by measurement (step 0): ACH rows are imported under a **fourth
+   confirmable warning, `other_income_type`**, shown with their count and sums, because ISO Hub's
+   own monthly Net includes them (below). `wrong_income_type` is no longer raised.
+2. **Filler rows are skipped**: no MID, no merchant name, no Volume and no Residual, whatever the
+   Processor or Income Type cells say. A row with figures but no MID still refuses (`missing_mid`).
+3. **Processor** names compare ignoring case, spaces and punctuation, plus the aliases
+   **Goat -> TSYS** and **Netevia -> Netevia HQ**. A **blank** Processor cell on a merchant row is
+   no warning. Any other mismatch keeps the `processor_mismatch` warning.
+4. **A numeric MID cell** that is a whole number of 15 digits or fewer is read by its stored value,
+   even when Excel shows it in exponent form (this reverses phase 14b's choice). Over 15 digits, or
+   not an integer, still refuses; text that looks mangled ("4.001E+11") still refuses.
+5. **A blank Volume or Residual on a row with a MID is 0**, with the count shown on the review screen.
+6. **Volume and Residual round in exact decimal, half up** (half away from zero, as Postgres), never
+   in binary floating point.
+
+Step 0's measure (aggregates only): 26 rows have Income Type ACH. 20 are filler (no MID, name or
+figures) and fall under 2. The other six, one each in TSYS January to May and July, hold volume
+267,271.27 and residual 1,541.53 in total. In each of those six months the file reproduces ISO Hub's
+Volume and Net to the cent **with** the ACH row and misses by that row **without** it, so they are
+imported (rule 1).
 
 ---
 
@@ -529,6 +560,10 @@ and override edits cannot interleave with a commit. Its own `revoke` / `grant ex
 8. Return `{written, overrides, replaced_lines}`.
 
 ### 2.4 The refusals and the three confirmations (as decided, §0.4)
+
+> Since phase 15 (§0d): another Income Type is the fourth confirmation, `other_income_type`, not a
+> refusal; a blank Processor cell and the aliases Goat / Netevia are no `processor_mismatch`; a blank
+> figure on a row with a MID is 0, not `missing_figure`. The table below is the phase 7 text.
 
 | Code | Kind | Rule | On Yes |
 | --- | --- | --- | --- |
@@ -2637,6 +2672,91 @@ Full e2e on `5cee38b` (this change plus the deploy plan `docs/claude/deploy-resi
 `supabase stop` / `start`, a fresh `functions serve`, `.next` deleted and port 3000 free: **384 passed**
 (6 setup), 0 failed, 0 flaky, 17.0 min, `retries: 0`. On the same commit: `npm test` 3072 passed (128 files),
 `test:live` 368 passed (24 files); build, lint and type-check pass.
+
+### Phase 15: the real ISO Hub files (11 Nov 2026, branch `intake-residuals`)
+
+The importer met the 33 files Owen chose (`load-manifest.csv`, Jan-Sep 2026; they stay outside the
+repo, and nothing here names a merchant, a MID or a per-merchant amount). Decisions: §0d.
+
+Step 0, measured before any code (aggregates only): 26 ACH rows; 20 are filler; the other six (TSYS
+Jan-May and Jul, one each) hold volume 267,271.27 and residual 1,541.53. With them in, each of those
+months equals ISO Hub's Volume and Net to the cent; without them it misses by that row. So they import,
+under the confirmable `other_income_type`.
+
+Built (`20261111120000_iso_hub_files.sql`; `_shared/residuals.ts` and `parse-residual-import`; the
+review page):
+- **Income Type** (`isResidualIncomeType`, `nameKey`): Residual, Residuals and blank, compared as
+  lower-case letters and digits. Anything else stages with the `other_income_type` warning, not a
+  blocker; its block on the review screen shows the count and the volume and residual sums
+  (`warningTotals`). `wrong_income_type` stays in the vocabulary (the staging CHECK still admits it)
+  and is never raised.
+- **Filler rows** (no MID, name, Volume or Residual, whatever the Processor and Income Type say) are
+  skipped and counted (`skipped`, `skipped_count` in the function's reply). A row with a figure or a
+  name and no MID is still `missing_mid`.
+- **Processor** (`processorKey` / `processor_key()`): letters and digits only, then Goat -> TSYS and
+  Netevia -> Netevia HQ; null when blank. `processor_mismatch` is a file cell with a key that is not
+  the batch's, or a merchant's saved processor whose key is not. A blank cell is silent. The review
+  screen's wording compares the same way.
+- **Numeric MIDs**: a whole number of 15 digits or fewer is read by its stored value even when shown
+  in exponent form (reverses 14b's choice); over 15 digits refuses with the use-the-CSV sentence; a
+  fraction is not a MID; mangled text ("4.001E+11") still refuses.
+- **Blank figures** on a row with a MID are 0 (`blank_as_zero` on the parsed row,
+  `blank_as_zero_count` in the reply). Staged `volume_raw` / `residual_income_raw` keep the blank, so
+  the review screen counts those rows from staging (`blankFigureRows`, in `lib/residual-review.ts`,
+  server-only: client components import `lib/payouts.ts`, and the parser stays off the browser). With
+  no MID the blank stays `missing_figure` beside `missing_mid`.
+- **Rounding** (`round2`, `decimalText`): the cell's shortest decimal, rounded half away from zero in
+  decimal. The old `Math.round(v * 100) / 100` read 1.005 as 100.4999... cents; on the real files
+  that left TSYS January and September each a cent short of ISO Hub's Net (69,645.71 and 107,560.12),
+  measured by running the new parser with only the old rounding put back.
+- **SQL** (`20261111120000`): `processor_key()` (immutable, EXECUTE for authenticated and service_role
+  only), the warnings CHECK with `other_income_type`, and v3 re-created from 20261106140000's body
+  with three changes: `other_income_type` confirmable, the Income Type refusal removed, step 4's
+  `processor_mismatch` and `other_income_type`. The migration refuses unless the deployed v3 carries
+  each replaced fragment exactly once; over a populated database it writes no row.
+
+Acceptance: all 33 chosen files through the new parser (SheetJS 0.20.3, the function's options),
+Netevia HQ September's one malformed Residual cell (two decimal points) set to 0.60 in memory only.
+**Zero blockers in every file; Volume and Residual equal ISO Hub's Volume and Net to the cent in all
+33.** Warnings without the database (merchant lookups not run): `other_income_type` once in TSYS
+Jan-May and Jul, `bad_numbers` once in TSYS Jul; no `processor_mismatch` from the file's cells
+(`processor_mismatch` and `inactive_merchant` also depend on the merchants, so the real load will
+show what those say). Filler rows skipped per file: 0-233.
+
+Where the instruction was silent, and what was chosen:
+- **Punctuation** is ignored for Income Type as well as Processor, so both compare by one key with one
+  SQL twin.
+- **A merchant's saved processor** is compared by `processor_key()` too (it was exact equality).
+- **A Processor cell of punctuation only** ("-") has no key, so it counts as blank.
+- **Filler is counted, not listed**: the count is in the function's reply; the rows are not staged.
+- **No new column**: blank-as-zero rows are derived from the staged raw cells.
+
+Tests: unit (`residuals-parse`: Income Type, filler, aliases and blank cell, exponent MIDs through
+SheetJS, blank figures, exact rounding with the float rounding shown wrong; `payouts`:
+`warningTotals`, `blankFigureRows`, the vocabulary pinned to the new CHECK), rls
+(`commit-residual-import-v3`: `other_income_type` refused unconfirmed and committed on a yes,
+Residual / blank accepted, blank and aliased Processor cells silent, `processor_key()` values and
+grants, mutation proofs for each new line and for the blank-cell exemption and alias map; new
+`iso-hub-files`: the migration over a populated database, its three refusals, and the spec block
+verbatim), live (`residual-import`: the warnings test gains a blank cell, Goat, ACH, a blank Volume
+and a filler row; ACH and blank figures through the real function and v3; the exponent MID read, 16
+digits refused) and one e2e (the review screen's ACH block with its sums, the blank-figures callout,
+no mismatch block). Mutation checks: each of nine parser rule removals (only Residuals accepted; no
+`other_income_type`; no filler skip; no alias map; blank cell warns; punctuation compared; exponent
+refused; blank not 0; float rounding) failed at least one unit test; in SQL, the mutation proofs
+above do the same for each new v3 line, the blank-cell exemption and the alias map.
+Changed because the rule changed (§0d), not weakened: the tests that asserted a refusal for another
+Income Type (unit, rls, live, one e2e row now uses an unreadable figure instead), a refusal for an
+exponent-shown 12-digit MID (unit, live; a 16-digit case now carries the refusal), a
+`processor_mismatch` on a blank cell (unit, rls), and `missing_figure` for a blank on a row with a MID
+(unit, live; the no-MID case keeps it).
+
+Suites: `npm test` 3072 → 3090 (128 → 129 files); `test:live` 368 → 369 (24 files); e2e 384 → 385
+(6 setup). Build, lint and type-check pass. Migration applied to the local stack only
+(`supabase migration up --local`). The first full `npm test` run timed one test out (the 70,000-row
+payout test, 30 s) while other suites ran beside it; alone, everything passed. Full e2e alone, port
+3000 free, `.next` deleted, a fresh `functions serve`: **385 passed**, 0 failed, 16.7 min,
+`retries: 0`.
 
 ---
 

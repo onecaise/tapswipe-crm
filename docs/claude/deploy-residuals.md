@@ -1,21 +1,21 @@
-# Deploy the residual build (intake-residuals, Phases 6–14 and 14b) — the plan
+# Deploy the residual build (intake-residuals, Phases 6–14, 14b and 15) — the plan
 
 Written 6 Nov 2026 on `intake-residuals` at `2ca866f`, before anything was deployed. **A plan, not a record**: nothing in it has been run against a hosted project. Owen runs every hosted command himself, in PowerShell, one at a time, and reads the output before the next one. It assumes **batch 1 is already on both projects** (`docs/claude/deploy-batch-1.md`): dev and prod at migration `20261028140000`, twelve functions deployed from `40c02d9` (the tip of `intake-and-reports`), `master` containing batch 1.
 
-This batch = everything on `intake-residuals` after `40c02d9`: Phases 6–14 (`d7f65bc` … `b3e6399`) and the alphanumeric-MID change (`2ca866f`).
+This batch = everything on `intake-residuals` after `40c02d9`: Phases 6–14 (`d7f65bc` … `b3e6399`), the alphanumeric-MID change (`2ca866f`) and phase 15, the real ISO Hub files (11 Nov 2026: migration #14, `parse-residual-import` again; §0d of `docs/design/intake-and-reports.md`).
 
 ## 0. Starting point, and what was checked
 
 | Claim | Checked how | Result |
 | --- | --- | --- |
 | Batch 1's deploy commit is `40c02d9` | `git rev-parse intake-and-reports origin/intake-and-reports` → both `40c02d9`; `git merge-base --is-ancestor 40c02d9 HEAD` → yes | **Yes**, and this branch contains it. |
-| Dev and prod are at `20261028140000` | Not checkable offline; it is this plan's premise. | **Not verified.** D2/P5's `migration:list` / dry run settles it: exactly the 13 versions in §1 pending, no more, no fewer. If batch 1 is not on a project yet, run `deploy-batch-1.md` there first. |
-| 83 migrations in the repo | `ls supabase/migrations \| wc -l` | 70 (batch 1) + 13 (this batch). `push-prod-migration.ps1` should end `RESULT: PASS -- all 83 migrations are recorded`. |
+| Dev and prod are at `20261028140000` | Not checkable offline; it is this plan's premise. | **Not verified.** D2/P5's `migration:list` / dry run settles it: exactly the 14 versions in §1 pending, no more, no fewer. If batch 1 is not on a project yet, run `deploy-batch-1.md` there first. |
+| 84 migrations in the repo | `ls supabase/migrations \| wc -l` | 70 (batch 1) + 14 (this batch). `push-prod-migration.ps1` should end `RESULT: PASS -- all 84 migrations are recorded`. |
 | The pre-check below is right | Run on PGlite built to exactly `20261028140000` (6 Nov 2026): 24 rows, all `0`. With a committed batch, two MIDs differing only in case and a `365 pay` processor added, it flagged exactly those three, and replaying the 13 migrations stopped at `20261030140000` naming the batch. | **Verified locally.** |
 | The two fixture files stage as described in D6 | Read through the real `_shared/merchant-imports.ts` and `_shared/residuals.ts` code (6 Nov 2026) with the D6 reps as lookups | **Verified in code**, not on dev: every refusal and note listed in D6 appeared on its row, nothing else. |
 | Vercel: `master` → prod, previews → dev | No Vercel config in the repo. | **Not verified** (as in batch 1). Check in the dashboard before D5/P8. |
 
-## 1. The migrations (all 13 after `20261028140000`, in order)
+## 1. The migrations (all 14 after `20261028140000`, in order)
 
 `db push` applies **all** of them in one command. **None refuses because a table has rows**; each guard names the specific rows it cannot carry. When one fires, the push stops there; the earlier ones in the same push **stay applied** (see §6).
 
@@ -34,12 +34,13 @@ This batch = everything on `intake-residuals` after `40c02d9`: Phases 6–14 (`d
 | 11 | `20261104150000_set_territory_ascii_trim.sql` | `set_territory()` trims every ASCII whitespace. | `set_territory` is not the 20261002143000 body (hand edit). |
 | 12 | `20261106120000_merchant_import.sql` | Merchant bulk import: two staging tables, `commit_merchant_import()`, the location exception, the sixth processor **365 Pay**. | **a processor row is `365 Pay` in another spelling or label**, or sort order 60 is taken; **the location trigger body check**: `enforce_merchant_location()` does not contain `if NEW.city is null or NEW.state is null then` exactly once (it is the 20261013130000 body). |
 | 13 | `20261106140000_alphanumeric_mids.sql` | `mid_key()`, the unique index `merchants_mid_key_ci`, v3 / `delete_payout_period` / `post_payout_adjustment` matching MIDs by key. | **two merchants' MIDs differ only in case or surrounding spaces** (it names them); a function body it copied differs (cannot fire: #5, #6 and #10 created them in this push). |
+| 14 | `20261111120000_iso_hub_files.sql` | Phase 15: `processor_key()` (case, spaces, punctuation ignored; Goat → TSYS, Netevia → Netevia HQ), the fourth warning `other_income_type` in the staging CHECK, v3 re-created: another Income Type is that warning (no longer a refusal), a blank Processor cell is no `processor_mismatch`. | v3 is not #13's body (its Income Type refusal, `processor_mismatch` line and confirmable list, each exactly once) — cannot fire: #13 created it in this push. Its CHECK only widens. |
 
 **Not refused at apply time, but refused later at commit** (worth knowing before the first import): a merchant with no rate (v3 refuses its MID); a share whose signer is not the owner or whose shares do not total the merchant's rate (v3 refuses its MID); a review batch started before #2 (it can be abandoned, never committed).
 
 ### The pre-check (read-only; SQL Editor, before every push)
 
-Verified as described in §0. Every `n` must be `0`. Rows 1–9 are data; the `D` rows are definitions that only a hand edit could have changed.
+Verified as described in §0. #14 (phase 15) adds no row: its one guard reads the v3 body #13 creates in the same push, and its CHECK only admits one more warning (`tests/rls/iso-hub-files.test.ts` applies it over a populated database: no row changes). Every `n` must be `0`. Rows 1–9 are data; the `D` rows are definitions that only a hand edit could have changed.
 
 ```sql
 -- Read-only. Run on a project at 20261028140000, BEFORE the push. Every n must be 0.
@@ -135,7 +136,8 @@ Changed files: `_shared/residuals.ts`, `_shared/residual-imports.ts`, `_shared/r
 | --- | --- | --- |
 | `export-report` | **NEW** (`export-report/index.ts`, `deno.json`; imports `_shared/report-sheets.ts`, `_shared/residual-imports.ts`) | New: Export Excel for both admin reports, admin-only, audited. |
 | `stage-merchant-import` | **NEW** (`stage-merchant-import/index.ts`, `deno.json`; imports `_shared/merchant-imports.ts`) | New: stages the ISO Hub merchants file. |
-| `parse-residual-import` | own `index.ts`; `_shared/residuals.ts`; `_shared/residual-imports.ts` | **Yes**: the six-column file, payee by MID, refusals and warnings, lettered MIDs in any case, CSV. |
+| `parse-residual-import` | own `index.ts`; `_shared/residuals.ts`; `_shared/residual-imports.ts` | **Yes**: the six-column file, payee by MID, refusals and warnings, lettered MIDs in any case, CSV; phase 15: filler rows skipped, blank figures 0, `other_income_type`, processor aliases, exact-decimal rounding, exponent-shown MIDs of 15 digits or fewer read. Needs #14 (it stages `other_income_type`). |
+| `export-residuals` (phase 15 note) | imports `_shared/residuals.ts`, which phase 15 changed | No behaviour change: it uses only the export header from that module. Redeployed anyway by the bare deploy. |
 | `residual-import-file-url` | own `index.ts`; `_shared/residual-imports.ts` | **Yes**: processor and month at upload, the replace prompt. |
 | `export-residuals` | own `index.ts`; `_shared/residuals.ts` | **Yes**: processor column, override lines, the header per memo §2.6. |
 | `provision-user-batch` | own `index.ts` | No: one comment line (`commit_residual_import` → `…_v3`). |
@@ -172,10 +174,10 @@ Both non-empty. No backup, no push.
 **D2. Pre-check + dry run.**
 
 1. SQL Editor, top-left **`tapswipe-crm-dev`**: the §1 pre-check. All 0. Row 2 non-zero → reset dev first (§1, "If row 2 is not 0"), then re-run the pre-check.
-2. `npm run migration:list` — Remote ends at `20261028140000`; exactly the 13 §1 versions missing.
-3. `npm run db:push -- --dry-run` — "Would push these migrations" and **exactly** the 13 §1 files.
+2. `npm run migration:list` — Remote ends at `20261028140000`; exactly the 14 §1 versions missing.
+3. `npm run db:push -- --dry-run` — "Would push these migrations" and **exactly** the 14 §1 files.
 
-**D3. Push.** `npm run db:push` (answer `y`). Then `npm run migration:list`: both columns end at `20261106140000`. Then the P6 verification queries in the dev SQL Editor.
+**D3. Push.** `npm run db:push` (answer `y`). Then `npm run migration:list`: both columns end at `20261111120000`. Then the P6 verification queries in the dev SQL Editor.
 
 **D4. Functions.** `npm run functions:deploy` (no name = all fourteen), then `npx supabase functions list --project-ref vdjtosofrimipklbdjbi`: fourteen `ACTIVE`, updated today, `export-report` and `stage-merchant-import` among them.
 
@@ -254,16 +256,16 @@ Both non-empty.
 powershell -File scripts\push-prod-migration.ps1 -DryRun
 ```
 
-`TARGET aws-0-us-west-2.pooler.supabase.com:5432 as postgres.zuvsdkjnfstrjahstsmg`, latest `20261028140000`, and **exactly** the 13 §1 files.
+`TARGET aws-0-us-west-2.pooler.supabase.com:5432 as postgres.zuvsdkjnfstrjahstsmg`, latest `20261028140000`, and **exactly** the 14 §1 files.
 
-**P5. Push.** `powershell -File scripts\push-prod-migration.ps1` → `RESULT: PASS -- all 83 migrations are recorded`.
+**P5. Push.** `powershell -File scripts\push-prod-migration.ps1` → `RESULT: PASS -- all 84 migrations are recorded`.
 
 **P6. Verification queries** (prod SQL Editor; the same on dev in D3):
 
 ```sql
--- the 13 versions
+-- the 14 versions
 select version from supabase_migrations.schema_migrations
- where version > '20261028140000' order by version;                 -- 13 rows, ending 20261106140000
+ where version > '20261028140000' order by version;                 -- 14 rows, ending 20261111120000
 -- six processors, 365 Pay last
 select code, sort_order from processors order by sort_order;         -- ... Square 50, 365 Pay 60
 -- the new tables: RLS on
@@ -343,7 +345,7 @@ Plain rule: **nothing before P5 changes prod.** After that, cannot be undone wit
 | --- | --- | --- | --- | --- |
 | §7 link | Linked to prod | `npm run guard:linked` prints `REFUSING … PRODUCTION` | Relink to dev | — |
 | D1/P2 | Backup empty or auth failure | size 0; `password authentication failed`; `Tenant or user not found` (wrong pooler host; `aws-0` is right) | Fix and re-run. Never continue without a backup | read-only |
-| D2/P4 | More or fewer than 13 pending | the dry-run list | Stop: the project is not at `20261028140000` (batch 1 missing, or something else pushed). Ask | read-only |
+| D2/P4 | More or fewer than 14 pending | the dry-run list | Stop: the project is not at `20261028140000` (batch 1 missing, or something else pushed). Ask | read-only |
 | D3/P5 push | #2 refuses: committed batches without processor | `import parser migration refuses to run: committed rep_payout_batches 3, 7 …` | #1 stays applied. Dev: reset, push again. Prod: stop and ask; repair = set `processor`, `period` on the named batches, push again | partial; restore from backup |
 | D3/P5 push | #3 refuses: merchant rate | `commit v3 migration refuses to run: merchants …` | #1–#2 stay applied. Fix each named merchant's split pair by hand (0–50, halves to 100), push again | partial |
 | D3/P5 push | #10 refuses: skip record / old preview flag | `retire_legacy_import refuses to run: …` | Copy the named record out first (the message gives the query), clear it, push again | partial |

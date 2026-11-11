@@ -7,6 +7,8 @@ import {
   RESIDUAL_BLOCKERS,
   RESIDUAL_COLUMNS,
   blockerMessage,
+  decimalText,
+  isBlankFigure,
   isResidualIncomeType,
   isSpreadsheetContainer,
   mapHeaders,
@@ -20,6 +22,9 @@ import {
   parseResidualSheet,
   pickBlocker,
   previousPayees,
+  PROCESSOR_ALIASES,
+  processorKey,
+  round2,
   rowWarnings,
   sameProcessor,
 } from "../../supabase/functions/_shared/residuals";
@@ -42,9 +47,15 @@ import {
  *   1. **A MID is text.** A numeric read drops leading zeros and can print a
  *      12-digit number in exponent form; either pays the wrong merchant, or
  *      refuses a right one.
- *   2. **The whole file is refused** on a non-Residuals income type, a repeated
- *      MID, a blank or unreadable figure -- every one listed.
+ *   2. **The whole file is refused** on a repeated MID, an unreadable figure,
+ *      or a row with figures and no MID -- every one listed.
  *   3. **A wrong number must be refused, not approximated.**
+ *
+ * Phase 15 (the real ISO Hub files) relaxed four things and tightened one,
+ * each pinned below: filler rows are skipped, a blank figure on a row with a
+ * MID is 0, another Income Type (ACH) is a warning, a blank or aliased
+ * Processor cell is no mismatch, a whole-number MID shown in exponent form is
+ * read by its stored value -- and figures round in exact decimal.
  */
 
 const HEADER = RESIDUAL_COLUMNS.map((column) => COLUMN_HEADERS[column]);
@@ -229,14 +240,20 @@ describe("Merchant Number through a real workbook (SheetJS 0.20.3)", () => {
     ]);
   });
 
-  it("refuses a 12-digit NUMBER cell in General format, shown in exponent form, with the use-the-CSV message", () => {
+  it("reads a 12-digit NUMBER cell in General format by its stored value, though shown in exponent form (phase 15)", () => {
     const { raw, formatted } = throughSheetJS(() => {}, [HEADER, row({ 1: 123456789012 })]);
-    // What SheetJS shows for it: the admin cannot check the digits.
+    // What SheetJS shows for it. The stored double is exact up to 15 digits.
     expect(typeof raw[1][1]).toBe("number");
     expect(formatted[1][1]).toBe("1.23457E+11");
     const [only] = parsed(raw, formatted);
+    expect(only.blockers).toEqual([]);
+    expect(only.mid_raw).toBe("123456789012");
+  });
+
+  it("still refuses a 16-digit NUMBER cell, shown in exponent form, with the use-the-CSV message", () => {
+    const { raw, formatted } = throughSheetJS(() => {}, [HEADER, row({ 1: 4400123456789012 })]);
+    const [only] = parsed(raw, formatted);
     expect(only.blockers).toEqual(["missing_mid"]);
-    expect(only.mid_raw).toBe("1.23457E+11");
     expect(only.messages.missing_mid).toMatch(/original CSV/);
   });
 
@@ -341,6 +358,32 @@ describe("parseNumberCell", () => {
     expect(parseNumberCell("10.005")).toEqual({ value: 10.01, ok: true });
     expect(parseNumberCell("-10.005")).toEqual({ value: -10.01, ok: true });
   });
+
+  it("rounds in exact decimal, never binary floating point (phase 15)", () => {
+    // Each of these is a half cent that value * 100 puts just BELOW .5 in
+    // binary (1.005 * 100 === 100.49999999999999), so Math.round lost a cent.
+    // ISO Hub's TSYS January and September totals were a cent off for it.
+    for (const [cell, cents] of [
+      [1.005, 1.01], [1.255, 1.26], [8.345, 8.35], [-1.005, -1.01], [4.355, 4.36],
+      ["1.005", 1.01], ["$1,234.565", 1234.57], ["(1.005)", -1.01],
+    ] as const) {
+      expect(parseNumberCell(cell), String(cell)).toEqual({ value: cents, ok: true });
+    }
+    expect(Math.round(1.005 * 100) / 100, "the float rounding this replaces").toBe(1);
+    expect(parseNumberCell(1.0049999)).toEqual({ value: 1, ok: true });
+    expect(parseNumberCell(0.004)).toEqual({ value: 0, ok: true });
+    expect(parseNumberCell(-0.004)).toEqual({ value: 0, ok: true });
+  });
+
+  it("writes a double out as its shortest decimal, exponent form included", () => {
+    expect(decimalText(1.005)).toBe("1.005");
+    expect(decimalText(1e-7)).toBe("0.0000001");
+    expect(decimalText(-2.5e-7)).toBe("-0.00000025");
+    expect(decimalText(1.5e21)).toBe("1500000000000000000000");
+    expect(round2("0.0000001")).toBe(0);
+    expect(round2("-0.005")).toBe(-0.01);
+    expect(round2("--5")).toBe(5);
+  });
 });
 
 describe("parseNumberCell: the processor file's currency formatting (§0b.1)", () => {
@@ -358,15 +401,15 @@ describe("parseNumberCell: the processor file's currency formatting (§0b.1)", (
   });
 });
 
-describe("isResidualIncomeType", () => {
-  it("accepts Residuals in any case, trimmed", () => {
-    for (const ok of ["Residuals", "residuals", " RESIDUALS ", "\tResiduals"]) {
-      expect(isResidualIncomeType(ok), ok).toBe(true);
+describe("isResidualIncomeType (phase 15)", () => {
+  it("accepts Residual, Residuals and blank, ignoring case and spaces", () => {
+    for (const ok of ["Residuals", "residuals", " RESIDUALS ", "\tResiduals", "Residual", "Residual ", "Residuals ", "Resid uals", null, "", "  "]) {
+      expect(isResidualIncomeType(ok), String(ok)).toBe(true);
     }
   });
 
-  it("refuses everything else, blank and the singular included", () => {
-    for (const bad of [null, "", "Residual", "Fees", "Residuals Adj", "Bonus"]) {
+  it("does not accept anything else (ACH, Fees...): that is other_income_type", () => {
+    for (const bad of ["ACH", "Fees", "Residuals Adj", "Bonus", "Residual2"]) {
       expect(isResidualIncomeType(bad), String(bad)).toBe(false);
     }
   });
@@ -421,6 +464,7 @@ describe("parseResidualSheet", () => {
       residual_income_raw: "$412.50",
       volume: 76877.18,
       residual_income: 412.5,
+      blank_as_zero: [],
       blockers: [],
       messages: {},
     });
@@ -463,13 +507,10 @@ describe("parseResidualSheet", () => {
     expect(!result.ok && result.error).toMatch(/looks like a CRM export, not a processor file/);
   });
 
-  it("refuses a row whose Income Type is not Residuals, quoting what it says", () => {
-    const rows = parsed([HEADER, row(), row({ 1: "222222222222", 3: "Fees" }), row({ 1: "333333333333", 3: null })]);
-    expect(rows.map((r) => r.blockers)).toEqual([[], ["wrong_income_type"], ["wrong_income_type"]]);
-    expect(rows[1].messages.wrong_income_type).toBe(
-      'Income Type is "Fees", not Residuals. A residual file holds residuals only.',
-    );
-    expect(rows[1].income_type_raw).toBe("Fees");
+  it("no longer refuses another Income Type: the row is staged for the other_income_type warning (phase 15)", () => {
+    const rows = parsed([HEADER, row(), row({ 1: "222222222222", 3: "ACH" }), row({ 1: "333333333333", 3: null })]);
+    expect(rows.map((r) => r.blockers)).toEqual([[], [], []]);
+    expect(rows[1].income_type_raw).toBe("ACH");
   });
 
   it("refuses EVERY row of a repeated MID, the first one too, listing the rows", () => {
@@ -485,11 +526,21 @@ describe("parseResidualSheet", () => {
     expect(rows.map((r) => r.blockers)).toEqual([[], []]);
   });
 
-  it("refuses a blank Volume or Residual as missing_figure, not as zero", () => {
+  it("reads a blank Volume or Residual on a row with a MID as 0, saying which (phase 15)", () => {
     const rows = parsed([HEADER, row({ 4: null }), row({ 1: "222222222222", 5: "" }), row({ 1: "333333333333", 4: "-", 5: "N/A" })]);
-    expect(rows.map((r) => r.blockers)).toEqual([["missing_figure"], ["missing_figure"], ["missing_figure"]]);
-    expect(rows[2].messages.missing_figure).toBe("Volume and Residual are blank on this row.");
-    expect(rows[0].volume).toBeNull();
+    expect(rows.map((r) => r.blockers)).toEqual([[], [], []]);
+    expect(rows.map((r) => [r.volume, r.residual_income])).toEqual([[0, 412.5], [76877.18, 0], [0, 0]]);
+    expect(rows.map((r) => r.blank_as_zero)).toEqual([["volume"], ["residual_income"], ["volume", "residual_income"]]);
+    // The raw cell is kept as the file had it: the review screen counts these by it.
+    expect(rows.map((r) => [r.volume_raw, r.residual_income_raw])).toEqual([[null, "$412.50"], ["$76,877.18", null], ["-", "N/A"]]);
+    expect(isBlankFigure(rows[2].volume_raw)).toBe(true);
+    expect(isBlankFigure("0.00")).toBe(false);
+  });
+
+  it("keeps a blank figure as missing_figure on a row with no MID, beside missing_mid", () => {
+    const rows = parsed([HEADER, row({ 1: null, 5: null })]);
+    expect(rows[0].blockers).toEqual(["missing_mid", "missing_figure"]);
+    expect(rows[0].residual_income).toBeNull();
   });
 
   it("refuses an unreadable figure, quoting the cell, and a decimal comma with its reason", () => {
@@ -507,9 +558,10 @@ describe("parseResidualSheet", () => {
   });
 
   it("lists every problem a row has, in precedence order", () => {
-    const rows = parsed([HEADER, row({ 3: "Fees", 4: "x" }), row({ 3: "Fees", 5: null })]);
-    expect(rows[0].blockers).toEqual(["duplicate_mid", "wrong_income_type", "unreadable_number"]);
-    expect(rows[1].blockers).toEqual(["duplicate_mid", "wrong_income_type", "missing_figure"]);
+    const rows = parsed([HEADER, row({ 4: "x" }), row({ 5: "y" }), row({ 1: "MID-7", 4: "z", 5: null })]);
+    expect(rows[0].blockers).toEqual(["duplicate_mid", "unreadable_number"]);
+    expect(rows[1].blockers).toEqual(["duplicate_mid", "unreadable_number"]);
+    expect(rows[2].blockers).toEqual(["missing_mid", "missing_figure", "unreadable_number"]);
   });
 
   it("does not block a negative residual, a zero volume or a negative volume (at most a warning)", () => {
@@ -520,6 +572,30 @@ describe("parseResidualSheet", () => {
   it("skips entirely blank rows instead of refusing them, keeping sheet row numbers", () => {
     const rows = parsed([HEADER, row(), [null, "", "  ", null, null, null], row({ 1: "222222222222" })]);
     expect(rows.map((r) => r.row_number)).toEqual([2, 4]);
+  });
+
+  it("skips filler rows -- no MID, name, Volume or Residual -- whatever Processor and Income Type say, and counts them (phase 15)", () => {
+    const result = parseResidualSheet([
+      HEADER,
+      row(),
+      ["Goat ", null, null, null, null, null],
+      ["TSYS", "", " ", "ACH", "-", null],
+      [null, null, null, "Residuals ", "", "N/A"],
+      row({ 1: "222222222222" }),
+    ]);
+    expect(result.ok && result.rows.map((r) => r.row_number)).toEqual([2, 6]);
+    expect(result.ok && result.skipped).toBe(3);
+  });
+
+  it("still refuses a row with a figure or a name but no MID (missing_mid), and does not count it as filler", () => {
+    const result = parseResidualSheet([
+      HEADER,
+      ["TSYS", null, null, "ACH", "100.00", null],
+      ["TSYS", null, null, null, null, "4.20"],
+      ["TSYS", null, "Joe's Diner", null, null, null],
+    ]);
+    expect(result.ok && result.rows.map((r) => r.blockers[0])).toEqual(["missing_mid", "missing_mid", "missing_mid"]);
+    expect(result.ok && result.skipped).toBe(0);
   });
 
   it("reports a header-only file and an empty one", () => {
@@ -556,6 +632,7 @@ describe("rowWarnings", () => {
     merchant: { status: "active", processor: "TSYS" },
     volume: 1000,
     residual: 50,
+    incomeType: "Residuals",
   };
 
   it("warns of nothing on a clean row", () => {
@@ -564,13 +641,28 @@ describe("rowWarnings", () => {
 
   it("processor_mismatch: the file's Processor differs from the chosen one", () => {
     expect(rowWarnings({ ...base, fileProcessor: "Square" })).toEqual(["processor_mismatch"]);
-    expect(rowWarnings({ ...base, fileProcessor: null })).toEqual(["processor_mismatch"]);
+    expect(rowWarnings({ ...base, fileProcessor: "Paybright " })).toEqual(["processor_mismatch"]);
   });
 
-  it("matches the file's Processor case- and space-insensitively", () => {
+  it("a BLANK Processor cell is not a mismatch (phase 15)", () => {
+    expect(rowWarnings({ ...base, fileProcessor: null })).toEqual([]);
+    expect(rowWarnings({ ...base, fileProcessor: " - " })).toEqual([]);
+    expect(processorKey(null)).toBeNull();
+    expect(processorKey("  ")).toBeNull();
+  });
+
+  it("matches the file's Processor ignoring case, spaces and punctuation, with the aliases Goat and Netevia (phase 15)", () => {
     expect(rowWarnings({ ...base, fileProcessor: " tsys " })).toEqual([]);
+    expect(rowWarnings({ ...base, fileProcessor: "Goat " })).toEqual([]);
+    expect(rowWarnings({ ...base, batchProcessor: "Netevia HQ", merchant: null, fileProcessor: "Netevia" })).toEqual([]);
     expect(sameProcessor("Netevia  HQ", "Netevia HQ")).toBe(true);
-    expect(sameProcessor("Red Fynn", "RedFynn")).toBe(false);
+    expect(sameProcessor("RedFynn", "Red Fynn")).toBe(true);
+    expect(sameProcessor("Paybright ", "PayBright")).toBe(true);
+    expect(sameProcessor("T.S.Y.S.", "TSYS")).toBe(true);
+    expect(sameProcessor("Goat", "Netevia HQ")).toBe(false);
+    expect(sameProcessor("Netevia", "TSYS")).toBe(false);
+    expect(processorKey("Netevia HQ")).toBe("neteviahq");
+    expect(Object.entries(PROCESSOR_ALIASES)).toEqual([["goat", "tsys"], ["netevia", "neteviahq"]]);
   });
 
   it("processor_mismatch: the merchant's saved processor differs", () => {
@@ -609,11 +701,17 @@ describe("rowWarnings", () => {
     expect(rowWarnings({ ...base, volume: 500, residual: -11.76 })).toEqual([]);
   });
 
-  it("needs both figures read for bad_numbers (a blank is a refusal instead)", () => {
+  it("needs both figures read for bad_numbers (an unreadable one is a refusal instead)", () => {
     expect(rowWarnings({ ...base, volume: null, residual: 5 })).toEqual([]);
   });
 
-  it("can carry all three at once", () => {
+  it("other_income_type: an Income Type that is not Residual, Residuals or blank (phase 15)", () => {
+    expect(rowWarnings({ ...base, incomeType: "ACH" })).toEqual(["other_income_type"]);
+    expect(rowWarnings({ ...base, incomeType: "Residual " })).toEqual([]);
+    expect(rowWarnings({ ...base, incomeType: null })).toEqual([]);
+  });
+
+  it("can carry all four at once", () => {
     expect(
       rowWarnings({
         fileProcessor: "Square",
@@ -621,8 +719,9 @@ describe("rowWarnings", () => {
         merchant: { status: "inactive", processor: "TSYS" },
         volume: -5,
         residual: 0,
+        incomeType: "ACH",
       }),
-    ).toEqual(["processor_mismatch", "inactive_merchant", "bad_numbers"]);
+    ).toEqual(["processor_mismatch", "inactive_merchant", "bad_numbers", "other_income_type"]);
   });
 });
 
@@ -654,14 +753,16 @@ describe("alphanumeric MIDs", () => {
     expect(parseMidCell(12345, "12345")).toEqual({ mid: null, unreadable: "12345", precision: false });
   });
 
-  it("refuses a spreadsheet number over 15 digits, or shown in exponent form, with the use-the-CSV message", () => {
+  it("refuses a spreadsheet number over 15 digits with the use-the-CSV message, and reads 15 or fewer shown in exponent form (phase 15)", () => {
     // 16 digits shown in full by a "0" format: Excel already kept only 15.
     expect(parseMidCell(4400123456789012, "4400123456789012")).toEqual({
       mid: null,
       unreadable: "4400123456789012",
       precision: true,
     });
-    expect(parseMidCell(440012345678, "4.40012E+11")).toEqual({ mid: null, unreadable: "4.40012E+11", precision: true });
+    expect(parseMidCell(440012345678, "4.40012E+11")).toEqual({ mid: "440012345678", unreadable: null, precision: false });
+    expect(parseMidCell(4400123456789012, "4.40012E+15")).toEqual({ mid: null, unreadable: "4.40012E+15", precision: true });
+    expect(parseMidCell(4400123456.5, "4.40012E+09")).toEqual({ mid: null, unreadable: "4.40012E+09", precision: false });
     // 15 digits is the most Excel keeps exactly.
     expect(parseMidCell(440012345678901, "440012345678901").mid).toBe("440012345678901");
   });
