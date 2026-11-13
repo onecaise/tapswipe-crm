@@ -126,7 +126,7 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (3090 tests, 129 files — every file must load)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (3093 tests, 129 files — every file must load)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (369 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
 npm run test:e2e       # Playwright, real browser against the app on the local stack (385 tests, 6 of them setup; last full run 385, 11 Nov 2026)
@@ -183,7 +183,7 @@ A feature isn't done when it compiles — it's done when it's verified and commi
 
 ### Edge Functions
 
-Fourteen functions, all registered in `supabase/config.toml` (unlisted ones won't deploy or serve). Full table: `docs/claude/edge-functions-and-storage.md`. In short: `create-user` / `deactivate-user` / `admin-reset-password` (admin user management, audited); `submit-` / `read-pre-app-secrets` (the four secrets tables); `residual-import-file-url` + `parse-residual-import` (residual upload, idempotent staging); `export-residuals` (**not admin-only: caller-scoped, never `supabaseAdmin`**); `export-report` (admin, audited); `stage-user-import` + `provision-user-batch` (bulk reps, password discarded unread); `stage-merchant-import` (bulk merchants, idempotent staging; the commit is `commit_merchant_import()`); `marketing-material-file-url` and `business-document-file-url` (admin uploads, every active user downloads).
+Fourteen functions, all registered in `supabase/config.toml` (unlisted ones won't deploy or serve). Full table: `docs/claude/edge-functions-and-storage.md`. In short: `create-user` / `deactivate-user` / `admin-reset-password` (admin user management, audited; the reset takes an optional admin-typed `password`, at least `MIN_PASSWORD_LENGTH`, blank generates one, and it is never written to `audit_log`, a log or an error → `docs/claude/user-accounts.md`); `submit-` / `read-pre-app-secrets` (the four secrets tables); `residual-import-file-url` + `parse-residual-import` (residual upload, idempotent staging); `export-residuals` (**not admin-only: caller-scoped, never `supabaseAdmin`**); `export-report` (admin, audited); `stage-user-import` + `provision-user-batch` (bulk reps, password discarded unread); `stage-merchant-import` (bulk merchants, idempotent staging; the commit is `commit_merchant_import()`); `marketing-material-file-url` and `business-document-file-url` (admin uploads, every active user downloads).
 
 ### Next.js / auth wiring
 

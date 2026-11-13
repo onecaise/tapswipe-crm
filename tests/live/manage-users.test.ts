@@ -810,6 +810,167 @@ describe("admin-reset-password", () => {
       "admin_reset_password",
     ]);
   });
+
+  /**
+   * Creates a rep whose own password is set and whose forced-change flag is
+   * clear, so each test below can see the reset turn the flag back on.
+   */
+  async function repWhoChoseTheirOwn(email: string): Promise<string> {
+    const created = await invoke(
+      "create-user",
+      { full_name: "Live Reset Rep", email, role: "agent", password: CHOSEN_PASSWORD },
+      fixtures.tokens.admin,
+    );
+    expect(created.status, created.raw).toBe(201);
+    const userId = String(created.body.user_id);
+    createdUserIds.push(userId);
+
+    const admin = adminClient();
+    await admin.auth.admin.updateUserById(userId, {
+      password: "rep-chosen-password-456",
+    });
+    await admin
+      .from("profiles")
+      .update({ must_change_password: false })
+      .eq("id", userId);
+    return userId;
+  }
+
+  async function mustChangePassword(userId: string): Promise<unknown> {
+    const { data } = await adminClient()
+      .from("profiles")
+      .select("must_change_password")
+      .eq("id", userId)
+      .single();
+    return data?.must_change_password;
+  }
+
+  it("sets the password the admin typed, and forces another change", async () => {
+    const email = "live-reset-typed@tapswipe.test";
+    const userId = await repWhoChoseTheirOwn(email);
+    const typed = "admin-typed-temp-789";
+
+    const response = await invoke(
+      "admin-reset-password",
+      { user_id: userId, password: typed },
+      fixtures.tokens.admin,
+    );
+    expect(response.status, response.raw).toBe(200);
+    // Echoed back unchanged, so the result screen shows what was really set.
+    expect(response.body.temporary_password).toBe(typed);
+    expect(response.body.user_id).toBe(userId);
+
+    const signIn = await anonClient().auth.signInWithPassword({
+      email,
+      password: typed,
+    });
+    expect(signIn.error, "the typed password should sign in").toBe(null);
+
+    const old = await anonClient().auth.signInWithPassword({
+      email,
+      password: "rep-chosen-password-456",
+    });
+    expect(old.error).not.toBeNull();
+
+    expect(await mustChangePassword(userId)).toBe(true);
+
+    // The audit row records the action and nothing about the value.
+    const { data: audit } = await adminClient()
+      .from("audit_log")
+      .select("*")
+      .eq("row_id", userId)
+      .eq("action", "admin_reset_password");
+    expect(audit ?? []).toHaveLength(1);
+    expect(JSON.stringify(audit)).not.toContain(typed);
+  });
+
+  it("refuses a too-short password with 400 and changes nothing", async () => {
+    const email = "live-reset-short@tapswipe.test";
+    const userId = await repWhoChoseTheirOwn(email);
+    const short = "abc12";
+
+    const response = await invoke(
+      "admin-reset-password",
+      { user_id: userId, password: short },
+      fixtures.tokens.admin,
+    );
+    expect(response.status, response.raw).toBe(400);
+    expect(String(response.body.error)).toMatch(/at least 6/);
+    // The refusal never carries the value.
+    expect(response.raw).not.toContain(short);
+    expect(response.body.temporary_password).toBeUndefined();
+
+    // The rep's own password still works and the flag was not touched.
+    const still = await anonClient().auth.signInWithPassword({
+      email,
+      password: "rep-chosen-password-456",
+    });
+    expect(still.error, "a refused reset must not change the password").toBe(
+      null,
+    );
+    expect(await mustChangePassword(userId)).toBe(false);
+
+    const { data: audit } = await adminClient()
+      .from("audit_log")
+      .select("action")
+      .eq("row_id", userId)
+      .eq("action", "admin_reset_password");
+    expect(audit ?? []).toEqual([]);
+  });
+
+  it("generates one when the password is blank, and forces another change", async () => {
+    const email = "live-reset-blank@tapswipe.test";
+    const userId = await repWhoChoseTheirOwn(email);
+
+    for (const blank of ["", "   "]) {
+      const response = await invoke(
+        "admin-reset-password",
+        { user_id: userId, password: blank },
+        fixtures.tokens.admin,
+      );
+      expect(response.status, response.raw).toBe(200);
+      const generated = String(response.body.temporary_password);
+      // The generator's shape: 20 characters, no blanks.
+      expect(generated).toMatch(/^[A-Za-z2-9]{20}$/);
+
+      const signIn = await anonClient().auth.signInWithPassword({
+        email,
+        password: generated,
+      });
+      expect(signIn.error, "the generated password should sign in").toBe(null);
+      expect(await mustChangePassword(userId)).toBe(true);
+
+      // Clear it again so the next round proves the flag is set afresh.
+      await adminClient()
+        .from("profiles")
+        .update({ must_change_password: false })
+        .eq("id", userId);
+    }
+  });
+
+  it("refuses an agent who sends a password, and changes nothing", async () => {
+    const email = "live-reset-by-agent@tapswipe.test";
+    const userId = await repWhoChoseTheirOwn(email);
+
+    const response = await invoke(
+      "admin-reset-password",
+      { user_id: userId, password: "agent-tries-this-1" },
+      fixtures.tokens.owner,
+    );
+    expect(response.status, response.raw).toBe(403);
+
+    const typed = await anonClient().auth.signInWithPassword({
+      email,
+      password: "agent-tries-this-1",
+    });
+    expect(typed.error).not.toBeNull();
+    const still = await anonClient().auth.signInWithPassword({
+      email,
+      password: "rep-chosen-password-456",
+    });
+    expect(still.error).toBe(null);
+    expect(await mustChangePassword(userId)).toBe(false);
+  });
 });
 
 describe("set_user_role through PostgREST", () => {

@@ -7,12 +7,14 @@
  * refused by the Auth server whatever the UI thinks, so validating it here is
  * about saying so before the round trip rather than about being the authority.
  *
- * Two write paths reach a password and both use this:
+ * Three write paths reach a password and all use this:
  *   - components/update-password-form.tsx — a rep choosing their own.
  *   - components/new-user-form.tsx — an admin setting a new account's first one.
+ *   - components/user-row-actions.tsx — an admin typing a reset's temporary one
+ *     (optional there: blank means admin-reset-password generates it).
  *
  * DUPLICATED, deliberately, in supabase/functions/_shared/admin-users.ts, which
- * is where create-user enforces the same rule server-side. The Deno functions
+ * is where create-user and admin-reset-password enforce the same rule server-side. The Deno functions
  * cannot import from lib/ (no import-map specifier reaches above
  * supabase/functions/, the same wall lib/pre-app-validation.ts and
  * lib/user-imports.ts both sit behind), so the copy is pinned by a test instead:
