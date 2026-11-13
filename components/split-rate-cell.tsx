@@ -133,7 +133,7 @@ export function SplitRateCell({
           Cancel
         </Button>
       </span>
-      <span className="text-xs text-muted-foreground">
+      <span className="max-w-[10rem] whitespace-normal text-xs text-muted-foreground">
         0 to 50. Applies to pre-apps submitted from now on.
       </span>
       {error && <span className="text-xs text-destructive">{error}</span>}

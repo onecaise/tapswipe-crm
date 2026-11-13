@@ -188,7 +188,10 @@ export function UserRowActions({
 
   return (
     <div className="flex flex-col items-end gap-1.5">
-      <div className="flex items-center justify-end gap-2">
+      {/* Wraps rather than holding all three controls on one line: this is
+          the widest column on Manage Users, and letting it wrap at a laptop
+          width is most of what lets the other eight fit beside it. */}
+      <div className="flex flex-wrap items-center justify-end gap-2">
         {/* Shows the pending choice while it waits to be confirmed, so the
             select reflects what was picked rather than snapping back and
             looking like the click was lost. */}
@@ -237,7 +240,7 @@ export function UserRowActions({
                   if (!chosenTooShort) void resetPassword();
                 }}
               >
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-end gap-2">
                   <label
                     htmlFor={`reset-password-${userId}`}
                     className="text-xs text-muted-foreground"
@@ -256,7 +259,7 @@ export function UserRowActions({
                     aria-describedby={`reset-password-hint-${userId}`}
                     aria-invalid={chosenTooShort || undefined}
                     disabled={busy === "password"}
-                    className="h-8 w-48 text-xs"
+                    className="h-8 w-40 text-xs"
                   />
                   <Button
                     type="button"
@@ -287,10 +290,11 @@ export function UserRowActions({
                 </div>
                 <span
                   id={`reset-password-hint-${userId}`}
+                  // Wraps to the form's width; the cell is whitespace-nowrap.
                   className={
                     chosenTooShort
-                      ? "text-xs text-destructive"
-                      : "text-xs text-muted-foreground"
+                      ? "max-w-[22rem] whitespace-normal text-right text-xs text-destructive"
+                      : "max-w-[22rem] whitespace-normal text-right text-xs text-muted-foreground"
                   }
                 >
                   At least {MIN_PASSWORD_LENGTH} characters. Leave blank to
