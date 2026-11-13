@@ -64,6 +64,18 @@ test("at a desktop width every column fits without scrolling sideways", async ({
   expect(box!.width).toBeGreaterThan(1100);
 });
 
+test("at 1024 with the sidebar hidden, every column fits too", async ({
+  page,
+}) => {
+  await openUsers(page, 1024);
+  await page.getByRole("button", { name: "Hide menu" }).click();
+  await expect(page.locator("#app-sidebar")).toBeHidden();
+
+  const o = await overflow(page);
+  expect(o.scrollWidth, "table scrolls sideways").toBeLessThanOrEqual(o.clientWidth);
+  expect(o.pageScrollWidth).toBeLessThanOrEqual(o.viewport);
+});
+
 test("long text carries its full value in a title", async ({ page }) => {
   await openUsers(page, 1440);
   const row = page.getByRole("row", { name: new RegExp(PERSONAS.admin.fullName) });
