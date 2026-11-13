@@ -16,12 +16,15 @@ import { idsFor, service } from "./qa-stack";
  *
  * The fixture pre-app has no owners, and with none the SSN input does not
  * render at all — so this spec gives it one, or the SSN half would pass by
- * asserting nothing.
+ * asserting nothing. Likewise the business tax ID input (20261026140000)
+ * renders only once an EIN type is chosen, so the spec sets one and puts the
+ * fixture's value back afterwards.
  */
 test.use({ storageState: storageStateFor("agent") });
 
 const OWNER_NAME = "QA A2 Owner";
 let ownerId: number | null = null;
+let einTypeBefore: string | null = null;
 
 test.beforeAll(async () => {
   const { preApp } = await idsFor(PERSONAS.agent.email, "agent");
@@ -34,9 +37,27 @@ test.beforeAll(async () => {
     .single();
   if (error) throw new Error(error.message);
   ownerId = data.id as number;
+
+  const { data: row } = await db.from("pre_apps").select("ein_type").eq("id", preApp).single();
+  einTypeBefore = (row?.ein_type as string | null) ?? null;
+  const { error: typeError } = await db.from("pre_apps").update({ ein_type: "EIN" }).eq("id", preApp);
+  if (typeError) throw new Error(typeError.message);
 });
 
 test.afterAll(async () => {
+  const { preApp } = await idsFor(PERSONAS.agent.email, "agent");
+  const { error: typeError } = await service()
+    .from("pre_apps")
+    .update({ ein_type: einTypeBefore })
+    .eq("id", preApp);
+  if (typeError) throw new Error(typeError.message);
+  // The two service-role updates are cross-agent writes on the rep's pre-app.
+  await service()
+    .from("audit_log")
+    .delete()
+    .eq("table_name", "pre_apps")
+    .eq("row_id", String(preApp))
+    .like("action", "cross_agent_%");
   if (ownerId !== null) {
     const { error } = await service().from("pre_app_owners").delete().eq("id", ownerId);
     if (error) throw new Error(error.message);
@@ -46,12 +67,13 @@ test.afterAll(async () => {
   await service().from("audit_log").delete().eq("table_name", "pre_app_owners").eq("row_id", String(ownerId));
 });
 
-test("A2 SSN, routing and account inputs opt out of autofill, spellcheck and autocorrect", async ({ page }) => {
+test("A2 SSN, tax ID, routing and account inputs opt out of autofill, spellcheck and autocorrect", async ({ page }) => {
   const { preApp } = await idsFor(PERSONAS.agent.email, "agent");
   await page.goto(`/pre-apps/${preApp}/edit?step=secrets`);
 
   const fields = [
     page.getByRole("textbox", { name: OWNER_NAME }),
+    page.getByRole("textbox", { name: "EIN", exact: true }),
     page.getByRole("textbox", { name: "ABA routing number" }),
     page.getByRole("textbox", { name: "Account number" }),
   ];

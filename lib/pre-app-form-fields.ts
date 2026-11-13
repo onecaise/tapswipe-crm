@@ -4,6 +4,7 @@ import {
   type PreAppOwner,
   type PreAppTerminal,
 } from "@/lib/pre-apps";
+import { PAPER_PROCESSOR_CODES } from "@/lib/processors";
 
 /**
  * The pre-app application as a list of fields, for the printable blank form.
@@ -73,9 +74,10 @@ export type PaperFieldEntry = PaperField & { key: string };
  * ------------------------------------------------------------------------- */
 
 /**
- * `split_company_pct` is excluded on purpose: the wizard derives it as
- * 100 minus the agent split and shows it read-only, so it is not a question to
- * ask on paper.
+ * Excluded on purpose, as not questions to ask on paper: the split
+ * (`split_agent_pct` / `split_company_pct`) and the rep's legal names are
+ * snapshotted from the rep's profile by submit_pre_app() (memo §0b.4, §7.1),
+ * and `country` is fixed to United States (memo A14).
  */
 type PaperBusinessKey = Exclude<
   keyof PreApp,
@@ -87,7 +89,11 @@ type PaperBusinessKey = Exclude<
   | "decline_reason"
   | "created_at"
   | "updated_at"
+  | "split_agent_pct"
   | "split_company_pct"
+  | "rep_legal_name"
+  | "rep_llc_legal_name"
+  | "country"
 >;
 
 /**
@@ -144,7 +150,6 @@ const BUSINESS_FIELDS = {
     group: "Address",
     hint: "12345 or 12345-6789",
   },
-  country: { label: "Country", kind: "text", group: "Address" },
 
   legal_entity_type: {
     label: "Entity type",
@@ -172,17 +177,27 @@ const BUSINESS_FIELDS = {
     kind: "date",
     group: "Business type",
   },
-  ein_type: { label: "EIN type", kind: "text", group: "Business type" },
-  ein_number: {
-    label: "EIN",
-    kind: "text",
+  // The number itself is a secret (pre_app_tax_secrets) and prints in the
+  // Sensitive data section, as TAX_ID_FIELD.
+  ein_type: {
+    label: "EIN type",
+    kind: "select",
     group: "Business type",
-    hint: "12-3456789",
+    options: ["EIN", "SSN"],
   },
   goods_sold: {
     label: "Goods or services sold",
     kind: "long",
     group: "Business type",
+  },
+  // The one list the paper form cannot read from the table, because this page
+  // is static by design; PAPER_PROCESSOR_CODES is pinned to the migration by
+  // tests/unit/processors.test.ts.
+  processor: {
+    label: "Processor",
+    kind: "select",
+    group: "Business type",
+    options: PAPER_PROCESSOR_CODES,
   },
 
   bank_name: { label: "Bank name", kind: "text", group: "Banking and split" },
@@ -191,12 +206,6 @@ const BUSINESS_FIELDS = {
     kind: "select",
     group: "Banking and split",
     options: ["Gross", "Net"],
-  },
-  split_agent_pct: {
-    label: "Agent split %",
-    kind: "percent",
-    group: "Banking and split",
-    hint: "the company split is 100 minus this",
   },
 
   /**
@@ -233,7 +242,8 @@ const BUSINESS_FIELDS = {
  * Owners — writes to `pre_app_owners`, one row per owner
  * ------------------------------------------------------------------------- */
 
-type PaperOwnerKey = Exclude<keyof PreAppOwner, "id" | "pre_app_id">;
+/** `home_country` is fixed to United States (memo A14), not a question. */
+type PaperOwnerKey = Exclude<keyof PreAppOwner, "id" | "pre_app_id" | "home_country">;
 
 const OWNER_FIELDS = {
   owner_name: { label: "Name", kind: "text", group: "Owner" },
@@ -271,7 +281,6 @@ const OWNER_FIELDS = {
     group: "Home address",
     hint: "12345 or 12345-6789",
   },
-  home_country: { label: "Home country", kind: "text", group: "Home address" },
 } satisfies Record<PaperOwnerKey, PaperField>;
 
 /* ---------------------------------------------------------------------------
@@ -410,7 +419,7 @@ const PROFILE_FIELDS = {
 } satisfies Record<PaperProfileKey, PaperField>;
 
 /* ---------------------------------------------------------------------------
- * Sensitive data — the three *_secrets tables
+ * Sensitive data — the four *_secrets tables
  * ------------------------------------------------------------------------- */
 
 /**
@@ -419,6 +428,15 @@ const PROFILE_FIELDS = {
  * inside each owner block instead of here.
  */
 export const SECRET_FIELDS: readonly PaperFieldEntry[] = [
+  // pre_app_tax_secrets (20261026140000). One box for either kind, because
+  // the kind is the EIN type ticked on the Business section.
+  {
+    key: "tax_id",
+    label: "Tax ID (EIN or SSN, as ticked under EIN type)",
+    kind: "text",
+    group: "Tax ID",
+    hint: "EIN 12-3456789 or SSN 123-45-6789",
+  },
   {
     key: "aba_routing",
     label: "ABA routing number",
@@ -513,21 +531,12 @@ export const PROFILE_SECTION: PaperSection = {
 export const PAPER_OWNER_BLOCKS = 2;
 
 /**
- * The submission blockers, copied from `preAppBlockers()` in lib/pre-apps.ts.
+ * The submission checklist the paper form prints. Only `dba_name` and
+ * `legal_business_name` are required to *save* a draft, so "which boxes must
+ * be filled in" is not answerable from the field list alone.
  *
- * Only `dba_name` and `legal_business_name` are required to *save* a draft, so
- * "which boxes must be filled in" is not answerable from the field list alone —
- * this is the real completeness test, and the paper form prints it as a
- * checklist so a rep can tell before leaving whether the form is finished.
+ * Generated from the codes of pre_app_missing_fields() in
+ * lib/pre-app-required.ts (phase 4), so it cannot lag the database again, as
+ * the hand-written list that used to sit here did (it lacked city and state).
  */
-export const PAPER_COMPLETENESS_CHECKLIST: readonly string[] = [
-  "A DBA name.",
-  "A legal business name.",
-  "At least one owner.",
-  "One owner holding at least 51%.",
-  "A social security number for every owner listed.",
-  "Bank routing number and account number — both, they are stored as a pair.",
-  "Swiped % and keyed % totalling 100, if either is filled in.",
-  "Card present % and card not present % totalling 100, if either is filled in.",
-  "An agent split; the company split is whatever is left of 100.",
-] as const;
+export { PAPER_COMPLETENESS_CHECKLIST } from "@/lib/pre-app-required";

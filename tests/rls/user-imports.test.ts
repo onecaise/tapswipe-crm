@@ -288,6 +288,10 @@ describe("constraints", () => {
       "invalid_email",
       "invalid_role",
       "invalid_agent_number",
+      // Phase 2 of the intake memo: a legal name or LLC legal name over the
+      // 200-character cap set_rep_identity() enforces.
+      "invalid_legal_name",
+      "invalid_llc_legal_name",
       "duplicate_email_in_file",
       "duplicate_agent_number_in_file",
       "email_exists",
@@ -305,7 +309,37 @@ describe("constraints", () => {
         `insert into user_import_rows (batch_id, row_number, blocker)
          values (${batchId}, 51, 'probably_fine')`,
       ),
-    ).rejects.toThrow(/check constraint/i);
+    ).rejects.toThrow(/user_import_rows_blocker_check/);
+  });
+
+  it("stages the two rep identity columns, readable by an admin only", async () => {
+    // The names sit here only until provision-user-batch hands them to
+    // set_rep_identity(). Staging is admin-only to read, so a rep cannot see
+    // another rep's legal name through a batch.
+    const batchId = await currentBatchId();
+    await asPlatform(db);
+    await db.exec(
+      `update user_import_rows
+          set legal_name_raw = ' Avery Q. Agent ', legal_name = 'Avery Q. Agent',
+              llc_legal_name_raw = 'Agent Payments LLC', llc_legal_name = 'Agent Payments LLC'
+        where batch_id = ${batchId} and row_number = 2`,
+    );
+
+    await asUser(db, ADMIN_ID);
+    const [staged] = await rows<{ legal_name: string; llc_legal_name: string }>(
+      db,
+      `select legal_name, llc_legal_name from user_import_rows
+        where batch_id = ${batchId} and row_number = 2`,
+    );
+    expect(staged).toEqual({
+      legal_name: "Avery Q. Agent",
+      llc_legal_name: "Agent Payments LLC",
+    });
+
+    await asUser(db, AGENT_ID);
+    expect(
+      await rows(db, `select legal_name from user_import_rows`),
+    ).toEqual([]);
   });
 
   it("accepts every outcome in the vocabulary and refuses one outside it", async () => {

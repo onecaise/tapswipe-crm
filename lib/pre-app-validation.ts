@@ -1,7 +1,6 @@
 import { z } from "zod";
 
 import {
-  isEin,
   isMoney,
   isPercent,
   isPhone,
@@ -109,7 +108,8 @@ export const businessStepSchema = z.object({
     .string()
     .min(1, "Pick a state from the list")
     .refine(isState, { message: "Pick a state from the list" }),
-  country: text,
+  // country is not a field: it is fixed to US (pre_apps_country_us, memo
+  // A14) and the step shows it as text.
   zip: masked(isZip, "12345 or 12345-6789"),
 
   state_incorporated: masked(isState, "Pick a state from the list"),
@@ -117,24 +117,27 @@ export const businessStepSchema = z.object({
   business_type: text,
   sub_business_type: text,
   business_start_date: isoDate,
-  ein_type: text,
-  ein_number: masked(isEin, "Use 12-3456789"),
+  /**
+   * EIN or SSN: which identifier the business's tax ID is (pre_apps_ein_type_check,
+   * 20261026140000). The NUMBER is not on this step: it is a secret, entered on
+   * the Sensitive data step and never autosaved.
+   */
+  ein_type: z.union([z.literal(UNSET), z.enum(["EIN", "SSN"])]),
   goods_sold: text,
 
   billing_type: z.union([z.literal(UNSET), z.enum(["gross", "net"])]),
   bank_name: text,
 
   /**
-   * Only the agent's share is entered; the company's is derived as 100 minus
-   * it and the two are written together.
-   *
-   * That is not cosmetic. `pre_apps_split_sums_to_100` is a table check, so
-   * saving one column on its own — which is exactly what a dirty-field autosave
-   * would do — raises 23514 the moment the pair stops totalling 100. Deriving
-   * the other half makes an invalid intermediate state unreachable rather than
-   * merely unlikely.
+   * A processor code from the select, or "" for not set. Not checked against
+   * the list here: the list is a table, and pre_apps_processor_fkey is what
+   * refuses anything else.
    */
-  split_agent_pct: masked(isPercent, "0 to 100"),
+  processor: text,
+
+  // No split field: the rep's rate is set by an admin on their profile
+  // (set_rep_split) and copied onto the pre-app by submit_pre_app() (memo
+  // §0b.4). No client may write the split (pre_apps_guard_transitions).
 
   /**
    * Sales volume — four optional dollar amounts.
@@ -179,6 +182,17 @@ export const SALES_VOLUME_FIELDS = [
   ["est_average_ticket", "Average ticket"],
   ["est_high_ticket", "High ticket"],
 ] as const satisfies readonly (readonly [keyof BusinessStepValues, string])[];
+
+/**
+ * Options for the ein_type select, including the absent case. The values are
+ * pre_apps_ein_type_check's; the number itself is entered on the Sensitive
+ * data step, with the mask this choice selects.
+ */
+export const EIN_TYPE_OPTIONS = [
+  { value: UNSET, label: "—" },
+  { value: "EIN", label: "EIN" },
+  { value: "SSN", label: "SSN" },
+] as const;
 
 /** Options for the billing_type select, including the absent case. */
 export const BILLING_TYPE_OPTIONS = [
@@ -227,7 +241,6 @@ export const ownerRowSchema = z.object({
   home_address: text,
   home_city: text,
   home_state: masked(isState, "Pick a state from the list"),
-  home_country: text,
   home_zip: masked(isZip, "12345 or 12345-6789"),
 });
 
@@ -328,8 +341,8 @@ export type TerminalStepValues = z.infer<typeof terminalStepSchema>;
 /**
  * Per-field format only. The two pair totals are NOT enforced here: they are a
  * submission rule, not a formatting one, so a draft with 60/30 has to remain
- * saveable while still being flagged. `preAppSubmitBlockers` and
- * `submit_pre_app` are where the pairs are checked.
+ * saveable while still being flagged. pre_app_missing_fields() is where the
+ * pairs are checked, for submit_pre_app() and the review step alike.
  */
 export const profileStepSchema = z.object({
   card_swiped_pct: masked(isPercent, "0 to 100"),

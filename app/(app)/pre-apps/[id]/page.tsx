@@ -21,6 +21,7 @@ import { NotesPanel } from "@/components/notes-panel";
 import { TasksPanel } from "@/components/tasks-panel";
 import { PreAppDecision } from "@/components/pre-app-decision";
 import { PreAppSummary } from "@/components/pre-app-summary";
+import { PreAppSensitiveData } from "@/components/pre-app-sensitive-data";
 import { Callout } from "@/components/callout";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -212,6 +213,16 @@ async function PreAppDetail({ params }: { params: Promise<{ id: string }> }) {
         terminal={terminal}
         cardMix={cardMix}
         agentName={isAdmin ? agentName : undefined}
+      />
+
+      {/* Client-fetched, so no digit of a secret is in this page's HTML or
+          RSC payload; keyed so another pre-app never inherits a revealed
+          value. Masked for everyone; an admin gets a per-field Show. */}
+      <PreAppSensitiveData
+        key={preApp.id}
+        preAppId={preApp.id}
+        einType={preApp.ein_type}
+        isAdmin={isAdmin}
       />
 
       <TasksPanel

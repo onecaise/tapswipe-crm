@@ -4,6 +4,7 @@ import { ArrowLeftIcon } from "lucide-react";
 
 import { requireAdmin } from "@/lib/auth";
 import { loadOwnerOptions } from "@/lib/merchant-owners";
+import { loadProcessors } from "@/lib/processors";
 import { createClient } from "@/lib/supabase/server";
 import { PageShell } from "@/components/page-shell";
 import { MerchantForm } from "@/components/merchant-form";
@@ -13,9 +14,13 @@ async function NewMerchant() {
   // Merchants are admin-only to create (20261021120000); a rep's come from
   // approve_pre_app(). RLS refuses a rep's insert anyway.
   const profile = await requireAdmin();
-  const owners = await loadOwnerOptions(await createClient(), profile.id);
+  const supabase = await createClient();
+  const [owners, processors] = await Promise.all([
+    loadOwnerOptions(supabase, profile.id),
+    loadProcessors(supabase),
+  ]);
 
-  return <MerchantForm owners={owners} />;
+  return <MerchantForm owners={owners} processors={processors} />;
 }
 
 export default function NewMerchantPage() {

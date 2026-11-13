@@ -339,7 +339,7 @@ const merchants = await insert("merchants", [
     state: "OH",
     legal_business_name: "Northgate Auto Detailing Inc",
     status: "active",
-    processor: "First Data",
+    processor: "Square",
     split_agent_pct: 50,
     split_company_pct: 50,
   },
@@ -361,7 +361,7 @@ const merchants = await insert("merchants", [
     state: "CO",
     legal_business_name: "Summit Hardware Supply Co",
     status: "active",
-    processor: "Elavon",
+    processor: "PayBright",
   },
 ]);
 

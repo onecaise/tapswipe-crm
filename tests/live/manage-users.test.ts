@@ -615,6 +615,123 @@ describe("create-user", () => {
       "a blank agent number must be stored as null",
     ).toBe(true);
   });
+
+  // Phase 2 of the intake memo: the rep's legal name and LLC legal name,
+  // optional at creation, written through set_rep_identity() as the admin.
+  it("records the legal names through set_rep_identity, audited as the admin", async () => {
+    const created = await invoke(
+      "create-user",
+      {
+        full_name: "Live Identity Rep",
+        email: "live-identity@tapswipe.test",
+        role: "agent",
+        password: CHOSEN_PASSWORD,
+        legal_name: "  Live Ann Ito ",
+        llc_legal_name: "Live Ito Payments LLC",
+      },
+      fixtures.tokens.admin,
+    );
+    expect(created.status, created.raw).toBe(201);
+    expect(created.body.identityWriteFailed).toBeUndefined();
+
+    const userId = String(created.body.user_id);
+    createdUserIds.push(userId);
+
+    const admin = adminClient();
+    const { data: profile } = await admin
+      .from("profiles")
+      .select("legal_name, llc_legal_name")
+      .eq("id", userId)
+      .single();
+    expect(profile).toEqual({
+      legal_name: "Live Ann Ito",
+      llc_legal_name: "Live Ito Payments LLC",
+    });
+
+    // The audit row is the RPC's, so its actor is the admin's auth.uid() —
+    // proof the names went through set_rep_identity on the caller's client
+    // rather than into the service-role insert.
+    const { data: audit } = await admin
+      .from("audit_log")
+      .select("actor_id, action, table_name, row_id")
+      .eq("row_id", userId)
+      .eq("action", "set_rep_identity");
+    expect(audit).toEqual([
+      {
+        actor_id: fixtures.userIds.admin,
+        action: "set_rep_identity",
+        table_name: "profiles",
+        row_id: userId,
+      },
+    ]);
+  });
+
+  it("treats blank legal names as not given: null, and no identity audit row", async () => {
+    const created = await invoke(
+      "create-user",
+      {
+        full_name: "Live Identity Blank",
+        email: "live-identity-blank@tapswipe.test",
+        role: "agent",
+        password: CHOSEN_PASSWORD,
+        legal_name: "   ",
+        llc_legal_name: "",
+      },
+      fixtures.tokens.admin,
+    );
+    expect(created.status, created.raw).toBe(201);
+
+    const userId = String(created.body.user_id);
+    createdUserIds.push(userId);
+
+    const admin = adminClient();
+    const { data: profile } = await admin
+      .from("profiles")
+      .select("legal_name, llc_legal_name")
+      .eq("id", userId)
+      .single();
+    expect(profile).toEqual({ legal_name: null, llc_legal_name: null });
+
+    const { data: audit } = await admin
+      .from("audit_log")
+      .select("action")
+      .eq("row_id", userId)
+      .eq("action", "set_rep_identity");
+    expect(audit).toEqual([]);
+  });
+
+  it("refuses an over-long or non-text legal name with 400, creating nothing", async () => {
+    for (const [field, value, message] of [
+      ["legal_name", "L".repeat(201), /legal_name must be 200 characters or fewer/],
+      ["llc_legal_name", "C".repeat(201), /llc_legal_name must be 200 characters or fewer/],
+      ["legal_name", 42, /legal_name must be text/],
+    ] as const) {
+      const email = `live-identity-refused-${field}@tapswipe.test`;
+      const response = await invoke(
+        "create-user",
+        {
+          full_name: "Live Identity Refused",
+          email,
+          role: "agent",
+          password: CHOSEN_PASSWORD,
+          [field]: value,
+        },
+        fixtures.tokens.admin,
+      );
+      // Registered for cleanup before asserting, so a regression that creates
+      // the account anyway does not leave it behind to break the next run.
+      if (response.body.user_id) createdUserIds.push(String(response.body.user_id));
+      expect(response.status, response.raw).toBe(400);
+      expect(String(response.body.error)).toMatch(message);
+
+      const { data: users } = await adminClient().auth.admin.listUsers({
+        perPage: 1000,
+      });
+      expect((users?.users ?? []).some((user) => user.email === email)).toBe(
+        false,
+      );
+    }
+  });
 });
 
 describe("admin-reset-password", () => {
@@ -959,5 +1076,141 @@ describe("set_territory through PostgREST", () => {
     expect(error, "an admin must not be able to PATCH profiles").not.toBeNull();
     expect(error?.message).toMatch(/permission denied/i);
     expect(await readTerritory()).toBe("Live Audited Region");
+  });
+});
+
+describe("set_rep_identity through PostgREST", () => {
+  // Guards, trimming and the CHECKs are covered in
+  // tests/rls/set-rep-identity.test.ts. This proves the Data API layer: real
+  // JWTs, EXECUTE for authenticated but not anon, readable raise messages (the
+  // Manage Users cell shows them verbatim), and that a rep reads their own two
+  // values and nobody else's.
+  const readIdentity = async (id: string) => {
+    const { data } = await adminClient()
+      .from("profiles")
+      .select("legal_name, llc_legal_name")
+      .eq("id", id)
+      .single();
+    return data;
+  };
+
+  it("lets an admin set the pair over HTTP, trimmed, with an audit row", async () => {
+    const asAdmin = userClient(fixtures.tokens.admin);
+
+    const { error } = await asAdmin.rpc("set_rep_identity", {
+      user_id: fixtures.userIds.intruder,
+      legal_name: "  Live Bo Lee ",
+      llc_legal_name: "Live Lee Merchant Services LLC",
+    });
+    expect(error, error?.message).toBeNull();
+    expect(await readIdentity(fixtures.userIds.intruder)).toEqual({
+      legal_name: "Live Bo Lee",
+      llc_legal_name: "Live Lee Merchant Services LLC",
+    });
+
+    const { data } = await adminClient()
+      .from("audit_log")
+      .select("actor_id, action, table_name, row_id")
+      .eq("row_id", fixtures.userIds.intruder)
+      .eq("action", "set_rep_identity");
+    expect(data).toContainEqual({
+      actor_id: fixtures.userIds.admin,
+      action: "set_rep_identity",
+      table_name: "profiles",
+      row_id: fixtures.userIds.intruder,
+    });
+  });
+
+  it("lets a rep read their own two values, and nobody else's", async () => {
+    const asIntruder = userClient(fixtures.tokens.intruder);
+    const { data: own } = await asIntruder
+      .from("profiles")
+      .select("id, legal_name, llc_legal_name");
+    expect(own).toEqual([
+      {
+        id: fixtures.userIds.intruder,
+        legal_name: "Live Bo Lee",
+        llc_legal_name: "Live Lee Merchant Services LLC",
+      },
+    ]);
+
+    const asOwner = userClient(fixtures.tokens.owner);
+    const { data: other } = await asOwner
+      .from("profiles")
+      .select("legal_name")
+      .eq("id", fixtures.userIds.intruder);
+    expect(other).toEqual([]);
+  });
+
+  it("refuses a rep setting their own, with a readable message", async () => {
+    const asIntruder = userClient(fixtures.tokens.intruder);
+    const { error } = await asIntruder.rpc("set_rep_identity", {
+      user_id: fixtures.userIds.intruder,
+      legal_name: "Live Self Service",
+      llc_legal_name: "Live Self LLC",
+    });
+    expect(error).not.toBeNull();
+    expect(error?.message).toMatch(/admin only/i);
+  });
+
+  it("refuses a deactivated account's token", async () => {
+    const { error } = await userClient(fixtures.tokens.deactivated).rpc(
+      "set_rep_identity",
+      {
+        user_id: fixtures.userIds.intruder,
+        legal_name: "Live Ghost",
+        llc_legal_name: "Live Ghost LLC",
+      },
+    );
+    expect(error).not.toBeNull();
+    expect(error?.message).toMatch(/admin only/i);
+  });
+
+  it("refuses an unauthenticated caller at the privilege layer", async () => {
+    // "permission denied", not "admin only": the latter would mean anon got
+    // EXECUTE and was turned away by the body's guard (see set_territory).
+    const { error } = await anonClient().rpc("set_rep_identity", {
+      user_id: fixtures.userIds.intruder,
+      legal_name: "Live Anonymous",
+      llc_legal_name: "Live Anonymous LLC",
+    });
+    expect(error).not.toBeNull();
+    expect(error?.message).toMatch(/permission denied/i);
+  });
+
+  it("refuses a blank string and an over-long value with the function's message", async () => {
+    const asAdmin = userClient(fixtures.tokens.admin);
+
+    const blank = await asAdmin.rpc("set_rep_identity", {
+      user_id: fixtures.userIds.intruder,
+      legal_name: "Live Bo Lee",
+      llc_legal_name: "   ",
+    });
+    expect(blank.error?.message).toMatch(/LLC legal name cannot be blank/);
+
+    const long = await asAdmin.rpc("set_rep_identity", {
+      user_id: fixtures.userIds.intruder,
+      legal_name: "L".repeat(201),
+      llc_legal_name: "Live Lee LLC",
+    });
+    expect(long.error?.message).toMatch(/200 characters or fewer/);
+  });
+
+  it("refuses a direct PATCH of either column, even for an admin", async () => {
+    const asAdmin = userClient(fixtures.tokens.admin);
+    for (const column of ["legal_name", "llc_legal_name"]) {
+      const { error } = await asAdmin
+        .from("profiles")
+        .update({ [column]: "Live Bypassed" })
+        .eq("id", fixtures.userIds.intruder);
+      expect(error, `an admin must not PATCH ${column}`).not.toBeNull();
+      expect(error?.message).toMatch(/permission denied/i);
+    }
+
+    // Nothing that was refused above landed.
+    expect(await readIdentity(fixtures.userIds.intruder)).toEqual({
+      legal_name: "Live Bo Lee",
+      llc_legal_name: "Live Lee Merchant Services LLC",
+    });
   });
 });

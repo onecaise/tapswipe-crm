@@ -210,6 +210,27 @@ export function isAgentNumber(value: unknown): value is string {
 }
 
 /**
+ * The cap set_rep_identity() and the profiles_*legal_name_format CHECKs enforce
+ * in SQL (20261026120000_rep_identity.sql). Keep the two in step;
+ * tests/unit/rep-identity.test.ts reads the migration and pins the pair.
+ */
+export const REP_IDENTITY_MAX_LENGTH = 200;
+
+/**
+ * A rep's legal name or LLC legal name, as set_rep_identity() will accept it:
+ * a string that is non-blank after trimming and within the cap.
+ *
+ * Optional at account creation (memo A20), so callers normalise blank to
+ * "absent" first (normalizeRepIdentityName in provision-user.ts) and only test
+ * what remains. The RPC itself refuses blank outright rather than clearing.
+ */
+export function isRepIdentityName(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= REP_IDENTITY_MAX_LENGTH;
+}
+
+/**
  * Records an admin action against a user.
  *
  * actor_id is passed explicitly rather than defaulting to auth.uid(): this runs

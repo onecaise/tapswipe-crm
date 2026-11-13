@@ -31,7 +31,22 @@ export type CreatedUser = {
    */
   resumedOrphanedAuthUser?: boolean;
   auditWriteFailed?: boolean;
+  /**
+   * Set when the account was created but set_rep_identity() did not store the
+   * legal names, with the database's own message. The account is complete;
+   * the names have to be entered from Manage Users.
+   */
+  identityWriteFailed?: boolean;
+  identityWriteError?: string;
 };
+
+/**
+ * The cap on a rep's legal name and LLC legal name. set_rep_identity() and the
+ * profiles CHECKs enforce it in SQL, REP_IDENTITY_MAX_LENGTH in
+ * _shared/admin-users.ts in the Edge Functions. A third copy because this file
+ * is browser code; tests/unit/rep-identity.test.ts pins all three together.
+ */
+export const REP_IDENTITY_MAX_LENGTH = 200;
 
 export type ResetPassword = {
   user_id: string;

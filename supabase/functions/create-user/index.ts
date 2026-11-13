@@ -41,11 +41,14 @@ import {
   isAgentNumber,
   isEmail,
   isFullName,
+  isRepIdentityName,
   isRole,
   json,
+  REP_IDENTITY_MAX_LENGTH,
 } from "../_shared/admin-users.ts";
 import {
   normalizeAgentNumber,
+  normalizeRepIdentityName,
   provisionUser,
 } from "../_shared/provision-user.ts";
 
@@ -83,6 +86,8 @@ export default {
       role,
       password,
       agent_number: agentNumber,
+      legal_name: legalName,
+      llc_legal_name: llcLegalName,
     } = body;
 
     if (!isFullName(fullName)) {
@@ -122,11 +127,37 @@ export default {
       );
     }
 
+    // The rep's legal name and LLC legal name (phase 2 of the intake memo).
+    // Optional at creation (memo A20): absent, null or blank all mean "not
+    // given". Anything else must be text within the cap set_rep_identity()
+    // enforces, checked here so a bad value is a 400 BEFORE an account exists
+    // rather than an account with its names silently missing.
+    for (const [field, value] of [
+      ["legal_name", legalName],
+      ["llc_legal_name", llcLegalName],
+    ] as const) {
+      if (value !== undefined && value !== null && typeof value !== "string") {
+        return json({ error: `${field} must be text` }, 400);
+      }
+      const normalised = normalizeRepIdentityName(value);
+      if (normalised !== null && !isRepIdentityName(normalised)) {
+        return json(
+          {
+            error:
+              `${field} must be ${REP_IDENTITY_MAX_LENGTH} characters or fewer`,
+          },
+          400,
+        );
+      }
+    }
+
     const result = await provisionUser(ctx.supabase, ctx.supabaseAdmin, actorId, {
       fullName,
       email,
       role,
       agentNumber: normalisedAgentNumber,
+      legalName: normalizeRepIdentityName(legalName),
+      llcLegalName: normalizeRepIdentityName(llcLegalName),
       // Passed through exactly as typed. provisionUser falls back to a generated
       // password when this is absent, which is the batch caller's path and not
       // one this function ever takes.
@@ -168,6 +199,13 @@ export default {
         // is what the response has always looked like on the ordinary path.
         resumedOrphanedAuthUser: result.outcome === "resumed" ? true : undefined,
         auditWriteFailed: result.auditWriteFailed ? true : undefined,
+        // The account exists, but set_rep_identity() did not store the legal
+        // names. Surfaced so the success screen can say "enter them in Manage
+        // Users" rather than implying they were saved.
+        identityWriteFailed: result.identityWriteError !== null
+          ? true
+          : undefined,
+        identityWriteError: result.identityWriteError ?? undefined,
       },
       201,
     );
@@ -185,10 +223,15 @@ export default {
     --data '{"full_name":"New Rep","email":"rep@tapswipe.test","role":"agent","password":"hand-this-over","agent_number":"4471"}'
 
   agent_number is optional; omit it, or send "" / null, for a rep with none.
+  legal_name and llc_legal_name are optional too (blank = not given), at most
+  200 characters each, and are stored through set_rep_identity().
   password is REQUIRED, and is the account's first password.
 
   Expected: 201 with { user_id, email, temporary_password }
             400 if password is missing or shorter than MIN_PASSWORD_LENGTH
+            400 if legal_name or llc_legal_name is over 200 characters
+            201 with identityWriteFailed: true if the account was made but
+                set_rep_identity() refused the names
             201 with resumedOrphanedAuthUser: true if that email had an
                 auth.users row but no profiles row — an interrupted earlier
                 attempt, finished rather than refused, with a fresh password

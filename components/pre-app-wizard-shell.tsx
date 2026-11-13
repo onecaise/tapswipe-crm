@@ -15,6 +15,10 @@ import {
   stepHref,
 } from "@/lib/pre-apps";
 import type { Autosave } from "@/hooks/use-autosave";
+import {
+  type PreAppMissingItem,
+  missingCountByStep,
+} from "@/lib/pre-app-required";
 import { PageHeader } from "@/components/page-header";
 import { Callout } from "@/components/callout";
 import { Button } from "@/components/ui/button";
@@ -79,12 +83,16 @@ export function useRegisterStep(autosave: Autosave, isValid: boolean): void {
   }, [register]);
 }
 
+/** useSyncExternalStore with nothing to subscribe to: a hydration flag. */
+const noSubscription = () => () => {};
+
 export function PreAppWizardShell({
   preAppId,
   dbaName,
   step,
   status,
   isAdmin,
+  missing,
   children,
 }: {
   preAppId: number;
@@ -92,6 +100,12 @@ export function PreAppWizardShell({
   step: PreAppStep;
   status: PreAppStatus;
   isAdmin: boolean;
+  /**
+   * pre_app_missing_fields() as of this render, or null when it could not be
+   * read (no badges then). Refreshed on every step change, because navigation
+   * calls router.refresh(); it does not update keystroke by keystroke.
+   */
+  missing: PreAppMissingItem[] | null;
   children: React.ReactNode;
 }) {
   const router = useRouter();
@@ -100,6 +114,21 @@ export function PreAppWizardShell({
     status: "idle",
   });
   const [stepIsValid, setStepIsValid] = React.useState(true);
+  // False in the server render and until this component has hydrated. The
+  // step is server-rendered, so its controls are on screen BEFORE React
+  // attaches; a select changed in that window was reset by react-hook-form's
+  // register() ref (which writes the loaded value back as it registers), and
+  // React's replay of the early change event then autosaved the reset value --
+  // billing_type: null. Reproduced on a production build, 4 of 27 runs
+  // (e2e/qa/wizard-early-select.spec.ts). Holding the controls disabled until
+  // hydration closes the window: the server snapshot (false) holds through
+  // hydration, and register() has run before the client snapshot (true)
+  // re-renders it.
+  const hydrated = React.useSyncExternalStore(
+    noSubscription,
+    () => true,
+    () => false,
+  );
 
   const register = React.useCallback((handle: StepHandle) => {
     entries.current.add(handle);
@@ -158,6 +187,8 @@ export function PreAppWizardShell({
     router.refresh();
   };
 
+  const missingByStep = missing ? missingCountByStep(missing) : {};
+
   const back = prevStep(step);
   const forward = nextStep(step);
 
@@ -198,6 +229,7 @@ export function PreAppWizardShell({
           {PRE_APP_STEPS.map((candidate) => {
             const href = stepHref(preAppId, candidate);
             const isCurrent = candidate === step;
+            const count = missingByStep[candidate] ?? 0;
             return (
               <Button
                 key={candidate}
@@ -214,13 +246,25 @@ export function PreAppWizardShell({
                   onClick={(event) => void navigate(event, href)}
                 >
                   {PRE_APP_STEP_LABELS[candidate]}
+                  {/* "Owners · 3 missing": the review list, counted by the
+                      step where each item is fixed. */}
+                  {count > 0 && (
+                    <span className="text-xs font-normal opacity-80">
+                      {" "}· {count} missing
+                    </span>
+                  )}
                 </Link>
               </Button>
             );
           })}
         </nav>
 
-        {children}
+        {/* display: contents, so the wrapper changes no layout; `disabled` on a
+            fieldset disables every control inside it, the step's own nested
+            fieldsets included. */}
+        <fieldset disabled={!hydrated} className="contents">
+          {children}
+        </fieldset>
 
         <div className="flex items-center justify-between gap-4 border-t pt-4">
           <SaveStatus state={saveState} onRetry={() => void flushAll()} />

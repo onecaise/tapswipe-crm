@@ -11,6 +11,7 @@ import {
   rows,
   type TestDb,
 } from "../helpers/db";
+import { makeSubmittable as makeSubmittableShared } from "../helpers/pre-app-submittable";
 
 /**
  * The pre-app state machine: the guard trigger plus submit / approve /
@@ -31,42 +32,14 @@ let draftId: number;
 let submittedId: number;
 let otherDraftId: number;
 
-/** Everything submit_pre_app demands, so individual tests can remove one rule. */
+/**
+ * Everything submit_pre_app demands, so individual tests can remove one rule.
+ * Since phase 4 (20261028120000) that is pre_app_missing_fields()'s whole list,
+ * filled by the shared helper that tests/rls/pre-app-required-fields.test.ts
+ * proves complete, item by item.
+ */
 async function makeSubmittable(id: number): Promise<void> {
-  await asPlatform(db);
-  // The flag: one caller passes the seeded SUBMITTED pre-app, whose children
-  // pre_app_children_guard (20261021130000) freezes for everyone but an admin
-  // or the state machine -- and the platform owner is neither. seed() does the
-  // same for pre_apps itself.
-  await db.exec(`select set_config('tapswipe.pre_app_transition', 'on', false)`);
-  try {
-    await fillSubmittable(id);
-  } finally {
-    await db.exec(`select set_config('tapswipe.pre_app_transition', '', false)`);
-  }
-}
-
-async function fillSubmittable(id: number): Promise<void> {
-  await db.exec(`
-    delete from pre_app_owners where pre_app_id = ${id};
-    insert into pre_app_owners (pre_app_id, owner_name, percent_owned)
-    values (${id}, 'Control Owner', 100.00);
-  `);
-  await db.exec(`
-    insert into pre_app_owner_secrets (pre_app_owner_id, ssn_encrypted)
-    values ((select id from pre_app_owners where pre_app_id = ${id}), decode('0011','hex'));
-  `);
-  await db.exec(`
-    insert into pre_app_banking_secrets (pre_app_id, aba_routing_encrypted, account_number_encrypted)
-    values (${id}, decode('0022','hex'), decode('0033','hex'))
-    on conflict (pre_app_id) do nothing;
-  `);
-  await db.exec(`
-    delete from pre_app_business_profile where pre_app_id = ${id};
-    insert into pre_app_business_profile
-      (pre_app_id, card_swiped_pct, card_keyed_pct, card_present_pct, card_not_present_pct)
-    values (${id}, 60.00, 40.00, 70.00, 30.00);
-  `);
+  await makeSubmittableShared(db, id);
 }
 
 async function statusOf(id: number): Promise<string> {
@@ -472,22 +445,25 @@ describe("submit_pre_app validation", () => {
   // location, so the requirement sits here, where the rep can still fix it.
   // Non-vacuity: seed()'s draft HAS a location, and the success tests above
   // submit it — so each refusal below is caused by the one field it clears.
+  //
+  // Phase 4 (20261028120000) split the one combined message into the codes
+  // 'city' and 'state' of pre_app_missing_fields(); the rule is unchanged.
+  const CITY = /A business city is required\./;
+  const STATE = /A two-letter business state is required\./;
   it.each([
-    ["no city", "city = null"],
-    ["a blank city", "city = '   '"],
-    ["a city that is only punctuation", "city = '...'"],
-    ["a city over 60 characters", `city = '${"A".repeat(61)}'`],
-    ["no state", "state = null"],
-    ["a state that is not a code", "state = 'Tennessee'"],
-  ])("refuses a pre-app with %s", async (_label, set) => {
+    ["no city", "city = null", CITY],
+    ["a blank city", "city = '   '", CITY],
+    ["a city that is only punctuation", "city = '...'", CITY],
+    ["a city over 60 characters", `city = '${"A".repeat(61)}'`, CITY],
+    ["no state", "state = null", STATE],
+    ["a state that is not a code", "state = 'Tennessee'", STATE],
+  ])("refuses a pre-app with %s", async (_label, set, message) => {
     await makeSubmittable(draftId);
     await asPlatform(db);
     await db.exec(`update pre_apps set ${set} where id = ${draftId}`);
 
     await asUser(db, AGENT_ID);
-    await expect(call(`submit_pre_app(${draftId})`)).rejects.toThrow(
-      /a business city and a two-letter state are required/,
-    );
+    await expect(call(`submit_pre_app(${draftId})`)).rejects.toThrow(message);
     expect(await statusOf(draftId)).toBe("draft");
   });
 
@@ -508,7 +484,7 @@ describe("submit_pre_app validation", () => {
 
     await asUser(db, AGENT_ID);
     await expect(call(`submit_pre_app(${draftId})`)).rejects.toThrow(
-      /at least one owner is required/i,
+      /Add at least one owner./,
     );
   });
 
@@ -645,11 +621,14 @@ describe("submit_pre_app is not an id oracle", () => {
 describe("submit_pre_app never reads ciphertext", () => {
   it("references the secrets table but no *_encrypted column", async () => {
     // The definer exception is only defensible while this holds, so it is
-    // pinned rather than promised.
+    // pinned rather than promised. Since phase 4 the secrets checks live in
+    // pre_app_missing_fields(), which submit_pre_app() calls, so that is the
+    // body read here; submit's own body names no secrets table at all
+    // (pinned in tests/rls/pre-app-required-fields.test.ts).
     await asPlatform(db);
     const r = await rows<{ def: string }>(
       db,
-      `select pg_get_functiondef('submit_pre_app(int)'::regprocedure) as def`,
+      `select pg_get_functiondef('pre_app_missing_fields(int)'::regprocedure) as def`,
     );
 
     // Comments are stripped first: the body carries a comment explaining that
@@ -685,17 +664,14 @@ describe("submit_pre_app never reads ciphertext", () => {
 
 describe("approve_pre_app succeeds under the guard trigger", () => {
   it("creates the merchant with the split and the rep's agent_id", async () => {
-    // Drives the whole real path — set the split as the rep while it is still
-    // a draft, submit through the RPC, then approve. Setting it directly on the
-    // already-submitted fixture is not possible: the trigger fires for the
-    // table OWNER too, and an owner connection has no auth.uid(), so
-    // is_admin() is false and the "non-draft rows are frozen" rule applies.
+    // Drives the whole real path. Since phase 4 the split is the rep's rate,
+    // set by an admin on the profile (set_rep_split) and snapshotted by
+    // submit_pre_app(); the rep can no longer type it on the draft. A rate
+    // other than the 50 default proves the copy rather than the default.
     await makeSubmittable(draftId);
+    await asUser(db, ADMIN_ID);
+    await call(`set_rep_split('${AGENT_ID}', 0)`);
     await asUser(db, AGENT_ID);
-    await db.exec(
-      `update pre_apps set split_agent_pct = 100, split_company_pct = 0
-       where id = ${draftId}`,
-    );
     await call(`submit_pre_app(${draftId})`);
 
     await asUser(db, ADMIN_ID);
@@ -714,8 +690,8 @@ describe("approve_pre_app succeeds under the guard trigger", () => {
     );
     expect(m[0].agent_id).toBe(AGENT_ID);
     expect(m[0].dba).toBe("Agent Draft App");
-    expect(m[0].a).toBe("100.00");
-    expect(m[0].c).toBe("0.00");
+    expect(m[0].a).toBe("0.00");
+    expect(m[0].c).toBe("100.00");
     expect(await statusOf(draftId)).toBe("approved");
   });
 

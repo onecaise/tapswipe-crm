@@ -11,7 +11,11 @@ import {
   UserPlusIcon,
 } from "lucide-react";
 
-import { callAdminFunction, type CreatedUser } from "@/lib/admin-users";
+import {
+  REP_IDENTITY_MAX_LENGTH,
+  callAdminFunction,
+  type CreatedUser,
+} from "@/lib/admin-users";
 import type { Role } from "@/lib/auth";
 import { MIN_PASSWORD_LENGTH, isAcceptablePassword } from "@/lib/passwords";
 import { safeNextPath } from "@/lib/safe-redirect";
@@ -72,6 +76,8 @@ export function NewUserForm() {
   const [agentNumber, setAgentNumber] = useState(
     () => searchParams.get("agent_number")?.trim() ?? "",
   );
+  const [legalName, setLegalName] = useState("");
+  const [llcLegalName, setLlcLegalName] = useState("");
   const [role, setRole] = useState<Role>("agent");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -100,6 +106,10 @@ export function NewUserForm() {
         // would set the account to something other than what is on screen.
         password,
         agent_number: agentNumber,
+        // Optional; blank means "not given". create-user stores them through
+        // set_rep_identity(), the only write path to the two columns.
+        legal_name: legalName,
+        llc_legal_name: llcLegalName,
       },
     );
 
@@ -180,6 +190,21 @@ export function NewUserForm() {
           </Callout>
         )}
 
+        {created.identityWriteFailed && (
+          <Callout tone="warning">
+            <p className="font-medium">The legal names were not saved</p>
+            <p className="mt-1">
+              The account was created, but its legal name and LLC legal name
+              could not be stored
+              {created.identityWriteError
+                ? ` (${created.identityWriteError})`
+                : ""}
+              . Set them from the users list — this rep cannot submit a pre-app
+              until both are on file.
+            </p>
+          </Callout>
+        )}
+
         {created.auditWriteFailed && (
           <Callout tone="warning">
             The account was created, but the audit log entry could not be
@@ -208,6 +233,8 @@ export function NewUserForm() {
               setFullName("");
               setEmail("");
               setAgentNumber("");
+              setLegalName("");
+              setLlcLegalName("");
               setRole("agent");
               // Cleared with the rest: carrying one person's password over into
               // the next person's form is how two reps end up sharing one.
@@ -305,6 +332,36 @@ export function NewUserForm() {
           How the processor names this rep in a residual report. Leave it blank if
           you don&apos;t know it yet — you can set it later from the users list,
           and an import will prompt for it when it needs one.
+        </p>
+      </div>
+
+      <div className="grid gap-2">
+        <Label htmlFor="legal_name">Legal name (optional)</Label>
+        <Input
+          id="legal_name"
+          value={legalName}
+          onChange={(event) => setLegalName(event.target.value)}
+          maxLength={REP_IDENTITY_MAX_LENGTH}
+          placeholder="Avery Quinn Agent"
+          aria-describedby="identity-hint"
+        />
+      </div>
+
+      <div className="grid gap-2">
+        <Label htmlFor="llc_legal_name">LLC legal name (optional)</Label>
+        <Input
+          id="llc_legal_name"
+          value={llcLegalName}
+          onChange={(event) => setLlcLegalName(event.target.value)}
+          maxLength={REP_IDENTITY_MAX_LENGTH}
+          placeholder="Agent Payments LLC"
+          aria-describedby="identity-hint"
+        />
+        <p id="identity-hint" className="text-xs text-muted-foreground">
+          The rep&apos;s real legal name and their LLC&apos;s legal name, as they
+          go on the processor&apos;s paperwork. A rep cannot submit a pre-app
+          until both are set. No LLC? Enter their own legal name in both. You can
+          also set these later from the users list.
         </p>
       </div>
 

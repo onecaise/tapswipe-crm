@@ -2,6 +2,16 @@
 
 Moved verbatim from `CLAUDE.md` on 19 Oct 2026 to keep that file under the size limit. **These are binding rules, not history** — CLAUDE.md's "Security and safety rules" summary points here. Words like "above", "below" or "this file" refer to the original single CLAUDE.md; the docs index at the end of CLAUDE.md says where each section now lives.
 
+### `processors` — the one processor list (20261023130000)
+
+Added 23 Oct 2026 (phase 1 of `docs/design/intake-and-reports.md`); not moved from CLAUDE.md, but it belongs with the tables below. **The table is the list**: `merchants.processor` and `pre_apps.processor` reference `processors(code)`, and the residual import's batch and ledger columns will too (phases 6–7). Five rows as Owen spelled them (`TSYS`, `Red Fynn`, `PayBright`, `Netevia HQ`, `Square`), `code` = `label` for now, `sort_order` is the drop-down order. NULL on either column means "not set" and is legal. `approve_pre_app()` copies the pre-app's value onto the merchant.
+
+- **Nobody writes it from a client, admins included.** One policy (select, `is_active_agent() or is_admin()`), `grant select` to `authenticated` and `service_role`, nothing to `anon`. A processor is added by migration. A write is `42501`, not a filtered no-op.
+- **The migration starts from `revoke all … from anon, authenticated, service_role`.** On the local stack `pg_default_acl` for role `postgres` still gives `service_role` TRUNCATE/REFERENCES/TRIGGER/MAINTAIN on every new table (measured 23 Oct 2026); PGlite has no such default, so the hermetic suite cannot see it. Copy that line for the next reference table.
+- **One drop-down**: `loadProcessors()` + `processorOptions()` in `lib/processors.ts`, rendered by `components/processor-select.tsx` (merchant form, wizard Business step). An unlisted current value is shown, labelled, rather than silently replaced by the first option.
+- **The one copy**: `PAPER_PROCESSOR_CODES`, for the static blank paper application, which cannot read the table. `tests/unit/processors.test.ts` pins it to the migration's insert and the schema doc — add a processor in all three.
+- **The migration refuses to run over a merchant whose free-text processor is not in the list**, naming the values. It does NOT refuse a non-empty table: a strict empty-table guard failed four hermetic suites that seed an existing database before replaying later migrations (measured), and the rows they seed are valid.
+
 ### Tables with no owner, and the one rule they share
 
 `business_documents` follows this section exactly — see "The Document Center" below for where it deliberately differs. `marketing_materials` and `products` are the only client-readable tables in the schema with **no `agent_id`**, and in both cases that is the design rather than an omission. They are company reference data: the select policy is `is_active_agent() or is_admin()` with nothing to compare an owner against, writes are `is_admin()`, and every active rep reads all of it. `is_active_agent()` is load-bearing on both and easy to misread as decoration — there is no ownership clause beside it, so it is the only thing stopping a let-go rep from reading the current rate cards and the current price list on a JWT that has not expired yet.

@@ -21,6 +21,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   adminClient,
+  anonClient,
   provisionFixtures,
   teardownFixtures,
   userClient,
@@ -229,5 +230,50 @@ describe("ordinary CRUD still works after the revoke", () => {
     });
     expect(search.error, search.error?.message).toBeNull();
     expect(Array.isArray(search.data)).toBe(true);
+  });
+});
+
+describe("processors over PostgREST (phase 1, docs/design/intake-and-reports.md)", () => {
+  // tests/rls/processors.test.ts asserts the privileges; this asserts what the
+  // app actually gets back through the Data API, where a missing grant and a
+  // restrictive policy look nothing alike.
+  it("serves a signed-in rep the five processors in drop-down order", async () => {
+    const { data, error } = await userClient(fx.tokens.owner)
+      .from("processors")
+      .select("code")
+      .order("sort_order");
+    expect(error).toBeNull();
+    expect(data?.map((r) => r.code)).toEqual([
+      "TSYS",
+      "Red Fynn",
+      "PayBright",
+      "Netevia HQ",
+      "Square",
+    ]);
+  });
+
+  it("refuses an admin's write at the privilege layer, not with an empty 200", async () => {
+    const { error } = await userClient(fx.tokens.admin)
+      .from("processors")
+      .insert({ code: "Fake", label: "Fake", sort_order: 99 });
+    expect(error?.code).toBe("42501");
+  });
+
+  it("gives anon nothing", async () => {
+    const { data, error } = await anonClient().from("processors").select("code");
+    // The TABLE privilege, by name. A bare 42501 is not enough: with an anon
+    // grant added, the policy's is_active_agent() call is refused instead (anon
+    // cannot execute it) and returns the same code -- measured, that version of
+    // this test stayed green with the grant in place.
+    expect(error?.message).toMatch(/permission denied for table processors/);
+    expect(data).toBeNull();
+  });
+
+  it("refuses a free-text merchant processor from an admin's session", async () => {
+    const { error } = await userClient(fx.tokens.admin)
+      .from("merchants")
+      .update({ processor: "First Data" })
+      .eq("id", fx.merchantIds.owner);
+    expect(error?.code).toBe("23503");
   });
 });

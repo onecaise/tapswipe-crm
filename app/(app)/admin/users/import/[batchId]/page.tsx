@@ -380,6 +380,12 @@ async function BatchReview({
                     <th className="px-4 py-2 text-left font-medium">Role</th>
                     <th className="px-4 py-2 text-left font-medium">Agent #</th>
                     <th className="px-4 py-2 text-left font-medium">
+                      Legal name
+                    </th>
+                    <th className="px-4 py-2 text-left font-medium">
+                      LLC legal name
+                    </th>
+                    <th className="px-4 py-2 text-left font-medium">
                       {hasRun ? "Outcome" : "Status"}
                     </th>
                   </tr>
@@ -402,11 +408,29 @@ async function BatchReview({
                       <td className="px-4 py-2 text-muted-foreground">
                         {formatText(row.agent_number ?? row.agent_number_raw)}
                       </td>
+                      <td className="px-4 py-2 text-muted-foreground">
+                        {formatText(row.legal_name ?? row.legal_name_raw)}
+                      </td>
+                      <td className="px-4 py-2 text-muted-foreground">
+                        {formatText(row.llc_legal_name ?? row.llc_legal_name_raw)}
+                      </td>
                       <td className="px-4 py-2">
                         {row.outcome !== null ? (
-                          <StatusBadge intent={outcomeIntent(row.outcome)}>
-                            {outcomeLabel(row.outcome)}
-                          </StatusBadge>
+                          <span className="flex flex-col items-start gap-1">
+                            <StatusBadge intent={outcomeIntent(row.outcome)}>
+                              {outcomeLabel(row.outcome)}
+                            </StatusBadge>
+                            {/* A created row can still carry a note — the
+                                legal names not saved, or the audit write
+                                failed. Failures list theirs above. */}
+                            {(row.outcome === "created" ||
+                              row.outcome === "resumed") &&
+                              row.outcome_detail && (
+                              <span className="text-xs text-muted-foreground">
+                                {row.outcome_detail}
+                              </span>
+                            )}
+                          </span>
                         ) : row.blocker !== null ? (
                           <StatusBadge intent="warning">
                             {blockerLabel(row.blocker)}

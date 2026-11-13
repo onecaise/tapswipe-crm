@@ -136,6 +136,58 @@ create table profiles (
   -- Users reads all of it anyway, and nothing resolves a rep THROUGH this
   -- column the way the residuals import resolves one through agent_number.
   manager_id uuid references profiles(id) on delete set null,
+  -- The rep's identity for the processor's paperwork (20261026120000; phase 2
+  -- of docs/design/intake-and-reports.md). `legal_name` is the person's real
+  -- legal name (full_name stays the display name, often a nickname);
+  -- `llc_legal_name` is the legal name of the rep's LLC. A rep with no LLC has
+  -- their own legal name (or sole-proprietor business name) entered here by
+  -- the admin -- never a placeholder like "N/A", which would print on the
+  -- processor's forms (memo §9 A16).
+  --
+  -- Nullable: admins and older accounts have none, and both are optional when
+  -- an account is created (A20). The gate is at pre-app SUBMIT, which refuses a
+  -- rep missing either (phase 4, pre_app_missing_fields() -> 'rep_identity'),
+  -- and snapshots both onto the pre-app there.
+  --
+  -- Written ONLY by set_rep_identity() below: admin-only, audited. profiles has
+  -- no UPDATE grant or policy, so no client -- the rep included -- can write
+  -- them directly. Read through the ordinary select policy: a rep sees their
+  -- own two values, an admin sees everyone's, nobody else sees any.
+  --
+  -- NEVER IN A POLICY. Not an access boundary; tests/rls/set-rep-identity
+  -- greps pg_policies for both names.
+  --
+  -- The CHECKs restate set_rep_identity()'s rules so the service role cannot
+  -- store what the RPC would refuse: trimmed, non-blank, at most 200
+  -- characters. Null is "not set yet"; '' is never stored.
+  legal_name text
+    constraint profiles_legal_name_format check (
+      legal_name is null or (
+        legal_name = btrim(legal_name, E' \t\n\r\f\x0b')
+        and legal_name <> ''
+        and length(legal_name) <= 200
+      )
+    ),
+  llc_legal_name text
+    constraint profiles_llc_legal_name_format check (
+      llc_legal_name is null or (
+        llc_legal_name = btrim(llc_legal_name, E' \t\n\r\f\x0b')
+        and llc_legal_name <> ''
+        and length(llc_legal_name) <= 200
+      )
+    ),
+  -- The rep's split rate (20261028120000; memo §0b.4 of
+  -- docs/design/intake-and-reports.md): the rep's share of a merchant's
+  -- residual, in percent. Default 50, 0-50, 0.01 steps. The house profile
+  -- (agent code 122) is set to 0 by an admin; no rate is hard-coded in a
+  -- migration.
+  --
+  -- Written ONLY by set_rep_split() below: admin-only, audited. NEVER IN A
+  -- POLICY. Copied onto a pre-app by submit_pre_app() (pre_apps.split_agent_pct)
+  -- and from there onto the merchant by approve_pre_app(); a later change here
+  -- changes neither.
+  split_rate_pct numeric(5,2) not null default 50
+    constraint profiles_split_rate_pct_range check (split_rate_pct between 0 and 50),
   -- When this user last opened the notifications panel behind the topbar bell.
   -- Everything the bell reports is derived from this one comparison: a support
   -- ticket or ghost sheet with created_at greater than this is "new to me".
@@ -765,6 +817,196 @@ revoke all on function set_manager(uuid, uuid) from public;
 grant execute on function set_manager(uuid, uuid) to authenticated, service_role;
 
 -- ---------------------------------------------------------------------
+-- set_rep_identity(user_id uuid, legal_name text, llc_legal_name text)
+--
+-- The only write path to profiles.legal_name and profiles.llc_legal_name
+-- (20261026120000). The set_territory() shape: `security definer`, pinned
+-- search_path, is_admin() first (which already requires is_active).
+--
+-- Sets BOTH columns on every call, so the caller always sends the pair it
+-- wants stored. Per value:
+--   null          -> clears it (an admin correcting a mistaken entry)
+--   text          -> trimmed; blank after trimming is REFUSED (PT400), and so
+--                    is anything over 200 characters. Blank is refused rather
+--                    than turned into null so that '' from a client can never
+--                    be mistaken for "clear"; a caller that means clear sends
+--                    null.
+-- The 200 cap is REP_IDENTITY_MAX_LENGTH in _shared/admin-users.ts; change the
+-- two together (tests/unit/rep-identity.test.ts pins the pair).
+--
+-- Audited as 'set_rep_identity' on 'profiles', one row per call that changes
+-- something, inside the same statement as the update: if the audit insert
+-- fails, the update rolls back with it. No exception handler, on purpose.
+-- No change -> no audit row (`is not distinct from`, as set_territory).
+--
+-- Self-target allowed, as set_territory: an admin who carries a book has an
+-- identity like anyone else.
+-- ---------------------------------------------------------------------
+create or replace function set_rep_identity(
+  user_id uuid,
+  legal_name text,
+  llc_legal_name text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  new_legal text;
+  new_llc text;
+  target profiles;
+begin
+  if not is_admin() then
+    raise exception 'admin only' using errcode = 'PT403';
+  end if;
+
+  new_legal := btrim(set_rep_identity.legal_name, E' \t\n\r\f\x0b');
+  new_llc := btrim(set_rep_identity.llc_legal_name, E' \t\n\r\f\x0b');
+
+  if new_legal = '' then
+    raise exception 'legal name cannot be blank' using errcode = 'PT400';
+  end if;
+  if new_llc = '' then
+    raise exception 'LLC legal name cannot be blank' using errcode = 'PT400';
+  end if;
+  if length(new_legal) > 200 then
+    raise exception 'legal name must be 200 characters or fewer'
+      using errcode = 'PT400';
+  end if;
+  if length(new_llc) > 200 then
+    raise exception 'LLC legal name must be 200 characters or fewer'
+      using errcode = 'PT400';
+  end if;
+
+  select * into target from profiles where id = set_rep_identity.user_id;
+  if not found then
+    raise exception 'user not found' using errcode = 'PT404';
+  end if;
+
+  if target.legal_name is not distinct from new_legal
+     and target.llc_legal_name is not distinct from new_llc then
+    return;
+  end if;
+
+  update profiles
+     set legal_name = new_legal,
+         llc_legal_name = new_llc
+   where id = set_rep_identity.user_id;
+
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (auth.uid(), 'set_rep_identity', 'profiles',
+          set_rep_identity.user_id::text);
+end;
+$$;
+
+revoke all on function set_rep_identity(uuid, text, text) from public;
+grant execute on function set_rep_identity(uuid, text, text) to authenticated, service_role;
+
+-- ---------------------------------------------------------------------
+-- set_rep_split(user_id uuid, rate numeric) (20261028120000)
+--
+-- The only write path to profiles.split_rate_pct. The set_rep_identity()
+-- shape: security definer, pinned search_path, is_admin() first. Refuses a
+-- null rate, one outside 0-50, and one with more than two decimals (numeric
+-- (5,2) would otherwise round it silently) -- PT400. Audited as
+-- 'set_rep_split' on 'profiles' in the same transaction, no exception handler
+-- (fails closed). No change, no audit row.
+-- ---------------------------------------------------------------------
+create or replace function set_rep_split(user_id uuid, rate numeric)
+returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  current_rate numeric(5,2);
+begin
+  if not is_admin() then
+    raise exception 'admin only' using errcode = 'PT403';
+  end if;
+
+  if set_rep_split.rate is null then
+    raise exception 'a split rate is required' using errcode = 'PT400';
+  end if;
+  if set_rep_split.rate < 0 or set_rep_split.rate > 50 then
+    raise exception 'the split rate must be between 0 and 50' using errcode = 'PT400';
+  end if;
+  if set_rep_split.rate <> round(set_rep_split.rate, 2) then
+    raise exception 'the split rate has at most two decimal places' using errcode = 'PT400';
+  end if;
+
+  select p.split_rate_pct into current_rate
+    from profiles p where p.id = set_rep_split.user_id;
+  if not found then
+    raise exception 'user not found' using errcode = 'PT404';
+  end if;
+
+  if current_rate = set_rep_split.rate then
+    return;
+  end if;
+
+  update profiles
+     set split_rate_pct = set_rep_split.rate
+   where id = set_rep_split.user_id;
+
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (auth.uid(), 'set_rep_split', 'profiles', set_rep_split.user_id::text);
+end;
+$$;
+
+revoke all on function set_rep_split(uuid, numeric) from public;
+grant execute on function set_rep_split(uuid, numeric) to authenticated, service_role;
+
+-- ---------------------------------------------------------------------
+-- PROCESSORS -- the one processor vocabulary (20261023130000; phase 1 of
+-- docs/design/intake-and-reports.md).
+--
+-- The same list everywhere a processor is named: merchants.processor and
+-- pre_apps.processor now, rep_payout_batches and rep_payout_rows when the
+-- residual import is rebuilt. A TABLE referenced by foreign key rather than a
+-- CHECK repeated on each column, because the repeats drift -- three copies of
+-- the list is the pattern this repo keeps paying for. Adding a processor is
+-- one insert, in a migration.
+--
+-- `code` is the stored value AND what the screens show (memo A1: code =
+-- label). `label` exists so a display name can change later without
+-- rewriting every row that names the code; until then the two are equal.
+-- No `id serial`: the natural key is what the referencing columns hold, so
+-- there is no sequence and no sequence grant.
+--
+-- Reference data with no owner (the products/brands shape, minus the
+-- admin-write policies): every active user reads it, nobody writes it from a
+-- client. No insert/update/delete policy and no write grant, so a write is
+-- `permission denied`, not a filtered no-op. Never anything for anon.
+-- ---------------------------------------------------------------------
+create table processors (
+  code text primary key
+    constraint processors_code_trimmed check (code = btrim(code) and code <> ''),
+  label text not null
+    constraint processors_label_trimmed check (label = btrim(label) and label <> ''),
+  -- The drop-down order. Unique so two processors cannot tie and reorder
+  -- between page loads.
+  sort_order int not null constraint processors_sort_order_key unique
+);
+
+alter table processors enable row level security;
+
+-- is_active_agent() covers every active profile, admins included -- the
+-- brands/products wording, kept identical so the two read alike.
+create policy "select active or admin" on processors
+  for select using (is_active_agent() or is_admin());
+
+-- Spellings exactly as Owen gave them (23 Oct 2026). sort_order in tens so a
+-- later insert can land between two without renumbering.
+insert into processors (code, label, sort_order) values
+  ('TSYS',       'TSYS',       10),
+  ('Red Fynn',   'Red Fynn',   20),
+  ('PayBright',  'PayBright',  30),
+  ('Netevia HQ', 'Netevia HQ', 40),
+  ('Square',     'Square',     50);
+
+-- ---------------------------------------------------------------------
 -- MERCHANTS
 -- ---------------------------------------------------------------------
 create table merchants (
@@ -774,7 +1016,12 @@ create table merchants (
   dba text not null,
   legal_business_name text,
   status text not null default 'active' check (status in ('active', 'inactive', 'other')),
-  processor text,
+  -- One of processors.code, or NULL for "not set yet" (20261023130000).
+  -- Free text until then. Nullable and staying that way: a merchant created
+  -- before anyone knows the processor is normal, and the residual import
+  -- treats an unset processor as "no mismatch" (memo A6). NO ACTION on delete:
+  -- a processor a merchant names cannot be removed from the list.
+  processor text constraint merchants_processor_fkey references processors(code),
   split_agent_pct numeric(5,2),
   split_company_pct numeric(5,2),
   -- Which pre-app was approved into this merchant, when one was. The foreign
@@ -1163,7 +1410,10 @@ create table pre_apps (
   physical_address text,
   city text,
   state text,
-  country text,
+  -- Fixed to 'US' (20261028120000; memo A14): only US merchants are
+  -- supported, and state is already a two-letter US code. Not editable in the
+  -- wizard. Relax this and the state rule together.
+  country text not null default 'US' constraint pre_apps_country_us check (country = 'US'),
   zip text,
   phone_number text,
   fax_number text,
@@ -1176,8 +1426,13 @@ create table pre_apps (
   business_type text,
   sub_business_type text,
   business_start_date date,
-  ein_type text,
-  ein_number text,
+  -- Which identifier the business's tax ID is (memo §0.3; 20261026140000).
+  -- Plaintext: it says what the number is, not what it is. The NUMBER lives in
+  -- pre_app_tax_secrets, encrypted -- the plaintext ein_number column that
+  -- used to sit here was dropped by the same migration. submit_pre_app()
+  -- requires a tax-id row whose tax_id_type equals this, so switching the
+  -- type after the number was entered means entering the number again.
+  ein_type text constraint pre_apps_ein_type_check check (ein_type in ('EIN', 'SSN')),
   goods_sold text,
 
   -- banking (non-sensitive half — see pre_app_banking_secrets for the rest)
@@ -1214,15 +1469,32 @@ create table pre_apps (
   est_average_ticket numeric(14,2) check (est_average_ticket >= 0),
   est_high_ticket    numeric(14,2) check (est_high_ticket    >= 0),
 
-  -- Commission split between the rep and Tapswipe, recorded by the rep who
-  -- knows the deal terms and copied into merchants by approve_pre_app(). The
-  -- standard deal is 50/50; it is 100/0 when the CEO is the one on the sale.
-  -- Without these columns approve_pre_app leaves merchants.split_*_pct NULL
-  -- and an admin has to retype terms the pre-app already captured.
-  split_agent_pct numeric(5,2) not null default 50,
+  -- Commission split between the rep and Tapswipe, copied into merchants by
+  -- approve_pre_app(). Since 20261028120000 (memo §0b.4) it is a SNAPSHOT:
+  -- submit_pre_app() writes the rep's profiles.split_rate_pct and 100 minus
+  -- it, and pre_apps_guard_transitions refuses any other write -- a rep, an
+  -- admin, or the wizard. A draft carries the defaults. The rep side is at
+  -- most 50 (pre_apps_split_agent_pct_range).
+  split_agent_pct numeric(5,2) not null default 50
+    constraint pre_apps_split_agent_pct_range check (split_agent_pct between 0 and 50),
   split_company_pct numeric(5,2) not null default 50,
   constraint pre_apps_split_sums_to_100
     check (split_agent_pct + split_company_pct = 100),
+
+  -- The rep's legal name and LLC legal name, snapshotted from the pre-app's
+  -- rep's profile by submit_pre_app() (20261028120000; memo §7.1). The LLC
+  -- column falls back to the legal name (A16). Null on a draft; written by
+  -- nothing else (pre_apps_guard_transitions). A later set_rep_identity()
+  -- does not change a submitted pre-app.
+  rep_legal_name text,
+  rep_llc_legal_name text,
+
+  -- The processor this application is for (20261023130000), from the same
+  -- list as merchants.processor, and copied onto the merchant by
+  -- approve_pre_app(). OPTIONAL: it is not in the mandatory-before-submit list
+  -- (docs/design/intake-and-reports.md, A6), so a rep may leave it unset and
+  -- an admin set it on the merchant later.
+  processor text constraint pre_apps_processor_fkey references processors(code),
 
   created_at timestamptz default now(),
   updated_at timestamptz default now()
@@ -1280,7 +1552,9 @@ create table pre_app_owners (
   home_address text,
   home_city text,
   home_state text,
-  home_country text,
+  -- Fixed to 'US' (20261028120000; memo A14), as pre_apps.country.
+  home_country text not null default 'US'
+    constraint pre_app_owners_home_country_us check (home_country = 'US'),
   home_zip text
 );
 
@@ -1587,6 +1861,33 @@ create table pre_app_terminal_secrets (
 );
 alter table pre_app_terminal_secrets enable row level security;
 -- intentionally zero policies for `authenticated` — service role only
+
+-- The FOURTH secrets table (20261026140000; phase 3 of
+-- docs/design/intake-and-reports.md): the business's tax ID, an EIN or an SSN
+-- according to pre_apps.ein_type. Built exactly as the three above: unique
+-- parent reference, cascade from pre_apps, key_version, RLS with zero
+-- policies, no grant to anon or authenticated, written and read only by the
+-- two secrets Edge Functions (AAD: pre_app_tax_secrets / tax_id_encrypted /
+-- pre_app_id). A rep reads back the last four only.
+--
+-- tax_id_type is plaintext and says which validator accepted the value. It is
+-- written by submit-pre-app-secrets, which refuses one that differs from the
+-- pre-app's current ein_type. It is NOT the SSN of any owner and is never
+-- copied from or to pre_app_owner_secrets, even when the number is the same.
+create table pre_app_tax_secrets (
+  id serial primary key,
+  pre_app_id int references pre_apps(id) on delete cascade not null unique,
+  tax_id_type text not null
+    constraint pre_app_tax_secrets_tax_id_type_check check (tax_id_type in ('EIN', 'SSN')),
+  tax_id_encrypted bytea not null,
+  key_version smallint not null default 1
+);
+alter table pre_app_tax_secrets enable row level security;
+-- intentionally zero policies for `authenticated` — service role only
+revoke all on pre_app_tax_secrets from public, anon, authenticated;
+revoke all on sequence pre_app_tax_secrets_id_seq from public, anon, authenticated;
+grant all on pre_app_tax_secrets to service_role;
+grant all on sequence pre_app_tax_secrets_id_seq to service_role;
 
 -- ---------------------------------------------------------------------
 -- DOCUMENTS — LEGACY, CLOSED. Metadata for per-record uploads (a voided
@@ -5727,6 +6028,11 @@ create table user_import_rows (
   email_raw text,
   role_raw text,
   agent_number_raw text,
+  -- The two optional rep identity columns ("Legal name", "LLC legal name"),
+  -- added by 20261026120000. provision-user-batch writes them through
+  -- set_rep_identity() after the account exists, never directly.
+  legal_name_raw text,
+  llc_legal_name_raw text,
 
   -- Resolved values, null wherever the raw text could not be resolved --
   -- in which case `blocker` says why.
@@ -5734,19 +6040,22 @@ create table user_import_rows (
   email text,
   role text check (role in ('agent', 'admin')),
   agent_number text,
+  legal_name text,
+  llc_legal_name text,
 
   -- A code so the UI can group and count; `error` carries the prose for
   -- the row itself.
   --
-  -- Six of these BLOCK the batch. The last two -- email_exists and
+  -- Eight of these BLOCK the batch. The last two -- email_exists and
   -- agent_number_taken -- deliberately do NOT: those rows are skipped
   -- and the rest of the file still imports. Accounts are independent of
   -- one another, unlike the rows of one period's ledger, so refusing
   -- forty onboardings because three people already have logins is the
   -- wrong trade. The split lives in isBlocking() in
   -- supabase/functions/_shared/user-imports.ts and lib/user-imports.ts.
-  blocker text check (blocker in (
+  blocker text constraint user_import_rows_blocker_check check (blocker in (
     'missing_name', 'invalid_email', 'invalid_role', 'invalid_agent_number',
+    'invalid_legal_name', 'invalid_llc_legal_name',
     'duplicate_email_in_file', 'duplicate_agent_number_in_file',
     'email_exists', 'agent_number_taken'
   )),
@@ -8219,14 +8528,6 @@ begin
     return new;
   end if;
 
-  -- INSERT has no OLD, so this branch has to return before the comparisons
-  -- below rather than falling through them -- `new.status is distinct from
-  -- old.status` against a NULL OLD record would raise, and on a BEFORE INSERT
-  -- trigger that is a confusing way to be right by accident.
-  --
-  -- `is distinct from` rather than `<>` because a BEFORE trigger runs ahead of
-  -- the column constraints: an explicit `status = null` arrives here still
-  -- null, before NOT NULL has had a chance to reject it.
   if tg_op = 'INSERT' then
     if new.status is distinct from 'draft' then
       raise exception
@@ -8236,6 +8537,17 @@ begin
 
     if new.date_submitted is not null then
       raise exception 'date_submitted is set by submit_pre_app()' using errcode = 'PT409';
+    end if;
+
+    -- The split and the rep's names are snapshotted by submit_pre_app()
+    -- from the rep's profile (memo §0b.4, §7.1). A draft carries the
+    -- defaults; nothing a client sends can pre-load them.
+    if new.split_agent_pct is distinct from 50
+       or new.split_company_pct is distinct from 50
+       or new.rep_legal_name is not null
+       or new.rep_llc_legal_name is not null then
+      raise exception 'the split and the rep''s legal names are set by submit_pre_app() from the rep''s profile'
+        using errcode = 'PT409';
     end if;
 
     return new;
@@ -8249,6 +8561,14 @@ begin
 
   if new.date_submitted is distinct from old.date_submitted then
     raise exception 'date_submitted is set by submit_pre_app()' using errcode = 'PT409';
+  end if;
+
+  if new.split_agent_pct is distinct from old.split_agent_pct
+     or new.split_company_pct is distinct from old.split_company_pct
+     or new.rep_legal_name is distinct from old.rep_legal_name
+     or new.rep_llc_legal_name is distinct from old.rep_llc_legal_name then
+    raise exception 'the split and the rep''s legal names are set by submit_pre_app() from the rep''s profile'
+      using errcode = 'PT409';
   end if;
 
   -- Decision: agents edit drafts, admins edit anything. Enforced here rather
@@ -8296,6 +8616,255 @@ create trigger pre_apps_guard_transitions
 -- the Edge Functions follow. PTxyz SQLSTATEs are PostgREST's mapping to HTTP
 -- status codes, so the browser sees 404/409/422 rather than a flat 400.
 -- =====================================================================
+-- ---------------------------------------------------------------------
+-- pre_app_missing_fields(pre_app_id_input int) returns jsonb
+--
+-- [{"code", "step", "label"}, ...] -- every item that blocks submission, in
+-- wizard order, empty when the pre-app is submittable. Owner items also carry
+-- "owner_id". Codes are stable (lib/pre-app-required.ts lists them, and
+-- tests/unit/pre-app-required.test.ts pins that list to this body); labels are
+-- written for a rep to read.
+--
+-- security definer, because it must see the zero-grant secrets tables. It
+-- names no *_encrypted column: existence and kind only. The caller guard is
+-- byte-for-byte pre_app_secrets_presence()'s, so "not yours" and "does not
+-- exist" stay indistinguishable. Codes and labels only, never a value -- the
+-- one exception is an owner's own name inside an owner label, which the
+-- caller can already read on pre_app_owners.
+--
+-- No status check: the review step asks for any draft, and submit_pre_app()
+-- checks status itself before calling this.
+-- ---------------------------------------------------------------------
+create or replace function pre_app_missing_fields(pre_app_id_input int)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  ws constant text := E' \t\n\r\f\x0b';
+  pa pre_apps;
+  rep profiles;
+  bp pre_app_business_profile;
+  o record;
+  items jsonb := '[]'::jsonb;
+  owner_count int;
+  control_count int;
+  tax_type_on_file text;
+  who text;
+  tax_step text;
+begin
+  select * into pa from pre_apps where id = pre_app_id_input;
+  if not found then
+    raise exception 'pre-app not found' using errcode = 'PT404';
+  end if;
+
+  if is_admin() then
+    null;
+  elsif pa.agent_id = auth.uid() then
+    if not is_active_agent() then
+      raise exception 'account is deactivated' using errcode = 'PT403';
+    end if;
+  else
+    raise exception 'pre-app not found' using errcode = 'PT404';
+  end if;
+
+  -- Business --------------------------------------------------------------
+  if coalesce(btrim(pa.dba_name, ws), '') = '' then
+    items := items || jsonb_build_object('code', 'dba_name', 'step', 'business',
+      'label', 'A DBA name is required.');
+  end if;
+  if coalesce(btrim(pa.legal_business_name, ws), '') = '' then
+    items := items || jsonb_build_object('code', 'legal_business_name', 'step', 'business',
+      'label', 'A legal business name is required.');
+  end if;
+  if coalesce(btrim(pa.contact_phone, ws), '') = '' then
+    items := items || jsonb_build_object('code', 'contact_phone', 'step', 'business',
+      'label', 'A contact phone is required.');
+  end if;
+  if coalesce(btrim(pa.physical_address, ws), '') = '' then
+    items := items || jsonb_build_object('code', 'physical_address', 'step', 'business',
+      'label', 'A business street address is required.');
+  end if;
+  -- The location rule (20261013132000), moved here: the same test
+  -- approve_pre_app() and merchants_location_guard apply, so a pre-app this
+  -- accepts is one approval accepts.
+  if coalesce(char_length(norm_city(pa.city)) < 2, true)
+     or char_length(btrim(pa.city)) > 60 then
+    items := items || jsonb_build_object('code', 'city', 'step', 'business',
+      'label', 'A business city is required.');
+  end if;
+  if coalesce(upper(btrim(pa.state)) !~ '^[A-Z]{2}$', true) then
+    items := items || jsonb_build_object('code', 'state', 'step', 'business',
+      'label', 'A two-letter business state is required.');
+  end if;
+  if coalesce(btrim(pa.zip, ws), '') !~ '^\d{5}(-\d{4})?$' then
+    items := items || jsonb_build_object('code', 'zip', 'step', 'business',
+      'label', 'A business ZIP code is required.');
+  end if;
+  -- Always 'US' while pre_apps_country_us stands; checked anyway so the rule
+  -- lives in the one list and survives that CHECK being relaxed.
+  if pa.country is distinct from 'US' then
+    items := items || jsonb_build_object('code', 'country', 'step', 'business',
+      'label', 'The business country must be United States.');
+  end if;
+  if coalesce(btrim(pa.legal_entity_type, ws), '') = '' then
+    items := items || jsonb_build_object('code', 'legal_entity_type', 'step', 'business',
+      'label', 'An entity type is required.');
+  end if;
+  if coalesce(upper(btrim(pa.state_incorporated)) !~ '^[A-Z]{2}$', true) then
+    items := items || jsonb_build_object('code', 'state_incorporated', 'step', 'business',
+      'label', 'A state of incorporation is required.');
+  end if;
+  if coalesce(btrim(pa.business_type, ws), '') = '' then
+    items := items || jsonb_build_object('code', 'business_type', 'step', 'business',
+      'label', 'A business type is required.');
+  end if;
+  if coalesce(btrim(pa.bank_name, ws), '') = '' then
+    items := items || jsonb_build_object('code', 'bank_name', 'step', 'business',
+      'label', 'A bank name is required.');
+  end if;
+  -- Required and above zero (memo A13): a zero estimate is a placeholder.
+  if coalesce(pa.est_annual_volume, 0) <= 0 then
+    items := items || jsonb_build_object('code', 'est_annual_volume', 'step', 'business',
+      'label', 'Estimated annual volume must be more than zero.');
+  end if;
+  if coalesce(pa.est_monthly_volume, 0) <= 0 then
+    items := items || jsonb_build_object('code', 'est_monthly_volume', 'step', 'business',
+      'label', 'Estimated monthly volume must be more than zero.');
+  end if;
+  if coalesce(pa.est_average_ticket, 0) <= 0 then
+    items := items || jsonb_build_object('code', 'est_average_ticket', 'step', 'business',
+      'label', 'Estimated average ticket must be more than zero.');
+  end if;
+  if coalesce(pa.est_high_ticket, 0) <= 0 then
+    items := items || jsonb_build_object('code', 'est_high_ticket', 'step', 'business',
+      'label', 'Estimated high ticket must be more than zero.');
+  end if;
+
+  -- Tax ID (the phase 3 rule, 20261026140000). A row in pre_app_tax_secrets
+  -- OF THE CHOSEN KIND; only submit-pre-app-secrets writes one, after the
+  -- value passed the EIN or SSN validator for that kind. Three labels, one
+  -- code. The step is where the fix is: the type on Business, the number on
+  -- Sensitive data.
+  if not exists (
+    select 1 from pre_app_tax_secrets t
+     where t.pre_app_id = pa.id and t.tax_id_type = pa.ein_type
+  ) then
+    select t.tax_id_type into tax_type_on_file
+      from pre_app_tax_secrets t where t.pre_app_id = pa.id;
+    tax_step := case when pa.ein_type is null then 'business' else 'secrets' end;
+    items := items || jsonb_build_object('code', 'tax_id', 'step', tax_step,
+      'label', case
+        when pa.ein_type is null then
+          'Choose an EIN type (EIN or SSN), then enter the tax ID.'
+        when tax_type_on_file is not null then
+          format('The tax ID on file is an %s, but EIN type says %s. Enter the %s.',
+                 tax_type_on_file, pa.ein_type, pa.ein_type)
+        else format('The %s (tax ID) has not been entered.', pa.ein_type)
+      end);
+  end if;
+
+  -- Owners ----------------------------------------------------------------
+  select count(*), count(*) filter (where percent_owned >= 51)
+    into owner_count, control_count
+    from pre_app_owners where pre_app_id = pa.id;
+
+  if owner_count = 0 then
+    items := items || jsonb_build_object('code', 'owner_required', 'step', 'owners',
+      'label', 'Add at least one owner.');
+  elsif control_count = 0 then
+    -- A genuine 50/50 partnership cannot be submitted: processors want one
+    -- control person. The label has to read as a rule, not a bug.
+    items := items || jsonb_build_object('code', 'owner_control', 'step', 'owners',
+      'label', 'One owner must hold at least 51% ownership.');
+  end if;
+
+  for o in
+    select ow.*, row_number() over (order by ow.id) as n
+      from pre_app_owners ow
+     where ow.pre_app_id = pa.id
+     order by ow.id
+  loop
+    who := format('Owner %s%s', o.n,
+      case when coalesce(btrim(o.owner_name, ws), '') = '' then ''
+           else format(' (%s)', btrim(o.owner_name, ws)) end);
+
+    items := items || (
+      select coalesce(jsonb_agg(jsonb_build_object(
+               'code', f.code, 'step', 'owners', 'owner_id', o.id,
+               'label', format('%s: %s is required.', who, f.label))
+             order by f.ord), '[]'::jsonb)
+        from (values
+          (1,  'owner_name',               'name',               coalesce(btrim(o.owner_name, ws), '') = ''),
+          (2,  'owner_title',              'title',              coalesce(btrim(o.title, ws), '') = ''),
+          (3,  'owner_percent_owned',      'percent owned',      coalesce(o.percent_owned, 0) <= 0),
+          (4,  'owner_dob',                'date of birth',      o.dob is null),
+          (5,  'owner_home_phone',         'home phone',         coalesce(btrim(o.home_phone, ws), '') = ''),
+          (6,  'owner_id_type',            'ID type',            coalesce(btrim(o.id_type, ws), '') = ''),
+          (7,  'owner_id_number',          'ID number',          coalesce(btrim(o.id_number, ws), '') = ''),
+          (8,  'owner_id_state',           'ID state',           coalesce(upper(btrim(o.id_state)) !~ '^[A-Z]{2}$', true)),
+          (9,  'owner_id_issue_date',      'ID issue date',      o.id_issue_date is null),
+          (10, 'owner_id_expiration_date', 'ID expiration date', o.id_expiration_date is null),
+          (11, 'owner_home_address',       'home street address', coalesce(btrim(o.home_address, ws), '') = ''),
+          (12, 'owner_home_city',          'home city',          coalesce(btrim(o.home_city, ws), '') = ''),
+          (13, 'owner_home_state',         'home state',         coalesce(upper(btrim(o.home_state)) !~ '^[A-Z]{2}$', true)),
+          (14, 'owner_home_zip',           'home ZIP code',      coalesce(btrim(o.home_zip, ws), '') !~ '^\d{5}(-\d{4})?$'),
+          (15, 'owner_home_country',       'home country (United States)', o.home_country is distinct from 'US'),
+          (16, 'owner_length_of_ownership','length of ownership', coalesce(btrim(o.length_of_ownership, ws), '') = '')
+        ) as f(ord, code, label, missing)
+       where f.missing
+    );
+
+    if not exists (select 1 from pre_app_owner_secrets s where s.pre_app_owner_id = o.id) then
+      items := items || jsonb_build_object('code', 'owner_ssn', 'step', 'secrets',
+        'owner_id', o.id, 'label', format('%s: no SSN on file.', who));
+    end if;
+  end loop;
+
+  -- Card mix: two independent pairs, each checked only when filled. moto and
+  -- internet are informational and never summed.
+  select * into bp from pre_app_business_profile where pre_app_id = pa.id;
+  if found then
+    if (bp.card_swiped_pct is not null or bp.card_keyed_pct is not null)
+       and coalesce(bp.card_swiped_pct, 0) + coalesce(bp.card_keyed_pct, 0) <> 100 then
+      items := items || jsonb_build_object('code', 'card_swiped_keyed_total', 'step', 'profile',
+        'label', 'Swiped and keyed percentages must total 100.');
+    end if;
+    if (bp.card_present_pct is not null or bp.card_not_present_pct is not null)
+       and coalesce(bp.card_present_pct, 0) + coalesce(bp.card_not_present_pct, 0) <> 100 then
+      items := items || jsonb_build_object('code', 'card_present_total', 'step', 'profile',
+        'label', 'Card-present and card-not-present percentages must total 100.');
+    end if;
+  end if;
+
+  -- Banking: existence only. The RP password is deliberately not required.
+  if not exists (select 1 from pre_app_banking_secrets where pre_app_id = pa.id) then
+    items := items || jsonb_build_object('code', 'banking', 'step', 'secrets',
+      'label', 'Banking details (routing and account number) have not been entered.');
+  end if;
+
+  -- Rep identity (memo §0.6, §7.1): the pre-app's rep, NOT the caller, so an
+  -- admin submitting on a rep's behalf is held to the same rule. The profile
+  -- CHECKs forbid blank, so null is the whole test.
+  select * into rep from profiles where id = pa.agent_id;
+  if rep.legal_name is null or rep.llc_legal_name is null then
+    items := items || jsonb_build_object('code', 'rep_identity', 'step', 'review',
+      'label', 'The rep''s legal name and LLC legal name are not on their profile yet. An admin adds them in Manage Users.');
+  end if;
+
+  return items;
+end;
+$$;
+
+revoke all on function pre_app_missing_fields(int) from public;
+grant execute on function pre_app_missing_fields(int) to authenticated, service_role;
+
+-- Since 20261028120000 every completeness rule lives in
+-- pre_app_missing_fields() above; this refuses with the whole list (PT422,
+-- the labels in the message, the codes in DETAIL) and then snapshots the
+-- rep's identity and split rate onto the pre-app.
 create or replace function submit_pre_app(pre_app_id_input int)
 returns int
 language plpgsql
@@ -8303,10 +8872,10 @@ security definer
 set search_path = public
 as $$
 declare
-  pa            pre_apps;
-  bp            pre_app_business_profile;
-  owner_count   int;
-  control_count int;
+  pa       pre_apps;
+  rep      profiles;
+  missing  jsonb;
+  n        int;
 begin
   select * into pa from pre_apps where id = pre_app_id_input;
   if not found then
@@ -8330,90 +8899,37 @@ begin
     raise exception 'pre-app is not a draft (status: %)', pa.status using errcode = 'PT409';
   end if;
 
-  if coalesce(btrim(pa.dba_name), '') = '' then
-    raise exception 'a DBA name is required' using errcode = 'PT422';
-  end if;
-  if coalesce(btrim(pa.legal_business_name), '') = '' then
-    raise exception 'a legal business name is required' using errcode = 'PT422';
-  end if;
-
-  -- The business location (20261013132000). approve_pre_app() refuses a
-  -- pre-app without one, because a merchant cannot be created without a city
-  -- and state (merchants_location_guard) -- so the gap has to be closed HERE,
-  -- where the rep can still fix it, rather than at approval, where the only
-  -- move is to reopen. Same rule as approve_pre_app() and the merchant
-  -- format check, so a pre-app this accepts is one approval accepts.
-  -- Deliberately a submit-time rule and NOT a table constraint on pre_apps:
-  -- a draft is saved field by field as it is typed, and must be allowed to
-  -- have no address yet.
-  if coalesce(char_length(norm_city(pa.city)) < 2, true)
-     or char_length(btrim(pa.city)) > 60
-     or coalesce(upper(btrim(pa.state)) !~ '^[A-Z]{2}$', true) then
-    raise exception 'a business city and a two-letter state are required'
-      using errcode = 'PT422';
+  missing := pre_app_missing_fields(pa.id);
+  n := jsonb_array_length(missing);
+  if n > 0 then
+    raise exception '%',
+      format('This pre-app cannot be submitted yet. %s missing: %s',
+             case when n = 1 then 'One thing is' else n || ' things are' end,
+             (select string_agg(m ->> 'label', ' ' order by ord)
+                from jsonb_array_elements(missing) with ordinality as e(m, ord)))
+      using errcode = 'PT422',
+            detail = (select jsonb_agg(m ->> 'code' order by ord)
+                        from jsonb_array_elements(missing) with ordinality as e(m, ord))::text;
   end if;
 
-  select count(*), count(*) filter (where percent_owned >= 51)
-    into owner_count, control_count
-    from pre_app_owners where pre_app_id = pa.id;
-
-  if owner_count = 0 then
-    raise exception 'at least one owner is required' using errcode = 'PT422';
-  end if;
-  -- Product consequence worth stating plainly: a genuine 50/50 two-owner
-  -- partnership cannot be submitted. That is the rule (processors want one
-  -- control person), it will come up, and the message has to read as a rule
-  -- rather than a bug.
-  if control_count = 0 then
-    raise exception 'one owner must hold at least 51%% ownership' using errcode = 'PT422';
-  end if;
-
-  if exists (
-    select 1 from pre_app_owners o
-     where o.pre_app_id = pa.id
-       and not exists (select 1 from pre_app_owner_secrets s where s.pre_app_owner_id = o.id)
-  ) then
-    raise exception 'every owner must have an SSN on file' using errcode = 'PT422';
-  end if;
-
-  -- Card mix: TWO INDEPENDENT PAIRS, nothing else. swiped+keyed is one 100%
-  -- split of how the card is read; present+not-present is a second. moto and
-  -- internet are informational and deliberately NOT summed against
-  -- card_not_present_pct. Each pair is checked only when at least one of its
-  -- columns is filled, so a half-completed profile still submits. The
-  -- wizard's client-side blocker list must implement exactly these two.
-  select * into bp from pre_app_business_profile where pre_app_id = pa.id;
-  if found then
-    if (bp.card_swiped_pct is not null or bp.card_keyed_pct is not null)
-       and coalesce(bp.card_swiped_pct, 0) + coalesce(bp.card_keyed_pct, 0) <> 100 then
-      raise exception 'swiped and keyed percentages must total 100' using errcode = 'PT422';
-    end if;
-    if (bp.card_present_pct is not null or bp.card_not_present_pct is not null)
-       and coalesce(bp.card_present_pct, 0) + coalesce(bp.card_not_present_pct, 0) <> 100 then
-      raise exception 'card-present and card-not-present percentages must total 100'
-        using errcode = 'PT422';
-    end if;
-  end if;
-
-  -- Existence only -- see the header. No *_encrypted column is named here.
-  -- Terminal secrets are deliberately NOT required: whether an RP password is
-  -- ever mandatory is an open question, and requiring one would block
-  -- submissions for deals that have no terminal.
-  if not exists (select 1 from pre_app_banking_secrets where pre_app_id = pa.id) then
-    raise exception 'banking details have not been submitted' using errcode = 'PT422';
-  end if;
+  -- The snapshot (memo §7.1, §0b.4). From the pre-app's rep, not the caller.
+  -- rep_identity above guarantees both names are set; the coalesce is the A16
+  -- rule written down where it applies (no LLC: the rep's own legal name),
+  -- not a path the check above leaves open.
+  select * into rep from profiles where id = pa.agent_id;
 
   perform set_config('tapswipe.pre_app_transition', 'on', true);
   update pre_apps
      set status = 'submitted',
          date_submitted = current_date,
-         decline_reason = null
+         decline_reason = null,
+         rep_legal_name = rep.legal_name,
+         rep_llc_legal_name = coalesce(rep.llc_legal_name, rep.legal_name),
+         split_agent_pct = rep.split_rate_pct,
+         split_company_pct = 100 - rep.split_rate_pct
    where id = pa.id;
   perform set_config('tapswipe.pre_app_transition', '', true);
 
-  -- auth.uid() is available here: this is an ordinary authenticated PostgREST
-  -- request, definer or not. Contrast the Edge Functions, where a service-role
-  -- connection has no auth.uid() and actor_id must be passed in explicitly.
   insert into audit_log (actor_id, action, table_name, row_id)
   values (auth.uid(), 'submit_pre_app', 'pre_apps', pa.id::text);
 
@@ -8498,13 +9014,16 @@ begin
       pre_app_id_input using errcode = 'PT409';
   end if;
 
+  -- PROCESSOR (20261023130000). Copied as-is, NULL included: the FK on both
+  -- columns means a value the pre-app holds is one the merchant accepts, so
+  -- nothing here can fail on it.
   insert into merchants (agent_id, dba, legal_business_name, status,
                          split_agent_pct, split_company_pct, pre_app_id,
-                         street, city, state, zip)
+                         street, city, state, zip, processor)
   values (pa.agent_id, pa.dba_name, pa.legal_business_name, 'active',
           pa.split_agent_pct, pa.split_company_pct, pa.id,
           nullif(btrim(pa.physical_address), ''), btrim(pa.city),
-          upper(btrim(pa.state)), nullif(btrim(pa.zip), ''))
+          upper(btrim(pa.state)), nullif(btrim(pa.zip), ''), pa.processor)
   returning id into new_merchant_id;
 
   perform set_config('tapswipe.pre_app_transition', 'on', true);
@@ -8631,8 +9150,19 @@ $$;
 -- being asked to supply, and logging every render of a form step would bury
 -- the reads that matter.
 -- =====================================================================
+-- tax_id_on_file / tax_id_type_on_file (20261026140000): whether a tax-id row
+-- OF THE PRE-APP'S CURRENT ein_type exists -- what submit_pre_app() counts --
+-- and which kind the stored row is, so the wizard can say "the tax ID on file
+-- is an EIN, but EIN type says SSN" instead of a bare "not on file". The kind
+-- is plaintext metadata, never the number. Adding columns changes the return
+-- type, so the migration drops and recreates the function and its grants.
 create or replace function pre_app_secrets_presence(pre_app_id_input int)
-returns table (banking_on_file boolean, owners_missing_ssn int)
+returns table (
+  banking_on_file boolean,
+  owners_missing_ssn int,
+  tax_id_on_file boolean,
+  tax_id_type_on_file text
+)
 language plpgsql
 security definer
 set search_path = public
@@ -8670,12 +9200,117 @@ begin
              select 1 from pre_app_owner_secrets s
               where s.pre_app_owner_id = o.id
            )
-      );
+      ),
+      exists (
+        select 1 from pre_app_tax_secrets t
+         where t.pre_app_id = pa.id and t.tax_id_type = pa.ein_type
+      ),
+      (select t.tax_id_type from pre_app_tax_secrets t where t.pre_app_id = pa.id);
 end;
 $$;
 
 revoke all on function pre_app_secrets_presence(int) from public;
 grant execute on function pre_app_secrets_presence(int) to authenticated, service_role;
+
+-- =====================================================================
+-- PRE-APP SECRET REVEAL — Tier 2 (20261028140000; phase 5 of
+-- docs/design/intake-and-reports.md, §1.E and A24). The audit row and the
+-- rate limit behind an admin's per-field "Show".
+--
+-- Since this migration read-pre-app-secrets answers EVERY default read --
+-- rep and admin alike -- with last four (presence only for the RP password).
+-- A full value leaves the Edge Function only on a request naming ONE field
+-- (`reveal`), only for an admin, and only after this function has returned.
+-- So the trail separates a glance (read_pre_app_secrets:last4) from a look.
+--
+-- Why SQL and not an insert from the Edge Function: the count and the insert
+-- must be one atomic step per admin (pg_advisory_xact_lock), exactly as
+-- accounts_in_city() counts a rep's searches, and audit_log has no insert
+-- policy for anyone to borrow.
+--
+--   * is_admin() first: a rep, a deactivated admin and anon are refused before
+--     anything is counted or written.
+--   * One audit_log row per reveal: actor_id the admin, row_id the pre-app,
+--     created_at the time, and the field in the action --
+--       read_pre_app_secrets:reveal:<field>
+--       read_pre_app_secrets:reveal:owner_ssn:<pre_app_owner_id>
+--     No exception handler (fails closed): no row, no value.
+--   * 30 reveals per admin per rolling hour (PT429 on the 31st, with a
+--     showable message). Default reads do not count.
+--   * It names no *_secrets table and decrypts nothing -- the key lives only
+--     in the Edge Function -- so an admin calling it directly can only write an
+--     audit row against themselves.
+-- =====================================================================
+create function record_pre_app_secret_reveal(
+  pre_app_id_input int,
+  field_input text,
+  pre_app_owner_id_input int default null
+)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  recent_reveals int;
+  oldest_reveal timestamptz;
+  wait_minutes int;
+begin
+  if not is_admin() then
+    raise exception 'Only an admin can reveal a full value.' using errcode = 'PT403';
+  end if;
+
+  if field_input is null
+     or field_input not in ('owner_ssn', 'aba_routing', 'account_number', 'rp_password', 'tax_id') then
+    raise exception 'Unknown secret field.' using errcode = '22023';
+  end if;
+  if (field_input = 'owner_ssn') <> (pre_app_owner_id_input is not null) then
+    raise exception 'An owner is named for an owner SSN, and only for one.' using errcode = '22023';
+  end if;
+
+  if not exists (select 1 from pre_apps where id = pre_app_id_input) then
+    raise exception 'pre-app not found' using errcode = 'PT404';
+  end if;
+  if pre_app_owner_id_input is not null and not exists (
+    select 1 from pre_app_owners
+     where id = pre_app_owner_id_input and pre_app_id = pre_app_id_input
+  ) then
+    raise exception 'pre-app not found' using errcode = 'PT404';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended('reveal_pre_app_secret:' || auth.uid()::text, 0));
+  select count(*), min(a.created_at)
+    into recent_reveals, oldest_reveal
+    from audit_log a
+   where a.actor_id = auth.uid()
+     and a.action like 'read_pre_app_secrets:reveal:%'
+     and a.created_at > now() - interval '1 hour';
+  if recent_reveals >= 30 then
+    wait_minutes := greatest(1, ceil(extract(epoch from
+                      (oldest_reveal + interval '1 hour' - now())) / 60)::int);
+    raise exception 'You have reached the limit of 30 reveals an hour. Try again in % minute%.',
+      wait_minutes, case when wait_minutes = 1 then '' else 's' end
+      using errcode = 'PT429';
+  end if;
+
+  insert into audit_log (actor_id, action, table_name, row_id)
+  values (
+    auth.uid(),
+    'read_pre_app_secrets:reveal:' || field_input
+      || coalesce(':' || pre_app_owner_id_input::text, ''),
+    'pre_apps',
+    pre_app_id_input::text
+  );
+end;
+$$;
+
+revoke all on function record_pre_app_secret_reveal(int, text, int) from public;
+grant execute on function record_pre_app_secret_reveal(int, text, int) to authenticated, service_role;
+
+-- The rate limit's count: one admin's reveal rows in the last hour.
+create index audit_log_secret_reveal_idx on audit_log (actor_id, created_at)
+  where action like 'read_pre_app_secrets:reveal:%';
 
 -- =====================================================================
 -- GHOST SHEET CONVERSION — Tier 2. Plain function, NOT security definer:
@@ -9541,7 +10176,9 @@ create index audit_log_city_search_idx on audit_log (actor_id, created_at)
 --                 RLS by design; this is the grant the Edge Functions
 --                 run on.
 --
--- The three *_secrets tables get NO grant for `authenticated`. Their
+-- The *_secrets tables -- three here, four since pre_app_tax_secrets
+-- (20261026140000), which revokes and grants its own -- get NO grant for
+-- `authenticated`. Their
 -- zero-policy RLS already denies everything, so this is the second lock
 -- on the same door: if someone later adds a policy to one of them (§ the
 -- standing "never add a policy to these tables" rule), the missing grant
@@ -9707,6 +10344,18 @@ grant select, insert, update on products to authenticated;
 -- product names is not history, and one that is named is refused by
 -- `on delete restrict`.
 grant select, insert, update, delete on brands to authenticated;
+
+-- processors: SELECT and nothing else, for both roles. The list changes only
+-- by migration, so no client verb is backed by any policy and none is
+-- granted -- a write is `permission denied`, not a filtered no-op. The
+-- service role gets SELECT for the residual import functions that will
+-- validate a chosen processor (phase 6-7 of docs/design/intake-and-reports.md);
+-- no Edge Function writes it. No sequence: the key is the code. Revoked to
+-- nothing first: on the local stack the default ACL for role postgres still
+-- gives service_role TRUNCATE/REFERENCES/TRIGGER/MAINTAIN on every new table.
+revoke all on processors from anon, authenticated, service_role;
+grant select on processors to authenticated;
+grant select on processors to service_role;
 
 -- product_compatibility: products' three verbs plus DELETE, which products
 -- deliberately withholds. The difference is not an inconsistency -- see the

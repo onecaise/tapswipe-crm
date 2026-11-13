@@ -113,7 +113,7 @@ describe("cross-agent mutations are logged", () => {
     const id = await merchantId(db, "Agent Active Co");
 
     await asUser(db, ADMIN_ID);
-    await db.exec(`update merchants set processor = 'TSYS 2' where id = ${id}`);
+    await db.exec(`update merchants set processor = 'Square' where id = ${id}`);
 
     expect(await auditRows(db)).toEqual([
       {
@@ -192,7 +192,7 @@ describe("cross-agent mutations are logged", () => {
     const id = await merchantId(db, "Agent Active Co");
 
     await asPlatform(db);
-    await db.exec(`update merchants set processor = 'Server' where id = ${id}`);
+    await db.exec(`update merchants set processor = 'PayBright' where id = ${id}`);
 
     const audit = await auditRows(db);
     expect(audit).toHaveLength(1);
@@ -538,7 +538,7 @@ describe("an audit failure rolls the write back — fail closed, not silent", ()
     let failed = false;
     try {
       await db.exec(
-        `update merchants set processor = 'Should Roll Back' where id = ${id}`,
+        `update merchants set processor = 'Red Fynn' where id = ${id}`,
       );
     } catch {
       failed = true;
@@ -556,7 +556,7 @@ describe("an audit failure rolls the write back — fail closed, not silent", ()
       db,
       `select processor from merchants where id = ${id}`,
     );
-    expect(merchant.processor).not.toBe("Should Roll Back");
+    expect(merchant.processor).not.toBe("Red Fynn");
 
     expect(await auditRows(db)).toEqual([]);
   });
@@ -577,7 +577,7 @@ describe("the trigger cannot be defeated by the grant it runs against", () => {
 
     const id = await merchantId(db, "Agent Active Co");
     await asUser(db, ADMIN_ID);
-    await db.exec(`update merchants set processor = 'Definer' where id = ${id}`);
+    await db.exec(`update merchants set processor = 'Netevia HQ' where id = ${id}`);
 
     // The write landed anyway, and the admin's UPDATE was not rejected.
     expect(await auditRows(db)).toHaveLength(1);
@@ -591,7 +591,7 @@ describe("the trigger cannot be defeated by the grant it runs against", () => {
     const id = await merchantId(db, "Agent Active Co");
 
     await asUser(db, ADMIN_ID);
-    await db.exec(`update merchants set processor = 'Caller' where id = ${id}`);
+    await db.exec(`update merchants set processor = 'Square' where id = ${id}`);
 
     expect((await auditRows(db))[0].actor_id).toBe(ADMIN_ID);
   });

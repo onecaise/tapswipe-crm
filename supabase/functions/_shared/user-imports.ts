@@ -27,20 +27,25 @@ import {
   isAgentNumber,
   isEmail,
   isFullName,
+  isRepIdentityName,
   isRole,
+  REP_IDENTITY_MAX_LENGTH,
   type Role,
 } from "./admin-users.ts";
 import {
   normalizeAgentNumber,
   normalizeEmail,
+  normalizeRepIdentityName,
 } from "./provision-user.ts";
 
-/** The four columns, by the key each maps to on a staging row. */
+/** The six columns, by the key each maps to on a staging row. */
 export const USER_IMPORT_COLUMNS = [
   "full_name",
   "email",
   "role",
   "agent_number",
+  "legal_name",
+  "llc_legal_name",
 ] as const;
 
 export type UserImportColumn = (typeof USER_IMPORT_COLUMNS)[number];
@@ -58,17 +63,29 @@ export const COLUMN_HEADERS: Record<UserImportColumn, string> = {
   email: "Email",
   role: "Role",
   agent_number: "Agent #",
+  // Phase 2 of the intake memo (§7.1): the rep's real legal name and their
+  // LLC's legal name, written through set_rep_identity() after the account
+  // exists. A rep with no LLC has their own legal name entered in both (A16).
+  legal_name: "Legal name",
+  llc_legal_name: "LLC legal name",
 };
 
 /**
- * The two columns a file need not carry.
+ * The four columns a file need not carry.
  *
  * `Role` absent means every row is an agent — the least-privileged value, which
  * is the only safe direction for a default. A file that means to create an admin
  * has to say so. `Agent #` absent is ordinary: a rep can be created long before
- * anyone knows what the processor will call them.
+ * anyone knows what the processor will call them. The two legal names are
+ * optional at creation (memo A20); a rep missing either cannot submit a pre-app
+ * until an admin sets it (phase 4), so a file without them still imports.
  */
-export const OPTIONAL_COLUMNS: UserImportColumn[] = ["role", "agent_number"];
+export const OPTIONAL_COLUMNS: UserImportColumn[] = [
+  "role",
+  "agent_number",
+  "legal_name",
+  "llc_legal_name",
+];
 
 export const REQUIRED_COLUMNS: UserImportColumn[] = USER_IMPORT_COLUMNS.filter(
   (column) => !OPTIONAL_COLUMNS.includes(column),
@@ -103,6 +120,8 @@ export type UserImportBlocker =
   | "invalid_email"
   | "invalid_role"
   | "invalid_agent_number"
+  | "invalid_legal_name"
+  | "invalid_llc_legal_name"
   | "duplicate_email_in_file"
   | "duplicate_agent_number_in_file"
   | "email_exists"
@@ -147,6 +166,8 @@ const BLOCKER_PRECEDENCE: UserImportBlocker[] = [
   "invalid_email",
   "invalid_role",
   "invalid_agent_number",
+  "invalid_legal_name",
+  "invalid_llc_legal_name",
   "duplicate_email_in_file",
   "duplicate_agent_number_in_file",
   "email_exists",
@@ -185,6 +206,10 @@ export function blockerMessage(
       return `"${context.role ?? ""}" is not a role — use agent or admin.`;
     case "invalid_agent_number":
       return "Agent # must be 32 characters or fewer.";
+    case "invalid_legal_name":
+      return `Legal name must be ${REP_IDENTITY_MAX_LENGTH} characters or fewer.`;
+    case "invalid_llc_legal_name":
+      return `LLC legal name must be ${REP_IDENTITY_MAX_LENGTH} characters or fewer.`;
     case "duplicate_email_in_file":
       return `The file already used ${context.email ?? ""} on row ${
         context.duplicateOfRow ?? ""
@@ -399,11 +424,15 @@ export type ParsedUserRow = {
   email_raw: string | null;
   role_raw: string | null;
   agent_number_raw: string | null;
+  legal_name_raw: string | null;
+  llc_legal_name_raw: string | null;
   /** Resolved values, null wherever the raw text could not be resolved. */
   full_name: string | null;
   email: string | null;
   role: Role | null;
   agent_number: string | null;
+  legal_name: string | null;
+  llc_legal_name: string | null;
   /** Everything the parser found wrong, before the lookups are considered. */
   blockers: UserImportBlocker[];
   /** Context for blockerMessage — carries the row a duplicate collides with. */
@@ -494,6 +523,8 @@ export function parseUserImport(text: string): UserImportParseResult {
     const emailRaw = parseTextCell(cellAt(raw, "email"));
     const roleRaw = parseTextCell(cellAt(raw, "role"));
     const agentNumberRaw = parseTextCell(cellAt(raw, "agent_number"));
+    const legalNameRaw = parseTextCell(cellAt(raw, "legal_name"));
+    const llcLegalNameRaw = parseTextCell(cellAt(raw, "llc_legal_name"));
 
     const blockers: UserImportBlocker[] = [];
     const context: BlockerContext = {};
@@ -529,6 +560,19 @@ export function parseUserImport(text: string): UserImportParseResult {
     if (agentNumber !== null && !isAgentNumber(agentNumber)) {
       blockers.push("invalid_agent_number");
     }
+
+    // --- rep identity ---
+    // Blank is "not given" (optional at creation). Too long blocks the row:
+    // set_rep_identity() would refuse it after the account exists, which would
+    // leave a rep created without the names the file said they had.
+    const legalName = normalizeRepIdentityName(legalNameRaw);
+    const legalNameOk = legalName === null || isRepIdentityName(legalName);
+    if (!legalNameOk) blockers.push("invalid_legal_name");
+
+    const llcLegalName = normalizeRepIdentityName(llcLegalNameRaw);
+    const llcLegalNameOk = llcLegalName === null ||
+      isRepIdentityName(llcLegalName);
+    if (!llcLegalNameOk) blockers.push("invalid_llc_legal_name");
 
     // --- duplicates within the file ---
     if (email !== null) {
@@ -567,12 +611,16 @@ export function parseUserImport(text: string): UserImportParseResult {
       email_raw: emailRaw,
       role_raw: roleRaw,
       agent_number_raw: agentNumberRaw,
+      legal_name_raw: legalNameRaw,
+      llc_legal_name_raw: llcLegalNameRaw,
       full_name: fullName,
       email,
       role,
       agent_number: agentNumber !== null && isAgentNumber(agentNumber)
         ? agentNumber
         : null,
+      legal_name: legalNameOk ? legalName : null,
+      llc_legal_name: llcLegalNameOk ? llcLegalName : null,
       blockers,
       context,
     });

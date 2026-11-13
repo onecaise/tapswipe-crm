@@ -55,10 +55,14 @@ export type UserImportRow = {
   email_raw: string | null;
   role_raw: string | null;
   agent_number_raw: string | null;
+  legal_name_raw: string | null;
+  llc_legal_name_raw: string | null;
   full_name: string | null;
   email: string | null;
   role: "agent" | "admin" | null;
   agent_number: string | null;
+  legal_name: string | null;
+  llc_legal_name: string | null;
   blocker: string | null;
   error: string | null;
   outcome: UserImportOutcome | null;
@@ -76,7 +80,7 @@ export type UserImportRow = {
  * reason, which is not obvious until it bites.
  */
 export const USER_IMPORT_ROW_COLUMNS =
-  "id, row_number, full_name_raw, email_raw, role_raw, agent_number_raw, full_name, email, role, agent_number, blocker, error, outcome, outcome_detail, user_id, orphaned_auth_user, provisioned_at";
+  "id, row_number, full_name_raw, email_raw, role_raw, agent_number_raw, legal_name_raw, llc_legal_name_raw, full_name, email, role, agent_number, legal_name, llc_legal_name, blocker, error, outcome, outcome_detail, user_id, orphaned_auth_user, provisioned_at";
 
 /**
  * The two blockers that do NOT stop the import — the row is skipped and the rest
@@ -95,6 +99,8 @@ const BLOCKER_LABELS: Record<string, string> = {
   invalid_email: "Email could not be read",
   invalid_role: "Role not recognised",
   invalid_agent_number: "Agent # too long",
+  invalid_legal_name: "Legal name too long",
+  invalid_llc_legal_name: "LLC legal name too long",
   duplicate_email_in_file: "Duplicate email in the file",
   duplicate_agent_number_in_file: "Duplicate agent # in the file",
   email_exists: "Already has an account",

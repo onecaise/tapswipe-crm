@@ -339,9 +339,14 @@ describe("grant surface after all migrations", () => {
       "pre_app_owner_secrets",
       "pre_app_banking_secrets",
       "pre_app_terminal_secrets",
+      "pre_app_tax_secrets",
     ]) {
       expect(await tablePrivileges(db, "authenticated", secrets)).toEqual([]);
       expect(await tablePrivileges(db, "anon", secrets)).toEqual([]);
+      // The privileges RLS cannot filter, too: a TRUNCATE grant would empty
+      // ciphertext no policy could protect.
+      expect(await nonDmlPrivileges(db, "authenticated", secrets)).toEqual([]);
+      expect(await nonDmlPrivileges(db, "anon", secrets)).toEqual([]);
     }
 
     await db.close();
@@ -681,6 +686,11 @@ describe("grant surface after all migrations", () => {
     // EXECUTE writes the table that decides who is an admin.
     expect(
       await canExecute(db, "anon", "public.set_territory(uuid, text)"),
+    ).toBe(false);
+    // Phase 2 of the intake memo: writes the rep's legal names, which gate
+    // pre-app submit and print on the processor's paperwork.
+    expect(
+      await canExecute(db, "anon", "public.set_rep_identity(uuid, text, text)"),
     ).toBe(false);
 
     const [seq] = await rows<{ ok: boolean }>(

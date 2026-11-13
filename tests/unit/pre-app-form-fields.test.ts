@@ -20,6 +20,7 @@ import {
   type PaperFieldEntry,
   type PaperSection,
 } from "@/lib/pre-app-form-fields";
+import { PRE_APP_REQUIRED_ITEMS } from "@/lib/pre-app-required";
 
 /**
  * The printable blank form's field inventory.
@@ -90,13 +91,21 @@ describe("the paper form asks what the wizard asks", () => {
    * printed layout, rather than drifting.
    */
   it("carries the same number of fields per step", () => {
-    expect(fieldsOf(BUSINESS_SECTION)).toHaveLength(28);
-    expect(fieldsOf(OWNER_SECTION)).toHaveLength(16);
+    // 29 since 20261023130000 added pre_apps.processor (phase 1 of
+    // docs/design/intake-and-reports.md); 28 since 20261026140000 dropped
+    // ein_number, whose number now prints as a secret below. 26 since phase 4
+    // (20261028120000): the agent split is the rep's rate, snapshotted at
+    // submit, and the country is fixed to United States -- neither is asked.
+    expect(fieldsOf(BUSINESS_SECTION)).toHaveLength(26);
+    // 15 since phase 4: home_country is fixed to United States.
+    expect(fieldsOf(OWNER_SECTION)).toHaveLength(15);
     expect(fieldsOf(TERMINAL_SECTION)).toHaveLength(24);
     expect(fieldsOf(PROFILE_SECTION)).toHaveLength(8);
-    // SSN is per owner and lives in the owner block; the other three are the
-    // banking pair plus the terminal password.
-    expect(SECRET_FIELDS).toHaveLength(3);
+    // SSN is per owner and lives in the owner block; the other four are the
+    // business tax ID (EIN or SSN, 20261026140000), the banking pair and the
+    // terminal password.
+    expect(SECRET_FIELDS).toHaveLength(4);
+    expect(SECRET_FIELDS.map((field) => field.key)).toContain("tax_id");
   });
 
   it("marks exactly the two fields that are required at entry", () => {
@@ -166,12 +175,37 @@ describe("the paper form asks what the wizard asks", () => {
 
 describe("the completeness checklist", () => {
   it("lists every submission blocker", () => {
-    // preAppBlockers() produces nine distinct reasons; the paper form reprints
-    // them because only two fields are required to SAVE a draft, so the field
-    // list alone cannot tell a rep whether the form is finished.
-    expect(PAPER_COMPLETENESS_CHECKLIST).toHaveLength(9);
+    // The paper form reprints what submit requires, because only two fields
+    // are required to SAVE a draft, so the field list alone cannot tell a rep
+    // whether the form is finished. Since phase 4 the list is GENERATED from
+    // the codes of pre_app_missing_fields() (lib/pre-app-required.ts, pinned
+    // to the SQL body by tests/unit/pre-app-required.test.ts), so it can no
+    // longer lag the database: the hand-kept list had ten lines and lacked
+    // city and state. Every per-owner item is one sentence.
+    // 17 business + 2 owner rules + 1 per-owner line + 2 card mix
+    // + banking + rep identity = 24.
+    expect(PAPER_COMPLETENESS_CHECKLIST).toHaveLength(24);
     for (const item of PAPER_COMPLETENESS_CHECKLIST) {
       expect(item.trim()).not.toBe("");
+    }
+    for (const item of PRE_APP_REQUIRED_ITEMS) {
+      expect(
+        PAPER_COMPLETENESS_CHECKLIST.some((line) => line.includes(item.paper)),
+        item.code,
+      ).toBe(true);
+    }
+    expect(PAPER_COMPLETENESS_CHECKLIST).toContain("The business city.");
+    expect(PAPER_COMPLETENESS_CHECKLIST).toContain("The business state (two letters).");
+    const ownerLine = PAPER_COMPLETENESS_CHECKLIST.find((l) => l.startsWith("For every owner:"));
+    expect(ownerLine).toMatch(/home ZIP code, .* and a social security number\.$/);
+  });
+
+  it("no longer asks for a split or a country on paper", () => {
+    // The split is the rep's rate, snapshotted at submit (memo §0b.4), and the
+    // country is fixed to United States (A14): neither is a question.
+    const keys = [...fieldsOf(BUSINESS_SECTION), ...fieldsOf(OWNER_SECTION)].map((f) => f.key);
+    for (const gone of ["split_agent_pct", "split_company_pct", "country", "home_country"]) {
+      expect(keys).not.toContain(gone);
     }
   });
 

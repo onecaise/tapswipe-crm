@@ -453,3 +453,99 @@ describe("retrying rows that failed", () => {
     expect(rows[0].user_id).not.toBeNull();
   });
 });
+
+/**
+ * Phase 2 of docs/design/intake-and-reports.md: the two optional CSV columns
+ * "Legal name" and "LLC legal name", staged by stage-user-import and written
+ * by provision-user-batch through set_rep_identity() as the calling admin.
+ */
+describe("rep identity columns", () => {
+  const IDENTITY_HEADER = "Full name,Email,Role,Agent #,Legal name,LLC legal name";
+
+  it("stages both names and provisions them through set_rep_identity", async () => {
+    const withNames = address("identity-named");
+    const without = address("identity-none");
+    const batchId = await stage(
+      [
+        IDENTITY_HEADER,
+        `Ann,${withNames},agent,, Live Ann Ito ,"Live Ito Payments, LLC"`,
+        `Bo,${without},agent,,,`,
+      ].join("\n"),
+    );
+
+    const { data: staged } = await adminClient()
+      .from("user_import_rows")
+      .select("row_number, legal_name, llc_legal_name, blocker")
+      .eq("batch_id", batchId)
+      .order("row_number", { ascending: true });
+    expect(staged).toEqual([
+      {
+        row_number: 2,
+        legal_name: "Live Ann Ito",
+        llc_legal_name: "Live Ito Payments, LLC",
+        blocker: null,
+      },
+      { row_number: 3, legal_name: null, llc_legal_name: null, blocker: null },
+    ]);
+
+    const response = await provision({ batch_id: batchId });
+    expect(response.status, response.raw).toBe(200);
+    expect(response.body.created).toBe(2);
+
+    const admin = adminClient();
+    const { data: profiles } = await admin
+      .from("profiles")
+      .select("id, email, legal_name, llc_legal_name")
+      .in("email", [withNames, without]);
+    const byEmail = Object.fromEntries(
+      (profiles ?? []).map((p) => [p.email as string, p]),
+    );
+    expect(byEmail[withNames]).toMatchObject({
+      legal_name: "Live Ann Ito",
+      llc_legal_name: "Live Ito Payments, LLC",
+    });
+    expect(byEmail[without]).toMatchObject({
+      legal_name: null,
+      llc_legal_name: null,
+    });
+
+    // The RPC's audit row, naming the admin who ran the import — and none for
+    // the row that carried no names.
+    const { data: audits } = await admin
+      .from("audit_log")
+      .select("actor_id, row_id")
+      .eq("action", "set_rep_identity")
+      .in("row_id", [byEmail[withNames].id, byEmail[without].id]);
+    expect(audits).toEqual([
+      { actor_id: fixtures.userIds.admin, row_id: byEmail[withNames].id },
+    ]);
+
+    // A clean write leaves no note on the row.
+    const rows = await stagedRows(batchId);
+    expect(rows.map((row) => row.outcome_detail)).toEqual([null, null]);
+  });
+
+  it("blocks a row whose legal name is over 200 characters", async () => {
+    const batchId = await stage(
+      [
+        IDENTITY_HEADER,
+        `Cy,${address("identity-long")},agent,,${"L".repeat(201)},Cy LLC`,
+      ].join("\n"),
+    );
+
+    const { data: staged } = await adminClient()
+      .from("user_import_rows")
+      .select("blocker, error, legal_name")
+      .eq("batch_id", batchId);
+    expect(staged).toEqual([
+      {
+        blocker: "invalid_legal_name",
+        error: "Legal name must be 200 characters or fewer.",
+        legal_name: null,
+      },
+    ]);
+
+    const response = await provision({ batch_id: batchId });
+    expect(response.status).toBe(409);
+  });
+});

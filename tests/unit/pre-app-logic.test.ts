@@ -4,13 +4,14 @@ import {
   caretForSignificant,
   countSignificant,
   isAccount,
-  isEin,
   isMoney,
   isPercent,
   isPhone,
   isRouting,
   isSsn,
   isState,
+  isTaxEin,
+  isTaxSsn,
   isZip,
   maskAccount,
   maskEin,
@@ -34,7 +35,6 @@ import {
   parsePreAppFilter,
   parsePreAppStep,
   preAppDefaultsFromLead,
-  preAppSubmitBlockers,
   prevStep,
   statusIntent,
 } from "@/lib/pre-apps";
@@ -82,8 +82,8 @@ describe("EIN, SSN and ZIP masks", () => {
     expect(maskEin("12")).toBe("12");
     expect(maskEin("123")).toBe("12-3");
     expect(maskEin("123456789")).toBe("12-3456789");
-    expect(isEin("12-3456789")).toBe(true);
-    expect(isEin("12-345678")).toBe(false);
+    expect(isTaxEin("12-3456789")).toBe(true);
+    expect(isTaxEin("12-345678")).toBe(false);
   });
 
   it("formats an SSN as xxx-xx-xxxx", () => {
@@ -93,6 +93,27 @@ describe("EIN, SSN and ZIP masks", () => {
     expect(maskSsn("123456789")).toBe("123-45-6789");
     expect(isSsn("123-45-6789")).toBe(true);
     expect(isSsn("123456789")).toBe(false);
+  });
+
+  // Phase 4: the owner SSN takes the tax-ID SSN rule. Before, isSsn checked
+  // the shape only and 000-00-0000 passed. Its server twin is isSsn in
+  // _shared/pre-app-secrets.ts; tests/live/pre-app-secrets.test.ts posts each.
+  it.each([
+    ["all zeros", "000-00-0000"],
+    ["area 000", "000-45-6789"],
+    ["area 666", "666-45-6789"],
+    ["area 900", "900-45-6789"],
+    ["area 999", "999-45-6789"],
+    ["group 00", "123-00-6789"],
+    ["serial 0000", "123-45-0000"],
+  ])("refuses an owner SSN that is %s", (_label, value) => {
+    expect(isSsn(value)).toBe(false);
+  });
+
+  it("accepts an owner SSN at the edges of the issued ranges, and blank", () => {
+    for (const value of ["001-01-0001", "665-99-9999", "667-01-0001", "899-99-9999", ""]) {
+      expect(isSsn(value), value).toBe(true);
+    }
   });
 
   it("accepts both ZIP and ZIP+4", () => {
@@ -107,7 +128,52 @@ describe("EIN, SSN and ZIP masks", () => {
     // The whole point of the split: autosave persists "12-3", the step just
     // won't let the rep leave until it's finished.
     expect(maskEin("12-3")).toBe("12-3");
-    expect(isEin("12-3")).toBe(false);
+    expect(isTaxEin("12-3")).toBe(false);
+  });
+});
+
+/**
+ * The business tax ID validators (20261026140000). Their twin is in
+ * supabase/functions/_shared/pre-app-secrets.ts; tests/live/pre-app-secrets
+ * posts each value refused here and expects the function's 400.
+ *
+ * Accepted values are deliberately ones no real holder has: EIN prefix 07 is
+ * one the IRS does not assign, and 123-45-6789 is an SSN the SSA lists as
+ * never valid.
+ */
+describe("tax ID validators", () => {
+  it("accepts a well-formed EIN, and blank (a draft can hold nothing)", () => {
+    expect(isTaxEin("07-1234567")).toBe(true);
+    expect(isTaxEin("")).toBe(true);
+  });
+
+  it.each([
+    ["all zeros", "00-0000000"],
+    ["prefix 00", "00-1234567"],
+    ["eight digits", "07-123456"],
+    ["no dash", "071234567"],
+    ["SSN-shaped", "071-23-4567"],
+    ["letters", "07-12345AB"],
+  ])("refuses an EIN that is %s", (_label, value) => {
+    expect(isTaxEin(value)).toBe(false);
+  });
+
+  it("accepts a well-formed SSN, and blank", () => {
+    expect(isTaxSsn("123-45-6789")).toBe(true);
+    expect(isTaxSsn("")).toBe(true);
+  });
+
+  it.each([
+    ["all zeros", "000-00-0000"],
+    ["area 000", "000-45-6789"],
+    ["area 666", "666-45-6789"],
+    ["area 9xx (an ITIN, not an SSN)", "912-45-6789"],
+    ["group 00", "123-00-6789"],
+    ["serial 0000", "123-45-0000"],
+    ["no dashes", "123456789"],
+    ["EIN-shaped", "12-3456789"],
+  ])("refuses an SSN that is %s", (_label, value) => {
+    expect(isTaxSsn(value)).toBe(false);
   });
 });
 
@@ -419,128 +485,12 @@ describe("pre-app vocabulary", () => {
   });
 });
 
-describe("submit blockers mirror the RPC", () => {
-  const complete = {
-    preApp: {
-      dba_name: "Acme Diner",
-      legal_business_name: "Acme Diner LLC",
-      city: "Nashville" as string | null,
-      state: "TN" as string | null,
-      split_agent_pct: 50,
-      split_company_pct: 50,
-    },
-    owners: [{ percent_owned: 100 }],
-    profile: null,
-    hasBankingSecrets: true,
-    ownersMissingSsn: 0,
-  };
-
-  it("reports nothing for a complete pre-app", () => {
-    expect(preAppSubmitBlockers(complete)).toEqual([]);
-  });
-
-  it.each([
-    ["no city", null, "TN"],
-    ["a blank city", "   ", "TN"],
-    ["no state", "Nashville", null],
-    ["a state that is not a code", "Nashville", "Tennessee"],
-  ])("requires a business city and state — %s", (_label, city, state) => {
-    expect(
-      preAppSubmitBlockers({ ...complete, preApp: { ...complete.preApp, city, state } }),
-    ).toEqual(["A business city and state are required."]);
-  });
-
-  it("requires an owner at 51% or more", () => {
-    expect(
-      preAppSubmitBlockers({
-        ...complete,
-        owners: [{ percent_owned: 50 }, { percent_owned: 50 }],
-      }),
-    ).toEqual(["One owner must hold at least 51% ownership."]);
-  });
-
-  it("requires at least one owner", () => {
-    expect(preAppSubmitBlockers({ ...complete, owners: [] })).toEqual([
-      "Add at least one owner.",
-    ]);
-  });
-
-  it("counts owners missing an SSN, singular and plural", () => {
-    expect(
-      preAppSubmitBlockers({ ...complete, ownersMissingSsn: 1 }),
-    ).toContain("One owner has no SSN on file.");
-    expect(
-      preAppSubmitBlockers({ ...complete, ownersMissingSsn: 3 }),
-    ).toContain("3 owners have no SSN on file.");
-  });
-
-  it("requires banking details", () => {
-    expect(
-      preAppSubmitBlockers({ ...complete, hasBankingSecrets: false }),
-    ).toContain("Banking details have not been submitted.");
-  });
-
-  it("checks the two card-mix pairs independently", () => {
-    const profile = {
-      id: 1,
-      pre_app_id: 1,
-      card_swiped_pct: 80,
-      card_keyed_pct: 10,
-      card_present_pct: 70,
-      card_not_present_pct: 30,
-      moto_pct: null,
-      internet_pct: null,
-      test_product_type: null,
-      notes: null,
-    };
-    expect(preAppSubmitBlockers({ ...complete, profile })).toEqual([
-      "Swiped and keyed percentages must total 100.",
-    ]);
-  });
-
-  it("ignores moto and internet entirely", () => {
-    // Settled rule: two pairs only. moto/internet are informational and are
-    // specifically not summed against card_not_present_pct.
-    const profile = {
-      id: 1,
-      pre_app_id: 1,
-      card_swiped_pct: 60,
-      card_keyed_pct: 40,
-      card_present_pct: 70,
-      card_not_present_pct: 30,
-      moto_pct: 99,
-      internet_pct: 99,
-      test_product_type: null,
-      notes: null,
-    };
-    expect(preAppSubmitBlockers({ ...complete, profile })).toEqual([]);
-  });
-
-  it("passes a pair that is entirely empty", () => {
-    const profile = {
-      id: 1,
-      pre_app_id: 1,
-      card_swiped_pct: 60,
-      card_keyed_pct: 40,
-      card_present_pct: null,
-      card_not_present_pct: null,
-      moto_pct: null,
-      internet_pct: null,
-      test_product_type: null,
-      notes: null,
-    };
-    expect(preAppSubmitBlockers({ ...complete, profile })).toEqual([]);
-  });
-
-  it("requires the splits to total 100", () => {
-    expect(
-      preAppSubmitBlockers({
-        ...complete,
-        preApp: { ...complete.preApp, split_agent_pct: 60, split_company_pct: 50 },
-      }),
-    ).toContain("Agent and company splits must total 100.");
-  });
-});
+// "submit blockers mirror the RPC" was retired in phase 4 with
+// preAppSubmitBlockers itself: the review step now shows
+// pre_app_missing_fields(), the function submit_pre_app() refuses with, so
+// there is no browser twin to keep in step. Every rule it covered is asserted
+// against the function, item by item, in
+// tests/rls/pre-app-required-fields.test.ts.
 
 describe("carrying a lead's fields into a new pre-app", () => {
   const lead = {
@@ -569,7 +519,9 @@ describe("carrying a lead's fields into a new pre-app", () => {
       physical_address: "12 Main St",
       city: "Nashville",
       state: "TN",
-      country: "USA",
+      // No country: pre_apps.country is fixed to US (memo A14), so the lead's
+      // free-text country ("USA" here) is not carried; the column default
+      // applies.
       zip: "37201-1234",
       // Carried as typed. leads.website only exists as of 20261002; before it,
       // a rep who found the site while working the lead retyped it here.
@@ -620,7 +572,6 @@ describe("carrying a lead's fields into a new pre-app", () => {
       address: null,
       city: "",
       state: null,
-      country: null,
       zip: null,
       website: "  ",
     });

@@ -107,13 +107,13 @@ describe("an existing merchant with no location stays editable", () => {
     // refused, so the row count is the assertion.
     await asUser(db, AGENT_ID);
     const rep = await db.query(
-      `update merchants set processor = 'Elavon' where dba = 'Agent Active Co'`,
+      `update merchants set processor = 'PayBright' where dba = 'Agent Active Co'`,
     );
     expect(rep.affectedRows).toBe(0);
 
     await asUser(db, ADMIN_ID);
     const admin = await db.query(
-      `update merchants set processor = 'Elavon' where dba = 'Agent Active Co'`,
+      `update merchants set processor = 'PayBright' where dba = 'Agent Active Co'`,
     );
     expect(admin.affectedRows).toBe(1);
     await asPlatform(db);
@@ -241,13 +241,13 @@ describe("once a merchant has a location", () => {
 
   it("still lets an admin edit every other column", async () => {
     await asUser(db, ADMIN_ID);
-    await db.exec(`update merchants set processor = 'FDMS' where dba = 'Agent Inactive Co'`);
+    await db.exec(`update merchants set processor = 'Red Fynn' where dba = 'Agent Inactive Co'`);
     await asPlatform(db);
     const [m] = await rows<{ processor: string }>(
       db,
       `select processor from merchants where dba = 'Agent Inactive Co'`,
     );
-    expect(m.processor).toBe("FDMS");
+    expect(m.processor).toBe("Red Fynn");
   });
 
   it("does not let the owning rep add or change a location (20261021120000)", async () => {

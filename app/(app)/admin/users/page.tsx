@@ -8,6 +8,8 @@ import { formatText } from "@/lib/format";
 import { AgentNumberCell } from "@/components/agent-number-cell";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
+import { RepIdentityCell } from "@/components/rep-identity-cell";
+import { SplitRateCell } from "@/components/split-rate-cell";
 import { StatusBadge } from "@/components/status-badge";
 import { TerritoryCell } from "@/components/territory-cell";
 import { UserRowActions } from "@/components/user-row-actions";
@@ -28,6 +30,9 @@ type ProfileRow = {
   email: string | null;
   agent_number: string | null;
   territory: string | null;
+  legal_name: string | null;
+  llc_legal_name: string | null;
+  split_rate_pct: number;
   role: Role;
   is_active: boolean;
   must_change_password: boolean;
@@ -49,7 +54,7 @@ async function UsersTable() {
   const { data, error } = await supabase
     .from("profiles")
     .select(
-      "id, full_name, email, agent_number, territory, role, is_active, must_change_password, created_at",
+      "id, full_name, email, agent_number, territory, legal_name, llc_legal_name, split_rate_pct, role, is_active, must_change_password, created_at",
     )
     .order("created_at", { ascending: true });
 
@@ -70,6 +75,8 @@ async function UsersTable() {
           <TableHead>Name</TableHead>
           <TableHead>Agent #</TableHead>
           <TableHead>Territory</TableHead>
+          <TableHead>Legal names</TableHead>
+          <TableHead>Split</TableHead>
           <TableHead>Role</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Created</TableHead>
@@ -79,7 +86,7 @@ async function UsersTable() {
       <TableBody>
         {profiles.length === 0 ? (
           <TableRow>
-            <TableCell colSpan={7} className="text-muted-foreground">
+            <TableCell colSpan={9} className="text-muted-foreground">
               No users found.
             </TableCell>
           </TableRow>
@@ -124,6 +131,29 @@ async function UsersTable() {
                   userId={profile.id}
                   fullName={profile.full_name}
                   territory={profile.territory}
+                />
+              </TableCell>
+              <TableCell>
+                {/* Legal name over LLC legal name, for the processor's
+                    paperwork. Admin-set only, through set_rep_identity(); a rep
+                    missing either cannot submit a pre-app (phase 4). */}
+                <RepIdentityCell
+                  userId={profile.id}
+                  fullName={profile.full_name}
+                  role={profile.role}
+                  legalName={profile.legal_name}
+                  llcLegalName={profile.llc_legal_name}
+                />
+              </TableCell>
+              <TableCell>
+                {/* The rep's share of a merchant's residual (memo §0b.4).
+                    Admin-set only, through set_rep_split(); copied onto a
+                    pre-app at submit, so a change here moves no existing
+                    pre-app or merchant. */}
+                <SplitRateCell
+                  userId={profile.id}
+                  fullName={profile.full_name}
+                  rate={profile.split_rate_pct}
                 />
               </TableCell>
               <TableCell>

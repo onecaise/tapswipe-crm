@@ -197,6 +197,7 @@ describe("the privilege it holds cannot leak ciphertext", () => {
       "pre_app_owner_secrets",
       "pre_app_banking_secrets",
       "pre_app_terminal_secrets",
+      "pre_app_tax_secrets",
     ]) {
       const r = await rows<{ anon: boolean; auth: boolean }>(
         db,
@@ -226,9 +227,12 @@ describe("the presence tests are load-bearing", () => {
   it("would notice if the ownership guard were dropped", async () => {
     await asPlatform(db);
     // Same body, minus the guard — the mistake this suite exists to catch.
+    // Its return type is the current one (four columns since 20261026140000),
+    // or create or replace refuses before the guard is ever tested.
     await db.exec(`
       create or replace function pre_app_secrets_presence(pre_app_id_input int)
-      returns table (banking_on_file boolean, owners_missing_ssn int)
+      returns table (banking_on_file boolean, owners_missing_ssn int,
+                     tax_id_on_file boolean, tax_id_type_on_file text)
       language plpgsql
       security definer
       set search_path = public
@@ -237,7 +241,7 @@ describe("the presence tests are load-bearing", () => {
         return query
           select exists (select 1 from pre_app_banking_secrets b
                           where b.pre_app_id = pre_app_id_input),
-                 0;
+                 0, false, null::text;
       end;
       $fn$;
     `);
