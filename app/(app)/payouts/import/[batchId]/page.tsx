@@ -5,7 +5,13 @@ import { ArrowLeftIcon } from "lucide-react";
 
 import { requireAdmin } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
-import { EMPTY, formatDate, formatText } from "@/lib/format";
+import {
+  EMPTY,
+  formatDate,
+  formatMoney,
+  formatPeriod,
+  formatText,
+} from "@/lib/format";
 import {
   PAYOUT_BATCH_COLUMNS,
   PAYOUT_IMPORT_ROW_COLUMNS,
@@ -13,37 +19,46 @@ import {
   blockerLabel,
   previewFlagLabel,
   reviewImportRows,
-  rowsWritten,
+  warningLabel,
+  warningQuestion,
+  warningTotals,
   type PayoutBatch,
   type PayoutImportRow,
 } from "@/lib/payouts";
-import { loadSkipReviewers } from "@/lib/residual-skips";
+import { blankFigureRows } from "@/lib/residual-review";
+import { sameProcessor } from "@/supabase/functions/_shared/residuals";
 import { Callout } from "@/components/callout";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { ResidualBatchActions } from "@/components/residual-batch-actions";
-import { ResidualCommitButton } from "@/components/residual-commit-button";
-import { ResidualSkipsNotice } from "@/components/residual-skips-notice";
+import {
+  ResidualWarningConfirmations,
+  RowList,
+  type WarningBlock,
+} from "@/components/residual-warning-confirmations";
 import { StatCard } from "@/components/stat-card";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 
 /**
- * The review screen — where a blocked import waits.
+ * The review screen -- where a refused import waits, and where its warnings
+ * are confirmed.
  *
- * This is the "block that row's import" surface, and it is a PAGE rather than a
- * dismissible dialog on purpose. A batch outlives the session: an unrecognised
- * agent number can take a day to sort out, and the admin will navigate away to
- * create the rep and come back. components/new-user-form.tsx records the same
- * reasoning for the same kind of thing — a dialog that can be dismissed is the
- * wrong container for something that must not be lost.
+ * A PAGE rather than a dismissible dialog on purpose. A batch outlives the
+ * session: adding the merchants an import refused for can take a day, and the
+ * admin will navigate away and come back. components/new-user-form.tsx records
+ * the same reasoning for the same kind of thing.
  *
- * Blockers are presented in two groups because they are fixed two different ways:
- * an unrecognised agent number is one action that unblocks all of its rows, while
- * a bad figure on row 22 needs the spreadsheet corrected and re-uploaded. Only the
- * first is offered an in-place fix; the second says so rather than presenting an
- * edit affordance that would let someone silently retype a figure the processor
- * sent.
+ * Phase 7 of docs/design/intake-and-reports.md (§2.2, §2.4). Two kinds of thing,
+ * shown two ways:
+ *   - REFUSALS (any blocker) refuse the whole import: a Callout at the top lists
+ *     every one, and nothing can be committed. An unknown MID is fixed in the
+ *     CRM and then "Read again"; every other refusal needs a corrected file
+ *     (A27). The screen is the alert (A9): nothing is sent anywhere.
+ *   - WARNINGS (processor mismatch, inactive merchant, bad numbers) are
+ *     confirmed with one yes per TYPE, never per line, before the commit is
+ *     offered.
+ * Nothing here edits a figure the processor sent.
  */
 async function BatchReview({
   params,
@@ -95,20 +110,110 @@ async function BatchReview({
   const rows = (rowData ?? []) as PayoutImportRow[];
   const review = reviewImportRows(rows);
 
-  // Shared-account preview flags (phase 4b). Advisory: a flagged row is still
-  // ready, and the commit recomputes all of it from the shares in force then.
+  // Advisory notes (a changed payee, a share that does not cover the month):
+  // a flagged row is still ready, and the commit recomputes everything then.
   const flagged = rows.filter((row) => row.preview_flag !== null);
 
-  const reviewers =
-    batch.skipped_rows.length > 0
-      ? await loadSkipReviewers(supabase, [batch.id])
-      : new Map<number, string>();
+  // The CRM side of each warned row: the merchant's own processor and name
+  // ("the file says X, the merchant is set to Y").
+  const merchantIds = [
+    ...new Set(
+      rows
+        .filter((row) => row.warnings.length > 0)
+        .map((row) => row.merchant_id)
+        .filter((value): value is number => value !== null),
+    ),
+  ];
+  const merchants = new Map<
+    number,
+    { dba: string | null; processor: string | null }
+  >();
+  if (merchantIds.length > 0) {
+    const { data } = await supabase
+      .from("merchants")
+      .select("id, dba, processor")
+      .in("id", merchantIds);
+    for (const merchant of (data ?? []) as {
+      id: number;
+      dba: string | null;
+      processor: string | null;
+    }[]) {
+      merchants.set(merchant.id, {
+        dba: merchant.dba,
+        processor: merchant.processor,
+      });
+    }
+  }
+  const byNumber = new Map(rows.map((row) => [row.row_number, row]));
 
-  // Which resolved reps are switched off. Not a blocker — money owed and the
-  // ability to log in are separate questions — but worth saying, because those
-  // rows will import and the rep will not be able to see them (the own-row select
+  const warningText = (warning: string, rowNumber: number): string => {
+    const row = byNumber.get(rowNumber);
+    if (!row) return "";
+    const mid = `MID ${row.mid_raw ?? EMPTY}`;
+    const merchant =
+      row.merchant_id === null ? undefined : merchants.get(row.merchant_id);
+    if (warning === "processor_mismatch") {
+      const parts: string[] = [];
+      const fileSays = (row.processor_raw ?? "").replace(/\s+/g, " ").trim();
+      // Compared as the parser does (phase 15): case, spaces, punctuation and
+      // the aliases ignored, and a blank cell is not a mismatch.
+      if (fileSays !== "" && !sameProcessor(fileSays, batch.processor)) {
+        parts.push(`the file says "${fileSays}"`);
+      }
+      if (
+        merchant?.processor &&
+        !sameProcessor(merchant.processor, batch.processor)
+      ) {
+        parts.push(
+          `the merchant is set to ${merchant.processor} (importing does not change it)`,
+        );
+      }
+      return `${mid}: ${parts.join(" and ") || "the processor differs"}.`;
+    }
+    if (warning === "inactive_merchant") {
+      return `${mid}: ${
+        merchant?.dba ?? row.merchant_name_raw ?? "this merchant"
+      } is inactive. The line is still paid to its owner.`;
+    }
+    if (warning === "other_income_type") {
+      return `${mid}: Income Type "${row.income_type_raw ?? ""}", volume ${
+        row.volume_raw ?? EMPTY
+      }, residual ${row.residual_income_raw ?? EMPTY}.`;
+    }
+    if (warning === "bad_numbers") {
+      return `${mid}: volume ${row.volume_raw ?? EMPTY}, residual ${
+        row.residual_income_raw ?? EMPTY
+      }.`;
+    }
+    return mid;
+  };
+
+  // Phase 15: how much the lines of another Income Type add, so the yes is
+  // given knowing it (ISO Hub's monthly Net includes them).
+  const summaryOf = (warning: string): string | undefined => {
+    if (warning !== "other_income_type") return undefined;
+    const totals = warningTotals(rows, warning);
+    return `${totals.count} row${totals.count === 1 ? "" : "s"}: volume ${formatMoney(
+      totals.volume,
+    )}, residual ${formatMoney(totals.residual)}.`;
+  };
+
+  const blocks: WarningBlock[] = review.warnings.map((group) => ({
+    warning: group.warning,
+    label: warningLabel(group.warning),
+    question: warningQuestion(group.warning),
+    summary: summaryOf(group.warning),
+    rows: group.rows.map((line) => ({
+      rowNumber: line.rowNumber,
+      text: warningText(group.warning, line.rowNumber),
+    })),
+  }));
+
+  // Which payees are switched off. Not a blocker -- money owed and the ability
+  // to log in are separate questions -- but worth saying, because those rows
+  // will import and the rep will not be able to see them (the own-row select
   // branch requires is_active_agent()).
-  const resolvedIds = [
+  const payeeIds = [
     ...new Set(
       rows
         .map((row) => row.agent_id)
@@ -116,20 +221,29 @@ async function BatchReview({
     ),
   ];
   let inactive: { full_name: string; agent_number: string | null }[] = [];
-  if (resolvedIds.length > 0) {
+  if (payeeIds.length > 0) {
     const { data: reps } = await supabase
       .from("profiles")
       .select("id, full_name, agent_number, is_active")
-      .in("id", resolvedIds)
+      .in("id", payeeIds)
       .eq("is_active", false);
     inactive = (reps ?? []) as typeof inactive;
   }
+
+  // Phase 15: a blank Volume or Residual on a row with a MID is read as 0.
+  const zeroed = blankFigureRows(rows);
+
+  const fileProblems = review.refusals.filter(
+    (refusal) => refusal.blocker !== "unknown_mid",
+  );
 
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
         title={formatText(batch.file_name)}
-        subtitle={`Uploaded ${formatDate(batch.uploaded_at)}`}
+        subtitle={`${batch.processor ?? "No processor"} · ${
+          batch.period ? formatPeriod(batch.period) : "no month"
+        } · Uploaded ${formatDate(batch.uploaded_at)}`}
         action={
           <ResidualBatchActions batchId={batch.id} status={batch.status} />
         }
@@ -141,13 +255,65 @@ async function BatchReview({
         </div>
       </PageHeader>
 
-      {/* The commit result's skipped rows, at the TOP: the first thing an
-          admin sees after committing, until they are reviewed. */}
-      <ResidualSkipsNotice
-        batch={batch}
-        reviewerName={reviewers.get(batch.id)}
-        linkToBatch={false}
-      />
+      {/* The replace (phase 9): a batch that replaces another says so while
+          it waits, and the one it replaced points to its successor. */}
+      {batch.replaces_batch_id !== null && batch.status === "review" && (
+        <Callout tone="warning">
+          <div data-testid="replaces-import">
+            <p className="font-medium">
+              This file replaces{" "}
+              <Link
+                href={`/payouts/import/${batch.replaces_batch_id}`}
+                className="underline underline-offset-4"
+              >
+                import #{batch.replaces_batch_id}
+              </Link>
+              .
+            </p>
+            <p className="mt-1 text-muted-foreground">
+              Committing it removes every line that import wrote for{" "}
+              {batch.processor} {formatPeriod(batch.period)} and writes these
+              instead. It is refused if the month has been marked paid since.
+            </p>
+          </div>
+        </Callout>
+      )}
+      {batch.status === "replaced" && batch.replaced_by_batch_id !== null && (
+        <div className="rounded-xl border p-4 text-sm text-muted-foreground">
+          <p data-testid="replaced-by">
+            Replaced by{" "}
+            <Link
+              href={`/payouts/import/${batch.replaced_by_batch_id}`}
+              className="underline underline-offset-4"
+            >
+              import #{batch.replaced_by_batch_id}
+            </Link>
+            . Its lines were removed when that one was committed; the file is
+            kept.
+          </p>
+        </div>
+      )}
+      {batch.status === "deleted" && (
+        <div className="rounded-xl border p-4 text-sm text-muted-foreground">
+          <p>
+            This month&rsquo;s lines from this import were deleted. The file is
+            kept.
+          </p>
+        </div>
+      )}
+
+      {batch.status === "review" && batch.processor === null && (
+        <Callout tone="warning">
+          <p className="font-medium">
+            This import was started before the processor and month were chosen
+            at upload.
+          </p>
+          <p className="mt-1 text-muted-foreground">
+            It cannot be read again or committed. Abandon it and upload the file
+            again.
+          </p>
+        </Callout>
+      )}
 
       {batch.row_count === 0 && rows.length === 0 ? (
         <Callout tone="warning">
@@ -160,53 +326,31 @@ async function BatchReview({
       ) : (
         <>
           {/* Two different questions, so two different sets of figures.
-              `review` is derived from the STAGING rows, and commit deletes those
-              — so a committed batch reported "Rows in the file 0 / Ready 0 /
-              Blocked 0", making a successful import of N rows look like an empty
-              one. That is exactly the confusion the RPC's `staged = 0` guard
-              exists to prevent, reintroduced on the page that reports the
-              result. rep_payout_batches.row_count is the surviving record of
-              what was committed, so a settled batch reads from that; only a
-              batch still in review has staging rows to describe. */}
+              `review` is derived from the STAGING rows, and commit deletes
+              those -- so a settled batch reads rep_payout_batches.row_count,
+              the surviving record of what was committed. */}
           {batch.status === "review" ? (
             <div className="grid gap-3 sm:grid-cols-3">
               <StatCard label="Rows in the file" value={review.total} />
               <StatCard label="Ready" value={review.clean} />
               <StatCard
-                label="Blocked"
+                label="Refused"
                 value={review.blocked}
                 accent={review.blocked > 0}
               />
             </div>
           ) : (
-            <div
-              className={
-                batch.skipped_rows.length > 0
-                  ? "grid gap-3 sm:grid-cols-3"
-                  : "grid gap-3 sm:grid-cols-2"
-              }
-            >
-              {/* What commit_residual_import_v2 returned: written and
-                  skipped, read back from the batch so a reload agrees. */}
+            <div className="grid gap-3 sm:grid-cols-2">
+              {/* What the commit recorded on the batch, read back so a reload
+                  agrees. v3 imports every row of the file or none of them. */}
               <StatCard
                 label={
                   batch.status === "committed"
                     ? "Rows imported"
                     : "Rows in the file"
                 }
-                value={
-                  batch.status === "committed"
-                    ? rowsWritten(batch)
-                    : batch.row_count
-                }
+                value={batch.row_count}
               />
-              {batch.skipped_rows.length > 0 && (
-                <StatCard
-                  label="Rows skipped"
-                  value={batch.skipped_rows.length}
-                  accent
-                />
-              )}
               <StatCard
                 label="Committed"
                 value={
@@ -218,121 +362,57 @@ async function BatchReview({
             </div>
           )}
 
-          {review.unknownAgents.length > 0 && (
-            <section className="flex flex-col gap-2">
-              <h2 className="text-sm font-semibold tracking-tight">
-                Unrecognised agent numbers
-              </h2>
-              <p className="text-xs text-muted-foreground">
-                Each of these can be fixed here: give the number to a rep who
-                already exists, or create the rep. Then choose &ldquo;Read
-                again&rdquo;.
-              </p>
-              <ul className="flex flex-col gap-2">
-                {review.unknownAgents.map((group) => (
-                  <li
-                    key={group.agentNumber ?? "(blank)"}
-                    className="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-card px-4 py-3"
-                  >
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium">
-                        <span className="font-mono">
-                          {group.agentNumber === null
-                            ? "(no agent #)"
-                            : group.agentNumber}
-                        </span>
-                        <span className="ml-2 font-normal text-muted-foreground">
-                          {group.rowCount} row
-                          {group.rowCount === 1 ? "" : "s"}
-                        </span>
-                      </p>
-                      {group.sampleMerchants.length > 0 && (
-                        <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                          {group.sampleMerchants.join(", ")}
-                          {group.rowCount > group.sampleMerchants.length &&
-                            `, +${group.rowCount - group.sampleMerchants.length} more`}
-                        </p>
-                      )}
-                    </div>
-                    {/* A blank cell cannot be assigned to anyone — there is no
-                        number to give out — so that group gets no action. */}
-                    {group.agentNumber !== null && (
-                      <div className="flex shrink-0 items-center gap-2">
-                        <Button asChild variant="outline" size="sm">
-                          <Link href="/admin/users">Assign to a rep</Link>
-                        </Button>
-                        <Button asChild size="sm">
-                          <Link
-                            href={`/admin/users/new?agent_number=${encodeURIComponent(
-                              group.agentNumber,
-                            )}&returnTo=/payouts/import/${batch.id}`}
-                          >
-                            Create the rep
-                          </Link>
-                        </Button>
-                      </div>
-                    )}
-                  </li>
+          {review.refusals.length > 0 && (
+            <Callout tone="danger">
+              <div data-testid="import-refused" className="flex flex-col gap-3">
+                <p className="font-medium">
+                  This import is refused. Nothing can be committed until every
+                  problem below is fixed.
+                </p>
+                {review.unknownMids.length > 0 && (
+                  <div className="flex flex-col gap-1">
+                    <p>
+                      {review.unknownMids.length === 1
+                        ? "1 MID is not a merchant in the CRM"
+                        : `${review.unknownMids.length} MIDs are not merchants in the CRM`}
+                      :{" "}
+                      <span className="font-mono">
+                        {review.unknownMids.join(", ")}
+                      </span>
+                      .
+                    </p>
+                    <p className="text-muted-foreground">
+                      Add them (or correct their MID), then choose &ldquo;Read
+                      again&rdquo;. The file does not need uploading again.
+                    </p>
+                  </div>
+                )}
+                {fileProblems.map((problem) => (
+                  <div key={problem.blocker} className="flex flex-col gap-1">
+                    <p className="font-medium">
+                      {blockerLabel(problem.blocker)}
+                      <span className="ml-2 font-normal text-muted-foreground">
+                        {problem.rows.length} row
+                        {problem.rows.length === 1 ? "" : "s"}
+                      </span>
+                    </p>
+                    <RowList
+                      rows={problem.rows.map((line) => ({
+                        rowNumber: line.rowNumber,
+                        text: line.detail,
+                      }))}
+                    />
+                  </div>
                 ))}
-              </ul>
-            </section>
-          )}
-
-          {review.fileProblems.length > 0 && (
-            <section className="flex flex-col gap-2">
-              <h2 className="text-sm font-semibold tracking-tight">
-                Problems in the file
-              </h2>
-              <p className="text-xs text-muted-foreground">
-                These cannot be fixed here. Correct the spreadsheet and upload it
-                again — a re-upload merges by period, agent # and MID, so nothing
-                is duplicated and any figures already entered are kept.
-              </p>
-              {review.fileProblems.map((problem) => (
-                <div
-                  key={problem.blocker}
-                  className="flex flex-col gap-1 rounded-xl border bg-card px-4 py-3"
-                >
-                  <p className="text-sm font-medium">
-                    {blockerLabel(problem.blocker)}
-                    <span className="ml-2 font-normal text-muted-foreground">
-                      {problem.rows.length} row
-                      {problem.rows.length === 1 ? "" : "s"}
-                    </span>
+                {fileProblems.some(
+                  (problem) => problem.blocker !== "mid_in_other_batch",
+                ) && (
+                  <p className="text-muted-foreground">
+                    A problem in the file itself is not fixed by reading it
+                    again: abandon this import and upload a corrected file.
                   </p>
-                  <ul className="flex flex-col gap-0.5">
-                    {problem.rows.map((row) => (
-                      <li
-                        key={row.rowNumber}
-                        className="text-xs text-muted-foreground"
-                      >
-                        {/* The spreadsheet line, because that is what an admin
-                            counts when they open the file to fix it. */}
-                        Row {row.rowNumber} — {row.detail}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </section>
-          )}
-
-          {/* Rows the file marked Line = Adjustment, which the parser does
-              not stage (phase 5): a re-imported export carries the CRM's own
-              adjustment lines, and importing one would turn a correction into
-              processor data. Kept on the batch, so this survives a reload. */}
-          {batch.adjustment_rows_ignored > 0 && (
-            <Callout tone="warning">
-              <p className="font-medium" data-testid="adjustments-ignored">
-                {batch.adjustment_rows_ignored} adjustment line
-                {batch.adjustment_rows_ignored === 1 ? "" : "s"} ignored:
-                adjustments are entered in the CRM.
-              </p>
-              <p className="mt-1 text-muted-foreground">
-                The file had rows marked &ldquo;Adjustment&rdquo; in its Line
-                column. They were not read, and the adjustments already in the
-                ledger are unchanged.
-              </p>
+                )}
+              </div>
             </Callout>
           )}
 
@@ -342,16 +422,15 @@ async function BatchReview({
               data-testid="shared-account-flags"
             >
               <h2 className="text-sm font-semibold tracking-tight">
-                Shared accounts
+                Notes
                 <span className="ml-2 font-normal text-muted-foreground">
                   {flagged.length} row{flagged.length === 1 ? "" : "s"}
                 </span>
               </h2>
               <p className="text-xs text-muted-foreground">
-                None of these stops the import. They say what committing will
-                do with each row on a shared account, or warn that a row looks
-                shared and no share covers its month, as the shares stand now;
-                a share changed before you commit changes the outcome.
+                None of these stops the import. They say that a MID now pays a
+                different rep than last month, or that its shared-account split
+                does not cover this month, as the data stands now.
               </p>
               <ul className="flex flex-col gap-2">
                 {flagged.map((row) => (
@@ -374,12 +453,29 @@ async function BatchReview({
             </section>
           )}
 
+          {zeroed.length > 0 && batch.status === "review" && (
+            <Callout tone="warning">
+              <div data-testid="blank-figures">
+                <p className="font-medium">
+                  {zeroed.length === 1
+                    ? "1 row has a blank Volume or Residual, read as 0"
+                    : `${zeroed.length} rows have a blank Volume or Residual, read as 0`}
+                  .
+                </p>
+                <p className="mt-1 text-muted-foreground">
+                  Row{zeroed.length === 1 ? "" : "s"} {zeroed.join(", ")}. This
+                  does not stop the import.
+                </p>
+              </div>
+            </Callout>
+          )}
+
           {inactive.length > 0 && (
             <Callout tone="warning">
               <p className="font-medium">
                 {inactive.length === 1
-                  ? "One resolved rep is deactivated."
-                  : `${inactive.length} resolved reps are deactivated.`}
+                  ? "One payee is deactivated."
+                  : `${inactive.length} payees are deactivated.`}
               </p>
               <p className="mt-1 text-muted-foreground">
                 {inactive
@@ -396,24 +492,13 @@ async function BatchReview({
             </Callout>
           )}
 
-          {review.ready && batch.status === "review" && (
-            <Callout tone="success">
-              <p className="font-medium">
-                All {review.total} rows resolved. This import is ready.
-              </p>
-              <p className="mt-1 text-muted-foreground">
-                Committing merges by period, agent # and MID — so a row that is
-                already in the ledger is updated rather than duplicated, and any
-                residual income or split entered by hand is kept unless this file
-                supplies one.
-              </p>
-              <div className="mt-3">
-                <ResidualCommitButton
-                  batchId={batch.id}
-                  rowCount={review.total}
-                />
-              </div>
-            </Callout>
+          {batch.status === "review" && batch.processor !== null && (
+            <ResidualWarningConfirmations
+              batchId={batch.id}
+              rowCount={review.total}
+              ready={review.ready}
+              blocks={blocks}
+            />
           )}
         </>
       )}

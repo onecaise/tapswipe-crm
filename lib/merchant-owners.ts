@@ -4,10 +4,12 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * The owner picker on the admin's merchant form (security fix phase 1
  * follow-up, docs/claude/security-fixes.md).
  *
- * Owning a merchant decides whose book it is in -- who can SEE it. It does
- * not decide who is paid: commit_residual_import_v2 pays the rep named by
- * the processor file's Agent #, and never reads merchants.agent_id. Nor does
- * it touch merchant_rep_shares: a share names its two reps itself.
+ * Owning a merchant decides whose book it is in -- who can SEE it -- and,
+ * since phases 7-8 of docs/design/intake-and-reports.md, who is PAID: each
+ * residual is paid to the owner of the merchant its MID names, re-resolved
+ * by commit_residual_import_v3. A merchant with a live shared-account split
+ * cannot be moved (its signer must stay its owner); the database refuses it
+ * with a sentence, shown as it is.
  */
 
 export type OwnerProfile = {

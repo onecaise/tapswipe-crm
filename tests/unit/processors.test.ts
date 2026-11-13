@@ -21,17 +21,32 @@ import { BUSINESS_SECTION } from "@/lib/pre-app-form-fields";
 
 const ROOT = path.resolve(__dirname, "../..");
 
-/** The codes an `insert into processors ... values (...)` statement seeds, in order. */
-async function seededCodes(file: string): Promise<string[]> {
-  const sql = await readFile(path.join(ROOT, file), "utf8");
-  const insert = sql.match(/insert into processors \(code, label, sort_order\) values([\s\S]*?);/);
-  if (!insert) throw new Error(`no processors insert in ${file}`);
-  return [...insert[1].matchAll(/\(\s*'([^']+)'/g)].map((m) => m[1]);
+/**
+ * The codes every `insert into processors ... values (...)` statement in the
+ * files seeds, in file order then statement order: the five of 20261023130000,
+ * then 365 Pay (20261106120000, phase 14).
+ */
+async function seededCodes(...files: string[]): Promise<string[]> {
+  const codes: string[] = [];
+  for (const file of files) {
+    const sql = await readFile(path.join(ROOT, file), "utf8");
+    const inserts = [...sql.matchAll(/insert into processors \(code, label, sort_order\) values([\s\S]*?);/g)];
+    if (inserts.length === 0) throw new Error(`no processors insert in ${file}`);
+    for (const insert of inserts) {
+      codes.push(...[...insert[1].matchAll(/\(\s*'([^']+)'/g)].map((m) => m[1]));
+    }
+  }
+  return codes;
 }
 
 describe("the paper form's processor list", () => {
-  it("matches what the migration seeds, in order", async () => {
-    expect(await seededCodes("supabase/migrations/20261023130000_processors.sql")).toEqual([
+  it("matches what the two migrations seed, in order", async () => {
+    expect(
+      await seededCodes(
+        "supabase/migrations/20261023130000_processors.sql",
+        "supabase/migrations/20261106120000_merchant_import.sql",
+      ),
+    ).toEqual([
       ...PAPER_PROCESSOR_CODES,
     ]);
   });

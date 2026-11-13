@@ -1,17 +1,21 @@
 # Pre-app intake, MID-based residual import, overrides and reports: design memo
 
-Status: **Revision 3, 28 Oct 2026. Decisions taken; phases 1-5 built locally (§10).** Nothing has
-been run against dev or prod.
+Status: **Revision 3, 28 Oct 2026. Decisions taken. The build plan is complete: phases 1 to 14,
+the merchant bulk import included, are built locally (§10), and phase 15 (the real ISO Hub files,
+§0d) on 11 Nov 2026.** Nothing has been run against dev or prod.
 
 - Owen's decisions of 23 Oct 2026 are recorded in §0 and are binding. Where an older paragraph
   below says **Recommend**, §0 is what was decided.
 - Owen's later answers of 28 Oct 2026 (§0c) close two §11 questions (deductions, the 50 cap).
+- Owen's decisions of 11 Nov 2026 (§0d), from the real ISO Hub files, supersede §0b.1 and §2.4
+  where they differ: a fourth warning (`other_income_type`), filler rows skipped, blank figures 0.
 - Owen's decisions of 28 Oct 2026 (§0b), taken from his real residual file and his current payout
   report, are also binding and **supersede §0 where they differ**: the split is a per-rep rate, not
   a constant 50, and the file has six columns. §11 lists the questions still open.
 - §9 lists the remaining defaults this memo assumes. The ones marked **[CONFIRM]** affect money,
   security or what reps can see, and are waiting for Owen's confirmation.
-- §8 is the 13-phase build plan, and §8.4 lists the CLAUDE.md rules each phase must change.
+- §8 is the build plan (13 phases, and the merchant bulk import added as 14), and §8.4 lists the
+  CLAUDE.md rules each phase must change.
 
 Inputs: Owen's requirements A-H (23 Oct 2026), `CLAUDE.md`, `docs/claude/*.md`,
 `docs/design/residual-splits.md` (the shared-account memo, phases 1-8 built locally) and
@@ -57,8 +61,10 @@ each phase in §8 edits it before the migration.
    - These are **confirmable** (yes/no):
      - processor mismatch
      - inactive merchant
-     - bad numbers: volume ≤ 0, or residual > volume. This is the only path by which a negative
-       volume can enter.
+     - bad numbers: volume < 0, or volume > 0 and residual > volume. This is the only path by
+       which a negative volume can enter. *(Amended 4 Nov 2026: was "volume ≤ 0, or residual >
+       volume". A zero-volume line is not a bad number, whatever its residual; §0b.3, and the
+       Phase 12c build notes.)*
    - Every confirmation is recomputed and enforced in the database at commit.
 5. **Residuals are not editable after commit.** A fix is either a **replace** of that processor and
    month, allowed until the month is marked paid, or an **adjustment line** once it is paid.
@@ -92,10 +98,13 @@ each phase in §8 edits it before the migration.
      five real processor names; Owen's sample uses a placeholder, so **tests use real names**.
 2. **One merchant per MID.** Several MIDs can share one merchant name: a business with 7 locations is
    7 merchant records, each with its own MID. No schema change (§2.0).
-3. **Warnings come in bulk.** Rows with zero volume and a small or negative residual are common
-   (monthly fees, clawbacks). The yes/no confirmation is **one per warning type per import**, not
+3. **Warnings come in bulk.** The yes/no confirmation is **one per warning type per import**, not
    per line. The commit still recomputes every warning in the database and refuses any type the
-   admin did not confirm.
+   admin did not confirm. *(Amended 4 Nov 2026.)* Rows with zero volume and a negative, zero or
+   positive residual are common (monthly fees, chargebacks, closing fees on a closed merchant), so
+   they raise **no** warning: with one yes per type, counting them meant the admin answered yes on
+   every import, and that yes also passed the rows `bad_numbers` exists for (a negative volume, or
+   a residual above a positive volume).
 4. **A split rate replaces "fixed 50".**
    - Each rep profile has a rate: default 50, `CHECK` between 0 and 50, set **only** by a new
      admin-only, audited, `security definer` function `set_rep_split`, never by a direct update.
@@ -128,6 +137,35 @@ each phase in §8 edits it before the migration.
    part of the total: **"Deductions (info only, not in total)"**. Closes §11 Q4.
 2. **50 is the maximum rep rate.** The 0-50 limit stays on the profile, pre-app and merchant rates
    and on the override's outer bound. Closes §11 Q2.
+
+---
+
+## 0d. Owen's decisions (11 Nov 2026), binding; the real ISO Hub files (phase 15)
+
+Taken against the 33 files chosen in `load-manifest.csv` (Jan-Sep 2026, five processors), which
+stay outside the repo. They supersede §0b.1 and §2.4 where they differ:
+
+1. **Income Type** "Residual", "Residuals" (case and spaces ignored) and blank are residuals.
+   Anything else is decided by measurement (step 0): ACH rows are imported under a **fourth
+   confirmable warning, `other_income_type`**, shown with their count and sums, because ISO Hub's
+   own monthly Net includes them (below). `wrong_income_type` is no longer raised.
+2. **Filler rows are skipped**: no MID, no merchant name, no Volume and no Residual, whatever the
+   Processor or Income Type cells say. A row with figures but no MID still refuses (`missing_mid`).
+3. **Processor** names compare ignoring case, spaces and punctuation, plus the aliases
+   **Goat -> TSYS** and **Netevia -> Netevia HQ**. A **blank** Processor cell on a merchant row is
+   no warning. Any other mismatch keeps the `processor_mismatch` warning.
+4. **A numeric MID cell** that is a whole number of 15 digits or fewer is read by its stored value,
+   even when Excel shows it in exponent form (this reverses phase 14b's choice). Over 15 digits, or
+   not an integer, still refuses; text that looks mangled ("4.001E+11") still refuses.
+5. **A blank Volume or Residual on a row with a MID is 0**, with the count shown on the review screen.
+6. **Volume and Residual round in exact decimal, half up** (half away from zero, as Postgres), never
+   in binary floating point.
+
+Step 0's measure (aggregates only): 26 rows have Income Type ACH. 20 are filler (no MID, name or
+figures) and fall under 2. The other six, one each in TSYS January to May and July, hold volume
+267,271.27 and residual 1,541.53 in total. In each of those six months the file reproduces ISO Hub's
+Volume and Net to the cent **with** the ACH row and misses by that row **without** it, so they are
+imported (rule 1).
 
 ---
 
@@ -470,8 +508,8 @@ locations, not a duplicate.
    - Blocked rows, starting with unknown or repeated MIDs, mean **Commit is disabled**, with the
      list and "Read again".
    - Otherwise, **one confirmation block per warning type present in the import** (never one per
-     line, §0b.3), each listing its rows (collapsed past the first few, since zero-volume fee and
-     clawback rows are common), with **Yes / No** buttons.
+     line, §0b.3), each listing its rows (collapsed past the first few, since one type can cover
+     many rows), with **Yes / No** buttons.
    - Commit is enabled only when every type present has a Yes. A No on any type means the admin
      abandons the batch or fixes the data and reads again.
 4. **Commit**: `commit_residual_import_v3(batch_id_input int, confirmed_input text[])`
@@ -523,6 +561,10 @@ and override edits cannot interleave with a commit. Its own `revoke` / `grant ex
 
 ### 2.4 The refusals and the three confirmations (as decided, §0.4)
 
+> Since phase 15 (§0d): another Income Type is the fourth confirmation, `other_income_type`, not a
+> refusal; a blank Processor cell and the aliases Goat / Netevia are no `processor_mismatch`; a blank
+> figure on a row with a MID is 0, not `missing_figure`. The table below is the phase 7 text.
+
 | Code | Kind | Rule | On Yes |
 | --- | --- | --- | --- |
 | `unknown_mid` | **Blocker; refuses the batch** | `mid_raw` matches no `merchants.mid` (exact text after trim, as today's lookup). | Not confirmable. The review screen's red Callout at the top: "This import is refused. 3 MIDs are not merchants in the CRM: 4400…, 4401…, 4402…. Add them (or correct their MID), then Read again." The screen is the alert (§9, A9). |
@@ -532,7 +574,7 @@ and override edits cannot interleave with a commit. Its own `revoke` / `grant ex
 | `missing_mid`, `missing_figure`, `unreadable_number` | Blockers | As today, plus a blank Volume or Residual. `unreadable_number` is today's `bad_number`, renamed so that "bad numbers" means only the confirmable warning below. Currency text (`$76,877.18`, `-$11.76`) is readable; anything else is not. | Not confirmable. |
 | `processor_mismatch` | Warning | The row's `Processor` cell differs from the batch processor (§0b.1), **or** `merchants.processor` is set and differs from it. **A merchant with no processor is not a mismatch** (§9, A6). | The lines are recorded under the **batch's** processor. The merchant's processor is not changed automatically; the review screen links to the merchant. |
 | `inactive_merchant` | Warning | `merchants.status = 'inactive'`. `'other'` does not trigger it. | Paid to the owner as normal. |
-| `bad_numbers` | Warning | `volume <= 0`, or `residual > volume`. Common on real files: zero-volume rows with a small or negative residual are monthly fees and clawbacks (§0b.3), so one "yes" per import covers them all. | Imported as read. **Needs a schema change:** `rep_payout_rows_volume_check` (`volume >= 0`) would refuse a negative volume. It becomes `volume >= 0 or volume_confirmed_negative`, where `volume_confirmed_negative` is a boolean only v3 sets, and only for a row whose `bad_numbers` warning was confirmed. So a negative volume can enter **only** through this path (§0.4), and the column records which lines did. |
+| `bad_numbers` | Warning | `volume < 0`, or `volume > 0` and `residual > volume` (amended 4 Nov 2026, `20261104120000`; was `volume <= 0`, or `residual > volume`). A **zero-volume** row raises nothing, whatever its residual: those are monthly fees, chargebacks and closing fees, common on real files (§0b.3). A negative residual on a positive volume raises nothing either (A25). | Imported as read. **Needs a schema change:** `rep_payout_rows_volume_check` (`volume >= 0`) would refuse a negative volume. It becomes `volume >= 0 or volume_confirmed_negative`, where `volume_confirmed_negative` is a boolean only v3 sets, and only for a row whose `bad_numbers` warning was confirmed. So a negative volume can enter **only** through this path (§0.4), and the column records which lines did. |
 
 The warning codes live in a CHECKed vocabulary on `rep_payout_import_rows.warnings` (each element
 `in (…)`, enforced by a trigger or a CHECK over `array <@`). The rule for each lives **once**, in
@@ -1094,6 +1136,7 @@ Thirteen phases, one prompt and one commit each, with the schema doc edited firs
 | 11 | Residual lock and payout UI cleanup | Revoke client UPDATE on `rep_payout_rows`; remove `PayoutFigureCell`, `PayoutBulkSplit`, `SharedResidualControl` and the round-trip copy; drop `set_shared_residual()`; new export header. | **R** (§0.5: not editable from the first import) | `rls/rep-payout-update-grant` (inverted: no UPDATE), `rls/shared-lines` (`set_shared_residual` tests retired), `rls/payout-history-trigger` (no client edit path; trigger kept as backstop), `unit/payout-figure-cell` (deleted), `unit/payouts`, `live/residual-import` (export header, 42501 test inverted), `e2e/payouts-editing` (retired or rewritten), `e2e/payouts-shares`, `e2e/payouts-states`, `e2e/qa/payout-figure-comma` (retired) |
 | 12 | Reports | `rep_payout_summary()` (Owen's nine columns, §7.2; the rate read from each line's `rep_split_pct`) and `merchant_processor_summary()` (both `security invoker`), `/admin/reports` page, admin nav item. | none (after 10) | none existing; `unit/` nav test only if one asserts the Admin group's items |
 | 13 | Docs and the old commit | CLAUDE.md, `docs/claude/*`, `RESIDUALS_SPEC.md` addendum, a docs-index line for this memo, and `commit_residual_import(int)` dropped once the new app is on dev and prod. | after deploy | `rls/commit-residual-import` (deleted with the function), `unit/claude-md` (index) |
+| 14 | Merchant bulk import | The ISO Hub merchants export (CSV or XLSX) staged by `stage-merchant-import`, reviewed, and committed all-or-nothing by `commit_merchant_import()`, which re-derives every check; the sixth processor, 365 Pay. Built 6 Nov 2026 (§10). | before the first real residual import (its MIDs must exist) | `rls/processors` + `unit/processors` + `live/grant-surface` (six processors), `rls/reset-business-data` + `live/reset-business-data` (39 tables, six processors), the grants inventory |
 
 ### 8.2 Size and order notes
 
@@ -1234,6 +1277,7 @@ Each item is what the build will assume unless Owen says otherwise.
 | A28 | Sharing a house merchant | **[CONFIRM: money]** Refused: a merchant at rate 0 has no rep side to divide. | Two shares of 0 pay nobody and only add lines. |
 | A29 | Lowering a merchant's rate below its open override | **[CONFIRM: money]** `set_merchant_split` refuses it, naming the override; the admin ends or changes the override first. | Otherwise the override would exceed the rate (§0b.5) and the rep's net would go negative. |
 | A30 | Rate precision | `numeric(5,2)`, 0.00-50.00 in 0.01 steps, matching `split_agent_pct` and the override. | The existing columns already have that type; Bruce Rozar's ~46% effective rate (§11) may be a blend, not a single rate. |
+| A31 | A merchant created without a rate | *Decided (Owen, 30 Oct 2026):* it takes the owner rep's CURRENT profile rate at creation, as a snapshot, by the approval rule (company = 100 minus it); the house profile gives 0. No rate is invented: an owner with none refuses the insert. A later change to the rep's rate does not touch existing merchants. Built with phase 9 (`20261030180000`). | A hand-made merchant (the merchant form) had no rate, and v3 refused its MID until someone remembered `set_merchant_split`. |
 
 ---
 
@@ -1563,6 +1607,1156 @@ Found while building:
   default (a test bug here, not an app bug).
 - The guard's message reads "a approved pre-app" (existing grammar, not changed).
 - The Supabase CLI is still linked to PROD, as phases 1 and 4 found; nothing linked was run.
+
+### Phase 6: import schema (30 Oct 2026, branch `intake-residuals`)
+
+Built (`20261030120000_import_schema.sql`; database only, no Edge Function changed):
+- `rep_payout_batches`: `processor` (FK `processors`), `period` (the 1st), set together or not at
+  all; `replaces_batch_id` / `replaced_by_batch_id` (self FKs); status gains `replaced`, which
+  needs `replaced_by_batch_id` and vice versa. The import window (memo A11) is the trigger
+  `guard_payout_batch_period()`: not after the current month, not more than 24 months before it
+  (24 back accepted, 25 refused).
+- `rep_payout_batches_one_committed_per_month`: unique `(processor, period) where status =
+  'committed'`. Review, abandoned and replaced batches are not limited.
+- Staging: `warnings text[]` (the three confirmable types) and the six new blocker codes beside
+  the five the deployed parser still writes.
+- Ledger: `processor` (FK, snapshot of the batch's), `volume_confirmed_negative`, the volume rule,
+  and the merge key `(period, processor, agent_id, mid) NULLS NOT DISTINCT where line_kind =
+  'import'`. Both commit functions re-created to write `batch.processor` and name the new key;
+  nothing else in them changed (pinned by a test that undoes the edits and compares bodies).
+- `payout_period_closures (period, processor, closed_at)`: admin SELECT, no client write, no
+  UPDATE, no future month, every insert and delete audited by its own trigger.
+- `scripts/reset-business-data.sql` clears the new table (36 tables).
+- Tests: `tests/rls/import-schema.test.ts` (catalog diff, every rule above, the migration's
+  refusals and its pass over a populated database).
+
+**Where the coalesce merge rule lives now, and what phase 8 must change.** The latest definitions
+of both functions are in `20261030120000` (§4 of the file): `commit_residual_import(int)` (its one
+`on conflict … do update`) and `commit_residual_import_v2(int)` step 3, the ordinary-rows upsert
+(`residual_income = coalesce(excluded.residual_income, rep_payout_rows.residual_income)` and the
+same for `rep_split_pct`). v2's shared-signer conflict writes no money ("NEVER THE MONEY ON
+CONFLICT") and its partner insert is `do nothing`. Phase 8: v3 never merges (plain insert; a second
+import of a processor-month is phase 9's replace), drop v2, and rewrite the CLAUDE.md rule line and
+Three tiers §3 to say the old function still carries the rule; `tests/rls/commit-residual-import-v2.test.ts`
+(which greps for it) goes with v2. Phase 13 drops `commit_residual_import(int)`, its test and the
+rule text.
+
+Where the memo was silent or said otherwise, and what was chosen (conservative side each time):
+- **`processor` and `period` are nullable in this phase**, though §1.B says `not null`.
+  `residual-import-file-url` still creates batches without them until phase 7, and making them
+  required now would break the current upload → commit path (and the live and e2e suites that
+  drive it). Instead: together-or-neither, FK, first-of-month and the window apply to every value
+  written. **The phase that makes them `NOT NULL` must first refuse, naming the ids, any committed
+  batch that has none.**
+- **So this migration has no batch row it cannot carry.** Every new batch column is nullable and
+  every new batch CHECK passes on a row that has none of them. Its refusals are what it can
+  actually break: a ledger line with a negative volume (only possible where the old CHECK was
+  altered by hand; named by id), and four preconditions on the definitions it replaces (merge key,
+  volume CHECK, status CHECK, blocker CHECK). No empty-table assertion (§8.1), per the phase 1
+  lesson.
+- **The window is a trigger, not a CHECK**: a CHECK reading the clock passes on insert and refuses
+  the same row on a restore years later. It checks the period only when it is written. "Current
+  month" is UTC, pinned rather than read from the session's TimeZone.
+- **`replaced` is added now** (§8.1 puts it in phase 6, §8.4 in phase 9): a replaced batch must
+  leave the one-committed rule, so the status is part of the rule's shape. Phase 9 still owns the
+  replace itself and the definer-side transitions (`committed -> replaced` only, `replaced`
+  terminal); the client rule is unchanged (review -> abandoned only), and a client cannot set
+  `replaced`.
+- **A replace pair cannot point at itself, and a batch that replaces another must carry a
+  processor-month.** Not in the memo; cheap and strictly tighter.
+- **NULLs distinct in the batch rule, NOT distinct in the merge key.** A batch without a processor
+  has no month to be unique on. A ledger line without one (every line today) must still collide
+  with its twin, or a re-import would duplicate a month instead of merging it.
+- **The volume rule is stricter than §2.4's `volume >= 0 or volume_confirmed_negative`**: it is
+  `volume_confirmed_negative = coalesce(volume < 0, false)`, so the marker is allowed only on a
+  negative volume and the column says exactly which lines entered that way. Phase 8 must set the
+  marker on negative-volume lines only, not on every confirmed `bad_numbers` row (a zero-volume or
+  residual-over-volume row stays unmarked). Zero and NULL volume stay allowed unmarked. No existing
+  test inserted a negative volume, so none had to be marked; "rejects a negative volume" in
+  `rep-payouts.test.ts` still holds (unmarked) and is unchanged.
+- **Staging `warnings` and the new blocker codes are in this phase** (§8.1), but the TypeScript
+  lists (`PAYOUT_BLOCKERS`, labels) are not touched: they move with the parser in phase 7, which
+  also removes the five old codes. The staging raw columns (`processor_raw`, `income_type_raw`) and
+  `confirmed_warnings` / `replace_summary` on batches are left to phases 7-9, which write them.
+- **`payout_period_closures` has no `closed_by` and no confirmation column**, as §3.2 says (Owen
+  confirmed 30 Oct 2026, over the phase 6 instruction's wording). Who marked it is the audit row.
+- **The closure audit is a table trigger, not a line in each RPC**, so every verb is audited
+  whoever writes (CLAUDE.md's every-verb rule). Phase 9's `close_payout_period()` and
+  `reopen_payout_period()` must therefore NOT write their own `close_payout_period` /
+  `reopen_payout_period` rows (the trail would double); the reopen's reason goes on its
+  `payout_period_reopenings` row. Row id format: `'2026-07-01/TSYS'`.
+- **A closure is never UPDATEd and never for a month that has not begun**, enforced by a trigger.
+  Phase 9's close function should also require a committed batch for that processor-month (not
+  enforced here; phase 9 owns that rule).
+- **`close_payout_period()` is NOT built here**, though §8.1 lists it under phase 6: the phase 6
+  instruction moved it to phase 9 with Reopen.
+- **`service_role` gets SELECT on the closures table**, as `processors`; nothing writes it outside
+  a definer function.
+- **v2's partner line copies its signer line's processor.** A filter matching the signer line to
+  the batch's processor was written first and taken out: the partner's conflict target already
+  separates processors, so no test could tell it was there.
+
+Not done here, for later phases:
+- **Phase 7:** a NULL-processor import line (everything committed before phase 7) and a
+  processor-tagged one are different keys now, so a legacy month re-imported under a processor would
+  sit beside the old lines. Nothing writes a tagged line before phase 7; its `mid_in_other_batch`
+  blocker must count a NULL-processor line as "another processor's".
+- **Phase 8:** check a staged row's period against its batch's (v3 takes the month from the batch),
+  and write `processor` from the batch on every line, adjustments excepted.
+
+Found while building: PGlite's `service_role` has no BYPASSRLS (the hosted one does), so a test
+that reads an admin-only table as `service_role` sees nothing there; `import-schema.test.ts` reads
+back as the owner and says why.
+
+### Phase 7: parser and upload page (30 Oct 2026, branch `intake-residuals`)
+
+Step 0 first: the eleven payout specs Phase 6 could not run passed 86/86 (80 + 6 setup) on a
+freshly restarted stack. The earlier failure was the environment, not Phase 6: two Playwright
+runs and a `next dev` from an earlier session were still running and holding port 3000.
+
+Built (`20261030140000_import_parser.sql`; Edge Functions `parse-residual-import`,
+`residual-import-file-url`, `export-residuals` (header constants only) and `_shared/residuals.ts`,
+`_shared/residual-imports.ts`):
+- **The six-column parser** (`_shared/residuals.ts`, still the only copy). It reads Processor,
+  Merchant Number, Merchant Name, Income Type, Volume and Residual. Headers are matched by name,
+  case- and whitespace-insensitively, after stripping a BOM and a leading apostrophe. The Merchant
+  Number is read as text: a numeric cell uses its formatted text when that is all digits (a
+  zero-padded format keeps its zeros), and otherwise its integer written out in full, never
+  `1.23457E+11`. Currency text is read (`$76,877.18`, `-$11.76`, `$-11.76`). The function reads
+  the sheet twice, as values and as displayed text.
+- **Payee by MID.** Each row's merchant is found by `merchants.mid`, and `agent_id` is that
+  merchant's owner. Agent # is not read; `profiles.agent_number` is now a display code only.
+- **Refusals** (`blockers text[]`, every code a row trips; `blocker` is the first by precedence,
+  for v2's `blocker is not null`): `missing_mid`, `duplicate_mid` (every row of a repeat),
+  `unknown_mid`, `mid_in_other_batch` (an import line for the month whose processor is another
+  one or NULL), `wrong_income_type`, `missing_figure`, `unreadable_number`. The four Agent #-era
+  codes are gone from the CHECK and from `lib/payouts.ts`.
+- **Warnings** (`warnings`): `processor_mismatch` (the file's cell or the merchant's saved
+  processor is not the batch's; a merchant with none is not a mismatch, A6), `inactive_merchant`
+  (only `inactive`, A26), and `bad_numbers` (volume ≤ 0 or residual > volume; a clawback on a
+  positive volume is silent, A25). They are stored per row, and the review screen asks one yes/no
+  per type.
+- **Notes**: `payee_changed` (A10) is new. The three share flags and `share_not_in_force` stay;
+  `looks_shared` is retired.
+- **Upload page**: Processor (from `processors`), Year and Month (this UTC month and the 24
+  before it, computed on the server), and the file. A committed processor-month returns
+  `{exists: {batch_id, file_name, committed_at, paid}}` and **no batch is created**. The page shows
+  the replace prompt's facts ("TSYS for July 2026 was already imported on … Replace it?") and says
+  the replace is not available yet. The import list shows each batch's processor and month.
+- **Review screen**: a red refusal Callout at the top listing every unknown MID and every other
+  refusal by row. One yes/no block per warning type, with rows folded past five. Commit is
+  offered only with no refusal and a yes on every type present. The Agent # "Assign / Create the
+  rep" section is gone.
+- **Required processor and month** on every new batch. The migration refuses, by id, a
+  committed or replaced batch without them, and by batch id any staged row with a retired code.
+  It then adds `require_payout_batch_month()`: an INSERT without both is PT400, an UPDATE cannot
+  clear them, and committing a batch without them is PT409. A validated CHECK
+  (`rep_payout_batches_month_when_committed`) backs it up. It is deliberately not NOT NULL (below).
+- Tests: `tests/rls/import-parser.test.ts` (new), `tests/unit/residuals-parse.test.ts`
+  (rewritten; it drives real XLSX bytes through the same SheetJS build), and
+  `tests/unit/residuals-preview.test.ts`, `tests/unit/payouts.test.ts`,
+  `tests/unit/figure-comma.test.ts`, `tests/live/residual-import.test.ts` (upload half rewritten),
+  `e2e/qa/residual-bad-import.spec.ts`, `e2e/qa/residual-import-comma.spec.ts` and the new
+  `e2e/qa/residual-review.spec.ts`. Fixtures: `seedPayouts()` (processor and relative months on
+  its batches, TSYS on its lines, `unknown_mid` as its refusal), new `insertBatch()` /
+  `freeBatchMonth()`, e2e `freeBatchSlot()`, and `seed-dev-payouts.mjs`.
+
+Where the memo was silent or said otherwise, and what was chosen (the conservative side each time):
+- **Processor and month are required on new batches by trigger, not by `NOT NULL`.** Review and
+  abandoned batches from before have neither, and there is no honest value to give them. They
+  are left untouched: a legacy review batch can still be abandoned, but it cannot be read again
+  (parse returns 409) or committed (trigger, then CHECK).
+- **Missing, repeated or unknown header columns are a whole-file 400, not staged rows**, as
+  before (D-08: the upload page abandons the batch). There is no MID to stage a row against, and
+  Read again cannot fix the shape. A column given twice is refused rather than first-wins. The
+  column order is not enforced, because columns are matched by name.
+- **The CRM export is refused with its own sentence** (§2.6 Recommend, built): a file with
+  `Agent #` or `Rep payout` is rejected, and so is the old seven-column Agent # file.
+- **Every refusal is kept per row** (`blockers`), which the memo does not have, so "every unknown
+  MID listed" holds even when a row is also a repeat or has a wrong Income Type.
+- **`duplicate_mid` refuses every occurrence, the first included.** A blank Income Type is
+  wrong. The singular "Residual" is wrong. A blank Processor cell is a `processor_mismatch`.
+- **A MID's length is not checked** (the 11-12 digits is a description, not a rule); unknown_mid
+  catches a wrong one. MIDs that differ only by a leading zero are different MIDs.
+- **Warnings are computed on blocked rows too** (where their inputs exist). Notes go only on
+  unblocked rows.
+- **The share preview flags are kept, against §8.1's "three flags removed".** The commit is still
+  v2, and v2 still skips a row whose owner is the partner and still imports a row whose owner is
+  outside the pair as ordinary. Removing the flags now would hide what the commit is about to do
+  with money. They retire with v2 in phase 8, when signer = owner makes them impossible.
+  `looks_shared` is retired now, because it read the rep the file named. The CHECK still allows
+  it for rows staged before.
+- **`payee_changed`** compares last month's import lines (any processor, signer or unshared only,
+  never a partner's) with the current owner. A MID with no line last month gets no note. When a
+  row has several notes, the flag shows the first (share flags, then payee_changed, then
+  share_not_in_force) and the note text holds them all.
+- **The parser writes no split** (`rep_split_pct` null) and no average ticket or total cost. The
+  rate is the merchant's, written at commit in phase 8; until then the admin fills it as before.
+- **`agent_number_raw` is not written**, so v2's skip record carries `agent_number: null`.
+- **`mid_in_other_batch` counts any import line for the month** with another or NULL processor,
+  whichever batch (or none) wrote it.
+- **The upload page has no default month.** The admin chooses, because a wrong default would
+  file a month under the wrong period. The window is the trigger's: the function checks the
+  shape only and passes the trigger's own sentence back.
+- **The replace prompt has no Yes.** The function does not accept `replace_batch_id`.
+- **Confirmations are page state in this phase.** v2 reads no warnings; v3 takes the confirmed
+  types and enforces them. A No keeps the commit closed and says what to do.
+- **A confirmed negative volume still cannot be committed.** v2 does not set
+  `volume_confirmed_negative`, so the ledger's volume CHECK refuses the line, and the admin sees
+  the constraint's message. That path is phase 8's.
+
+Not done here, for later phases:
+- **Phase 8.** Re-resolve the owner at commit. v2 still pays the staged `agent_id`, so an owner
+  changed between Read and Commit is paid as staged. Also: take the confirmed types; set the
+  negative-volume marker; check the staged month against the batch's. **The fixtures' staged and
+  batch months differ today**: hermetic batches take relative months while their rows are
+  2026-06/07, and e2e rows are 2027-2028 while their batches take free in-window slots. Phase 8
+  must align them.
+- **Phase 9.** The replace (the prompt's Yes), and `paid` from Mark paid. The `paid: true` branch
+  of the upload's answer cannot be exercised yet, because nothing can write
+  `payout_period_closures`.
+- **Phase 11** changes the export header; `EXPORT_COLUMN_HEADERS` holds the old one until then.
+- **Cleanup**: drop `looks_shared` from the CHECK, and `skipped_rows` / `adjustment_rows_ignored`
+  UI.
+
+Found while building:
+- **The coalesce merge cannot be reached through the real upload any more.** A second file for a
+  committed processor-month is the replace prompt, and the same MID under another processor is
+  `mid_in_other_batch`. The live "merges a re-import" test became "a second file is the replace
+  prompt, and the figures stay"; the rule itself is still pinned in SQL
+  (`tests/rls/commit-residual-import*.test.ts`) until phase 8.
+- **The local database held 22 committed batches with no processor** (earlier e2e runs). The
+  migration refused them, as designed, and the local stack was rebuilt (`supabase db reset`).
+- Fixtures that seed a ledger line and re-import it must give both the same processor, since the
+  processor joined the merge key. `seedPayouts()` now tags its lines TSYS, and the two
+  duplicate-key tests copy the seeded line's processor.
+
+### Phase 8: commit v3 (30 Oct 2026, branch `intake-residuals`)
+
+Built (`20261030160000_commit_v3.sql`; Edge Function `parse-residual-import` and
+`_shared/residuals.ts` changed, the share flags only):
+- **`commit_residual_import_v3(batch_id_input int, confirmed_input text[])`** returns
+  `{written, rows, shared, overrides, replaced_lines}`. Definer, `search_path = public, pg_temp`,
+  `is_admin()` first, its own revoke/grant lines (anon has no EXECUTE; a rep meets PT403). One
+  transaction: batch `for update`, an advisory lock on the processor-month, the share lock, `for
+  share` on every merchant the file names. Refuses (PT409, listing what it found) a batch not in
+  review, without a month, beside a committed batch for its processor-month, with no rows or a
+  blocked row; a row read for another month, a blank/repeated/unknown MID, a wrong Income Type, a
+  missing figure, an owner or MID changed since the read, a merchant with no rate, a MID already
+  in the month, and a covering share whose signer is not the owner or whose shares do not total
+  the rate. Recomputes the three warnings and refuses any type not confirmed (DETAIL = the codes).
+  Plain inserts, never a merge. `rep_split_pct` = the merchant's rate; the house at 0 still gets
+  its line. A shared row is the signer's and the partner's line, pieces by `shared_part`, at
+  commit. `volume_confirmed_negative` exactly where volume < 0. `skipped_rows = '[]'`,
+  `confirmed_warnings` kept on the batch, one `commit_residual_import` audit row.
+- **`commit_residual_import_v2` dropped.** `commit_residual_import(int)` stays (phase 13).
+- **The merchant's rate**: `merchants_split_zero_to_fifty` (validated; NULL/NULL or 0-50 with
+  the company half 100 minus it), `set_merchant_split(merchant_id, rate)` (the `set_rep_split`
+  shape, audited, refused while a share is live), and `guard_merchant_split_and_owner()` refusing
+  every other UPDATE of the two columns, and moving a merchant with a live share. The merchant
+  form's split input is gone; the merchant page has an admin Split control
+  (`components/merchant-split-cell.tsx`).
+- **Shares under the owner rule**: `set_merchant_rep_share()` refuses a signer who is not the
+  owner, a merchant with no rate or at 0 (A28), and shares that do not total the rate; the
+  table's and the ledger snapshot's `= 50` CHECKs are relaxed to `<= 50`.
+- **The app**: the commit button calls v3 with the types answered yes; the review page's notes
+  copy updated. The merchant page's share card holds a new share to the merchant's rate (its
+  client check and "Company N%" line; `lib/rep-shares.ts` takes the total), and says the signer is
+  the owner; the correction form keeps its ratio out of 50. The signer select is unchanged: the
+  RPC refuses anyone but the owner with a sentence the card shows.
+- **The parser**: v2's three share flags (`share_not_applied`, `partner_named`,
+  `line_not_shared`) and `previewSharedRow` / `sharePreviewNote` removed (§2.1); `share_not_in_force`
+  and `payee_changed` stay.
+- Tests: new `tests/rls/commit-residual-import-v3.test.ts` (each refusal, each unconfirmed
+  warning, the owner-changed and MID-moved cases, no merge, the money grid at 0, 30, 45 and 50 and
+  eight share splits across odd-cent residuals including exact half-cent ties, the marker, the
+  audit row, grants, the rate CHECK, `set_merchant_split`, the move refusal, the migration's
+  refusal and pass, and eight mutation proofs that each remove one protection from a copy of v3
+  and watch its case go through). `tests/rls/commit-residual-import-v2.test.ts` deleted with v2.
+
+Where the memo was silent, and what was chosen (the conservative side each time):
+- **An owner changed between Read and Commit is refused, never re-paid** (§2.3 step 2 says
+  refuse; followed). So is a MID moved to another merchant, and a staged payee that is not the
+  owner. The review screen does not show it as a blocker; the commit's sentence says "Read it
+  again".
+- **A MID that already has an import line in the month refuses, whatever its processor** —
+  including a legacy NULL-processor line or one with no committed batch beside it. Stricter than
+  `mid_in_other_batch` (which the parser still shows); it is what "never merge" needs.
+- **A merchant with no rate refuses** (hand-made merchants have none, and the form no longer
+  sets one). No rate is invented.
+- **`confirmed_input`**: NULL means none; an unknown code is 22023; a yes to a type not present is
+  accepted and not recorded. `confirmed_warnings` holds the types PRESENT and their sheet rows
+  (`{}` when none).
+- **Who committed is the audit row** (`actor_id`), when is `committed_at`. No `committed_by`
+  column: it would be the 26th `profiles` FK and a fifth entry in every teardown list.
+- **`merchant_name` is the merchant's `dba`**, falling back to the file's name if the merchant has
+  none. `average_ticket` / `total_cost` are copied from staging (the parser writes neither).
+- **The result also returns `rows`** (file rows) beside `written` (lines), and `overrides: 0`,
+  `replaced_lines: 0` so phases 9 and 10 only fill them in.
+- **Overrides plug in at v3's step 6**, after the import lines and before the batch closes, from
+  the same merchant rows; nothing about the rep amount changes.
+- **The split guard is a trigger, not a column grant** (the phase 4 `pre_apps` precedent: a grant
+  list on `merchants` would drift). It guards UPDATE only: `approve_pre_app()` inserts the
+  snapshot, and a hand-made merchant starts with none.
+- **"Live share"** (refuses `set_merchant_split` and an owner move): open-ended, or ending after
+  the latest month with an import line for that merchant — any month if it has none. A future
+  share counts.
+- **`set_merchant_split`**: PT400 for a bad rate (as `set_rep_split`), a same-value call is a no-op
+  with no audit row, the share lock taken.
+- **The merchants CHECK carries the company half** (`= 100 - rate`); `merchants_split_totals_100`
+  stays NOT VALID, untouched. The migration refuses, by id, any merchant outside the new CHECK.
+- **The hermetic fixture's merchants are all 50 now** (were 60, 55, 50, 70), because the share
+  suites divide them 40 + 10, 30 + 20 and 25 + 25 and a share must total its merchant's rate.
+  Rate-specific tests make their own merchants.
+- **`seedPayouts()`'s staged rows keep their month** (not the batch's): only the old
+  `commit_residual_import(int)` commits that batch as seeded, and its tests merge into the seeded
+  ledger lines; both go in phase 13. Every v3 caller stages with the new `stageForCommit()` at
+  the batch's month. The e2e fixtures (`createCommittableBatch`, the new `createSharedBatch`) now
+  stage at the batch's month, against real merchants with a rate.
+- **`post_share_correction()` is unchanged**: its shares are a ratio typed out of 50 and applied to
+  the signer's payout, which holds at any rate.
+- **The skipped-row acknowledgement is kept** (`acknowledge_residual_skips()`,
+  `ResidualSkipsNotice`): v3 writes `[]` and nothing new is ever skipped, so it only serves a batch
+  v2 committed; §2.1 leaves the UI to the cleanup phase. What was removed for the v3 path: the
+  skip itself, the share preview flags that predicted it, and `createSkippingBatch` (replaced by
+  `plantLegacySkips`, which plants v2's exact record so the kept UI stays tested).
+- **The preview-flag CHECK still allows the retired flags** (rows staged before; cleanup phase),
+  and `lib/payouts.ts` keeps their labels for the same rows.
+- **`set_merchant_rep_share` keeps `search_path = public`** (rewritten, not new); every function
+  this phase creates pins `public, pg_temp`.
+
+Not done here, for later phases:
+- **Phase 9**: the replace inside v3 (it refuses a committed processor-month today, naming it).
+- **Phase 10**: override lines at step 6; `set_merchant_split` refusing a rate below an open
+  override (A29).
+- **Cleanup**: drop the retired flags from the CHECK, the skip UI and its columns.
+
+### Phase 9: replace, Mark paid, period delete, adjustments (30 Oct 2026, branch `intake-residuals`)
+
+Step 0 first (its own commit, `5c1b870`): Phase 8 had mutation proofs for eight of v3's
+protections. Every other refusal (unknown confirmation code, status, missing month, empty batch,
+blocked row, blank / repeated / unknown MID, Income Type, missing figure, no rate, shares not
+totalling the rate) and the `is_admin()` guard now has one too: the real v3 refuses the case with
+its sentence, a copy without that check does not. The money grids (rates 0, 30, 45, 50 across odd
+cents; eight share splits with half-cent ties) were made re-runnable against a mutant: a v3 that
+skips the house line fails the unshared grid, and a `shared_part` that rounds half away from zero
+fails the shared grid at its ties.
+
+Built (`20261030180000_merchant_default_rate.sql`, `20261030190000_replace_paid_adjustments.sql`;
+Edge Function `residual-import-file-url`):
+- **A31, merchant default rate**: `default_merchant_split()`, BEFORE INSERT on `merchants`. Both
+  split columns NULL → the owner's `profiles.split_rate_pct` and 100 minus it (house: 0 / 100); a
+  rate the insert carries is kept; no rate invented (PT409); a snapshot (a later `set_rep_split`
+  and a move to another rep change nothing); no backfill.
+- **Mark paid / Reopen** (A8): `close_payout_period(period, processor, confirmation)` and
+  `reopen_payout_period(period, processor, reason)`. The closures table's trigger writes the one
+  audit row per action; the reason reaches it as `audit_log.detail` through the transaction-local
+  `tapswipe.reopen_reason`.
+- **Replace inside v3** (§2.3 step 4, §3.2), and the upload prompt's Yes (`replace_batch_id`).
+- **`delete_payout_period(period, processor)`** replacing the client delete (DELETE revoked, policy
+  dropped); the old path wrote no audit row, the defect §2.1 recorded.
+- **`post_payout_adjustment(agent, mid, adjusts_period, processor, amount, note)`** (A23).
+- Batch status `deleted`; `replaced` and `deleted` only from `committed`, final for every writer.
+- The app: `/payouts` lists each committed processor-month with its paid state, Mark paid (typed
+  phrase), Reopen (reason) and, on a paid month, the adjustment form; the period page deletes per
+  processor; the upload prompt's Yes / No, and the paid case; the review page says what a
+  replacing batch replaces and what replaced a batch.
+- Tests: `tests/rls/replace-paid-adjustments.test.ts`, `tests/rls/merchant-default-rate.test.ts`,
+  `tests/live/commit-concurrency.test.ts` (two real connections), the live replace-over-HTTP block
+  in `tests/live/residual-import.test.ts`; e2e `merchant-split.spec.ts`, `payouts-paid.spec.ts`,
+  and the rewritten replace-prompt test in `qa/residual-review.spec.ts`.
+
+Where the memo was silent or said otherwise, and what was chosen (the conservative side each time):
+- **The Reopen reason is on the audit row (`audit_log.detail`, new), not a `payout_period_reopenings`
+  table** (§3.2). The table's only reason was that `audit_log` had no detail column; the
+  instruction for this phase put the reason on the one audit row, so it has one home. `detail` is
+  NULL elsewhere except the period delete's count.
+- **A closure DELETE without a reason is refused at the trigger**, the owner included, so no path
+  reopens silently. A test cleanup must `TRUNCATE` (no row trigger) or reopen with a reason.
+- **The typed confirmation** (no wording in the memo): the processor code and month as the page
+  shows them, "TSYS July 2026", case and runs of space ignored. Mark paid also needs a committed
+  batch for that processor-month, and refuses one already paid (saying when).
+- **A Reopen reason is 10 to 500 characters** after trimming.
+- **Replace is v3, not a dedicated function**: the memo specifies it there (§2.3 step 4), and one
+  function means a replace cannot drift from a first commit's refusals or money.
+- **Replace refuses when the batch it replaces is no longer THE committed one** for the same
+  processor-month (a second replace of one batch; a deleted month), as well as when paid.
+- **The adjustment refusal for replace and delete covers both kinds**: an adjustment adjusting the
+  month on a MID the old lines paid (share corrections carry no processor) OR under its processor
+  (general adjustments carry one).
+- **The general adjustment needs a MID** (the ledger's `mid` is NOT NULL; the instruction's list
+  omitted it, the memo's has it), must name a CRM merchant, and is **refused for a month not marked
+  paid**: §0.5 says the fix before payment is a replace. Payee active (as a share correction's
+  partner); amount non-zero whole cents; reason 1-500; no double-post guard (several adjustments
+  for one month are legitimate; the form disables while posting).
+- **`post_share_correction()` is unchanged**, so its "already posted" guard counts a general
+  adjustment on the same MID and month and refuses a share correction there. The safe side; its
+  sentence predates general adjustments.
+- **The period delete is per processor** (§3.4's signature). NULL processor means the lines
+  committed before processors were recorded. Only IMPORT lines go; adjustment lines (corrections
+  already made) stay. The month's committed batch becomes **`deleted`** (new status: the memo did not
+  say what happens to the batch; this frees the slot for a new file and keeps the record). Nothing
+  to delete is PT404. Audit `row_id` `'<period>/<processor>'` (`/none` for NULL), `detail` the line
+  count and batch.
+- **`replaced` and `deleted` are final for every writer**, not only clients: no update of any kind.
+- **A31's trigger is `security definer`**, not the invoker default: a BEFORE trigger runs before
+  RLS's WITH CHECK, so an invoker copy answered a rep's (refused) insert into another rep's book
+  with "the owner has no split rate", a false sentence about that rep. Definer keeps RLS the
+  refusal. It fills only when BOTH split columns arrive NULL.
+- **Not built** (Recommend items, not instructed): the replace's `replace_summary` jsonb (§3.2
+  table) and the "not marked paid after 45 days" reminder (§9.1).
+
+Not done here, for later phases:
+- **Phase 10**: override lines at v3 step 6. The replace already deletes every line with the old
+  `batch_id`, so overrides carrying it are removed and rebuilt with no change to the replace.
+- An admin's client INSERT may still carry an explicit merchant rate (unaudited); only the NULL case
+  is defaulted. Closing that is a separate decision.
+
+### Phase 10: overrides (2 Nov 2026, branch `intake-residuals`)
+
+Owen confirmed A4c, A4d and A4f as written before the build: the rep sees who receives their
+override, the recipient sees the merchant's name as plain text with no access to the merchant;
+Report 1 gets "Overrides received" (phase 12); every override has a named recipient.
+
+Built (`20261102120000_merchant_overrides.sql`; Edge Function `export-residuals`, the `Line`
+column only):
+- **`merchant_overrides`** as §4.2: `override_pct` CHECK `> 0` and `<= 50` (the outer bound),
+  months on the 1st with an exclusive end, at most one per merchant per month (exclusion,
+  A4e), `recipient_id` the **26th** `profiles` FK (NO ACTION), `merchant_id` RESTRICT. RLS
+  enabled in the migration itself (not left to `ensure_rls`), one admin SELECT policy; everything
+  revoked first, then `authenticated` SELECT and `service_role` SELECT + DELETE (teardowns).
+- **`set_merchant_override(merchant, recipient, pct, from)`, `end_merchant_override(id, to)`,
+  `cancel_merchant_override(id)`**: definer, `search_path = public, pg_temp`, `is_admin()` first,
+  the share lock, an audit row in the same transaction (no exception handler), their own
+  revoke/grant lines. The cap is the **merchant's rate** (0.01-50 at rate 50, up to 30 at 30,
+  none at 0), refused with the rate named. The recipient must exist, be active, not be the owner
+  and not be a party of a share overlapping the override. A merchant whose pre-app is not
+  submitted or approved is refused (A4b). The month rule is the shares': no boundary at or
+  before the latest committed month for the MID.
+- **The rules that hold over time**: `set_merchant_split` refuses a rate below a live override
+  (A29); moving a merchant with a live override is refused (`guard_merchant_split_and_owner`);
+  `set_merchant_rep_share` refuses naming an overlapping override's recipient as a party.
+  `merchant_has_live_override()` has no client EXECUTE.
+- **The ledger**: `override_id` (RESTRICT), `override_role` (`debit`/`credit`), signed
+  `override_amount`; `line_kind` gains `override`; `rep_payout` gains its branch by drop and
+  re-add under the 20261014140000 precautions (refuses over a dependent or a column grant;
+  count, total and per-row md5 compared or nothing commits). The two adjustment CHECKs say "not
+  an adjustment" where they said "import"; an override line carries a batch and a processor, no
+  figure and no share column; one line per (batch, override, role, rep).
+- **v3 step 6**, the cent rule (§4.4), in this order: `X = round(R × o / 100, 2)` once, from the
+  account residual (half away from zero, `rep_payout`'s own rounding); unshared, the owner's
+  debit `-X`; shared, the partner's piece `shared_part(X, b, a + b)` and the signer's `X` minus
+  it (the signer takes the odd cent); the recipient's credit `+X`. So debits + credit = 0 and
+  the reps' nets + the credit = T exactly; the company's R - T never moves. A clawback imports
+  without a warning and reverses in proportion (A25). Backstops before anything is written
+  (PT409, naming MIDs and override ids): an override above the merchant's rate now; one paid to
+  the owner or a party of a covering share; one whose recipient is deactivated. The result's
+  `overrides` is the number of file rows an override applied to.
+- **Replace** needs no change of its own: the old batch's override lines carry its `batch_id`,
+  so the existing delete removes them, and step 6 writes them again.
+- **`delete_payout_period`** now deletes the month's override lines with its import lines.
+- **Visibility (A4c)**: `my_override_recipients()` (definer, `is_active_agent()` first,
+  `override_id`, `recipient_name`, `override_pct` only, for overrides the caller holds a DEBIT
+  line for). No merchants policy changed. The period page and the statement have an Overrides
+  block: a debit reads "Override 10% of residual · to Dana Cole", a credit "Override received"
+  with the merchant's name as plain text (an admin's credit also shows the percent); the
+  statement prints no MID on a credit. `payoutTotals` counts override lines in the payout,
+  never as merchants, volume, residual or awaiting figures.
+- **Merchant page** (admins): an Override card (`components/merchant-override-card.tsx`) with
+  the override in force, the history, Set/Change (recipient prefilled with the owner's manager,
+  the percent with a worked example, the first month), End and Cancel. **A rep's merchant page
+  shows nothing about overrides**: no card, no action, no notice.
+- **Teardown and reset**: all four teardown lists clear overrides by merchant and by recipient,
+  their lines first; `scripts/reset-business-data.sql` clears `merchant_overrides` (37 tables),
+  with a fixture row and an override line.
+- Tests: `tests/rls/merchant-overrides.test.ts` (76: table, grants, the cap at 0/30/46.5/50, one
+  per month, recipient rules, month rule, audit rows, the rules over time, the commit and
+  replace lines, clawback, zero, backstops, the property test over 800 random mirrored cases
+  through the real commit, visibility, CHECKs, the migration's refusals and pass, and 20
+  mutation proofs); `tests/rls/shared-lines-rewrite.test.ts` (the second rewrite moves none of
+  ~78,000 awkward, shared and adjustment payouts; its guard aborts a rewrite that would);
+  `tests/live/override-teardown.test.ts`; `tests/unit/overrides.test.ts`; e2e
+  `merchant-override.spec.ts` (new) and override blocks in `payouts-shares.spec.ts` and
+  `payouts-rendering.spec.ts`; every new e2e test failed under a revert of what it protects.
+
+Where the memo was silent or said otherwise, and what was chosen (the conservative side each time):
+- **The function never picks the recipient.** §4.1 says the recipient defaults to the manager,
+  "prefilled in the form but editable": the card prefills it; `set_merchant_override` requires
+  one (22023 without).
+- **"Change" is a new override from a later month**, the open one ended at that month in the same
+  call (the shares' shape), so the table is the history. No in-place edit of a percent or a
+  recipient.
+- **A deactivated recipient refuses the commit (and a replace)**, naming the MID, the override
+  and the person. The admin ends the override or reactivates them. A replace of a month whose
+  recipient has since left is therefore refused too; that month can still be deleted and
+  re-imported after the override is ended.
+- **A merchant with a live override cannot be moved** (silent in the memo; the shares' rule). It
+  also stops the recipient becoming the owner.
+- **A share naming an overlapping override's recipient is refused** at `set_merchant_rep_share`,
+  and v3 re-checks it.
+- **X = 0 still writes the pair at 0.00**, so every month an override was in force shows it.
+- **What a replace uses: the override in force at replace time.** The month rule makes it the
+  one the original commit used for every MID the original paid (no boundary can move at or
+  before a committed month); for a MID new to the replacing file it is whatever is in force. One
+  code path (replace is v3), and committed lines are snapshots (`override_amount` stored), so
+  editing an override later never changes a committed month.
+- **The §4.2 CHECK "a debit line's agent_id is never the override's recipient_id" is not a
+  CHECK**: the debit line carries no recipient (a column would put the recipient's id on the
+  rep's row, and a 27th profiles reference). The rule is held by `set_merchant_override`, the
+  move refusal, `set_merchant_rep_share` and v3's refusal. Added instead: one line per (batch,
+  override, role, rep).
+- **The percent is not snapshotted on the line.** Override rows are immutable except their end,
+  so the rep's statement reads it through `my_override_recipients()`; the recipient never sees
+  it.
+- **The recipient learns the merchant's name only**: not the percent, not the rep, and the
+  statement prints no MID on a credit. The credit line itself carries `mid` and `merchant_id` (as
+  a partner's line does; the ledger requires `mid`), readable through the API on their own row;
+  neither opens the merchant.
+- **`service_role` gets SELECT and DELETE, not `all`** (§4.2 said `all`): nothing outside the
+  definer functions inserts or updates an override.
+- **Cancel** is refused when a line references the override (§4.3) or when a committed month
+  falls inside it (the shares' rule). Set is refused for a merchant with no MID, no rate or a
+  rate of 0.
+- **"Latest committed month" counts import lines only**, as phase 8's share functions do.
+- **Export**: `Line` reads `Override` on an override line (§2.6). The export is not an import
+  format, so nothing reads it back.
+
+Found while building:
+- **An override line must carry its batch, and `rep_payout_rows.batch_id` is ON DELETE SET
+  NULL**, so deleting a batch (or a teardown detaching lines from it) is refused while an
+  override line points at it. The live helper and both seed scripts now delete override lines on
+  a user's own batches before detaching the rest; `tests/live/override-teardown.test.ts` proves
+  the obstacle and the teardown.
+- **Three columns put the amount behind the table's sideways scroll at 360px** (caught by the new
+  rendering test); the block is two columns, the label wrapping under the name.
+- The migration's exact-text preconditions (`pg_get_constraintdef`) read the same on PGlite 18.3
+  and the local stack's 17.6, and its checksum held over the local database's real rows.
+
+### Phase 11: lock residuals (2 Nov 2026, branch `intake-residuals`)
+
+Step 0 first (its own commit, `c25c0d5`): Phase 10 had behaviour tests but no mutation check for
+the cap at rates 0 and 50, one override per merchant per month, no client write, and the
+recipient's read of the merchant, and no test at all for a deactivated recipient refusing a
+REPLACE. Each now has one, layer by layer (the function's check, then the constraint, grant or
+policy behind it). The money property test was already there: two seeds of 200 cases, each
+mirrored at -R, so 800 committed rows through the real v3.
+
+Built (`20261102140000_lock_residuals.sql`; Edge Function `export-residuals` and
+`_shared/residuals.ts`):
+- **No client UPDATE on `rep_payout_rows`**: the column grant on `residual_income` and
+  `rep_split_pct` (`20261014160000`) and any table-level UPDATE revoked from anon,
+  authenticated and PUBLIC; the "admin only update" policy dropped; and
+  `guard_client_payout_update()` (BEFORE UPDATE, invoker) refuses any update made as
+  `authenticated` or `anon`, an admin included (PT409, "A committed payout line is never
+  edited…"). Each layer refuses alone. The service role and the owner (definer functions, FK
+  actions, the teardowns) are untouched.
+- **`set_shared_residual()` dropped.** `guard_shared_line()`, the partner-rate copy and
+  `log_payout_row_change()` are kept as backstops with no client path (§2.1).
+- **The app**: `PayoutFigureCell`, `PayoutBulkSplit` and `SharedResidualControl` deleted, with
+  `parseFigureInput` (their only user) and the round-trip copy on the export button and period
+  page. The period page and the statement are read-only for every role.
+- **The export header is §2.6's**: `Period, Processor, Agent #, Agent, MID, Merchant name,
+  Volume, Residual, Rep split, Rep payout, Line, Account share` (`EXPORT_HEADER`); `Line` is blank,
+  `Adjustment` or `Override`. The parser still refuses it as a CRM export (it carries `Agent #` and
+  `Rep payout`).
+- Tests: `tests/rls/lock-residuals.test.ts` (catalog; a rep, the recipient, an admin and anon
+  refused on import, shared, override and adjustment lines; each layer's mutation proof; replace
+  and adjustment still work; the migration's pass and refusals); the inverted
+  `rep-payout-update-grant`, `rep-payouts`, `payout-history-trigger`, `shared-lines`,
+  `share-corrections`, `merchant-overrides` and `grants` assertions; live: the export header, the
+  `Override` label with signed amounts and its refusal on re-upload, and a commit racing
+  `set_merchant_override` over two real connections in both orders (plus a mutation proof that
+  removes the override function's locks and shows the month rule broken).
+
+Where the memo was silent, and what was chosen (the conservative side each time):
+- **A trigger behind the revoked grant** (the memo says revoke): a grant added back by hand would
+  otherwise reopen client edits. It names the client roles, so definer functions and the service
+  role are unaffected.
+- **The service role keeps UPDATE**: the test teardowns detach lines from a batch they delete,
+  and no Edge Function updates the ledger.
+- **No audited admin replacement for the removed controls.** The memo names the replacements
+  (replace before paid, adjustment after), and no workflow is stranded: every line v3 writes has
+  both figures, and a legacy line with none is fixed by deleting the month and importing it again,
+  or by an adjustment once paid.
+- **"Awaiting figures" / "N to enter" now read "Lines with no figure" / "N with no figure"**, with
+  the counts and links kept: nobody enters a figure any more, so the old words promised an action
+  that does not exist. The statement no longer says "entered yet".
+- **The export drops `Average ticket` and `Total cost`** (not in §2.6's header) and adds
+  `Processor`. `Residual` is the line's own residual (a shared line's piece of the account's).
+- **The partner-line wording on the admin's period page is unchanged** ("its residual and split
+  follow the signer's line"): still true, now as a fact about how v3 writes the pair.
+- **The skipped-row acknowledgement UI stays** for the cleanup phase, as phase 8 left it.
+
+The full e2e suite, run once after a clean restart (stack stopped and started, functions served, `.next` deleted, nothing else running): **372 passed, 0 failed, 0 flaky, 19.1 minutes**; the slowest test 19.8s (a Document Center page's first compile).
+
+### Phase 12: reports (2 Nov 2026, branch `intake-residuals`)
+
+Built (`20261102160000_reports.sql`; no Edge Function changed):
+- **`rep_payout_summary(from, to, processor)`** (Report 1, §7.2 and §0b.7) and
+  **`merchant_processor_summary(from, to, processor)`** (Report 2): security invoker,
+  `search_path = public, pg_temp`, `is_admin()` first (PT403), months first-of-month with
+  `from <= to` (22023), revoke from PUBLIC and anon, EXECUTE for `authenticated` and
+  `service_role`. They read only lines of `committed` batches, plus adjustment lines (no batch),
+  and sum the ledger's own `rep_payout`; totals are their own `GROUPING SETS` rows. The
+  migration refuses, naming them, if a column the plpgsql bodies read is missing (a body is not
+  checked until called); it reads and writes no row, so it has no row guard.
+- **Report 1**: agent code, legal name (`llc_legal_name`, else `legal_name`, A17), full name,
+  sales volume (import lines; the signer's only on a shared account, A18), net residual, agent
+  split (import `rep_payout` + the rep's override debits, §4.5), **"Deductions (info only, not in
+  total)"** (§0c.1), override received (A4d) and total agent commission = split + received.
+- **Report 2**: processor, merchant, MID, owner (code and name), volume, the account residual
+  (never the partner's piece again), rep side, company share; a subtotal per processor-month with
+  its paid state, and a grand total.
+- **`/admin/reports`**: `requireAdmin()`, an `adminOnly` "Reports" item in the Admin nav group,
+  two `FilterTabs`, a GET form (From month, To month, Processor; the latest committed month and
+  all processors by default), the paid state of each covered processor-month, Print, a table from
+  `xl` up and on paper and one card per row below it, and Report 1's plus (§4.5's detail row).
+- Tests: `tests/rls/reports.test.ts` (32: catalog and grants, the rep / anon / bad-range
+  refusals, a worked month through the real v3 (override, clawback on a zero-volume line, a
+  shared account with the cent rule, the house profile at 0, Report 2's figures, the totals
+  rows), committed-only (review, abandoned, no batch; a real replace and a real period delete),
+  deductions against a real Mark paid + `post_payout_adjustment`, two seeds of random months
+  through the real v3 over three processors (rates 0-50, shares, overrides, clawbacks, zero
+  volume; non-vacuity asserted) reconciling `Σ(split + received) + Σ company share` with the
+  file residuals to the cent, every rep row with the statement's `payoutTotals`, Report 2's
+  total with the files, each processor alone and the two-month range, the migration's pass and
+  refusal, and 9 mutation proofs: admin-only in each function, committed-only in each, the
+  received and debit halves of the total, deductions subtracted from the total, adjustments
+  taken into the split, and a shared account's residual counted twice);
+  `tests/unit/reports.test.ts` (14: the URL filters and their refusals, the header words, the
+  nav item); `tests/live/reports.test.ts` (6: the wire over PostgREST, a review batch not
+  counted, rep PT403, anon 42501); e2e `admin-reports.spec.ts` (7: the nav link, Report 1's
+  columns and each rep's total against their ledger lines, the plus, Report 2's rows, subtotal
+  and paid state, 360px with every amount on screen and no sideways scroll, the empty and
+  unreadable-month states, and a rep with no link and redirected). Every e2e test failed under a
+  revert of what it protects (nav `adminOnly`, `requireAdmin()`, the cards, the plus, the
+  deductions header, the total column, the paid badge, the empty state).
+
+Where the memo was silent or said otherwise, and what was chosen (the conservative side each time):
+- **A rep is refused, not answered with their own rows** (§7.2 says a rep calling an invoker
+  function "would get their own rows only"; the phase 12 instruction says no rep): invoker AND
+  `is_admin()` first, so the refusal does not depend on RLS and RLS does not depend on it.
+- **A processor parameter on both functions** (§7.2's signatures have only the months). NULL
+  is every processor. Under a processor, an adjustment counts only if it carries that
+  processor, so a share correction (no processor) appears only under "all processors".
+- **Committed only, precisely**: an import or override line needs a `committed` batch; an
+  adjustment needs none. An import line with no batch (a legacy or hand-made line) is not
+  counted, though a statement would still show it. v3 writes none.
+- **The range option** (§7.2) is From and To months. Report 1 stays per rep per month (§7.2),
+  with a total per month only when the range spans more than one, and a grand total.
+- **Totals are computed in SQL** (`GROUPING SETS`), not in the page, so the page adds nothing.
+- **Report 2 is grouped by (month, processor, MID)**; the merchant name is the line's snapshot
+  (what the statement prints, not today's `dba`) and the owner the payee at commit (the
+  unshared or signer line), not today's owner. Its rep-side and company-share columns (§7.2
+  "optionally") are built.
+- **Only reps with a counted line in the selection appear** (an adjustment alone is enough); no
+  zero rows for the rest.
+- **No CSV or XLSX export.** §7.2 says printing covers the first need and an XLSX download is
+  built only if asked; the page has Print and a print layout (the table, no filters or toggles).
+  (Asked for since: phase 12b below.)
+- **The plus (§4.5's detail row)** lists each override line of the rep in the selection's
+  committed batches: a debit with percent, merchant, MID and recipient; a credit with percent,
+  merchant, MID and the rep(s) it came from. Display only, read in the page; nothing in it is
+  summed.
+- **Month choices are the committed months** (plus whatever month the address names), newest
+  first; the default is the latest committed month of any processor.
+- **A month or processor in the address that cannot be read is said so** in a Callout, never
+  replaced by the default (`parsePeriodParam`'s rule); a backwards range likewise.
+- **Negatives read `-$5.41`** (`formatMoney`), with no colour: red is the brand and destructive
+  colour, and the status colours are for badges.
+- **The table appears from `xl` (1280px)**, one card per row below it: nine columns do not fit
+  the content width below that without a sideways scroll.
+- **No row is returned for an empty selection** (not a zero totals row); the page says
+  "Nothing is committed for …".
+
+Not done here: real data (Owen's report) has not been put through it; the print layout was
+looked at only through the e2e's DOM, not on paper; widths between 360px and 1280px were not
+measured.
+
+Found while building:
+- `asUser(db, null)` in the hermetic helpers is the `authenticated` role with no user, not
+  `anon`; the anon test sets the role itself.
+- A helper exported from a `"use client"` module cannot be called from a server component (it
+  failed at runtime, not at type-check); `detailKey` lives in `lib/reports.ts`.
+- Playwright's Desktop Chrome viewport is 1280px wide, exactly the `xl` boundary, so the e2e
+  sees the table at desktop and the cards at 360px.
+
+### Phase 12b: Excel export of the reports (4 Nov 2026, branch `intake-residuals`)
+
+Asked for, so §7.2's "XLSX download only if asked" is now built, as §7.2 recommends: a new
+caller-scoped Edge Function. No migration; no new dependency (SheetJS stays the pinned 0.20.3).
+
+Built:
+- **`export-report`** (the thirteenth function, `verify_jwt = false`): `withSupabase` (401) →
+  `callerIsActive` → `callerIsAdmin` (403 "Admin only", before the body is read) → the selection
+  `{report, from, to, processor}` (400; an unknown processor is refused, as the page refuses it) →
+  the same SQL function with the same three arguments the page passes, plus the covered
+  processor-months' paid state, all through the **caller-scoped** client → 404 for an empty
+  selection → one `audit_log` row → the file.
+- **`_shared/report-sheets.ts`**, dependency-free: the row types, the two column lists (the
+  components now render from them, through `lib/reports.ts`), the file name, and the sheet. It writes
+  the functions' rows as they came back, totals rows included, and adds nothing.
+- **"Export Excel"** next to the report heading, only when the selection has rows; it downloads
+  `residual-report-{1|2}-{2026-07 | 2026-06-to-2026-07}-{all-processors | processor slug}.xlsx`.
+- Tests: `tests/unit/report-sheets.test.ts` (16), `tests/live/report-export.test.ts` (6),
+  e2e `admin-reports-export.spec.ts` (4). Mutation-checked: the quote prefix (2 unit tests fail),
+  text typing (4), recomputed totals (1), the function's admin check (the live rep test fails: the
+  rep gets the SQL's own refusal as a 500 instead of a 403), and the audit write (1). Each e2e test
+  failed under a revert of what it protects: the button removed (Report 1 and Report 2, each run
+  alone), the has-rows guard removed (the empty selection), the function's admin check removed (the
+  rep), and the file's figure columns reversed against the page's (Report 1).
+- Suites: `npm test` 2909 → 2925 (121 → 122 files), `test:live` 347 → 353, the two named e2e specs
+  17 passed (6 setup + 7 + 4). The full e2e suite was not run; its baseline 379 → 383 is the
+  arithmetic, not a run.
+
+Where the memo was silent, and what was chosen (the conservative side each time):
+- **An Edge Function, not a route handler**, because `export-residuals` is one, §7.2 names one, and
+  the audit row is a write no client role holds: the function has `supabaseAdmin` for it, the Next
+  app holds no service key, and a route handler would have needed a new definer RPC (a migration).
+- **An audit row**, though `export-residuals` writes none: `action = 'export_report'`,
+  `table_name` = the SQL function's name, `row_id` = `from..to processor` (`audit_log` has no
+  detail column). After the reads, before the response, **failing closed**: no row, no file.
+- **A rep, a deactivated account, no session or a bad token** get what every admin-only function
+  gives: 403 or 401, with no file and no audit row. The page itself still redirects a rep.
+- **Formula injection: typed string AND a leading `'`.** Every text cell is `t: "s"` with no
+  formula; text whose first character is `= + - @`, tab or CR is also prefixed with a single quote.
+  The string type alone stops evaluation on open, but Excel re-parses the cell as a formula when it is
+  edited, and a copy to CSV carries it raw; SheetJS CE cannot write the hidden `quotePrefix`, so the
+  quote is visible in such a cell. Applied to every text cell, header block included.
+- **Money cells** use `"$"#,##0.00;-"$"#,##0.00`: a minus sign, no red, as the page writes it. A
+  figure that is not a finite number aborts the export rather than writing NaN. A null is a blank
+  cell, and so is a missing name (the page prints a dash).
+- **Report 2's columns are split** where the page stacks two values in one cell: Merchant, MID,
+  Owner code, Owner name, so the MID and the owner's code are text columns of their own (the
+  instruction's "MID and agent code columns"). Otherwise both reports keep the page's columns in the
+  page's order, Report 1's month heading rows over a range, its month totals and grand total, and
+  Report 2's subtotal per processor-month (its paid state in the label) and grand total.
+- **Months are text** (`2026-07`), in the header block, the month rows and the totals labels; the
+  page's "July 2026" is not copied.
+- **The header block** holds the report name, months, processor, each covered processor-month's
+  paid state (as the page's list shows) and "Committed months only". The sheet is named after the
+  report; the selection is in the header block and the file name.
+- **Not exported:** the override detail behind Report 1's plus (collapsed on the page, display
+  only), and an empty selection (no button; the function answers 404).
+- **`Cache-Control: no-store`** on the file, and `application/octet-stream` for supabase-js's Blob
+  branch (`export-residuals` explains why the spreadsheet type corrupts the download).
+
+Not verified: an actually expired session against the function (the local stack signs ES256 and
+the private key is not reachable; a legacy-HS256 token is refused outright, so it cannot stand in);
+the withSupabase expiry check is trusted, and the forged-signature and no-session cases are tested.
+The file was opened only by SheetJS, not in Excel, LibreOffice or Google Sheets, so how each one
+shows the quoted cells and the number format was not looked at. Nothing was deployed.
+
+### Phase 12c: zero volume is not a bad number (4 Nov 2026, branch `intake-residuals`)
+
+Found in 12b: the export test's clawback line at volume 0 was refused by v3 as an unconfirmed
+`bad_numbers`, and the seed was moved to 5,000 volume to get past it. Investigated on the local
+stack (real parse, real v3) before any change: every zero-volume line (residual negative, zero or
+positive) raised `bad_numbers`, and one such row held up the whole file until the admin's Yes. A
+Yes did let it through, so real data was never blocked, but it was asked on almost every file, and
+that one Yes per type also passed the rows the warning exists for. Owen decided (§0.4, §0b.3 and
+§2.4 amended):
+
+- **`bad_numbers` = `volume < 0` or (`volume > 0` and `residual > volume`).** Zero volume raises
+  nothing, whatever the residual; a negative volume (a refund month) is still confirmable only
+  through it and still marked `volume_confirmed_negative`; volume > 0 with a zero or negative
+  residual stays silent (A25). No zero-volume note was added (the optional `preview_flag` was
+  declined).
+- **`20261104120000`** re-creates `commit_residual_import_v3` with `20261102120000`'s body and only
+  step 4's `bad_numbers` line changed, and refuses to run unless the deployed v3 carries the old
+  rule exactly once. `rowWarnings()` in `_shared/residuals.ts` changes with it; the review screen's
+  label reads "Volume is negative, or the residual is more than the volume".
+- Tests: `tests/rls/zero-volume-lines.test.ts` (14: shapes a–e through the real v3, a mixed file, a
+  zero-volume row beside real bad numbers, a 35-cell grid where `rowWarnings()` and v3 must flag the
+  same rows, the migration's body diff against `20261102120000`, its refusal, the grants, and a
+  mutation proof that the old rule refuses a, b and c). The unit, v3, replace and live
+  warning tests moved their bad-numbers trigger from zero volume to a negative volume or a residual
+  over volume; the e2e seed (`createCommittableBatch`'s `badNumbers`) and
+  `qa/residual-review.spec.ts` the same; `report-export.test.ts` is back to its clawback at
+  volume 0 with nothing confirmed, as the regression check.
+- Revert experiment: with `<= 0` put back in both the migration and `rowWarnings()`, 9 tests
+  failed (8 in the new file, 1 unit), and passed again restored.
+- Suites: `npm test` 2925 → 2941 (122 → 123 files), `test:live` 353 (unchanged count), the full e2e
+  suite 383 passed (17.0 min, none flaky; the first measured run of 12b's 383, which was arithmetic). Applied to the local stack only; nothing pushed, linked or deployed.
+
+### Phase 13: docs and cleanup (4 Nov 2026, branch `intake-residuals`)
+
+Built (`20261104140000_retire_legacy_import.sql`, `20261104150000_set_territory_ascii_trim.sql`; no
+Edge Function behaviour changed, one stale comment in `provision-user-batch`):
+- **The old commit is dropped.** A search of the app, the Edge Functions, both seed scripts and
+  the tests found nothing calling `commit_residual_import(int)` except its own tests, the historical
+  migration tests (which replay a migration prefix, so they still run it as it was), five live
+  calls and one e2e call. The e2e call and three of the live ones now call v3; the other two live
+  tests were deleted with v1. `acknowledge_residual_skips(int)`,
+  `rep_payout_batches.skipped_rows` and `.skips_acknowledged_at` went with it. v3 is re-created with
+  20261104120000's body minus its `skipped_rows = '[]'` line. The preview-flag CHECK keeps
+  `share_not_in_force` and `payee_changed`. **The migration refuses, naming them,** a batch holding a
+  skip record (what the column drop would lose), a staged row carrying one of the four retired flags,
+  and a v3 that is not the body it copied. It writes no row.
+- **The dead UI is gone**: `ResidualSkipsNotice`, `AcknowledgeSkipsButton`, `lib/residual-skips.ts`,
+  the import list's "N skipped" badge, the batch page's "Rows skipped" card and its "adjustment lines
+  ignored" Callout, and the period page's skip notice. Also `skipsOwed`, `rowsWritten`,
+  `skipReasonLabel`, `SkippedRow` and the four retired flag labels in `lib/payouts.ts`. The batch read
+  no longer selects the three columns.
+- **`set_territory()` trims ASCII whitespace** (`E' \t\n\r\f\x0b'`, `set_rep_identity()`'s set). It
+  is re-created with only the normalising line changed, and refuses unless the deployed function has
+  the old line exactly once. It writes no row: a territory already stored with a tab stays as it is
+  until it is set again (the header gives the query that lists any).
+- **Grants inventory**: `docs/claude/grants-inventory.md`. It covers the four tables created after
+  `20261023120000` (`processors`, `pre_app_tax_secrets`, `payout_period_closures`,
+  `merchant_overrides`): the exact grants per Data API role, the migration that sets them, the two
+  sequences, and one read-only `role_table_grants` query with an `expected` / `actual` / `matches`
+  column. `tests/rls/grants-inventory.test.ts` and `tests/live/grants-inventory.test.ts` run that query
+  as written in the doc. Both fail if a table the migrations create after the cutoff is not in it.
+  **No table relies on an automatic grant**: each migration revokes and grants its own, and the local
+  catalog matched before anything changed. So no fix migration.
+- **Docs**:
+  - CLAUDE.md: the retired merge rule and the "Three tiers" §3 remark are gone, so the only ledger rule
+    is "a committed processor-month changes only by replace (until paid) or an adjustment line
+    (after)". Size 45,224 → ~39,358 characters (39,582 bytes; 45,486 bytes before): "Hosted projects and deployment" and the
+    design-system section were moved verbatim to `docs/claude/hosted-projects-and-deployment.md` and
+    `docs/claude/design-system.md`, each with a summary left behind.
+  - The docs index gained those two files, `grants-inventory.md` and this memo.
+  - The Edge Functions table gained `business-document-file-url` (13 of 13).
+  - `payouts-and-teardown.md`, `project-state.md` (every route, the 12b export, the 12c rule),
+    `rpcs-profiles-audit.md`, `user-accounts.md` and `security-followups.md` were brought up to date.
+  - `reset-business-data.md` step 1: the prod backup passes the password in `PGPASSWORD`, never inside
+    the URL.
+  - `RESIDUALS_SPEC.md` gained the addendum §8.1 asks for.
+- **Schema doc**:
+  - Both blocks were added verbatim.
+  - The GRANTS section now shows `rep_payout_rows` as SELECT only (it still granted the DELETE and
+    UPDATE that phases 9 and 11 revoked) and lists the three post-cutoff tables it lacked.
+  - Three older drifts found by comparing the doc with the migrations were fixed:
+    `convert_ghost_sheet_to_lead` lacked `security invoker` / `set search_path = public`,
+    `enforce_compatibility_kinds` differed in wording, and `idx_products_brand` and six constraint
+    names (`pre_apps_est_*_non_negative`, `products_kind_vocabulary`, `products_billing_vocabulary`)
+    were missing.
+  - Now the latest definition of every function, and every policy, trigger, table, index and named
+    constraint, matches.
+- **Fixtures**:
+  - `seedPayouts()` stages its review batch's rows at the batch's month (the unaligned-month note is
+    gone).
+  - `seed-dev-payouts.mjs` makes one committed batch per ledger month instead of one batch holding two
+    months that were not its own.
+  - `plantAdjustments()` no longer plants the "ignored" review batch.
+  - `plantLegacySkips()` and `skipEvidence()` are deleted.
+
+Where the memo was silent or said otherwise, and what was chosen (the conservative side each time):
+- **The old commit is dropped before deployment**, against §8.1's "once the new app is on dev and
+  prod", because the phase 13 instruction says to drop it if nothing calls it. The migration says
+  it in a DEPLOY ORDER note: on a project whose app still calls the old function (prod today), it
+  ships with the app that calls v3, or that app's commit fails.
+- **The skip columns are dropped** (phase 8's note: "the skip UI and its columns"; §2.1 had called
+  it optional). That meant re-creating v3, done by a body diff with one line removed and pinned by
+  a test.
+- **`adjustment_rows_ignored` stays** (§2.1: "the column on batches stays and is written as 0"):
+  only its Callout and its place in the batch read went. The parser still writes 0, so no Edge
+  Function changed.
+- **A skip record refuses rather than being copied somewhere**: no table exists for it, and v2 ran
+  on no hosted project. The local stack held two (e2e leftovers from `plantLegacySkips`, batches
+  789 and 791). The real CLI refused them, naming both, and they were cleared by hand, as the
+  refusal says.
+- **The historical migration tests keep calling v1** (`import-merge-key`, `import-schema`,
+  `shared-lines-rewrite`). They run on a migration prefix where it exists, and test those
+  migrations, not the head.
+- **`pre_app_secrets_presence()` is kept** (phase 4 left dropping it as "a cleanup-phase choice").
+  It has tests, and the definer-function audit reads it. Keeping it changes nothing.
+- **The territory migration does not rewrite stored values** (no backfill without a decision). It
+  lists them in its header instead.
+- **The grants test is both hermetic and live.** PGlite proves what the migrations grant. The local
+  stack has Supabase's default ACL, which there still gives `service_role` TRUNCATE, REFERENCES,
+  TRIGGER and MAINTAIN on a table nobody revoked, so a table relying on automatic grants fails
+  there too.
+- **Not done**: the "not marked paid after 45 days" reminder (§9.1) and `replace_summary` (§3.2),
+  as phase 9 left them; the search_path follow-up for the remaining 27 definer functions
+  (`security-followups.md`).
+
+Tests deleted:
+- `tests/rls/commit-residual-import.test.ts`, the whole file (26).
+- From the renamed `tests/rls/acknowledge-residual-skips.test.ts` (now `residual-batch-grant.test.ts`):
+  - the nine acknowledgement tests and its three catalog tests;
+  - the two "cannot write `skipped_rows` / `skips_acknowledged_at`" cases;
+  - "no rep can read a batch's skip record". It became "no rep can read a batch", and two columns
+    were added to the cannot-write cases.
+- One case in `batch-status-transitions` (the acknowledgement stamps a batch).
+- The v1 case in `import-merge-key` (v3's twin stays).
+- Three in `unit/payouts` (skips owed, rows written, skip labels).
+- Three live: "refuses an agent over HTTP" (v1; v3's own test covers it), "the acknowledgement has
+  nothing to do", and "the old commit refuses a shared batch".
+- Three e2e: the "adjustment lines ignored" notice, and the planted skip record at both widths (the
+  rest of `residual-skips.spec.ts` is now `payouts-shared-commit.spec.ts`).
+
+Changed:
+- `unit/payouts` ("labels the two notes the parser writes, and only those"), `share-corrections` (the
+  vocabulary narrowed) and the v3 catalog test ("v1 gone").
+- Live:
+  - the v3 commit result no longer selects `skipped_rows`;
+  - "cannot be committed twice", "refuses while a row is still blocked" and "commits to the owner"
+    now commit through v3. The line now carries the merchant's rate (50, payout 12.50), where v1
+    left it null.
+  - The PATCH test pins `row_count` and `confirmed_warnings` instead of the dropped columns.
+- e2e: `payouts-roles` posts to v3's endpoint for the rep's PT403.
+- `grants` no longer lists the dropped function.
+
+Suites: `npm test` 2941 → 2928 (123 → 124 files); `test:live` 353 → 353 (22 → 23 files: three deleted, three added); e2e: only the twelve specs covering the changed pages (the nine `payouts-*`, `qa/residual-review`, `qa/residual-bad-import`, `qa/upload-labels`), 99 passed (6 setup), 4.9 min. The full e2e suite was not run; its baseline 383 → 380 is arithmetic.
+Applied to the local stack only; nothing pushed, linked or deployed.
+
+### Phase 14: merchant bulk import (6 Nov 2026, branch `intake-residuals`)
+
+Built (`20261106120000_merchant_import.sql`; new Edge Function `stage-merchant-import` and
+`_shared/merchant-imports.ts`; no other function's source changed — `_shared/user-imports.ts` is
+imported, unchanged, for its CSV tokenizer):
+- **The import**: the ISO Hub merchants export (CSV or XLSX, at most 2,000 rows and 2 MiB) at
+  `/admin/merchants/import`, linked from Merchants. `stage-merchant-import` keeps the file on the batch
+  and stages every row with its refusals and notes; the review page (`/admin/merchants/import/[id]`)
+  groups each refusal with its offending values and row numbers, lists the notes, and disables Commit
+  while any refusal stands; Read again re-stages the stored file; Abandon is the one client write.
+- **`commit_merchant_import(batch_id)`**: definer, `search_path = public, pg_temp`, `is_admin()` first,
+  an advisory lock, the batch `for update`, review only, 1-2,000 rows; re-derives EVERY check from the
+  staged raw cells (`merchant_import_findings()`, internal) and also refuses any blocker the parser
+  staged; one merchant per MID, all or nothing; returns `{created, rows, merged}`; one
+  `commit_merchant_import` audit row (file name and counts) beside each merchant's own
+  `cross_agent_insert`.
+- **The rules** (`docs/claude/merchant-import.md`): MID as text (6-20 letters and digits; an XLSX number
+  that may have lost digits refused, a short one noted); owner by `llc_legal_name` (none, several,
+  deactivated or admin refused); Split a fraction or a percentage, hundredths, at most 50, blank = the
+  owner's rate (A31), a different rate noted; processor by code or label, blank allowed (A6); Status
+  Active / Inactive; repeats merged or refused; an existing MID refused, case-insensitively.
+- **The rate**: carried by the INSERT, or NULL for `default_merchant_split()`; the split guard's flag is
+  never set and no merchant is updated.
+- **The sixth processor, `365 Pay`** (sort order 60): idempotent insert. The dropdowns already read the
+  table (`ProcessorSelect`, the residual upload, the reports filter); the paper form's static list
+  (`PAPER_PROCESSOR_CODES`) gained it, pinned to both migrations' inserts.
+- **Tables** `merchant_import_batches` / `merchant_import_rows`: revoke all, then grants (inventory),
+  RLS on in the migration text, admin SELECT, a status-only client UPDATE guarded by a trigger, no
+  `profiles` reference. Added to the grants inventory, the CLAUDE.md normal-tables list and the reset
+  script's `clear_tables` (39 tables).
+- **Docs**: CLAUDE.md (the Edge Functions table moved verbatim to `edge-functions-and-storage.md` to make
+  room; one new rule; counts), `docs/claude/merchant-import.md` (new), `merchant-location.md`,
+  `reset-business-data.md`, `grants-inventory.md`, `project-state.md`, the schema doc.
+
+Step 0, the merchants table: NOT NULL are `agent_id` (FK profiles), `dba`, `status` (default `active`,
+CHECK active / inactive / other); `id` serial. Nullable: `mid` (UNIQUE), `legal_business_name`,
+`processor` (FK processors), the split pair (CHECK both NULL or 0-50 with company = 100 minus it; A31
+fills a NULL pair from the owner on INSERT; the guard trigger refuses any UPDATE outside
+`set_merchant_split`), `pre_app_id`, `street`, `city`, `state` (format CHECK), `zip`, `date_added`
+(default today), timestamps. The admin merchant form carries owner, DBA, legal name, MID, status,
+processor, and a required city and state (+ street, zip); its insert gets the A31 rate. **The one
+obstacle**: `merchants_location_guard` refuses any new merchant without a city and state, and the file
+has no address. Chosen: the columns are nullable and the app already handles location-less merchants
+(the missing-location screen, the dashboard notice, the form's legacy mode), so the import creates them
+with neither, under a flag only its commit sets. `legal_business_name` stays NULL (the file's name is
+the DBA); `date_added` is the import date.
+
+Where the memo was silent, and what was chosen (the conservative side each time):
+- **No `profiles` reference** on either table (no `imported_by`): who committed is the audit row (the
+  phase 8 rule), the staged `owner_id` is a display hint re-derived at commit. So no 27th FK.
+- **The file is kept on the batch** (`source_bytes`, both formats), not in a Storage bucket: Read again
+  needs it, and a new bucket would need out-of-band hosted setup.
+- **A staged row's parser blockers refuse at commit too**, even when SQL finds nothing (the parser alone
+  sees how an XLSX cell was typed; `mid_source` carries that).
+- **Type must be MERCHANT** (any case); anything else, blank included, refuses. **All seven columns are
+  required**; a repeated column fails the file; the first non-blank row is the header.
+- **An admin profile matching Agent refuses** (`agent_not_rep`), as a deactivated one does.
+- **Two profiles matching refuse even if one is deactivated** (ambiguous counts every profile).
+- **A MID is 6-20 ASCII letters and digits**; other characters refuse. MIDs compare case-insensitively
+  for repeats and for "already a merchant"; the merchant keeps the file's spelling.
+- **Text that looks like a spreadsheet number** (`4.001E+11`, `400100200300.0`) refuses as
+  `mid_precision`, as an unsafe XLSX number does. An XLSX number shown in exponent form refuses even when
+  its value is exact (the instruction's "in exponent form"; the admin cannot check it).
+- **A repeat with a different STATUS refuses** like a different owner or rate. Owner and rate compare as
+  written to the merchant (a blank Split equals the owner's rate written out).
+- **A rate not in hundredths refuses** (`12.344%`; the column would round it).
+- **A merchant name is at most 200 characters.**
+- **Commit is refused for more than 2,000 staged rows** as well as by the parser.
+- **Staging rows are kept after the commit** (the user-import rule: the record of the file), and Abandon
+  exists, as for the user import.
+- **Status `Inactive`** is accepted now (the instruction maps it), though the export has only Active.
+- **No per-merchant audit of the rate**: the commit's own audit row and each merchant's
+  `cross_agent_insert` record the import (an approval's snapshot is not audited per rate either).
+
+Tests: `tests/unit/merchant-import-parse.test.ts` (32), `tests/unit/merchant-import-lib.test.ts` (7),
+`tests/rls/merchant-import.test.ts` (71: access, grants and privileges; the commit's results,
+audit, atomicity and refusals; every refusal re-derived with the staged rows "clean"; TS/SQL parity
+over a file raising all 18 codes; 22 mutation proofs, one per protection, including the batch guard and
+the location flag; the migration's three refusals and its pass), `tests/live/merchant-import.test.ts`
+(9: auth over HTTP, CSV and XLSX staging, Read again after a CRM fix, commit and its refusals over
+HTTP, tampered rows, 500 rows, and two real-connection races), `e2e/merchant-import.spec.ts` (4).
+Changed, never weakened: `rls/processors`, `unit/processors`, `live/grant-surface` (five → six, and the
+paper-form test reads both migrations' inserts), `rls/reset-business-data` and
+`live/reset-business-data` (37 → 39 tables, five → six processors, the two new tables asserted
+cleared), `e2e/processor-select` (six options).
+
+Suites: `npm test` 2928 → 3038 (124 → 127 files); `test:live` 353 → 362 (23 → 24 files); e2e: only the four specs
+covering the changed pages (`merchant-import`, `processor-select`, `merchant-location`, `merchant-owner`), 24 passed
+(6 setup), 1.9 min; the full e2e suite was not run, and its baseline 380 → 384 is arithmetic. Each new e2e
+test was proven by reverting what it guards (Commit enabled while refused, the rep's link, the table's
+scroll wrapper, the success state, the page's `requireAdmin()`, the settled page's Read again): each
+failed at its own assertion. Applied to the local stack only (`supabase migration up --local`).
+
+Not done: no deploy plan (as instructed); nothing pushed, linked or deployed; the reset script was not
+run.
+
+### Phase 14b: alphanumeric MIDs in the residual parser (6 Nov 2026, branch `intake-residuals`)
+
+Phase 14 loads merchants whose MID has letters (Square: 13 letters and digits); the residual parser
+read a Merchant Number as digits only and every match was exact, so a Square file could not pay them.
+
+Built (`20261106140000_alphanumeric_mids.sql`; Edge Function `parse-residual-import` and
+`_shared/residuals.ts`; no other function's source changed):
+- **The MID** (`parseMidCell`): text, 6-20 ASCII letters and digits, trimmed, apostrophe and BOM
+  dropped, kept as written. A spreadsheet NUMBER cell over 15 digits, shown in exponent form or beyond
+  2^53 refuses (`missing_mid` with the use-the-CSV sentence), and so does text a spreadsheet wrote for a
+  number (`4.001E+11`, `400100200300.0`) — the phase 14 rule. A zero-padded number format still gives
+  its leading zeros.
+- **A CSV is read as text.** The upload accepts `.csv`; `isSpreadsheetContainer()` (zip or compound
+  file) tells an XLSX/XLS from text, and for text the Merchant Number is each cell's own text (SheetJS
+  keeps it in `w`), so 19 digits or leading zeros survive. The figures are read as before.
+- **One key**: `midKey()` / `mid_key()` = trimmed, upper case. A repeated MID (two spellings are one,
+  both named), the lookup by MID (`ilikeAnyOf`: equality ignoring case, and a validated MID holds no
+  wildcard), `mid_in_other_batch`, payee_changed and share_not_in_force all compare keys; the review's
+  unknown-MID list is de-duplicated by key.
+- **`merchants_mid_key_ci`**: unique on `mid_key(mid)`. Without it a key could name two merchants and a
+  case-insensitive match would be ambiguous. The merchant form's 23505 sentence covers it; the merchant
+  import's `mid_exists` check now has it as a backstop.
+- **SQL**: `commit_residual_import_v3` (the row lock, unknown MID, the repeat, owner/MID changed, no
+  rate, the share and override checks, the warnings, the three inserts, no-merge, the replace's
+  adjustment check), `delete_payout_period` (its adjustment check) and `post_payout_adjustment` (the
+  merchant lookup) re-created from their latest bodies with ONLY the MID comparisons changed (generated
+  by text substitution and checked: no plain `m.mid =` / `= r.mid_raw` / `l.mid =` left in v3).
+- **Display**: ledger lines carry the MERCHANT's spelling (`m.mid`, as before), so statements, both
+  reports and both exports show it; they read the ledger and needed no change (a test reads Report 2).
+  The review screen shows the file's own text for each row (it is the file's row).
+
+The migration refuses, naming them, merchants whose MIDs differ only in case or surrounding spaces,
+and a function body it did not copy; it passes over a populated database and writes no row.
+
+Where the instruction was silent, and what was chosen:
+- **Exponent form refuses even for an exact 12-digit number** (Excel's General format). The parser used
+  to write such a number out digit for digit (two tests said so). The instruction's "a number over 15
+  digits or in exponent form is refused" was followed, as the merchant import does; the two tests now
+  assert the refusal and the CSV route.
+- **The unique index**, rather than refusing an ambiguous match at commit: a key naming two merchants
+  is never a state worth keeping, and the merchant import already treated it as a duplicate.
+- **The review screen shows the file's spelling**, the ledger the merchant's.
+- **No new blocker code**: an unreadable or precision-damaged MID is still `missing_mid` (no CHECK
+  change), with its own sentence.
+- **The upload label** is now "Residual report (XLSX or CSV)"; two e2e helpers that find it by label
+  changed with it.
+
+Tests: `tests/rls/alphanumeric-mids.test.ts` (new: the key and index, the commit in lower and mixed
+case, the repeat in another case, unknown, no-merge, replace and its adjustment check, Report 2, the
+adjustment lookup, the delete's check, the migration's refusals and pass, and seven mutation proofs),
+unit tests for the parser (alphanumeric, lengths, precision, CSV through SheetJS, the container sniff,
+the case repeat, the key helpers, the preview helpers, the review's unknown list) and six live tests
+through the real function and commit (lettered MIDs stored and written in different cases, the case
+repeat, unknown and short MIDs, `mid_in_other_batch` in another case, a CSV with 19 digits, leading zeros
+and letters, the General-format refusal). Mutation checks: each of 13 parser changes reverted alone
+failed a unit test; each of the five Edge Function changes reverted alone (a fresh `functions serve`
+each time, with a passing control run) failed a live test, after one live test was strengthened for the
+merchant stored in lower case.
+Changed, never weakened: `unit/residuals-parse` (`precision` in the result shape; one-character MID
+stand-ins became 12-digit ones; the General-format test now asserts the refusal; the missing-MID
+sentence), `live/residual-import` (its number-cell row carries a "0" format, the General case is its
+own test), `rls/commit-residual-import-v3` (two mutation fragments follow the new text),
+`rls/merchant-import` (the case mutation is now caught by the index as backstop), two e2e helpers (the
+label).
+
+Suites: `npm test` 3038 → 3072 (127 → 128 files); `test:live` 362 → 368 (24 files); e2e: only the four
+specs for the import pages (`residual-review`, `residual-bad-import`, `residual-import-comma`,
+`upload-labels`), 18 passed (6 setup), 1.2 min; no e2e test was added, so the baseline stays 384. Build,
+lint and type-check pass. Applied to the local stack only (`supabase migration up --local`).
+
+Full e2e on `5cee38b` (this change plus the deploy plan `docs/claude/deploy-residuals.md`), alone, after
+`supabase stop` / `start`, a fresh `functions serve`, `.next` deleted and port 3000 free: **384 passed**
+(6 setup), 0 failed, 0 flaky, 17.0 min, `retries: 0`. On the same commit: `npm test` 3072 passed (128 files),
+`test:live` 368 passed (24 files); build, lint and type-check pass.
+
+### Phase 15: the real ISO Hub files (11 Nov 2026, branch `intake-residuals`)
+
+The importer met the 33 files Owen chose (`load-manifest.csv`, Jan-Sep 2026; they stay outside the
+repo, and nothing here names a merchant, a MID or a per-merchant amount). Decisions: §0d.
+
+Step 0, measured before any code (aggregates only): 26 ACH rows; 20 are filler; the other six (TSYS
+Jan-May and Jul, one each) hold volume 267,271.27 and residual 1,541.53. With them in, each of those
+months equals ISO Hub's Volume and Net to the cent; without them it misses by that row. So they import,
+under the confirmable `other_income_type`.
+
+Built (`20261111120000_iso_hub_files.sql`; `_shared/residuals.ts` and `parse-residual-import`; the
+review page):
+- **Income Type** (`isResidualIncomeType`, `nameKey`): Residual, Residuals and blank, compared as
+  lower-case letters and digits. Anything else stages with the `other_income_type` warning, not a
+  blocker; its block on the review screen shows the count and the volume and residual sums
+  (`warningTotals`). `wrong_income_type` stays in the vocabulary (the staging CHECK still admits it)
+  and is never raised.
+- **Filler rows** (no MID, name, Volume or Residual, whatever the Processor and Income Type say) are
+  skipped and counted (`skipped`, `skipped_count` in the function's reply). A row with a figure or a
+  name and no MID is still `missing_mid`.
+- **Processor** (`processorKey` / `processor_key()`): letters and digits only, then Goat -> TSYS and
+  Netevia -> Netevia HQ; null when blank. `processor_mismatch` is a file cell with a key that is not
+  the batch's, or a merchant's saved processor whose key is not. A blank cell is silent. The review
+  screen's wording compares the same way.
+- **Numeric MIDs**: a whole number of 15 digits or fewer is read by its stored value even when shown
+  in exponent form (reverses 14b's choice); over 15 digits refuses with the use-the-CSV sentence; a
+  fraction is not a MID; mangled text ("4.001E+11") still refuses.
+- **Blank figures** on a row with a MID are 0 (`blank_as_zero` on the parsed row,
+  `blank_as_zero_count` in the reply). Staged `volume_raw` / `residual_income_raw` keep the blank, so
+  the review screen counts those rows from staging (`blankFigureRows`, in `lib/residual-review.ts`,
+  server-only: client components import `lib/payouts.ts`, and the parser stays off the browser). With
+  no MID the blank stays `missing_figure` beside `missing_mid`.
+- **Rounding** (`round2`, `decimalText`): the cell's shortest decimal, rounded half away from zero in
+  decimal. The old `Math.round(v * 100) / 100` read 1.005 as 100.4999... cents; on the real files
+  that left TSYS January and September each a cent short of ISO Hub's Net (69,645.71 and 107,560.12),
+  measured by running the new parser with only the old rounding put back.
+- **SQL** (`20261111120000`): `processor_key()` (immutable, EXECUTE for authenticated and service_role
+  only), the warnings CHECK with `other_income_type`, and v3 re-created from 20261106140000's body
+  with three changes: `other_income_type` confirmable, the Income Type refusal removed, step 4's
+  `processor_mismatch` and `other_income_type`. The migration refuses unless the deployed v3 carries
+  each replaced fragment exactly once; over a populated database it writes no row.
+
+Acceptance: all 33 chosen files through the new parser (SheetJS 0.20.3, the function's options),
+Netevia HQ September's one malformed Residual cell (two decimal points) set to 0.60 in memory only.
+**Zero blockers in every file; Volume and Residual equal ISO Hub's Volume and Net to the cent in all
+33.** Warnings without the database (merchant lookups not run): `other_income_type` once in TSYS
+Jan-May and Jul, `bad_numbers` once in TSYS Jul; no `processor_mismatch` from the file's cells
+(`processor_mismatch` and `inactive_merchant` also depend on the merchants, so the real load will
+show what those say). Filler rows skipped per file: 0-233.
+
+Where the instruction was silent, and what was chosen:
+- **Punctuation** is ignored for Income Type as well as Processor, so both compare by one key with one
+  SQL twin.
+- **A merchant's saved processor** is compared by `processor_key()` too (it was exact equality).
+- **A Processor cell of punctuation only** ("-") has no key, so it counts as blank.
+- **Filler is counted, not listed**: the count is in the function's reply; the rows are not staged.
+- **No new column**: blank-as-zero rows are derived from the staged raw cells.
+
+Tests: unit (`residuals-parse`: Income Type, filler, aliases and blank cell, exponent MIDs through
+SheetJS, blank figures, exact rounding with the float rounding shown wrong; `payouts`:
+`warningTotals`, `blankFigureRows`, the vocabulary pinned to the new CHECK), rls
+(`commit-residual-import-v3`: `other_income_type` refused unconfirmed and committed on a yes,
+Residual / blank accepted, blank and aliased Processor cells silent, `processor_key()` values and
+grants, mutation proofs for each new line and for the blank-cell exemption and alias map; new
+`iso-hub-files`: the migration over a populated database, its three refusals, and the spec block
+verbatim), live (`residual-import`: the warnings test gains a blank cell, Goat, ACH, a blank Volume
+and a filler row; ACH and blank figures through the real function and v3; the exponent MID read, 16
+digits refused) and one e2e (the review screen's ACH block with its sums, the blank-figures callout,
+no mismatch block). Mutation checks: each of nine parser rule removals (only Residuals accepted; no
+`other_income_type`; no filler skip; no alias map; blank cell warns; punctuation compared; exponent
+refused; blank not 0; float rounding) failed at least one unit test; in SQL, the mutation proofs
+above do the same for each new v3 line, the blank-cell exemption and the alias map.
+Changed because the rule changed (§0d), not weakened: the tests that asserted a refusal for another
+Income Type (unit, rls, live, one e2e row now uses an unreadable figure instead), a refusal for an
+exponent-shown 12-digit MID (unit, live; a 16-digit case now carries the refusal), a
+`processor_mismatch` on a blank cell (unit, rls), and `missing_figure` for a blank on a row with a MID
+(unit, live; the no-MID case keeps it).
+
+Suites: `npm test` 3072 → 3090 (128 → 129 files); `test:live` 368 → 369 (24 files); e2e 384 → 385
+(6 setup). Build, lint and type-check pass. Migration applied to the local stack only
+(`supabase migration up --local`). The first full `npm test` run timed one test out (the 70,000-row
+payout test, 30 s) while other suites ran beside it; alone, everything passed. Full e2e alone, port
+3000 free, `.next` deleted, a fresh `functions serve`: **385 passed**, 0 failed, 16.7 min,
+`retries: 0`.
 
 ---
 

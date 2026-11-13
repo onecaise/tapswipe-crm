@@ -10,30 +10,30 @@ import { ConfirmPair } from "@/components/confirm-pair";
 import { Button } from "@/components/ui/button";
 
 /**
- * Deletes a whole period's ledger rows — the escape hatch for an import that was
- * simply wrong.
+ * Deletes one processor's lines for a month -- the escape hatch for an import
+ * filed under the wrong month or processor. A wrong FIGURE is not this: until
+ * the month is paid it is a replace (upload the corrected file), and after it
+ * an adjustment.
  *
- * Individual rows are deliberately not deletable from the UI: a wrong merchant line
- * is a correction, made by editing, which the history table then records. A whole
- * period is different, because a bad import is bad in one piece.
+ * Through delete_payout_period() (20261030190000), never a client DELETE: the
+ * ledger has no DELETE grant or policy any more. The function re-checks
+ * is_admin(), refuses a month marked paid or one an adjustment corrects,
+ * deletes only that processor's import lines (adjustment lines stay), frees
+ * the processor-month for a new file, and writes one audit row -- which the
+ * old browser delete never did, though the docs said it did. Its messages are
+ * written for people and shown as they are.
  *
- * **The confirmation names how many rows carry hand-entered figures**, because that
- * is the part that cannot be re-imported — the processor's columns come back with
- * the next upload, but a month of typed-in residuals does not. The count is what
- * makes the cost of the click visible before it happens rather than after.
- *
- * The rep_payout_row_history rows survive this, which is why row_id carries no
- * foreign key. So the record that someone entered a figure outlives the figure.
+ * `processor` null is the lines committed before processors were recorded.
  */
 export function PayoutPeriodDelete({
   period,
+  processor,
   rowCount,
-  filledCount,
 }: {
   period: string;
+  processor: string | null;
+  /** Import lines of that processor in the month. */
   rowCount: number;
-  /** Rows with a residual income or split entered by hand. */
-  filledCount: number;
 }) {
   const router = useRouter();
 
@@ -41,43 +41,38 @@ export function PayoutPeriodDelete({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const what = processor === null ? "lines with no processor" : `${processor} lines`;
+
   const remove = async () => {
     setBusy(true);
     setError(null);
 
     const supabase = createClient();
-    const { error: deleteError, count } = await supabase
-      .from("rep_payout_rows")
-      .delete({ count: "exact" })
-      .eq("period", period);
+    const { error: rpcError } = await supabase.rpc("delete_payout_period", {
+      period_input: period,
+      processor_input: processor,
+    });
 
     setBusy(false);
     setConfirming(false);
 
-    if (deleteError) {
-      setError(deleteError.message);
-      return;
-    }
-    if (count === 0) {
-      setError("Nothing was deleted. Reload the page.");
+    if (rpcError) {
+      setError(rpcError.message);
       return;
     }
 
-    // The period no longer exists, so its page would 404. Back to the list, which
-    // is where the admin now needs to be.
+    // The month may be empty now, and its page would 404. Back to the list,
+    // which is where the admin now needs to be.
     router.push("/payouts");
+    router.refresh();
   };
 
   return (
     <div className="flex flex-col items-end gap-1">
       {confirming ? (
         <ConfirmPair
-          label={
-            filledCount === 0
-              ? `Delete all ${rowCount} rows for ${formatPeriod(period)}? This cannot be undone.`
-              : `Delete all ${rowCount} rows for ${formatPeriod(period)}? ${filledCount} of them have figures entered by hand, which a re-import will not bring back.`
-          }
-          confirmLabel={`Delete ${rowCount} rows`}
+          label={`Delete all ${rowCount} ${what} for ${formatPeriod(period)}? Adjustment lines stay. This cannot be undone.`}
+          confirmLabel={`Delete ${rowCount} line${rowCount === 1 ? "" : "s"}`}
           onConfirm={() => void remove()}
           onCancel={() => setConfirming(false)}
           busy={busy}
@@ -92,10 +87,10 @@ export function PayoutPeriodDelete({
           onClick={() => setConfirming(true)}
         >
           <Trash2Icon size={14} />
-          Delete period
+          {processor === null ? "Delete period" : `Delete ${processor}`}
         </Button>
       )}
-      {error && <span className="text-xs text-destructive">{error}</span>}
+      {error && <span className="max-w-xs text-right text-xs text-destructive">{error}</span>}
     </div>
   );
 }

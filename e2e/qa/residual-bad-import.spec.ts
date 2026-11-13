@@ -1,8 +1,8 @@
-import { expect, test, type Page } from "@playwright/test";
-import * as XLSX from "xlsx";
+import { expect, test } from "@playwright/test";
 
 import { storageStateFor } from "../fixtures/seed";
 import { service } from "./qa-stack";
+import { HEADER, XLSX_TYPE, clearQa, freeSlot, newMid, upload, workbook } from "./residual-files";
 
 /**
  * B4 (D-08). Uploading a file that is not a residual report — a text file, an
@@ -15,61 +15,39 @@ import { service } from "./qa-stack";
  * UPDATE the Abandon button runs (rep_payout_batches has no DELETE policy or
  * grant — a batch is the record that an import was attempted). A valid file
  * still lands on its review screen exactly as before.
+ *
+ * Phase 7 (docs/design/intake-and-reports.md): the file is the processor's six
+ * columns, and the processor and month are chosen on the page. A file the
+ * parser refuses OUTRIGHT -- missing columns, the CRM's own export -- is still
+ * abandoned; one it reads but refuses row by row (an unknown MID) waits in
+ * Review, because Read again can fix it.
  */
 test.use({ storageState: storageStateFor("admin") });
 
 const PREFIX = "qa-b4-";
 
-function workbook(rows: unknown[][]): Buffer {
-  const book = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(rows), "Residuals");
-  return XLSX.write(book, { type: "buffer", bookType: "xlsx" }) as Buffer;
-}
-
 async function batchesNamed(fileName: string) {
   const { data, error } = await service()
     .from("rep_payout_batches")
-    .select("id, status, row_count")
+    .select("id, status, row_count, processor, period")
     .eq("file_name", fileName);
   if (error) throw new Error(error.message);
-  return data as { id: number; status: string; row_count: number | null }[];
+  return data as { id: number; status: string; row_count: number | null; processor: string; period: string }[];
 }
 
-/** Service-role cleanup: staging rows, then batches, then their stored files. */
-async function clearQaBatches() {
-  const db = service();
-  const { data } = await db.from("rep_payout_batches").select("id, file_key").like("file_name", `${PREFIX}%`);
-  const rows = (data ?? []) as { id: number; file_key: string | null }[];
-  if (rows.length === 0) return;
-  const ids = rows.map((r) => r.id);
-  await db.from("rep_payout_import_rows").delete().in("batch_id", ids);
-  const { error } = await db.from("rep_payout_batches").delete().in("id", ids);
-  if (error) throw new Error(`clear batches: ${error.message}`);
-  const keys = rows.map((r) => r.file_key).filter((k): k is string => Boolean(k));
-  if (keys.length > 0) await db.storage.from("residual-imports").remove(keys);
-}
-
-test.beforeAll(clearQaBatches);
-test.afterAll(clearQaBatches);
-
-async function upload(page: Page, name: string, buffer: Buffer, mimeType: string) {
-  await page.goto("/payouts/import");
-  await page.getByLabel("Residual report (XLSX)").setInputFiles({ name, mimeType, buffer });
-  await page.getByRole("button", { name: "Upload" }).click();
-}
-
-const XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+test.beforeAll(() => clearQa(PREFIX));
+test.afterAll(() => clearQa(PREFIX));
 
 test("B4 an empty file is refused before any batch exists", async ({ page }) => {
   const name = `${PREFIX}empty.xlsx`;
-  await upload(page, name, Buffer.alloc(0), XLSX_TYPE);
+  await upload(page, { name, buffer: Buffer.alloc(0) }, await freeSlot());
   await expect(page.getByText("That file is empty.")).toBeVisible();
   expect(await batchesNamed(name)).toEqual([]);
 });
 
 test("B4 a non-spreadsheet leaves no batch in Review", async ({ page }) => {
   const name = `${PREFIX}not-a-sheet.xlsx`;
-  await upload(page, name, Buffer.from("this is not a spreadsheet\njust words\n"), XLSX_TYPE);
+  await upload(page, { name, buffer: Buffer.from("this is not a spreadsheet\njust words\n") }, await freeSlot());
   await expect(page.getByText(/no batch was kept in Review/i)).toBeVisible();
   const batches = await batchesNamed(name);
   expect(batches.filter((b) => b.status === "review")).toEqual([]);
@@ -79,22 +57,32 @@ test("B4 a non-spreadsheet leaves no batch in Review", async ({ page }) => {
 
 test("B4 a workbook missing required columns leaves no batch in Review", async ({ page }) => {
   const name = `${PREFIX}missing-columns.xlsx`;
-  await upload(page, name, workbook([["Period", "MID"], ["2027-11-01", "X1"]]), XLSX_TYPE);
+  await upload(page, { name, buffer: workbook([["Processor", "Merchant Number"], ["TSYS", newMid()]]) }, await freeSlot());
+  await expect(page.getByText(/missing columns: Merchant Name, Income Type, Volume, Residual/)).toBeVisible();
   await expect(page.getByText(/no batch was kept in Review/i)).toBeVisible();
   const batches = await batchesNamed(name);
   expect(batches.map((b) => b.status)).toEqual(["abandoned"]);
 });
 
-test("B4 a valid report still lands on its review screen", async ({ page }) => {
-  const name = `${PREFIX}valid.xlsx`;
+test("B4 the CRM's own export is refused as not a processor file, and leaves no batch in Review", async ({ page }) => {
+  const name = `${PREFIX}crm-export.xlsx`;
   const rows = [
-    ["Period", "Agent #", "MID", "Merchant name", "Volume", "Average ticket", "Total cost"],
-    ["2027-11-01", "9002", "QA-B4-MID-1", "QA B4 Merchant", 1000, 10, 50],
+    ["Period", "Agent #", "Agent", "MID", "Merchant name", "Volume", "Average ticket", "Total cost", "Residual income", "Rep split", "Rep payout", "Line"],
+    ["2026-07-01", "9002", "E2E Agent", newMid(), "QA Co", 1000, 10, 50, 5, 50, 2.5, ""],
   ];
-  await upload(page, name, workbook(rows), XLSX_TYPE);
+  await upload(page, { name, buffer: workbook(rows) }, await freeSlot());
+  await expect(page.getByText(/looks like a CRM export, not a processor file/)).toBeVisible();
+  expect((await batchesNamed(name)).map((b) => b.status)).toEqual(["abandoned"]);
+});
+
+test("B4 a valid report still lands on its review screen, under the processor and month chosen", async ({ page }) => {
+  const name = `${PREFIX}valid.xlsx`;
+  const slot = await freeSlot();
+  const rows = [HEADER, ["TSYS", newMid(), "QA B4 Merchant", "Residuals", "$1,000.00", "$50.00"]];
+  await upload(page, { name, buffer: workbook(rows), mimeType: XLSX_TYPE }, slot);
   await expect(page).toHaveURL(/\/payouts\/import\/\d+$/);
   const batches = await batchesNamed(name);
-  expect(batches.map((b) => b.status)).toEqual(["review"]);
+  expect(batches).toEqual([expect.objectContaining({ status: "review", ...slot })]);
   const { count } = await service()
     .from("rep_payout_import_rows")
     .select("id", { count: "exact", head: true })

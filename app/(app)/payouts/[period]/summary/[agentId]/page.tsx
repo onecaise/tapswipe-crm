@@ -20,6 +20,7 @@ import {
   type PayoutRow,
 } from "@/lib/payouts";
 import { loadOwnShareViews } from "@/lib/rep-shares";
+import { loadOverrideViews, overrideIdsOf, overrideLineLabel } from "@/lib/overrides";
 import { PageShell } from "@/components/page-shell";
 import { PrintButton } from "@/components/print-button";
 import { PrintDocument } from "@/components/print-document";
@@ -91,9 +92,13 @@ async function Summary({
 
   const rep = repData as { full_name: string; agent_number: string | null } | null;
   const totals = payoutTotals(rows);
-  // Adjustment lines (post_share_correction, phase 5) are printed in their own
-  // block, naming the month each corrects; the total includes them.
-  const { imports, adjustments } = splitPayoutLines(rows);
+  // Override lines (20261102120000) and adjustment lines are printed in their
+  // own blocks; the total includes both.
+  const { imports, overrides, adjustments } = splitPayoutLines(rows);
+
+  // Who receives each override on this rep's debits (memo A4c). As for the
+  // shares above: an admin reads the table, the rep my_override_recipients().
+  const overrideViews = await loadOverrideViews(supabase, isAdmin, overrideIdsOf(overrides));
 
   // Shared lines: the partner's name and the rep's own share. An admin
   // reads them from merchant_rep_shares relative to this statement's rep; the
@@ -144,7 +149,7 @@ async function Summary({
                  period that is still being worked on would otherwise look final. */
               <p className="mt-1 text-xs font-medium text-warning">
                 {totals.unfilled} of {totals.rows} merchants have no residual figure
-                entered yet — this summary is incomplete.
+                — this summary is incomplete.
               </p>
             )}
           </header>
@@ -198,6 +203,42 @@ async function Summary({
                       {formatPct(row.rep_split_pct)}
                     </td>
                     <td className="py-1.5 text-right font-medium tabular-nums">
+                      {formatMoney(row.rep_payout)}
+                    </td>
+                  </tr>
+                ))}
+                {overrides.length > 0 && (
+                  <tr>
+                    <th
+                      colSpan={6}
+                      className="pb-1 pt-4 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground"
+                    >
+                      Overrides
+                    </th>
+                  </tr>
+                )}
+                {overrides.map((row) => (
+                  <tr
+                    key={row.id}
+                    className="border-b last:border-0"
+                    data-testid="statement-override"
+                  >
+                    {/* The MID on the rep's own debit only: a credit names
+                        the merchant, as text, and nothing else of it. */}
+                    <td className="py-1.5 align-top font-mono text-xs">
+                      {row.override_role === "debit" ? row.mid : ""}
+                    </td>
+                    <td className="py-1.5 align-top" colSpan={4}>
+                      {formatText(row.merchant_name)}
+                      <span className="block break-words text-xs text-muted-foreground">
+                        {overrideLineLabel(
+                          row,
+                          row.override_id === null ? undefined : overrideViews.get(row.override_id),
+                          false,
+                        )}
+                      </span>
+                    </td>
+                    <td className="py-1.5 text-right align-top font-medium tabular-nums">
                       {formatMoney(row.rep_payout)}
                     </td>
                   </tr>

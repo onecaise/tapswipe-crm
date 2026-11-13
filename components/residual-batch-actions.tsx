@@ -14,10 +14,10 @@ import { Button } from "@/components/ui/button";
  * Re-parse, download the original, and abandon — the three things that can be
  * done to a batch that is still under review.
  *
- * Re-parse is the mechanism behind resolving an unrecognised agent number: the
- * parse function is idempotent (it clears the batch's staging rows first), so
- * "create the rep, then parse again" is one code path rather than a second
- * resolution route to keep in step with the first.
+ * Re-parse is the mechanism behind resolving an unknown MID: the parse function
+ * is idempotent (it clears the batch's staging rows first), so "add the
+ * merchant, then Read again" is one code path rather than a second resolution
+ * route to keep in step with the first.
  *
  * Abandon is an UPDATE, not a delete. rep_payout_batches has no delete policy and
  * no delete grant — a batch is the record that an import was attempted, and the

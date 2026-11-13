@@ -459,7 +459,17 @@ describe("post_share_correction", () => {
 
   it("refuses an admin's hand edit of the figures on an adjustment line", async () => {
     const result = await correct(ADMIN_ID);
+    // Since 20261102140000 an admin holds no UPDATE at all: the grant refuses
+    // every column first. The CHECK still refuses the figures for the owner,
+    // who holds every privilege.
     await asUser(db, ADMIN_ID);
+    for (const set of ["residual_income = 1.00", "rep_split_pct = 50", "adjustment_amount = 99"]) {
+      const error = await attempt(() =>
+        db.query(`update rep_payout_rows set ${set} where id = ${result.partner_line_id}`),
+      );
+      expect(error?.code, set).toBe("42501");
+    }
+    await asPlatform(db);
     for (const set of ["residual_income = 1.00", "rep_split_pct = 50"]) {
       const error = await attempt(() =>
         db.query(`update rep_payout_rows set ${set} where id = ${result.partner_line_id}`),
@@ -467,11 +477,6 @@ describe("post_share_correction", () => {
       expect(error?.code, set).toBe("23514");
       expect(error?.message).toContain("rep_payout_rows_adjustment_no_figures");
     }
-    // The amount itself: the column grant refuses it first.
-    const amount = await attempt(() =>
-      db.query(`update rep_payout_rows set adjustment_amount = 99 where id = ${result.partner_line_id}`),
-    );
-    expect(amount?.code).toBe("42501");
     await asPlatform(db);
   });
 });
@@ -527,15 +532,18 @@ describe("catalog", () => {
     }
   });
 
-  it("widens the preview flag vocabulary to five, and keeps adjustment_rows_ignored out of the client's reach", async () => {
+  it("keeps share_not_in_force in the preview flag vocabulary, and adjustment_rows_ignored out of the client's reach", async () => {
     await asPlatform(db);
     const [{ def }] = await rows<{ def: string }>(
       db,
       `select pg_get_constraintdef(oid) as def from pg_constraint
         where conname = 'rep_payout_import_rows_preview_flag_check'`,
     );
-    for (const flag of ["share_not_applied", "partner_named", "line_not_shared", "share_not_in_force", "looks_shared"]) {
-      expect(def).toContain(`'${flag}'`);
+    // This migration widened the vocabulary to five; 20261104140000 narrowed it
+    // to the two notes the parser still writes, keeping this one.
+    expect(def).toContain("'share_not_in_force'");
+    for (const retired of ["share_not_applied", "partner_named", "line_not_shared", "looks_shared"]) {
+      expect(def).not.toContain(`'${retired}'`);
     }
     const [{ can }] = await rows<{ can: boolean }>(
       db,

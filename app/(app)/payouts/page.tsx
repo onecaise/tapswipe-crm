@@ -5,10 +5,12 @@ import { UploadIcon } from "lucide-react";
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { formatMoney, formatPeriod, periodParam } from "@/lib/format";
-import { summarizeByPeriod, type PayoutRow } from "@/lib/payouts";
+import { payoutMonthLabel, summarizeByPeriod, type PayoutRow } from "@/lib/payouts";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
+import { PayoutAdjustmentForm } from "@/components/payout-adjustment-form";
 import { PayoutExportButton } from "@/components/payout-export-button";
+import { PayoutMonthPaid } from "@/components/payout-month-paid";
 import { StatCard } from "@/components/stat-card";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -83,7 +85,7 @@ async function PayoutPeriods() {
     { repPayout: 0, unfilled: 0 },
   );
 
-  // Where "Awaiting figures" should send someone — and only when that question
+  // Where "Lines with no figure" should send someone — and only when that question
   // has one answer. The card totals unfilled rows across every period, so it is
   // a link exactly while a single period is waiting, which is the ordinary case
   // (one import, one month, many blank rows). With two months outstanding an
@@ -105,9 +107,10 @@ async function PayoutPeriods() {
           value={formatMoney(overall.repPayout)}
         />
         {/* Accented only for an admin, and only because it is the one figure on
-            this page that represents outstanding work — rows still waiting for
-            someone to enter a residual. A rep cannot act on it, so it stays
-            plain for them.
+            this page that flags a problem — lines with no residual or rate,
+            which since 20261102140000 nobody edits: an admin fixes the month
+            by replacing it, or by an adjustment once it is paid. A rep cannot
+            act on it, so it stays plain for them.
 
             Linked for BOTH roles, though, and the asymmetry is deliberate: the
             two props answer different questions. `accent` is about priority, and
@@ -117,7 +120,7 @@ async function PayoutPeriods() {
             roles could already reach it from the period name; this just stops
             the figure naming the work from being the one thing that is inert. */}
         <StatCard
-          label="Awaiting figures"
+          label="Lines with no figure"
           value={overall.unfilled}
           accent={isAdmin && overall.unfilled > 0}
           href={soleUnfilledHref}
@@ -157,7 +160,7 @@ async function PayoutPeriods() {
                     blanks is waiting on someone. Exactly what the two intents
                     mean everywhere else, so no new colour is needed.
 
-                    "N to enter" is a LINK to the period, because it was the one
+                    The count is a LINK to the period, because it was the one
                     thing on this page naming the outstanding work and the one
                     thing that could not be clicked — the period name in the
                     first column was the only way in, and it reads as a label
@@ -173,20 +176,18 @@ async function PayoutPeriods() {
                 ) : (
                   <Link
                     href={`/payouts/${periodParam(period.period)}`}
-                    // Named rather than left to read as a bare "1 to enter",
-                    // which says nothing out of its row. Deliberately NOT "Enter
-                    // figures for…": a rep reaches this link too and cannot
-                    // enter anything (update on rep_payout_rows is admin-only),
-                    // so the label states the fact both roles share and neither
-                    // is promised an action they do not have.
-                    aria-label={`${formatPeriod(period.period)} — ${period.unfilled} awaiting figures`}
+                    // Named rather than left to read as a bare count, which says
+                    // nothing out of its row. It states a fact and promises no
+                    // action: nobody enters a figure (20261102140000); a month
+                    // is fixed by a replace, or an adjustment once paid.
+                    aria-label={`${formatPeriod(period.period)} — ${period.unfilled} with no figure`}
                     className="rounded-full focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
                     <StatusBadge
                       intent="warning"
                       className="transition-opacity hover:opacity-80"
                     >
-                      {period.unfilled} to enter
+                      {period.unfilled} with no figure
                     </StatusBadge>
                   </Link>
                 )}
@@ -196,6 +197,120 @@ async function PayoutPeriods() {
         </TableBody>
       </Table>
     </div>
+  );
+}
+
+/**
+ * Every committed processor-month, with whether it is marked paid and the two
+ * actions (memo §3.2, A8), and the adjustment form on a paid one (§3.3).
+ * Admin-only by requireUser's role AND by RLS: rep_payout_batches and
+ * payout_period_closures are admin-SELECT tables, so a rep's query would
+ * return nothing here anyway.
+ *
+ * Paid is per processor and month because a file is: TSYS July can be paid
+ * while Square July is still being corrected.
+ */
+async function ProcessorMonths() {
+  const profile = await requireUser();
+  if (profile.role !== "admin") return null;
+
+  const supabase = await createClient();
+  const [batches, closures, reps] = await Promise.all([
+    supabase
+      .from("rep_payout_batches")
+      .select("id, file_name, processor, period, committed_at")
+      .eq("status", "committed")
+      .order("period", { ascending: false })
+      .order("processor", { ascending: true }),
+    supabase.from("payout_period_closures").select("period, processor, closed_at"),
+    supabase
+      .from("profiles")
+      .select("id, full_name")
+      .eq("is_active", true)
+      .order("full_name", { ascending: true }),
+  ]);
+
+  const error = batches.error ?? closures.error ?? reps.error;
+  if (error) {
+    return (
+      <p className="text-sm text-destructive">
+        Could not load the processor months: {error.message}
+      </p>
+    );
+  }
+
+  type Month = { id: number; file_name: string; processor: string; period: string; committed_at: string | null };
+  const months = (batches.data ?? []) as Month[];
+  if (months.length === 0) return null;
+
+  const paid = new Map(
+    ((closures.data ?? []) as { period: string; processor: string; closed_at: string }[]).map(
+      (c) => [`${c.processor}|${c.period}`, c.closed_at],
+    ),
+  );
+  const activeReps = (reps.data ?? []) as { id: string; full_name: string }[];
+
+  return (
+    <section className="flex flex-col gap-3" aria-labelledby="processor-months">
+      <div>
+        <h2 id="processor-months" className="text-base font-semibold tracking-tight">
+          Processor months
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          Until a month is marked paid it can be replaced (upload the corrected file) or
+          deleted. Once paid, it is corrected with an adjustment.
+        </p>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Month</TableHead>
+            <TableHead>Processor</TableHead>
+            <TableHead>Import</TableHead>
+            <TableHead>Paid</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {months.map((month) => {
+            const closedAt = paid.get(`${month.processor}|${month.period}`) ?? null;
+            return (
+              <TableRow key={month.id} data-testid="processor-month">
+                <TableCell className="whitespace-nowrap font-medium">
+                  {formatPeriod(month.period)}
+                </TableCell>
+                <TableCell>{month.processor}</TableCell>
+                <TableCell>
+                  <Link
+                    href={`/payouts/import/${month.id}`}
+                    className="block max-w-[22ch] truncate underline underline-offset-4"
+                    title={month.file_name}
+                  >
+                    {month.file_name}
+                  </Link>
+                </TableCell>
+                <TableCell className="whitespace-normal">
+                  <div className="flex min-w-0 flex-col gap-2">
+                    <PayoutMonthPaid
+                      period={month.period}
+                      processor={month.processor}
+                      label={payoutMonthLabel(month.processor, month.period)}
+                      closedAt={closedAt}
+                    />
+                    {closedAt !== null && (
+                      <PayoutAdjustmentForm
+                        period={month.period}
+                        processor={month.processor}
+                        reps={activeReps}
+                      />
+                    )}
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </section>
   );
 }
 
@@ -240,6 +355,10 @@ export default function PayoutsPage() {
         }
       >
         <PayoutPeriods />
+      </Suspense>
+
+      <Suspense fallback={null}>
+        <ProcessorMonths />
       </Suspense>
     </PageShell>
   );

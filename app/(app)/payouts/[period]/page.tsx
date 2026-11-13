@@ -14,14 +14,12 @@ import {
   periodParam,
 } from "@/lib/format";
 import {
-  PAYOUT_BATCH_COLUMNS,
   PAYOUT_ROW_COLUMNS,
   PAYOUT_SHARE_ADMIN_COLUMNS,
   isPartnerLine,
   parsePeriodParam,
   payoutTotals,
   splitPayoutLines,
-  type PayoutBatch,
   type PayoutRow,
 } from "@/lib/payouts";
 import {
@@ -30,16 +28,13 @@ import {
   type AdminShareView,
   type OwnShareView,
 } from "@/lib/rep-shares";
-import { SharedResidualControl } from "@/components/shared-residual-control";
+import { loadOverrideViews, overrideIdsOf } from "@/lib/overrides";
 import { PayoutAdjustments } from "@/components/payout-adjustments";
-import { loadSkipReviewers } from "@/lib/residual-skips";
+import { PayoutOverrides } from "@/components/payout-overrides";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
-import { PayoutBulkSplit } from "@/components/payout-bulk-split";
 import { PayoutExportButton } from "@/components/payout-export-button";
-import { PayoutFigureCell } from "@/components/payout-figure-cell";
 import { PayoutPeriodDelete } from "@/components/payout-period-delete";
-import { ResidualSkipsNotice } from "@/components/residual-skips-notice";
 import { StatCard } from "@/components/stat-card";
 import { Button } from "@/components/ui/button";
 import {
@@ -58,34 +53,11 @@ import {
  * returns every rep's rows and a rep's returns their own, so the grouping code is
  * the same and a rep simply gets one group.
  *
- * DELIBERATELY NOT ON components/list-table.tsx, unlike every other list in the
- * app. That component renders BOTH a table and a stacked-card view and hides one
- * with display:none, which is fine for read-only text and wrong here. Measured,
- * by converting it and then reverting:
- *
- *   * 9 payouts-editing specs went red on `getByLabel(...) resolved to 2
- *     elements`. getByRole consults the accessibility tree and so ignores the
- *     hidden copy; getByLabel does not, and every figure input existed twice.
- *   * 2 payouts-rendering specs went red — the ones pinning the long-merchant-
- *     name truncation that keeps the six money columns on screen.
- *   * The two copies genuinely diverge mid-edit: typing 777.77 into the visible
- *     cell left the hidden one showing the stored -820.40. They re-converge
- *     after a save, because PayoutFigureCell re-syncs on a prop change — but the
- *     window between typing and blurring is real, and crossing the breakpoint
- *     inside it shows a stale figure on the one page where a wrong number is a
- *     wrong commission payment.
- *   * It doubles the stateful client components: 40 merchants is 80 editable
- *     cells, not 160.
- *
- * If this page ever needs a narrow layout, the shape to reach for is a CSS-only
- * one that restyles a SINGLE table — one DOM, so PayoutFigureCell mounts once —
- * not a second rendered copy.
- *
- * The `isAdmin` branches below are about affordances, NOT access: the update
- * policy on rep_payout_rows is admin-only, so a rep who reached an editable cell
- * would have their write filtered to zero rows — which is what the cell's
- * `count === 0` check reports. Verified by calling PATCH directly as each role:
- * both agents come back with a zero affected-row count, the admin with one.
+ * Read-only for every role, admins included (20261102140000): a committed line
+ * is never edited. A fix is a replace of the processor-month until it is
+ * marked paid, or an adjustment line after (/payouts). The `isAdmin` branches
+ * below are about what is SHOWN -- both parties of a shared account, the
+ * per-processor delete -- never about editing.
  */
 
 type Rep = { id: string; full_name: string; agent_number: string | null };
@@ -119,6 +91,16 @@ function groupByAgent(rows: PayoutRow[], reps: Map<string, Rep>): Group[] {
     .sort((a, b) =>
       (a.rep?.full_name ?? "").localeCompare(b.rep?.full_name ?? ""),
     );
+}
+
+/** The month's import lines counted per processor (NULL: before processors were recorded). */
+function processorsIn(rows: PayoutRow[]): [string | null, number][] {
+  const counts = new Map<string | null, number>();
+  for (const row of rows) {
+    if (row.line_kind !== "import") continue;
+    counts.set(row.processor, (counts.get(row.processor) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort(([a], [b]) => (a ?? "").localeCompare(b ?? ""));
 }
 
 async function PeriodLedger({
@@ -202,24 +184,10 @@ async function PeriodLedger({
     ? new Map<number, OwnShareView>()
     : await loadOwnShareViews(supabase, false, profile.id, shareIds);
 
-  // Committed batches that skipped a row in THIS period (phase 4b, design
-  // §5.4). Not role-branched: rep_payout_batches is admin-only by policy, so a
-  // rep's query returns nothing and they never see a skip notice -- a skipped
-  // row is not on anyone's ledger. Matched with jsonb containment on the
-  // period each skip record carries.
-  const { data: skipData, error: skipError } = await supabase
-    .from("rep_payout_batches")
-    .select(PAYOUT_BATCH_COLUMNS)
-    .eq("status", "committed")
-    .contains("skipped_rows", JSON.stringify([{ period }]))
-    .order("id", { ascending: true });
-  const skipBatches = (skipData ?? []) as PayoutBatch[];
-  const skipReviewers = await loadSkipReviewers(
-    supabase,
-    skipBatches
-      .filter((batch) => batch.skips_acknowledged_at !== null)
-      .map((batch) => batch.id),
-  );
+  // Override lines (20261102120000): who receives each one. An admin reads
+  // the table; a rep reads my_override_recipients(), which names the
+  // recipient of their own debits only (memo A4c).
+  const overrideViews = await loadOverrideViews(supabase, isAdmin, overrideIdsOf(rows));
 
   return (
     <div className="flex flex-col gap-8">
@@ -239,40 +207,24 @@ async function PeriodLedger({
         action={
           <div className="flex items-start gap-2">
             {/* Not admin-only: the export is scoped by RLS, so a rep exporting
-                gets their own rows. And it is the bulk-entry path for an admin —
-                export, fill the two columns in Excel, upload it again. */}
+                gets their own rows. A download only: it is not an import
+                format, and nothing edits a committed line. */}
             <PayoutExportButton period={period} label="Export XLSX" />
-            {isAdmin && (
-              <PayoutPeriodDelete
-                period={period}
-                // Every line goes, adjustments included -- and an adjustment,
-                // like a hand-entered figure, is not something a re-import
-                // brings back.
-                rowCount={overall.rows + overall.adjustments}
-                filledCount={
-                  overall.rows - overall.unfilled + overall.adjustments
-                }
-              />
-            )}
+            {/* One delete per processor in the month: a file is one
+                processor's, and delete_payout_period deletes that
+                processor's import lines only (adjustments stay). */}
+            {isAdmin &&
+              processorsIn(rows).map(([processor, count]) => (
+                <PayoutPeriodDelete
+                  key={processor ?? ""}
+                  period={period}
+                  processor={processor}
+                  rowCount={count}
+                />
+              ))}
           </div>
         }
       />
-
-      {/* Above the stat cards: the period's totals are missing these rows, and
-          the admin should know that before reading them. */}
-      {skipError !== null && isAdmin && (
-        <p className="text-sm text-destructive">
-          Skipped rows could not be checked ({skipError.message}).
-        </p>
-      )}
-      {skipBatches.map((batch) => (
-        <ResidualSkipsNotice
-          key={batch.id}
-          batch={batch}
-          reviewerName={skipReviewers.get(batch.id)}
-          linkToBatch
-        />
-      ))}
 
       <div className="grid gap-3 sm:grid-cols-4">
         <StatCard label="Merchants" value={overall.rows} />
@@ -286,10 +238,10 @@ async function PeriodLedger({
 
       {groups.map((group) => {
         const totals = payoutTotals(group.rows);
-        // Merchant lines in the table; adjustment lines (post_share_correction,
-        // phase 5) in their own block under it. A rep can hold only
-        // adjustments in a month nobody has imported yet.
-        const { imports, adjustments } = splitPayoutLines(group.rows);
+        // Merchant lines in the table; override lines and adjustment lines
+        // each in their own block under it. A rep can hold only adjustments
+        // in a month nobody has imported yet, and a recipient only overrides.
+        const { imports, overrides, adjustments } = splitPayoutLines(group.rows);
 
         return (
           <section key={group.agentId} className="flex flex-col gap-3">
@@ -310,7 +262,14 @@ async function PeriodLedger({
                     {formatMoney(totals.repPayout)}
                   </span>
                   {totals.unfilled > 0 && (
-                    <> · {totals.unfilled} awaiting figures</>
+                    <> · {totals.unfilled} with no figure</>
+                  )}
+                  {totals.overrides > 0 && (
+                    <>
+                      {" · "}
+                      {totals.overrides} override line
+                      {totals.overrides === 1 ? "" : "s"}
+                    </>
                   )}
                   {totals.adjustments > 0 && (
                     <>
@@ -327,20 +286,6 @@ async function PeriodLedger({
                     Payout summary
                   </Link>
                 </p>
-                {/* The common case in one action: a rep's split is usually the
-                    same percentage on every merchant, and typing it forty times
-                    is how a wrong one gets missed. */}
-                {/* A partner's line takes the signer's rate, never its own,
-                    so the bulk split skips it and counts without it. */}
-                {isAdmin &&
-                  imports.some((row) => !isPartnerLine(row)) && (
-                  <PayoutBulkSplit
-                    period={period}
-                    agentId={group.agentId}
-                    repName={group.rep?.full_name ?? "this rep"}
-                    rowCount={imports.filter((row) => !isPartnerLine(row)).length}
-                  />
-                )}
               </div>
             </div>
 
@@ -408,45 +353,10 @@ async function PeriodLedger({
                     <TableCell>
                       <Money value={row.total_cost} />
                     </TableCell>
-                    {/* The two hand-entered figures: editable for an admin, read
-                        for a rep. Not a security boundary — update on
-                        rep_payout_rows is admin-only by policy, so a rep who
-                        reached the control would have their write filtered to
-                        nothing, which is what the cell's count check catches. */}
                     <TableCell>
-                      {/* A shared line's residual is its piece of the
-                          account total, which is set on the pair as a whole
-                          (the control under the signer's line) and refused
-                          per line by guard_shared_line(). */}
-                      {isAdmin && row.share_role === null ? (
-                        <PayoutFigureCell
-                          rowId={row.id}
-                          field="residual_income"
-                          value={row.residual_income}
-                          merchantName={row.merchant_name}
-                        />
-                      ) : (
-                        <Money value={row.residual_income} />
-                      )}
+                      <Money value={row.residual_income} />
                     </TableCell>
-                    <TableCell>
-                      {/* The partner's rate copies the signer's; edited on
-                          the signer's line only. */}
-                      {isAdmin && !isPartnerLine(row) ? (
-                        <PayoutFigureCell
-                          rowId={row.id}
-                          field="rep_split_pct"
-                          value={row.rep_split_pct}
-                          merchantName={row.merchant_name}
-                        />
-                      ) : (
-                        // No Number() wrap: rep_split_pct is already a number
-                        // (see the header of lib/payouts.ts). The coercion here
-                        // was residue of the string premise that caused the
-                        // PayoutFigureCell TypeError.
-                        formatPct(row.rep_split_pct)
-                      )}
-                    </TableCell>
+                    <TableCell>{formatPct(row.rep_split_pct)}</TableCell>
                     <TableCell className="font-medium">
                       <Money value={row.rep_payout} />
                     </TableCell>
@@ -484,6 +394,13 @@ async function PeriodLedger({
             </Table>
             )}
 
+            <PayoutOverrides
+              lines={overrides}
+              views={overrideViews}
+              repName={group.rep?.full_name ?? "this rep"}
+              isAdmin={isAdmin}
+            />
+
             <PayoutAdjustments
               lines={adjustments}
               repName={group.rep?.full_name ?? "this rep"}
@@ -496,9 +413,9 @@ async function PeriodLedger({
 }
 
 /**
- * Under a shared line, for an admin: both parties and both figures, the
- * account residual, and on the SIGNER's line the one control that sets it.
- * The partner's line says where its figures come from instead.
+ * Under a shared line, for an admin: both parties and both figures and the
+ * account residual, read-only (the file sets it at commit). The partner's line
+ * says where its figures come from.
  */
 function AdminShareMarker({
   row,
@@ -520,14 +437,6 @@ function AdminShareMarker({
         {isPartnerLine(row) &&
           " · Partner's line: its residual and split follow the signer's line."}
       </p>
-      {row.share_role === "primary" && row.rep_share_id !== null && (
-        <SharedResidualControl
-          shareId={row.rep_share_id}
-          period={row.period}
-          accountResidual={row.account_residual_income ?? null}
-          merchantName={row.merchant_name}
-        />
-      )}
     </div>
   );
 }

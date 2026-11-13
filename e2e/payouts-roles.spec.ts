@@ -136,13 +136,12 @@ test.describe("as an agent", () => {
       },
     );
 
-    // RLS FILTERS rather than erroring: the update policy on rep_payout_rows is
-    // admin-only, so the statement succeeds against zero rows. The affected
-    // count is the assertion, NOT the status code — a 204 here would look like
-    // success to anyone reading only the status, which is exactly why
-    // PayoutFigureCell passes count: "exact" and treats 0 as a failure.
-    expect(response.status()).toBe(204);
-    expect(response.headers()["content-range"]).toBe("*/0");
+    // REFUSED since 20261102140000 (phase 11): no client role holds UPDATE on
+    // rep_payout_rows, an admin included, so PostgREST answers 403 with the
+    // privilege error. (It was a 204 filtered to zero rows while admins held a
+    // column grant and the update policy hid the row from a rep.)
+    expect(response.status()).toBe(403);
+    expect((await response.json()).code).toBe("42501");
 
     // And the figure is untouched on reload.
     await page.reload();
@@ -161,14 +160,14 @@ test.describe("as an agent", () => {
     expect(token, "the signed-in page should hold an access token").toBeTruthy();
 
     const response = await request.post(
-      `${apiUrl}/rest/v1/rpc/commit_residual_import`,
+      `${apiUrl}/rest/v1/rpc/commit_residual_import_v3`,
       {
         headers: {
           apikey: publishableKey,
           Authorization: `Bearer ${token as string}`,
           "Content-Type": "application/json",
         },
-        data: { batch_id_input: 1 },
+        data: { batch_id_input: 1, confirmed_input: [] },
       },
     );
 
@@ -179,6 +178,45 @@ test.describe("as an agent", () => {
       code: "PT403",
       message: "admin only",
     });
+  });
+
+  test("cannot delete ledger lines, mark a month paid or post an adjustment by calling the API directly", async ({
+    page,
+    request,
+  }) => {
+    await page.goto(`/payouts/${PERIODS.many}`);
+
+    const { apiUrl, publishableKey } = publicStackConfig();
+    const token = await accessTokenFrom(page);
+    expect(token, "the signed-in page should hold an access token").toBeTruthy();
+    const headers = {
+      apikey: publishableKey,
+      Authorization: `Bearer ${token as string}`,
+      "Content-Type": "application/json",
+    };
+
+    // No client holds DELETE on the ledger since 20261030190000: refused
+    // outright (42501), not filtered to zero rows as the old policy did.
+    const direct = await request.delete(`${apiUrl}/rest/v1/rep_payout_rows?mid=eq.E2E-A1000`, { headers });
+    expect(direct.status()).toBe(403);
+    expect(await direct.json()).toMatchObject({ code: "42501" });
+
+    // The three phase 9 functions each check is_admin() first.
+    for (const [fn, data] of [
+      ["delete_payout_period", { period_input: `${PERIODS.many}-01`, processor_input: null }],
+      ["close_payout_period", { period_input: `${PERIODS.many}-01`, processor_input: "TSYS", confirmation_input: "x" }],
+      ["post_payout_adjustment", {
+        agent_id_input: "00000000-0000-0000-0000-000000000001", mid_input: "E2E-A1000",
+        adjusts_period_input: `${PERIODS.many}-01`, processor_input: "TSYS", amount_input: 1, note_input: "x",
+      }],
+    ] as const) {
+      const response = await request.post(`${apiUrl}/rest/v1/rpc/${fn}`, { headers, data });
+      expect(response.status(), fn).toBe(403);
+      expect(await response.json(), fn).toMatchObject({ code: "PT403", message: "admin only" });
+    }
+
+    await page.reload();
+    await expect(page.getByRole("cell", { name: "E2E-A1000" })).toBeVisible();
   });
 
   test("cannot reach another rep's payout summary", async ({ page }) => {
@@ -237,16 +275,15 @@ test.describe("as an admin", () => {
     expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b)));
   });
 
-  test("is offered the admin affordances", async ({ page }) => {
+  test("is offered the admin affordances, and no figure editing", async ({ page }) => {
     await page.goto(`/payouts/${PERIODS.many}`);
 
     await expect(
       page.getByRole("button", { name: /delete period/i }),
     ).toBeVisible();
-    // One bulk-split control per rep group.
-    await expect(page.getByRole("button", { name: "Apply" })).toHaveCount(3);
-    // Two editable figures per row across 12 rows, plus one bulk-split box per
-    // rep group.
-    await expect(page.getByRole("textbox")).toHaveCount(12 * 2 + 3);
+    // And no figure editing, an admin included (20261102140000): the inline
+    // cells (two per row) and the per-rep bulk split are gone.
+    await expect(page.getByRole("button", { name: "Apply" })).toHaveCount(0);
+    await expect(page.getByRole("textbox")).toHaveCount(0);
   });
 });

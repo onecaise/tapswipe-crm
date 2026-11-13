@@ -1,7 +1,15 @@
 // Mints a signed URL for a residual import file, in the private
 // `residual-imports` bucket. Two modes, both admin-only:
 //
-//   { file_name }  -> creates the batch row, returns a signed UPLOAD url
+//   { file_name, processor, period }
+//                  -> creates the batch row, returns a signed UPLOAD url; or,
+//                     when that processor-month is already committed,
+//                     { exists } and NO batch (the page asks "Replace it?")
+//   { file_name, processor, period, replace_batch_id }
+//                  -> the Yes to that question: creates a batch that REPLACES
+//                     the committed one, unless the month is marked paid
+//                     (409). The replace itself happens at commit, inside
+//                     commit_residual_import_v3 (phase 9).
 //   { batch_id }   -> returns a signed DOWNLOAD url for that batch's file
 //
 // verify_jwt = false in config.toml, so this function authenticates the caller
@@ -30,6 +38,7 @@ import {
 import {
   RESIDUAL_BUCKET,
   buildBatchKey,
+  isFirstOfMonth,
   isPositiveInt,
   sanitizeFileName,
 } from "../_shared/residual-imports.ts";
@@ -114,6 +123,122 @@ export default {
       return json({ error: "file_name is required" }, 400);
     }
 
+    // The processor and month chosen on the upload page are the batch's
+    // (phase 7 of docs/design/intake-and-reports.md, §2.2). Both required:
+    // the database refuses a batch without them (20261030140000).
+    if (typeof body.processor !== "string" || body.processor.trim() === "") {
+      return json({ error: "Choose the processor this file is from." }, 400);
+    }
+    if (!isFirstOfMonth(body.period)) {
+      return json(
+        { error: "Choose the month this file is for (period must be YYYY-MM-01)." },
+        400,
+      );
+    }
+    const processor = body.processor;
+    const period = body.period;
+
+    // The Yes to the replace prompt names the committed batch it saw.
+    const replaceId = body.replace_batch_id;
+    if (replaceId !== undefined && !isPositiveInt(replaceId)) {
+      return json({ error: "replace_batch_id must be a positive integer" }, 400);
+    }
+
+    // Through the caller's client: processors is readable by every
+    // authenticated user, and the foreign key would refuse an unknown code
+    // anyway -- this only turns that into a sentence.
+    const { data: known, error: processorError } = await ctx.supabase
+      .from("processors")
+      .select("code")
+      .eq("code", processor)
+      .maybeSingle();
+    if (processorError) {
+      return json(
+        { error: `Could not read the processor list: ${processorError.message}` },
+        500,
+      );
+    }
+    if (!known) {
+      return json({ error: `"${processor}" is not a processor in the CRM.` }, 400);
+    }
+
+    // One committed batch per (processor, month). A second file for a
+    // committed month is a REPLACE (memo §2.2, §3.2). Asked without
+    // replace_batch_id, the answer is the facts of the committed batch and NO
+    // new batch, so the page can ask "Replace it?". Asked with it -- the Yes
+    // -- a replacement batch is created, unless the month is marked paid.
+    // This is the early answer only: commit_residual_import_v3 re-checks all
+    // of it under its locks. Through the caller's client: an admin reads
+    // every batch and closure via RLS.
+    const { data: committed, error: committedError } = await ctx.supabase
+      .from("rep_payout_batches")
+      .select("id, file_name, committed_at")
+      .eq("processor", processor)
+      .eq("period", period)
+      .eq("status", "committed")
+      .maybeSingle();
+    if (committedError) {
+      return json(
+        { error: `Could not check for an earlier import: ${committedError.message}` },
+        500,
+      );
+    }
+    const monthName = new Date(`${period}T00:00:00Z`).toLocaleString("en-US", {
+      month: "long",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+
+    if (!committed && replaceId !== undefined) {
+      return json(
+        {
+          error: `Import #${replaceId} is no longer the committed import for ${processor} for ${monthName}. Upload the file again.`,
+        },
+        409,
+      );
+    }
+
+    if (committed) {
+      const { data: closure, error: closureError } = await ctx.supabase
+        .from("payout_period_closures")
+        .select("period")
+        .eq("processor", processor)
+        .eq("period", period)
+        .maybeSingle();
+      if (closureError) {
+        return json(
+          { error: `Could not check whether the month is paid: ${closureError.message}` },
+          500,
+        );
+      }
+      if (replaceId === undefined) {
+        return json({
+          exists: {
+            batch_id: committed.id,
+            file_name: committed.file_name,
+            committed_at: committed.committed_at,
+            paid: closure !== null,
+          },
+        });
+      }
+      if (committed.id !== replaceId) {
+        return json(
+          {
+            error: `Import #${replaceId} is no longer the committed import for ${processor} for ${monthName}. Upload the file again.`,
+          },
+          409,
+        );
+      }
+      if (closure !== null) {
+        return json(
+          {
+            error: `${processor} for ${monthName} is marked paid and cannot be replaced. Reopen it (with a reason) on the Payouts page, or post an adjustment instead.`,
+          },
+          409,
+        );
+      }
+    }
+
     const fileName = sanitizeFileName(body.file_name);
 
     // Placeholder key: the real one needs the id this insert is about to produce.
@@ -127,11 +252,19 @@ export default {
         file_name: fileName,
         status: "review",
         row_count: 0,
+        processor,
+        period,
+        replaces_batch_id: replaceId ?? null,
       })
       .select("id")
       .single();
 
     if (createError || !created) {
+      // PT400 is the import window (guard_payout_batch_period: not a future
+      // month, not more than 24 months back), already worded for a person.
+      if (createError?.code === "PT400") {
+        return json({ error: createError.message }, 400);
+      }
       return json(
         {
           error: `Could not start the import: ${
@@ -195,9 +328,17 @@ export default {
   curl -i --location --request POST 'http://127.0.0.1:54321/functions/v1/residual-import-file-url' \
     --header 'Authorization: Bearer <ADMIN_ACCESS_TOKEN>' \
     --header 'Content-Type: application/json' \
-    --data '{"file_name":"July-2026.xlsx"}'
+    --data '{"file_name":"July-2026.xlsx","processor":"TSYS","period":"2026-07-01"}'
 
   Expected: 200 with { batch_id, path, token, signedUrl, fileKey }
+            200 with { exists: { batch_id, file_name, committed_at, paid } }
+                and no batch, when that processor-month is committed
+            200 with { batch_id, ... } for a replacement, given
+                replace_batch_id = the committed batch
+            409 with replace_batch_id when the month is marked paid, or the
+                batch named is not (or no longer) the committed one
+            400 for a missing or unknown processor, a malformed period, or a
+                month outside the import window
             200 with { signedUrl, fileName } when given { batch_id } instead
             404 for a batch id that does not exist
             403 if the caller is not an active admin

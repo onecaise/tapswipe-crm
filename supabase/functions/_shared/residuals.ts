@@ -1,9 +1,11 @@
-// Parsing a processor's monthly residual XLSX into staging rows.
+// Parsing a processor's monthly residual XLSX into staging rows, and the
+// rules that decide each staged row's refusals, warnings and notes.
 //
-// Pure functions over already-extracted cell values: this file never sees a
-// workbook. SheetJS lives in the function that calls it, so this stays
-// dependency-free and needs no deno.json import map of its own — the same
-// arrangement _shared/documents.ts and _shared/admin-users.ts use.
+// Pure functions over already-extracted cell values and already-fetched
+// lookups: this file never sees a workbook or a database. SheetJS and the
+// queries live in parse-residual-import, so this stays dependency-free and
+// needs no deno.json import map of its own -- the same arrangement
+// _shared/documents.ts and _shared/admin-users.ts use.
 //
 // One useful consequence of being dependency-free: Node can import it, so
 // tests/unit/residuals-parse.test.ts exercises every rule below under vitest
@@ -15,153 +17,204 @@
 // shared file could not survive `functions deploy`. That does not apply to this
 // module: parsing happens only server-side (RESIDUALS_SPEC decision 22), so there
 // is exactly one copy of these rules and no browser twin to drift from. Do not
-// create one.
+// create one. (commit v3, phase 8, recomputes the three warnings and the MID
+// refusals in SQL; that TS/SQL pair is pinned by the live suite, memo §2.4.)
+//
+// THE FILE (phase 7 of docs/design/intake-and-reports.md, §0b.1 and §1.G):
+// six columns, Processor, Merchant Number, Merchant Name, Income Type, Volume,
+// Residual. The month and the processor come from the BATCH (chosen on the
+// upload page), never from a cell. The payee is the owner of the merchant whose
+// MID the row names; the file names no rep.
 
-/**
- * The nine columns, by the key each maps to on a staging row, plus `line`,
- * which maps to nothing: it is read only to skip adjustment lines.
- */
+/** The six columns, by the key each maps to on a staging row. */
 export const RESIDUAL_COLUMNS = [
-  "period",
-  "agent_number",
+  "processor",
   "mid",
   "merchant_name",
+  "income_type",
   "volume",
-  "average_ticket",
-  "total_cost",
   "residual_income",
-  "rep_split",
-  "line",
 ] as const;
 
 export type ResidualColumn = (typeof RESIDUAL_COLUMNS)[number];
 
 /**
- * The header text each column is recognised by, as it appears in the file.
+ * The header text each column is recognised by, as Owen's real file spells it.
  *
- * Canonical spellings only — deliberately no alias list. A processor that ships a
+ * Canonical spellings only -- deliberately no alias list. A processor that ships a
  * differently-named column should fail the whole parse with a message naming what
- * is missing, rather than being silently guessed at: mapping "Cost" onto
- * total_cost, or "Merchant" onto merchant_name instead of mid, produces a
- * plausible-looking import of the wrong numbers. Adding an alias is a decision
- * someone should make while looking at a real file.
+ * is missing, rather than being silently guessed at: mapping "Amount" onto the
+ * residual, or "Merchant" onto the MID, produces a plausible-looking import of the
+ * wrong numbers. Adding an alias is a decision someone should make while looking
+ * at a real file. Matching is case- and space-insensitive (normalizeHeader).
  */
 export const COLUMN_HEADERS: Record<ResidualColumn, string> = {
-  period: "Period",
-  agent_number: "Agent #",
-  mid: "MID",
-  merchant_name: "Merchant name",
+  processor: "Processor",
+  mid: "Merchant Number",
+  merchant_name: "Merchant Name",
+  income_type: "Income Type",
   volume: "Volume",
-  average_ticket: "Average ticket",
-  total_cost: "Total cost",
-  residual_income: "Residual income",
-  rep_split: "Rep split",
-  line: "Line",
+  residual_income: "Residual",
 };
 
-/**
- * The two columns a fresh processor file will not have.
- *
- * They appear only in this app's own round-trip export, which is how a whole
- * period's figures get bulk-filled in Excel. Their absence is normal; their
- * presence is what tells the commit step to write the money columns.
- */
-export const OPTIONAL_COLUMNS: ResidualColumn[] = [
-  "residual_income",
-  "rep_split",
-  // The export's own marker (phase 5 of docs/design/residual-splits.md): a row
-  // whose Line says "Adjustment" is an adjustment line exported from the CRM,
-  // and is skipped rather than staged. See isAdjustmentLine.
-  "line",
-];
+/** All six are required (memo §1.G). */
+export const REQUIRED_COLUMNS: readonly ResidualColumn[] = RESIDUAL_COLUMNS;
 
 /**
- * Whether a row's Line cell marks it as an exported adjustment line.
- *
- * An adjustment is entered in the CRM (post_share_correction) and only ever
- * there. Re-importing one would make it an IMPORT line -- or merge it into the
- * import line on the same key -- so the round trip would quietly turn a
- * correction into processor data. Only the export's exact word counts, in any
- * case; anything else in the column (blank, as the export writes for an
- * import line) imports normally.
+ * The export's header row, in order (export-residuals; memo §2.6, phase 11).
+ * A download, NOT an import format: the parser refuses a file carrying either
+ * CRM_EXPORT_MARKERS header, and this one carries both.
  */
-export function isAdjustmentLine(value: unknown): boolean {
-  return typeof value === "string" && value.trim().toLowerCase() === "adjustment";
-}
-
-export const REQUIRED_COLUMNS: ResidualColumn[] = RESIDUAL_COLUMNS.filter(
-  (column) => !OPTIONAL_COLUMNS.includes(column),
-);
-
-/** Blocker codes, in the order rep_payout_import_rows.blocker allows. */
-export type ResidualBlocker =
-  | "unknown_agent"
-  | "unparseable_period"
-  | "bad_number"
-  | "missing_mid"
-  | "duplicate_in_file";
+export const EXPORT_HEADER = [
+  "Period",
+  "Processor",
+  "Agent #",
+  "Agent",
+  "MID",
+  "Merchant name",
+  "Volume",
+  "Residual",
+  "Rep split",
+  "Rep payout",
+  "Line",
+  "Account share",
+] as const;
 
 /**
- * Precedence when a row trips more than one.
- *
- * Ordered by what an admin should act on first. A missing MID means the row has
- * no identity at all, so nothing else about it can be checked. An unreadable
- * period means it cannot be filed. An unrecognised agent number comes next
- * because it is the ONLY blocker fixable without touching the spreadsheet — worth
- * surfacing ahead of a bad figure, since resolving it is a different kind of
- * action. Then bad figures, then a duplicate, which is only meaningful once the
- * key parts of both rows have been read.
+ * Headers only the CRM's own export carries. A file with one is an export
+ * being re-imported by mistake, which would count each shared account's volume
+ * once per rep (memo §2.6), so it is refused with its own sentence rather than
+ * "missing columns".
  */
-const BLOCKER_PRECEDENCE: ResidualBlocker[] = [
+export const CRM_EXPORT_MARKERS = ["Agent #", "Rep payout"] as const;
+
+/** The Income Type a residual file carries (§0b.1), as messages spell it. */
+export const RESIDUAL_INCOME_TYPE = "Residuals";
+
+/**
+ * The Income Type cells that are residuals, by nameKey(): "Residual",
+ * "Residuals" and blank (phase 15; ISO Hub's files carry all three, "Residual "
+ * and "Residuals " with a trailing space among them). Anything else -- ACH on
+ * the TSYS files -- imports under the confirmable other_income_type warning,
+ * because ISO Hub's own monthly Net includes those rows (phase 15, step 0).
+ */
+export const RESIDUAL_INCOME_TYPE_KEYS: readonly string[] = ["", "residual", "residuals"];
+
+/**
+ * wrong_income_type is no longer raised (phase 15: another Income Type is the
+ * other_income_type warning). It stays in the vocabulary because the staging
+ * CHECK still admits it and a row read before 20261111120000 may carry it.
+ *
+ * Why a row cannot be imported, in precedence order (memo §2.4). Every code a
+ * row trips is kept (rep_payout_import_rows.blockers); `blocker` is the first of
+ * them in this order. Identity first: a row with no readable MID cannot be
+ * checked for anything else, and a repeated or unknown MID is what an admin
+ * fixes before a figure.
+ */
+export const RESIDUAL_BLOCKERS = [
   "missing_mid",
-  "unparseable_period",
-  "unknown_agent",
-  "bad_number",
-  "duplicate_in_file",
-];
+  "duplicate_mid",
+  "unknown_mid",
+  "mid_in_other_batch",
+  "wrong_income_type",
+  "missing_figure",
+  "unreadable_number",
+] as const;
+
+export type ResidualBlocker = (typeof RESIDUAL_BLOCKERS)[number];
+
+/**
+ * The four confirmable warnings (memo §2.4, §0b.3; other_income_type since
+ * phase 15), stored on the staged row (rep_payout_import_rows.warnings).
+ * Confirmed once per TYPE per import, never per line; commit v3 (phase 8)
+ * recomputes them and refuses a type nobody confirmed.
+ */
+export const RESIDUAL_WARNINGS = [
+  "processor_mismatch",
+  "inactive_merchant",
+  "bad_numbers",
+  "other_income_type",
+] as const;
+
+export type ResidualWarning = (typeof RESIDUAL_WARNINGS)[number];
+
+/** Sorts a row's codes into precedence order, without repeats. */
+export function orderBlockers(
+  codes: readonly ResidualBlocker[],
+): ResidualBlocker[] {
+  return RESIDUAL_BLOCKERS.filter((code) => codes.includes(code));
+}
 
 /** The most important of a row's blockers, or null if it has none. */
 export function pickBlocker(
-  candidates: readonly (ResidualBlocker | null)[],
+  codes: readonly ResidualBlocker[],
 ): ResidualBlocker | null {
-  for (const blocker of BLOCKER_PRECEDENCE) {
-    if (candidates.includes(blocker)) return blocker;
-  }
-  return null;
+  return orderBlockers(codes)[0] ?? null;
 }
+
+/** "2026-07-01" -> "July 2026". */
+export function monthLabel(period: string): string {
+  const [year, month] = period.split("-");
+  return `${MONTHS[Number(month) - 1] ?? month} ${year}`;
+}
+
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
 
 /** Human-readable text for each blocker, shown on the review screen. */
 export function blockerMessage(
   blocker: ResidualBlocker,
-  context: { agentNumber?: string; mid?: string; period?: string } = {},
+  context: {
+    mid?: string | null;
+    midCell?: string | null;
+    /** The cell was a spreadsheet number that may have lost digits. */
+    midPrecision?: boolean;
+    rows?: readonly number[];
+    incomeType?: string | null;
+    period?: string;
+  } = {},
 ): string {
+  const mid = context.mid ?? "";
   switch (blocker) {
     case "missing_mid":
-      return "This row has no MID, so there is nothing to file it against.";
-    case "unparseable_period":
-      return `Could not read "${context.period ?? ""}" as a month.`;
-    case "unknown_agent":
-      return `No rep has agent # ${context.agentNumber ?? ""}.`;
-    case "bad_number":
-      return "One of the figures on this row could not be read as a number.";
-    case "duplicate_in_file":
-      return `The file has more than one row for MID ${
-        context.mid ?? ""
-      } in this period.`;
+      if (context.midCell && context.midPrecision) {
+        return `Merchant Number "${context.midCell}" was stored as a spreadsheet number, which may have lost digits (more than 15). Upload the processor's original CSV, or format the column as text, and upload it again.`;
+      }
+      return context.midCell
+        ? `Merchant Number "${context.midCell}" is not 6 to 20 letters and digits, so there is nothing to file it against.`
+        : "This row has no Merchant Number, so there is nothing to file it against.";
+    case "duplicate_mid":
+      return `MID ${mid} appears on rows ${(context.rows ?? []).join(", ")}. Fix the file and upload it again.`;
+    case "unknown_mid":
+      return `MID ${mid} is not a merchant in the CRM. Add the merchant (or correct its MID), then Read again.`;
+    case "mid_in_other_batch":
+      return `MID ${mid} already has a line for ${
+        context.period ? monthLabel(context.period) : "this month"
+      } from another processor's import. Two processors cannot both pay one MID for one month.`;
+    case "wrong_income_type":
+      return `Income Type is "${context.incomeType ?? ""}", not ${RESIDUAL_INCOME_TYPE}. A residual file holds residuals only.`;
+    case "missing_figure":
+      return "The Volume or the Residual on this row is blank.";
+    case "unreadable_number":
+      return "The Volume or the Residual on this row could not be read as a number.";
   }
 }
 
-/** Collapses a header cell to a comparable form. */
-function normalizeHeader(value: unknown): string {
+/**
+ * Collapses a header cell to a comparable form: a leading BOM and a leading
+ * apostrophe (Excel's text marker) dropped, every kind of whitespace removed
+ * (so "Merchant  Number", " merchant number " and a non-breaking space all
+ * match), lower case. A trailing colon or period is dropped too.
+ */
+export function normalizeHeader(value: unknown): string {
   return String(value ?? "")
-    .toLowerCase()
-    // Punctuation and spacing around "#" is the one genuinely ambiguous bit of
-    // these names: "Agent #", "Agent#" and "AGENT  #" are the same column, and
-    // which one a processor emits is not worth failing an import over.
-    .replace(/\s+/g, " ")
-    .replace(/\s*#\s*/g, "#")
+    .replace(/^[\s\uFEFF]+/, "")
+    .replace(/^'/, "")
+    .replace(/[\s\uFEFF]+/g, "")
     .replace(/[:.]+$/, "")
-    .trim();
+    .toLowerCase();
 }
 
 const HEADER_LOOKUP = new Map<string, ResidualColumn>(
@@ -171,30 +224,42 @@ const HEADER_LOOKUP = new Map<string, ResidualColumn>(
   ]),
 );
 
+const EXPORT_MARKER_LOOKUP = new Set(CRM_EXPORT_MARKERS.map(normalizeHeader));
+
 export type HeaderMap = {
   /** Column key -> zero-based index in the sheet's rows. */
   index: Partial<Record<ResidualColumn, number>>;
   /** Canonical names of required columns the file does not have. */
   missing: string[];
+  /** Canonical names of columns the header row carries more than once. */
+  repeated: string[];
+  /** True when the header row has a column only the CRM's export carries. */
+  crmExport: boolean;
 };
 
 /**
  * Maps a sheet's header row onto column keys.
  *
  * A missing REQUIRED header fails the whole parse rather than blocking rows
- * individually: a file with the wrong shape has no rows worth reviewing, and forty
- * identical blockers is a worse message than one naming the column.
+ * individually: a file with the wrong shape has no rows worth reviewing, and
+ * forty identical blockers is a worse message than one naming the column. A
+ * column given twice fails it too: which copy holds the real figures is not
+ * something to guess.
  */
 export function mapHeaders(headerRow: readonly unknown[]): HeaderMap {
   const index: Partial<Record<ResidualColumn, number>> = {};
+  const repeated = new Set<ResidualColumn>();
+  let crmExport = false;
 
   headerRow.forEach((cell, position) => {
-    const column = HEADER_LOOKUP.get(normalizeHeader(cell));
-    // First occurrence wins. A duplicated header is a malformed sheet, and
-    // silently preferring the last copy would make which numbers got imported
-    // depend on column order.
-    if (column !== undefined && index[column] === undefined) {
+    const normalized = normalizeHeader(cell);
+    if (EXPORT_MARKER_LOOKUP.has(normalized)) crmExport = true;
+    const column = HEADER_LOOKUP.get(normalized);
+    if (column === undefined) return;
+    if (index[column] === undefined) {
       index[column] = position;
+    } else {
+      repeated.add(column);
     }
   });
 
@@ -202,14 +267,21 @@ export function mapHeaders(headerRow: readonly unknown[]): HeaderMap {
     (column) => index[column] === undefined,
   ).map((column) => COLUMN_HEADERS[column]);
 
-  return { index, missing };
+  return {
+    index,
+    missing,
+    repeated: RESIDUAL_COLUMNS.filter((c) => repeated.has(c)).map(
+      (c) => COLUMN_HEADERS[c],
+    ),
+    crmExport,
+  };
 }
 
 /** Values that mean "this cell is empty", as distinct from zero. */
 const BLANK_CELLS = new Set(["", "-", "--", "—", "–", "n/a", "na", "null"]);
 
 export type NumberCell = {
-  /** Null when the cell is blank — which is NOT the same as zero. */
+  /** Null when the cell is blank -- which is NOT the same as zero. */
   value: number | null;
   /** False when there was text that could not be read as a number. */
   ok: boolean;
@@ -218,29 +290,30 @@ export type NumberCell = {
 };
 
 /**
- * Reads a money or percentage cell the way Excel actually emits them.
+ * Reads a money cell the way Excel and processors actually emit them.
  *
- * Tolerates a leading currency symbol, thousands separators, surrounding
- * whitespace, a trailing percent sign, and accounting parentheses for negatives.
+ * Tolerates a currency symbol before or after the minus sign ("-$11.76",
+ * "$-11.76"), thousands separators ("$76,877.18"), surrounding whitespace, a
+ * trailing percent sign, and accounting parentheses for negatives.
  *
- * The distinction that matters most: **blank is null, not zero.** "This merchant
- * earned nothing" and "nobody has filled this in" are different facts, and the
- * whole nullable-column design downstream depends on keeping them apart — a blank
- * coerced to 0 would show as a settled $0.00 payout instead of an outstanding row.
+ * Blank is null, not zero. On a residual file a blank Volume or Residual is the
+ * missing_figure refusal (memo §1.G): "this merchant earned nothing" and "the
+ * cell is empty" are different facts, and committing the second would write a
+ * line with no payout.
  */
 export function parseNumberCell(value: unknown): NumberCell {
   if (value === null || value === undefined) return { value: null, ok: true };
 
   // SheetJS gives a real number for a numeric cell, which needs none of the
-  // text handling below and must not be run through it — String(1e21) is
+  // text handling below and must not be run through it -- String(1e21) is
   // "1e+21", which the cleanup would mangle.
   if (typeof value === "number") {
     return Number.isFinite(value)
-      ? { value: round2(value), ok: true }
+      ? { value: round2(decimalText(value)), ok: true }
       : { value: null, ok: false };
   }
 
-  const text = String(value).trim();
+  const text = String(value).replace(/\uFEFF/g, "").trim();
   if (BLANK_CELLS.has(text.toLowerCase())) return { value: null, ok: true };
 
   const negative = /^\(.*\)$/.test(text);
@@ -252,22 +325,31 @@ export function parseNumberCell(value: unknown): NumberCell {
   if (cleaned === "" || cleaned === "-") return { value: null, ok: true };
 
   // Rejected explicitly rather than left to Number(), which accepts "0x10",
-  // "1e5" and "Infinity" — none of which belongs in a residual report, and each
+  // "1e5" and "Infinity" -- none of which belongs in a residual report, and each
   // of which would import a figure nobody typed.
   if (!/^-?\d*\.?\d+$/.test(cleaned)) return { value: null, ok: false };
 
   const parsed = Number(cleaned);
   if (!Number.isFinite(parsed)) return { value: null, ok: false };
 
-  // D-10. The commas were stripped wherever they were, so "12,99" — a decimal
-  // comma — imported as 1299, a hundred times the figure. A comma now has to be
-  // real thousands grouping. Checked only once the old path has produced a
-  // number, so everything without a misplaced comma reads exactly as before.
+  // D-10. The commas were stripped wherever they were, so "12,99" -- a decimal
+  // comma -- imported as 1299, a hundred times the figure. A comma now has to be
+  // real thousands grouping.
   if (text.includes(",") && !isThousandsGrouped(text)) {
     return { value: null, ok: false, problem: MISPLACED_COMMA };
   }
 
-  return { value: round2(negative ? -parsed : parsed), ok: true };
+  return { value: round2(negative ? `-${cleaned}` : cleaned), ok: true };
+}
+
+/**
+ * Whether a figure cell is blank (null, empty, "-", "n/a"...), as distinct
+ * from zero. The review screen counts the staged rows whose blank figure the
+ * parser read as 0 (phase 15) by this, from volume_raw / residual_income_raw.
+ */
+export function isBlankFigure(value: unknown): boolean {
+  const cell = parseNumberCell(value);
+  return cell.ok && cell.value === null;
 }
 
 /** Why a figure with a misplaced comma was refused, for the review screen. */
@@ -278,8 +360,8 @@ export const MISPLACED_COMMA =
  * Whether every comma in a cell is a thousands separator: `1,299.00`, `12,345`.
  * The currency sign, whitespace, percent, accounting parentheses and minus are
  * peeled off first, matching what parseNumberCell tolerates around the digits.
- * Shared with nothing on purpose — parseFigureInput in lib/payouts.ts carries
- * its own copy of the same shape (see the note above that function).
+ * Shared with nothing. The payout cell's parseFigureInput carried a copy of the
+ * same shape until the cell was removed (20261102140000).
  */
 function isThousandsGrouped(text: string): boolean {
   const body = text
@@ -290,155 +372,187 @@ function isThousandsGrouped(text: string): boolean {
   return /^\d{1,3}(,\d{3})+(\.\d+)?$/.test(body);
 }
 
-/** Half-away-from-zero, matching Postgres's round() on numeric. */
-function round2(value: number): number {
-  const scaled = Math.round(Math.abs(value) * 100) / 100;
-  return value < 0 ? -scaled : scaled;
-}
-
-const MONTH_NAMES = [
-  "january",
-  "february",
-  "march",
-  "april",
-  "may",
-  "june",
-  "july",
-  "august",
-  "september",
-  "october",
-  "november",
-  "december",
-];
-
-/** Builds 'YYYY-MM-01' arithmetically. Never via Date#toISOString. */
-function firstOfMonth(year: number, month: number): string | null {
-  if (!Number.isInteger(year) || year < 2000 || year > 2100) return null;
-  if (!Number.isInteger(month) || month < 1 || month > 12) return null;
-  return `${year}-${String(month).padStart(2, "0")}-01`;
+/**
+ * Rounds a plain decimal STRING to the cent, half away from zero, matching
+ * Postgres's round() on numeric -- in decimal, never in binary floating point
+ * (phase 15). Math.round(value * 100) / 100 read a half cent like 1.005 as
+ * 100.49999999999999 cents and rounded it down, which put TSYS January and
+ * September a cent off ISO Hub. The result is the double
+ * nearest the rounded decimal, which prints as it. "--5" (a minus inside
+ * accounting parentheses) is 5.
+ */
+export function round2(text: string): number {
+  const match = /^(-*)(\d*)(?:\.(\d*))?$/.exec(text);
+  if (match === null || (match[2] === "" && !match[3])) return Number.NaN;
+  const [, minus, whole, fraction = ""] = match;
+  const digits = BigInt((whole || "0") + (fraction + "00").slice(0, 2));
+  // BigInt(1), not 1n: the Next app's tsconfig targets ES2017.
+  const cents = (fraction[2] ?? "0") >= "5" ? digits + BigInt(1) : digits;
+  if (cents === BigInt(0)) return 0;
+  const abs = cents.toString().padStart(3, "0");
+  const sign = minus.length % 2 === 1 ? "-" : "";
+  return Number(`${sign}${abs.slice(0, -2)}.${abs.slice(-2)}`);
 }
 
 /**
- * A two-digit year, read as this century.
- *
- * "Jul-26" is 2026. There is no residual data from 1926 and none of this app will
- * be running in 2126, so the window is not worth making cleverer than the
- * `year < 2000` guard in firstOfMonth.
+ * A double as the shortest decimal that reads back as it -- what the
+ * spreadsheet wrote in the cell -- with exponent form written out:
+ * 1e-7 -> "0.0000001", 1.5e+21 -> "1500000000000000000000".
  */
-function expandYear(text: string): number {
-  const year = Number(text);
-  return text.length === 2 ? 2000 + year : year;
-}
-
-/**
- * Normalises whatever the Period column contains to the first of that month.
- *
- * Returns null for anything it cannot read, which blocks the row. Two things it
- * deliberately refuses rather than guesses:
- *
- *   - **A bare month with no year.** "July" could be any year, and picking one on
- *     a commission record is not a guess worth making.
- *   - **A quarter or range.** "Q3 2026" spans three months and this schema stores
- *     one; there is no honest normalisation.
- *
- * Everything is computed in UTC components. Formatting a locally-constructed Date
- * would reintroduce the timezone shift lib/format.ts documents — and on the first
- * of a month that lands in the previous month, so July would be filed as June.
- */
-export function parsePeriodCell(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
-
-  // A real Date, which SheetJS produces with cellDates: true.
-  if (value instanceof Date) {
-    if (Number.isNaN(value.getTime())) return null;
-    return firstOfMonth(value.getUTCFullYear(), value.getUTCMonth() + 1);
+export function decimalText(value: number): string {
+  const text = String(value);
+  const match = /^(-?)(\d)(?:\.(\d+))?e([+-]\d+)$/.exec(text);
+  if (match === null) return text;
+  const [, sign, lead, rest = "", exp] = match;
+  const digits = lead + rest;
+  const point = 1 + Number(exp);
+  if (point <= 0) return `${sign}0.${"0".repeat(-point)}${digits}`;
+  if (point >= digits.length) {
+    return `${sign}${digits}${"0".repeat(point - digits.length)}`;
   }
-
-  // An Excel serial date. Day 1 is 1900-01-01 and Excel believes 1900 was a leap
-  // year, so the epoch that makes every real-world date come out right is
-  // 1899-12-30. Serials below 61 fall inside that fiction and are refused rather
-  // than silently shifted by a day.
-  if (typeof value === "number") {
-    if (!Number.isFinite(value) || value < 61) return null;
-    const ms = Date.UTC(1899, 11, 30) + Math.floor(value) * 86_400_000;
-    const date = new Date(ms);
-    return firstOfMonth(date.getUTCFullYear(), date.getUTCMonth() + 1);
-  }
-
-  const text = String(value).trim();
-  if (text === "") return null;
-
-  // YYYY-MM or YYYY-MM-DD
-  const iso = /^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?$/.exec(text);
-  if (iso) return firstOfMonth(Number(iso[1]), Number(iso[2]));
-
-  // M/YYYY, MM/YYYY, M/D/YYYY, MM/DD/YYYY — and the two-digit-year forms. Told
-  // apart by how many segments there are, not by guessing which number is which:
-  // with two, it is month and year; with three, US month/day/year, which is what
-  // Excel emits in this locale.
-  const slashed = /^(\d{1,2})\/(\d{1,4})(?:\/(\d{2,4}))?$/.exec(text);
-  if (slashed) {
-    const month = Number(slashed[1]);
-    const year =
-      slashed[3] === undefined
-        ? expandYear(slashed[2])
-        : expandYear(slashed[3]);
-    return firstOfMonth(year, month);
-  }
-
-  // "Jul-26", "Jul 2026", "July 2026", "July, 2026"
-  const named = /^([a-z]{3,9})[\s,-]+(\d{2,4})$/i.exec(text);
-  if (named) {
-    const prefix = named[1].toLowerCase();
-    const month = MONTH_NAMES.findIndex((name) => name.startsWith(prefix));
-    if (month === -1) return null;
-    // "ma" would match both March and May, so a prefix has to be unambiguous.
-    // findIndex takes the first, which would silently file May as March.
-    if (
-      MONTH_NAMES.filter((name) => name.startsWith(prefix)).length > 1
-    ) {
-      return null;
-    }
-    return firstOfMonth(expandYear(named[2]), month + 1);
-  }
-
-  return null;
+  return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
 }
 
 /** Reads a cell as trimmed text, or null when it is empty. */
 export function parseTextCell(value: unknown): string | null {
   if (value === null || value === undefined) return null;
-  const text = typeof value === "number" ? String(value) : String(value).trim();
+  const text = String(value).replace(/\uFEFF/g, "").trim();
   return text === "" ? null : text;
 }
 
-/** One staging row, before the agent-number lookup. */
+export type MidCell = {
+  /** The MID as written, 6-20 letters and digits; null when blank or unreadable. */
+  mid: string | null;
+  /** What the cell held, when it held something that is not a MID. */
+  unreadable: string | null;
+  /** The cell was (or looks like) a spreadsheet number that may have lost digits. */
+  precision: boolean;
+};
+
+/** A MID: 6 to 20 ASCII letters and digits (a Square MID has letters). */
+export const MID_PATTERN = /^[A-Za-z0-9]{6,20}$/;
+
+/**
+ * The key two MIDs are compared by: trimmed, upper case. The SQL twin is
+ * mid_key() (20261106140000); merchants are unique on it, so a key names at
+ * most one merchant. Display keeps the spelling as written.
+ */
+export function midKey(mid: string): string {
+  return mid.trim().toUpperCase();
+}
+
+/** Text a spreadsheet wrote for a number: "4.001E+11", "400100200300.0". */
+function looksLikeSpreadsheetNumber(text: string): boolean {
+  return /^\d*\.\d*$/.test(text) || /^\d*\.?\d+e[+-]?\d+$/i.test(text);
+}
+
+/**
+ * Reads a Merchant Number as TEXT, never as a number (memo §0b.1).
+ *
+ * A MID is 6 to 20 letters and digits, leading zeros possible. `raw` is the
+ * cell's value, `formatted` its displayed text (SheetJS `w`); `textFile` is
+ * true for a CSV, where SheetJS keeps the file's own text in `w`:
+ *
+ *   - a text cell (and every cell of a CSV) is used as written, after a
+ *     leading apostrophe (Excel's text marker), a BOM and surrounding
+ *     whitespace are stripped;
+ *   - a NUMERIC spreadsheet cell may already have lost digits (Excel keeps
+ *     15), so one over 15 digits or beyond 2^53 is refused with the
+ *     use-the-CSV message (phase 14's rule for the merchant import), and a
+ *     fraction is refused as not a MID. A whole number of 15 digits or fewer
+ *     is exact, so it is read by its STORED value even when Excel shows it in
+ *     exponent form (phase 15: ISO Hub's General-format columns do). Its
+ *     formatted text is used when that is all digits (a "000000000000" number
+ *     format is the only place a stored-as-number MID's leading zeros
+ *     survive), else the integer written out;
+ *   - text that looks like a spreadsheet number ("4.001E+11", "400100200300.0")
+ *     gets the same message: it was a number before it was text.
+ *
+ * Anything else that is not 6-20 letters and digits (a fraction, a negative,
+ * "4400-1234") is missing_mid with the cell quoted. The unknown_mid refusal is
+ * what catches a MID the CRM does not hold; case is compared by midKey().
+ */
+export function parseMidCell(
+  raw: unknown,
+  formatted?: unknown,
+  textFile = false,
+): MidCell {
+  if (raw === null || raw === undefined) {
+    return { mid: null, unreadable: null, precision: false };
+  }
+
+  let text: string;
+  if (typeof raw === "number" && !(textFile && typeof formatted === "string")) {
+    const shown = typeof formatted === "string" ? formatted.trim() : "";
+    const unsafe: MidCell = { mid: null, unreadable: shown || String(raw), precision: true };
+    if (!Number.isSafeInteger(raw)) {
+      return Number.isInteger(raw) ? unsafe : invalid(shown || String(raw));
+    }
+    if (raw < 0) return invalid(shown || String(raw));
+    text = /^\d+$/.test(shown) ? shown : String(raw);
+    if (text.length > 15) return unsafe;
+  } else {
+    text = String(textFile && typeof formatted === "string" ? formatted : raw)
+      .replace(/\uFEFF/g, "")
+      .trim()
+      .replace(/^'/, "")
+      .trim();
+    if (text === "") return { mid: null, unreadable: null, precision: false };
+    if (looksLikeSpreadsheetNumber(text)) {
+      return { mid: null, unreadable: text, precision: true };
+    }
+  }
+  return MID_PATTERN.test(text)
+    ? { mid: text, unreadable: null, precision: false }
+    : invalid(text);
+}
+
+function invalid(text: string): MidCell {
+  return { mid: null, unreadable: text, precision: false };
+}
+
+/**
+ * Whether uploaded bytes are a spreadsheet container (XLSX is a zip, the old
+ * .xls a compound file) rather than text. Anything else SheetJS reads as CSV,
+ * and a CSV's Merchant Number is its own text (parseMidCell's `textFile`).
+ */
+export function isSpreadsheetContainer(bytes: Uint8Array): boolean {
+  const starts = (...sig: number[]) => sig.every((b, i) => bytes[i] === b);
+  return starts(0x50, 0x4b, 0x03, 0x04) || starts(0xd0, 0xcf, 0x11, 0xe0);
+}
+
+/**
+ * A name reduced to lower-case ASCII letters and digits: case, spaces and
+ * punctuation ignored. The SQL twin, in commit v3 and processor_key()
+ * (20261111120000), is regexp_replace(lower(x), '[^a-z0-9]', '', 'g').
+ */
+export function nameKey(value: string | null): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/** True when an Income Type cell is a residual: Residual, Residuals or blank. */
+export function isResidualIncomeType(value: string | null): boolean {
+  return RESIDUAL_INCOME_TYPE_KEYS.includes(nameKey(value));
+}
+
+/** One staging row, before the database lookups. */
 export type ParsedResidualRow = {
   /** 1-based spreadsheet row, so an error can name where to look. */
   row_number: number;
-  period_raw: string | null;
-  agent_number_raw: string | null;
+  processor_raw: string | null;
   mid_raw: string | null;
   merchant_name_raw: string | null;
+  income_type_raw: string | null;
   volume_raw: string | null;
-  average_ticket_raw: string | null;
-  total_cost_raw: string | null;
   residual_income_raw: string | null;
-  rep_split_raw: string | null;
-  period: string | null;
   volume: number | null;
-  average_ticket: number | null;
-  total_cost: number | null;
   residual_income: number | null;
-  rep_split_pct: number | null;
-  /** Everything the parser found wrong, before unknown_agent is considered. */
+  /** Figures blank on a row with a MID, read as 0 (phase 15). */
+  blank_as_zero: ("volume" | "residual_income")[];
+  /** The refusals the file alone shows, before the MID lookup. */
   blockers: ResidualBlocker[];
-  /**
-   * Cell-level reasons behind a bad_number, worded for the review screen —
-   * e.g. `Total cost "12,99" has a comma that is not a thousands separator…`.
-   * Empty when a figure was simply unreadable; blockerMessage covers that.
-   */
-  number_problems: string[];
+  /** One sentence per blocker, worded for the review screen. */
+  messages: Partial<Record<ResidualBlocker, string>>;
 };
 
 export type ParseResult =
@@ -446,43 +560,75 @@ export type ParseResult =
   | {
       ok: true;
       rows: ParsedResidualRow[];
-      /** Rows marked Line = Adjustment, skipped rather than staged. */
-      adjustments_ignored: number;
+      /** Filler rows skipped: no MID, merchant name, Volume or Residual. */
+      skipped: number;
     };
 
 /**
- * Turns a sheet — a header row followed by data rows — into staging rows.
+ * Turns a sheet -- a header row followed by data rows -- into staging rows.
  *
- * `rows[0]` is the header. Entirely blank rows are skipped rather than blocked:
- * processor exports routinely carry trailing empties and a footer gap, and forty
- * "this row has no MID" blockers over blank lines would bury the one that matters.
+ * `sheet` holds each cell's value (SheetJS raw); `formatted`, when given, the
+ * same grid as displayed text (SheetJS `w`), which is only read for the
+ * Merchant Number (parseMidCell).
+ *
+ * `rows[0]` is the header. FILLER rows are skipped rather than blocked: no
+ * MID, no merchant name, no Volume and no Residual, whatever the Processor or
+ * Income Type cells say (phase 15: ISO Hub pads every file to ~995 rows, most
+ * carrying only a Processor, a few only "ACH"). Forty "this row has no MID"
+ * blockers over empty lines would bury the one that matters. A row with a
+ * figure or a name but no MID is still refused (missing_mid).
  */
 export function parseResidualSheet(
   sheet: readonly (readonly unknown[])[],
+  formatted?: readonly (readonly unknown[])[],
+  options: { textFile?: boolean } = {},
 ): ParseResult {
   if (sheet.length === 0) {
     return { ok: false, error: "That file has no rows." };
   }
 
   const headers = mapHeaders(sheet[0]);
+  if (headers.crmExport) {
+    return {
+      ok: false,
+      error:
+        "This looks like a CRM export, not a processor file: it has an Agent # or Rep payout column. Upload the processor's own residual report.",
+    };
+  }
   if (headers.missing.length > 0) {
     return {
       ok: false,
       error: `That file is missing ${
         headers.missing.length === 1 ? "a column" : "columns"
-      }: ${headers.missing.join(", ")}.`,
+      }: ${headers.missing.join(", ")}. A residual file has six: ${RESIDUAL_COLUMNS.map(
+        (c) => COLUMN_HEADERS[c],
+      ).join(", ")}.`,
+    };
+  }
+  if (headers.repeated.length > 0) {
+    return {
+      ok: false,
+      error: `That file has ${
+        headers.repeated.length === 1 ? "a column" : "columns"
+      } more than once: ${headers.repeated.join(", ")}.`,
     };
   }
 
-  const cellAt = (row: readonly unknown[], column: ResidualColumn): unknown => {
+  const at = (
+    grid: readonly (readonly unknown[])[] | undefined,
+    offset: number,
+    column: ResidualColumn,
+  ): unknown => {
     const position = headers.index[column];
-    return position === undefined ? null : row[position];
+    return position === undefined ? null : (grid?.[offset]?.[position] ?? null);
   };
 
   const rows: ParsedResidualRow[] = [];
-  /** (period, agent number, mid) already seen, for duplicate_in_file. */
-  const seen = new Map<string, number>();
-  let adjustmentsIgnored = 0;
+  let skipped = 0;
+  /** midKey -> every sheet row it is on, for duplicate_mid. */
+  const seen = new Map<string, number[]>();
+  /** midKey -> each spelling the file uses for it, in order. */
+  const spellings = new Map<string, string[]>();
 
   for (let offset = 1; offset < sheet.length; offset += 1) {
     const raw = sheet[offset];
@@ -491,101 +637,135 @@ export function parseResidualSheet(
 
     if (isBlankRow(raw)) continue;
 
-    // Before anything else is read, and in particular before the duplicate
-    // check: an exported adjustment shares its (period, agent, MID) with the
-    // import line beside it, and would otherwise block that line as a
-    // duplicate.
-    if (isAdjustmentLine(cellAt(raw, "line"))) {
-      adjustmentsIgnored += 1;
+    const midCell = parseMidCell(
+      at(sheet, offset, "mid"),
+      at(formatted, offset, "mid"),
+      options.textFile ?? false,
+    );
+    const incomeType = parseTextCell(at(sheet, offset, "income_type"));
+    const volume = parseNumberCell(at(sheet, offset, "volume"));
+    const residual = parseNumberCell(at(sheet, offset, "residual_income"));
+    const name = parseTextCell(at(sheet, offset, "merchant_name"));
+
+    const isBlank = (cell: NumberCell) => cell.ok && cell.value === null;
+    if (
+      midCell.mid === null && midCell.unreadable === null && name === null &&
+      isBlank(volume) && isBlank(residual)
+    ) {
+      skipped += 1;
       continue;
     }
 
-    const period = parsePeriodCell(cellAt(raw, "period"));
-    const agentNumber = parseTextCell(cellAt(raw, "agent_number"));
-    const mid = parseTextCell(cellAt(raw, "mid"));
-
-    const volume = parseNumberCell(cellAt(raw, "volume"));
-    const averageTicket = parseNumberCell(cellAt(raw, "average_ticket"));
-    const totalCost = parseNumberCell(cellAt(raw, "total_cost"));
-    const residualIncome = parseNumberCell(cellAt(raw, "residual_income"));
-    const repSplit = parseNumberCell(cellAt(raw, "rep_split"));
-
-    const numberProblems: string[] = [];
-    for (const [column, cell] of [
-      ["volume", volume],
-      ["average_ticket", averageTicket],
-      ["total_cost", totalCost],
-      ["residual_income", residualIncome],
-      ["rep_split", repSplit],
-    ] as const) {
-      if (cell.problem) {
-        numberProblems.push(
-          `${COLUMN_HEADERS[column]} "${rawText(cellAt(raw, column)) ?? ""}" ${cell.problem}.`,
-        );
+    // A blank figure on a row with a MID is 0 (phase 15), counted on the
+    // review screen. Without a MID the row is refused anyway, and a blank
+    // stays missing_figure beside missing_mid.
+    const blankAsZero: ("volume" | "residual_income")[] = [];
+    if (midCell.mid !== null) {
+      for (const [column, cell] of [
+        ["volume", volume],
+        ["residual_income", residual],
+      ] as const) {
+        if (isBlank(cell)) {
+          cell.value = 0;
+          blankAsZero.push(column);
+        }
       }
     }
 
     const blockers: ResidualBlocker[] = [];
-    if (mid === null) blockers.push("missing_mid");
-    if (period === null) blockers.push("unparseable_period");
-    if (
-      !volume.ok ||
-      !averageTicket.ok ||
-      !totalCost.ok ||
-      !residualIncome.ok ||
-      !repSplit.ok
-    ) {
-      blockers.push("bad_number");
+    const messages: Partial<Record<ResidualBlocker, string>> = {};
+    const block = (code: ResidualBlocker, message: string) => {
+      if (!blockers.includes(code)) blockers.push(code);
+      messages[code] = message;
+    };
+
+    if (midCell.mid === null) {
+      block(
+        "missing_mid",
+        blockerMessage("missing_mid", {
+          midCell: midCell.unreadable,
+          midPrecision: midCell.precision,
+        }),
+      );
+    } else {
+      const key = midKey(midCell.mid);
+      seen.set(key, [...(seen.get(key) ?? []), rowNumber]);
+      const written = spellings.get(key) ?? [];
+      if (!written.includes(midCell.mid)) spellings.set(key, [...written, midCell.mid]);
     }
 
-    // The ledger's merge key, so the same duplicate the unique index would refuse
-    // is caught here with a message instead. Keyed on the agent NUMBER because the
-    // uuid is not known until resolution.
-    if (period !== null && mid !== null) {
-      const key = `${period}|${agentNumber ?? ""}|${mid}`;
-      if (seen.has(key)) {
-        blockers.push("duplicate_in_file");
-      } else {
-        seen.set(key, rowNumber);
+    const unreadable: string[] = [];
+    for (const [column, cell] of [
+      ["volume", volume],
+      ["residual_income", residual],
+    ] as const) {
+      if (!cell.ok) {
+        const text = rawText(at(sheet, offset, column)) ?? "";
+        unreadable.push(
+          cell.problem
+            ? `${COLUMN_HEADERS[column]} "${text}" ${cell.problem}.`
+            : `${COLUMN_HEADERS[column]} "${text}" could not be read as a number.`,
+        );
       }
+    }
+    if (unreadable.length > 0) block("unreadable_number", unreadable.join(" "));
+
+    const blank = (
+      [
+        ["volume", volume],
+        ["residual_income", residual],
+      ] as const
+    )
+      .filter(([, cell]) => cell.ok && cell.value === null)
+      .map(([column]) => COLUMN_HEADERS[column]);
+    if (blank.length > 0) {
+      block(
+        "missing_figure",
+        `${blank.join(" and ")} ${blank.length === 1 ? "is" : "are"} blank on this row.`,
+      );
     }
 
     rows.push({
       row_number: rowNumber,
       // The raw text is kept for every cell, so the review screen can show what
-      // the file said next to what it was read as. It is also what makes offering
-      // a re-parse safe: nothing has been interpreted destructively.
-      period_raw: rawText(cellAt(raw, "period")),
-      agent_number_raw: agentNumber,
-      mid_raw: mid,
-      merchant_name_raw: parseTextCell(cellAt(raw, "merchant_name")),
-      volume_raw: rawText(cellAt(raw, "volume")),
-      average_ticket_raw: rawText(cellAt(raw, "average_ticket")),
-      total_cost_raw: rawText(cellAt(raw, "total_cost")),
-      residual_income_raw: rawText(cellAt(raw, "residual_income")),
-      rep_split_raw: rawText(cellAt(raw, "rep_split")),
-      period,
+      // the file said next to what it was read as, and "Read again" is safe:
+      // nothing has been interpreted destructively.
+      processor_raw: parseTextCell(at(sheet, offset, "processor")),
+      mid_raw: midCell.mid ?? midCell.unreadable,
+      merchant_name_raw: name,
+      income_type_raw: incomeType,
+      volume_raw: rawText(at(sheet, offset, "volume")),
+      residual_income_raw: rawText(at(sheet, offset, "residual_income")),
       volume: volume.value,
-      average_ticket: averageTicket.value,
-      total_cost: totalCost.value,
-      residual_income: residualIncome.value,
-      rep_split_pct: repSplit.value,
+      residual_income: residual.value,
+      blank_as_zero: blankAsZero,
       blockers,
-      number_problems: numberProblems,
+      messages,
     });
   }
 
   if (rows.length === 0) {
-    return {
-      ok: false,
-      error:
-        adjustmentsIgnored > 0
-          ? "That file holds only adjustment lines. Adjustments are entered in the CRM, not imported."
-          : "That file has a header but no data rows.",
-    };
+    return { ok: false, error: "That file has a header but no data rows." };
   }
 
-  return { ok: true, rows, adjustments_ignored: adjustmentsIgnored };
+  // Every row of a repeated MID is refused, the first one included: which copy
+  // is right is not something to guess (memo §0.4). Case is not a difference:
+  // "abc123" and "ABC123" are one MID.
+  for (const row of rows) {
+    if (row.blockers.includes("missing_mid") || row.mid_raw === null) continue;
+    const key = midKey(row.mid_raw);
+    const onRows = seen.get(key) ?? [];
+    if (onRows.length > 1) {
+      row.blockers.push("duplicate_mid");
+      row.messages.duplicate_mid = blockerMessage("duplicate_mid", {
+        mid: (spellings.get(key) ?? [row.mid_raw]).join(" / "),
+        rows: onRows,
+      });
+    }
+  }
+  for (const row of rows) row.blockers = orderBlockers(row.blockers);
+
+  return { ok: true, rows, skipped };
 }
 
 /** A Date has to be rendered deliberately, or the raw column reads "[object Date]". */
@@ -606,189 +786,121 @@ function isBlankRow(row: readonly unknown[]): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Shared-account preview flags (phase 4b of docs/design/residual-splits.md, §7)
+// The lookups: payee by MID, the refusals that need the database, warnings
 // ---------------------------------------------------------------------------
 
-/**
- * What commit_residual_import_v2 would do with a row about a shared account,
- * stored on the staging row as rep_payout_import_rows.preview_flag. The codes
- * are v2's own plan names, so a flag and the skip it predicts read the same.
- *
- *   share_not_applied  the file names a rep outside the pair: imported as an
- *                      ordinary line for that rep; the share pays nothing.
- *   partner_named      the file names the partner: v2 skips the row.
- *   line_not_shared    the file names the signer, but a key of the pair
- *                      already holds a line that is not this share's: skipped.
- *
- * A flag never blocks. The commit recomputes all of this from the shares in
- * force when it runs, so this is advisory by construction.
- *
- * THIS MIRRORS v2's PLAN, and nothing type-checks the pair: the CASE in
- * commit_residual_import_v2 (20261016120000) is the authority. Change both
- * together. tests/live/residual-import.test.ts runs a file through this
- * preview and then through v2 and requires the flags to predict exactly the
- * rows v2 skipped.
- */
-export type SharePreviewFlag =
-  | "share_not_applied"
-  | "partner_named"
-  | "line_not_shared";
-
-export type PreviewShare = {
+/** The CRM merchant a MID names, as the parser reads it. */
+export type MerchantByMid = {
   id: number;
-  /** The share's merchant's CURRENT mid, as v2 joins it. */
   mid: string;
-  primaryAgentId: string;
-  secondaryAgentId: string;
-  /** YYYY-MM-DD, first of a month. */
-  effectiveFrom: string;
-  /** YYYY-MM-DD, exclusive; null = open-ended. */
-  effectiveTo: string | null;
-};
-
-export type PreviewLedgerLine = {
-  period: string;
-  mid: string;
+  /** The owner: the row's payee (memo headline 1). */
   agentId: string;
-  repShareId: number | null;
-  shareRole: string | null;
-  /**
-   * 'import' or 'adjustment'. v2's line_not_shared looks at IMPORT lines only
-   * (20261016160000): an adjustment posted into the month must not make the
-   * signer's row look blocked. Absent means an import line.
-   */
-  lineKind?: string;
+  status: string | null;
+  processor: string | null;
 };
 
-export type PreviewRow = {
-  period: string | null;
-  agentId: string | null;
-  mid: string | null;
-  /** A blocked row is never flagged: it cannot be committed as it stands. */
-  blocked: boolean;
-};
-
-export type SharePreview = { flag: SharePreviewFlag; share: PreviewShare };
-
-/** The share covering this MID in this month, as v2's join finds it. */
-export function shareCovering(
-  shares: readonly PreviewShare[],
-  mid: string,
-  period: string,
-): PreviewShare | null {
-  return (
-    shares.find(
-      (share) =>
-        share.mid === mid &&
-        period >= share.effectiveFrom &&
-        (share.effectiveTo === null || period < share.effectiveTo),
-    ) ?? null
-  );
-}
-
-export function previewSharedRow(
-  row: PreviewRow,
-  shares: readonly PreviewShare[],
-  ledger: readonly PreviewLedgerLine[],
-): SharePreview | null {
-  if (row.blocked) return null;
-  if (row.period === null || row.agentId === null || row.mid === null) {
-    return null;
-  }
-
-  const share = shareCovering(shares, row.mid, row.period);
-  if (share === null) return null;
-
-  if (row.agentId === share.secondaryAgentId) {
-    return { flag: "partner_named", share };
-  }
-  if (row.agentId !== share.primaryAgentId) {
-    return { flag: "share_not_applied", share };
-  }
-
-  const foreign = ledger.some(
-    (line) =>
-      line.lineKind !== "adjustment" &&
-      line.period === row.period &&
-      line.mid === row.mid &&
-      (line.agentId === share.primaryAgentId ||
-        line.agentId === share.secondaryAgentId) &&
-      (line.repShareId !== share.id ||
-        line.shareRole !==
-          (line.agentId === share.primaryAgentId ? "primary" : "secondary")),
-  );
-  return foreign ? { flag: "line_not_shared", share } : null;
-}
-
-const MONTHS = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
-
-/** "2026-07-01" -> "July 2026". */
-export function monthLabel(period: string): string {
-  const [year, month] = period.split("-");
-  return `${MONTHS[Number(month) - 1] ?? month} ${year}`;
-}
-
-/** The sentence the review screen shows beside a flagged row. */
-export function sharePreviewNote(
-  preview: SharePreview,
-  context: {
-    mid: string;
-    period: string;
-    signerName: string;
-    partnerName: string;
-    fileRepName: string;
-  },
-): string {
-  const pair = `${context.signerName} / ${context.partnerName}`;
-  const when = monthLabel(context.period);
-  switch (preview.flag) {
-    case "share_not_applied":
-      return `Share ${pair} not applied to MID ${context.mid} for ${when}: the file names ${context.fileRepName}. This row imports as an ordinary line for ${context.fileRepName}.`;
-    case "partner_named":
-      return `MID ${context.mid} is shared by ${pair} for ${when}, and the file names the partner. This row will be skipped: a shared account is imported on the signer's row.`;
-    case "line_not_shared":
-      return `MID ${context.mid} is shared by ${pair} for ${when}, but the ledger already holds a line for one of them on this MID that is not part of the share. This row will be skipped.`;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Unshared-row preview flags (phase 5 of docs/design/residual-splits.md, §7)
-// ---------------------------------------------------------------------------
+/** An import line already in the ledger for the batch's month. */
+export type MonthLine = { mid: string; processor: string | null };
 
 /**
- * Two warnings about a row NO share covers, so v2 imports it as an ordinary
- * line paying the rep the file names the whole rep side. Neither predicts a
- * skip -- v2 skips nothing here -- so unlike the three above they mirror no
- * plan; they are heuristics, advisory by construction.
- *
- *   share_not_in_force  the MID's merchant has a share, but none covers this
- *                       month (it ended, or starts later). Without this, v2
- *                       pays the signer 100% of a month the admin may believe
- *                       is shared.
- *   looks_shared        no share exists on the MID, and another rep is paid on
- *                       it within LOOKS_SHARED_MONTHS before this row's month
- *                       or in that month itself -- a committed import line, or
- *                       another row of the same file. (The CRM owner is not a
- *                       signal: merchants.agent_id is often not the payee.)
- *
- * Applied only where previewSharedRow found nothing, so a row carries at most
- * one flag, in that precedence: covered-share flags, then share_not_in_force,
- * then looks_shared.
+ * The MIDs that already have an import line this month from ANOTHER
+ * processor's batch: mid_in_other_batch (memo §2.4). A line with no processor
+ * -- everything committed before phase 7 -- counts as another processor's
+ * (phase 6 build notes): it cannot be told apart from one, and a second line
+ * for the MID would pay it twice. The set holds midKey()s.
  */
-export type UnsharedPreviewFlag = "share_not_in_force" | "looks_shared";
+export function midsInOtherBatches(
+  lines: readonly MonthLine[],
+  batchProcessor: string,
+): Set<string> {
+  return new Set(
+    lines
+      .filter((line) => line.processor === null || line.processor !== batchProcessor)
+      .map((line) => midKey(line.mid)),
+  );
+}
 
-/** The design's six-month lookback (design §7, §14). */
-export const LOOKS_SHARED_MONTHS = 6;
+/**
+ * Other names a processor's file uses for it, by nameKey(), and the processor
+ * each means (phase 15: ISO Hub writes "Goat" on TSYS files and "Netevia" on
+ * Netevia HQ's). The SQL twin is processor_key() (20261111120000).
+ */
+export const PROCESSOR_ALIASES: Readonly<Record<string, string>> = {
+  goat: "tsys",
+  netevia: "neteviahq",
+};
 
-/** A rep paid on a MID in a month: a committed import line, or a file row. */
-export type PaidLine = { period: string; mid: string; agentId: string };
+/** A processor name by nameKey(), then the alias map; null when blank. */
+export function processorKey(value: string | null): string | null {
+  const key = nameKey(value);
+  return key === "" ? null : (PROCESSOR_ALIASES[key] ?? key);
+}
 
-export type UnsharedPreview =
-  | { flag: "share_not_in_force"; shares: PreviewShare[] }
-  | { flag: "looks_shared"; others: PaidLine[] };
+/** Compares two processor names by processorKey(); a blank never matches. */
+export function sameProcessor(a: string | null, b: string | null): boolean {
+  const left = processorKey(a);
+  return left !== null && left === processorKey(b);
+}
+
+/**
+ * The four confirmable warnings for one row (memo §2.4):
+ *
+ *   processor_mismatch  the file's Processor cell names another processor, or
+ *                       the merchant has a saved processor that is not it,
+ *                       compared by processorKey() (case, spaces, punctuation
+ *                       and the alias map ignored). A BLANK cell is not a
+ *                       mismatch (phase 15: ISO Hub leaves most blank), nor is
+ *                       a merchant with NO saved processor (A6). Confirming
+ *                       never changes the merchant's processor.
+ *   inactive_merchant   merchants.status = 'inactive'; 'other' is not (A26).
+ *   bad_numbers         volume < 0, or volume > 0 and residual > volume. A
+ *                       negative residual on a positive volume is a clawback,
+ *                       not a bad number (A25), and imports with no warning.
+ *                       A ZERO-volume row imports with no warning whatever its
+ *                       residual (fees, chargebacks, closing fees on a closed
+ *                       merchant; 20261104120000): they are on most files,
+ *                       and the yes is one per type (§0b.3), so counting them
+ *                       made the admin's routine yes also pass the rows this
+ *                       warning is for.
+ *
+ *   other_income_type   the Income Type is not Residual, Residuals or blank
+ *                       (phase 15; ACH on the TSYS files).
+ *
+ * A figure that is unreadable is a blocker, not a bad number, so bad_numbers
+ * needs both figures read.
+ */
+export function rowWarnings(input: {
+  fileProcessor: string | null;
+  batchProcessor: string;
+  merchant: Pick<MerchantByMid, "status" | "processor"> | null;
+  volume: number | null;
+  residual: number | null;
+  incomeType: string | null;
+}): ResidualWarning[] {
+  const warnings: ResidualWarning[] = [];
+  const fileDiffers =
+    processorKey(input.fileProcessor) !== null &&
+    !sameProcessor(input.fileProcessor, input.batchProcessor);
+  const merchantDiffers =
+    input.merchant !== null &&
+    input.merchant.processor !== null &&
+    !sameProcessor(input.merchant.processor, input.batchProcessor);
+  if (fileDiffers || merchantDiffers) {
+    warnings.push("processor_mismatch");
+  }
+  if (input.merchant?.status === "inactive") warnings.push("inactive_merchant");
+  if (
+    input.volume !== null &&
+    input.residual !== null &&
+    (input.volume < 0 || (input.volume > 0 && input.residual > input.volume))
+  ) {
+    warnings.push("bad_numbers");
+  }
+  if (!isResidualIncomeType(input.incomeType)) {
+    warnings.push("other_income_type");
+  }
+  return warnings;
+}
 
 /** "2026-07-01" minus n months, as YYYY-MM-01. Arithmetic, never Date. */
 export function monthsBefore(period: string, n: number): string {
@@ -799,38 +911,123 @@ export function monthsBefore(period: string, n: number): string {
   return `${y}-${String(m).padStart(2, "0")}-01`;
 }
 
-/** The first month of the lookback window for a row in `period`. */
-export function lookbackStart(period: string): string {
-  return monthsBefore(period, LOOKS_SHARED_MONTHS);
+/** Who a MID paid last month: an import line, signer or unshared only. */
+export type LastMonthLine = {
+  mid: string;
+  agentId: string;
+  /** 'secondary' is a partner's half of a shared pair, never "the payee". */
+  shareRole: string | null;
+};
+
+/**
+ * payee_changed (memo A10): last month this MID paid someone, and the
+ * merchant's owner -- this month's payee -- is not among them. Informational,
+ * never a blocker: it is the only signal that a merchant reassignment moved
+ * money. A partner's line is not "who it paid", so a shared MID compares its
+ * signer; a MID with no line last month has nothing to compare.
+ */
+export function previousPayees(
+  lines: readonly LastMonthLine[],
+  mid: string,
+  ownerId: string,
+): string[] | null {
+  const payees = [
+    ...new Set(
+      lines
+        .filter((line) => midKey(line.mid) === midKey(mid) && line.shareRole !== "secondary")
+        .map((line) => line.agentId),
+    ),
+  ];
+  if (payees.length === 0 || payees.includes(ownerId)) return null;
+  return payees;
 }
+
+export function payeeChangedNote(context: {
+  mid: string;
+  period: string;
+  previousNames: readonly string[];
+  ownerName: string;
+}): string {
+  return `Last month (${monthLabel(monthsBefore(context.period, 1))}) MID ${
+    context.mid
+  } paid ${[...context.previousNames].sort().join(", ")}; this month it pays ${
+    context.ownerName
+  }, the merchant's current owner. If moving the merchant was not meant to change who is paid, correct its owner before committing.`;
+}
+
+// ---------------------------------------------------------------------------
+// Shared accounts in the preview (phase 4b of docs/design/residual-splits.md)
+// ---------------------------------------------------------------------------
+//
+// The three share flags v2 needed (share_not_applied, partner_named,
+// line_not_shared) went with v2 in phase 8 of docs/design/intake-and-reports.md.
+// Under v3 a share's signer IS the merchant's owner (set_merchant_rep_share
+// refuses anything else, and an owner cannot be moved while a share is live),
+// and a MID with a line already in the month is refused, so none of the three
+// can happen; v3 refuses the import if an older share breaks the rule. What
+// remains here is share_not_in_force.
+
+export type PreviewShare = {
+  id: number;
+  /** The share's merchant's CURRENT mid, as the commit joins it. */
+  mid: string;
+  primaryAgentId: string;
+  secondaryAgentId: string;
+  /** YYYY-MM-DD, first of a month. */
+  effectiveFrom: string;
+  /** YYYY-MM-DD, exclusive; null = open-ended. */
+  effectiveTo: string | null;
+};
+
+export type PreviewRow = {
+  period: string | null;
+  agentId: string | null;
+  mid: string | null;
+  /** A blocked row is never flagged: it cannot be committed as it stands. */
+  blocked: boolean;
+};
+
+/** The share covering this MID in this month, as the commit's join finds it. */
+export function shareCovering(
+  shares: readonly PreviewShare[],
+  mid: string,
+  period: string,
+): PreviewShare | null {
+  return (
+    shares.find(
+      (share) =>
+        midKey(share.mid) === midKey(mid) &&
+        period >= share.effectiveFrom &&
+        (share.effectiveTo === null || period < share.effectiveTo),
+    ) ?? null
+  );
+}
+
+/**
+ * share_not_in_force (phase 5 of docs/design/residual-splits.md): the MID's
+ * merchant has a share, but none covers this month (it ended, or starts
+ * later), so the commit pays the owner the whole rep side of a month the
+ * admin may believe is shared. Advisory. Applied only where no share covers
+ * the month. (`looks_shared`, the other phase 5 flag, read who the FILE named;
+ * the file names nobody now, and payee_changed replaces it.)
+ */
+export type UnsharedPreview = {
+  flag: "share_not_in_force";
+  shares: PreviewShare[];
+};
 
 export function previewUnsharedRow(
   row: PreviewRow,
   shares: readonly PreviewShare[],
-  paid: readonly PaidLine[],
 ): UnsharedPreview | null {
   if (row.blocked) return null;
   if (row.period === null || row.agentId === null || row.mid === null) {
     return null;
   }
-  const { period, agentId, mid } = row;
-
-  if (shareCovering(shares, mid, period) !== null) return null;
-
-  const onMid = shares.filter((share) => share.mid === mid);
-  if (onMid.length > 0) {
-    return { flag: "share_not_in_force", shares: onMid };
-  }
-
-  const from = lookbackStart(period);
-  const others = paid.filter(
-    (line) =>
-      line.mid === mid &&
-      line.agentId !== agentId &&
-      line.period >= from &&
-      line.period <= period,
-  );
-  return others.length > 0 ? { flag: "looks_shared", others } : null;
+  if (shareCovering(shares, row.mid, row.period) !== null) return null;
+  const mid = row.mid;
+  const onMid = shares.filter((share) => midKey(share.mid) === midKey(mid));
+  return onMid.length > 0 ? { flag: "share_not_in_force", shares: onMid } : null;
 }
 
 /** "July 2026" to "September 2026", or "from November 2026". */
@@ -845,27 +1042,15 @@ export function unsharedPreviewNote(
   context: {
     mid: string;
     period: string;
-    fileRepName: string;
-    /** False when no merchant in the CRM has this MID. */
-    hasMerchant: boolean;
+    ownerName: string;
     nameOf: (agentId: string) => string;
   },
 ): string {
-  const when = monthLabel(context.period);
-  if (preview.flag === "share_not_in_force") {
-    const ranges = preview.shares
-      .map(
-        (share) =>
-          `${context.nameOf(share.primaryAgentId)} / ${context.nameOf(share.secondaryAgentId)}, ${shareRange(share)}`,
-      )
-      .join("; ");
-    return `MID ${context.mid} has a share (${ranges}), but it does not cover ${when}. This row imports as an ordinary line paying ${context.fileRepName} the whole rep side.`;
-  }
-  const names = [...new Set(preview.others.map((line) => context.nameOf(line.agentId)))]
-    .sort()
-    .join(", ");
-  const advice = context.hasMerchant
-    ? "If two reps share this account, set it on the merchant page before committing."
-    : "No merchant in the CRM has this MID, so a share cannot be set on it until one is added.";
-  return `MID ${context.mid} is also paid to ${names} within the six months to ${when}, and no share is set on it. This row imports for ${context.fileRepName} alone. ${advice}`;
+  const ranges = preview.shares
+    .map(
+      (share) =>
+        `${context.nameOf(share.primaryAgentId)} / ${context.nameOf(share.secondaryAgentId)}, ${shareRange(share)}`,
+    )
+    .join("; ");
+  return `MID ${context.mid} has a share (${ranges}), but it does not cover ${monthLabel(context.period)}. This row imports as an ordinary line paying ${context.ownerName} the whole rep side.`;
 }

@@ -1,6 +1,13 @@
 import { expect, test } from "@playwright/test";
 
-import { LONG_MERCHANT_NAME, PERIODS, storageStateFor } from "./fixtures/seed";
+import {
+  LONG_MERCHANT_NAME,
+  OVERRIDE_FIXTURE,
+  PERIODS,
+  createOverrideFixture,
+  storageStateFor,
+} from "./fixtures/seed";
+import { service } from "./qa/qa-stack";
 
 /**
  * How the ledger LOOKS, which is the half no other suite can reach.
@@ -282,5 +289,61 @@ test.describe("the value edge cases render honestly", () => {
     ).toBeVisible();
     // And no element was actually created from it.
     expect(await page.locator("script:has-text(\"alert('xss')\")").count()).toBe(0);
+  });
+});
+
+/**
+ * The override block (20261102120000) under the rep's merchant table, from
+ * createOverrideFixture(): two ordinary debits and a clawback month's
+ * reversed one. Geometry and sign, the half the hermetic suite cannot see.
+ */
+test.describe("the override block", () => {
+  const o = OVERRIDE_FIXTURE;
+  let fx: Awaited<ReturnType<typeof createOverrideFixture>>;
+  test.beforeAll(async () => {
+    fx = await createOverrideFixture("rendering");
+  });
+
+  const amountCell = (page: import("@playwright/test").Page, dba: string) =>
+    page.getByTestId("payout-override-line").filter({ hasText: dba }).getByRole("cell").nth(1);
+
+  test("a deduction is negative and marked; a clawback month's reversal is positive and not", async ({ page }) => {
+    await page.goto(`/payouts/${fx.period}`);
+    await expect(amountCell(page, fx.plain.dba)).toHaveText(o.plain.debit);
+    await expect(amountCell(page, fx.plain.dba).locator("span")).toHaveClass(/text-destructive/);
+    await expect(amountCell(page, fx.clawback.dba)).toHaveText(o.clawback.debit);
+    await expect(amountCell(page, fx.clawback.dba).locator("span")).not.toHaveClass(/text-destructive/);
+  });
+
+  test("at 360px the amounts stay on screen and the page does not scroll sideways", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 900 });
+    await page.goto(`/payouts/${fx.period}`);
+    const block = page.getByTestId("payout-overrides");
+    await block.scrollIntoViewIfNeeded();
+    await expect(block.getByRole("columnheader", { name: "Amount" })).toBeInViewport();
+    await expect(amountCell(page, fx.shared.dba)).toBeInViewport();
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+
+  test("the rep's total for the month is every line of theirs, the override lines included", async ({ page }) => {
+    // The database's own sum of rep_payout over the rep's lines this month,
+    // overrides included; other specs' lines may share the month, so it is
+    // read, not assumed.
+    const { data } = await service()
+      .from("rep_payout_rows")
+      .select("rep_payout, line_kind")
+      .eq("agent_id", fx.ids.agent)
+      .eq("period", `${fx.period}-01`);
+    const lines = data ?? [];
+    expect(lines.some((l) => l.line_kind === "override")).toBe(true);
+    const cents = lines.reduce((sum, l) => sum + Math.round(Number(l.rep_payout ?? 0) * 100), 0);
+    const total = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
+
+    await page.goto(`/payouts/${fx.period}`);
+    const section = page.locator("section").filter({ has: page.getByTestId("payout-overrides") });
+    await expect(section.getByText(total, { exact: true })).toBeVisible();
   });
 });

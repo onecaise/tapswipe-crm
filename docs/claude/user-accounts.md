@@ -6,7 +6,7 @@ Moved verbatim from `CLAUDE.md` on 19 Oct 2026 to keep that file under the size 
 
 `user_import_batches` + `user_import_rows` look like `rep_payout_batches` + `rep_payout_import_rows`, and the resemblance is deliberate, but **one difference is the entire design and everything else follows from it.**
 
-`commit_residual_import` is a `security definer` RPC that moves a whole batch into the ledger in **one transaction** and **deletes** the staging rows. That is possible because everything it touches is in Postgres. Creating an account is not: each one is a GoTrue write plus a Postgres write, in two different systems, with nothing spanning them. Two hundred reps is four hundred operations that can stop anywhere, and there is no commit that either happens or does not — only progress.
+`commit_residual_import_v3` is a `security definer` RPC that moves a whole batch into the ledger in **one transaction** and **deletes** the staging rows. That is possible because everything it touches is in Postgres. Creating an account is not: each one is a GoTrue write plus a Postgres write, in two different systems, with nothing spanning them. Two hundred reps is four hundred operations that can stop anywhere, and there is no commit that either happens or does not — only progress.
 
 So **these staging rows are NOT deleted when the import finishes. They survive, each carrying its own outcome**, which makes the table the progress ledger as well as the staging area. `outcome is null` is the work list, and that single fact is the whole of batch-level resume. Do not "tidy up" by deleting committed rows: that throws away the only record of what each row did and makes a half-finished batch indistinguishable from a fresh one.
 

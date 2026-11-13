@@ -13,7 +13,7 @@ import { freshWizardDraft, storageStateFor } from "./fixtures/seed";
  * really wrote it to pre_apps.processor.
  */
 
-const EXPECTED = ["Not set", "TSYS", "Red Fynn", "PayBright", "Netevia HQ", "Square"];
+const EXPECTED = ["Not set", "TSYS", "Red Fynn", "PayBright", "Netevia HQ", "Square", "365 Pay"];
 
 async function optionLabels(page: Page): Promise<string[]> {
   const select = page.getByRole("combobox", { name: "Processor", exact: true });

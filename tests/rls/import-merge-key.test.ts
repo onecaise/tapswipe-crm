@@ -3,19 +3,21 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   ADMIN_ID,
   AGENT_ID,
-  AGENT_NUMBER,
+  asPlatform,
+  asUser,
+  commitV3,
+  createTestDb,
+  insertBatch,
+  migrationsBefore,
+  migrationsThrough,
   OTHER_AGENT_ID,
   PAYOUT_PERIOD,
   PAYOUT_PERIOD_PRIOR,
-  asPlatform,
-  asUser,
-  createTestDb,
-  migrationsBefore,
-  migrationsThrough,
   readMigration,
   resetData,
   rows,
   seedPayouts,
+  stageForCommit,
   type TestDb,
 } from "../helpers/db";
 
@@ -427,67 +429,10 @@ describe("an import never merges into an adjustment, and an adjustment never int
     return id;
   }
 
-  async function stage(
-    staged: { agentId: string; agentNumber: string; mid: string; period: string; volume: string; residual?: string; split?: string }[],
-  ): Promise<number> {
-    await asPlatform(db);
-    const [{ id }] = await rows<{ id: number }>(
-      db,
-      `insert into rep_payout_batches (imported_by, file_key, file_name, status)
-       values ('${ADMIN_ID}', 'test/f.xlsx', 'f.xlsx', 'review') returning id`,
-    );
-    for (const [index, r] of staged.entries()) {
-      await db.exec(`
-        insert into rep_payout_import_rows
-          (batch_id, row_number, agent_number_raw, mid_raw, merchant_name_raw, period,
-           agent_id, merchant_id, volume, residual_income, rep_split_pct)
-        values (${id}, ${index + 2}, '${r.agentNumber}', '${r.mid}', 'File Co', '${r.period}',
-                '${r.agentId}', (select id from merchants where mid = '${r.mid}'), ${r.volume},
-                ${r.residual ?? "null"}, ${r.split ?? "null"});`);
-    }
-    return id;
-  }
-
-  async function commit(fn: "commit_residual_import" | "commit_residual_import_v2", batch: number): Promise<unknown> {
-    await asUser(db, ADMIN_ID);
-    try {
-      const [{ r }] = await rows<{ r: unknown }>(db, `select ${fn}(${batch}) as r`);
-      return r;
-    } finally {
-      await asPlatform(db);
-    }
-  }
-
-  it.each(["commit_residual_import", "commit_residual_import_v2"] as const)(
-    "%s: importing a key that holds only an adjustment inserts a new import line beside it, twice over",
-    async (fn) => {
-      const adj = await adjustment(AGENT_ID, AUG, "MID-AGENT-1", "12.34");
-      const adjBefore = await lines(`id = ${adj}`);
-
-      const first = await stage([
-        { agentId: AGENT_ID, agentNumber: AGENT_NUMBER, mid: "MID-AGENT-1", period: AUG, volume: "100.00", residual: "40.00", split: "50.00" },
-      ]);
-      await commit(fn, first);
-      const second = await stage([
-        { agentId: AGENT_ID, agentNumber: AGENT_NUMBER, mid: "MID-AGENT-1", period: AUG, volume: "200.00", residual: "60.00" },
-      ]);
-      await commit(fn, second);
-
-      const onKey = await lines(`period = '${AUG}' and agent_id = '${AGENT_ID}' and mid = 'MID-AGENT-1'`);
-      expect(onKey).toHaveLength(2);
-      // The adjustment, byte-identical through both commits.
-      expect(onKey.find((l) => l.id === adj)).toEqual(adjBefore[0]);
-      // The import line took both commits, merged by THE COALESCE as always.
-      expect(onKey.find((l) => l.id !== adj)).toMatchObject({
-        line_kind: "import",
-        volume: 200,
-        residual_income: 60,
-        rep_split_pct: 50,
-        rep_payout: 30,
-        adjustment_amount: null,
-      });
-    },
-  );
+  // The old commit_residual_import(int) ran a case here too, merging the
+  // import line by THE COALESCE beside an untouched adjustment, until
+  // 20261104140000 dropped it; v2 went in 20261030160000. v3, which never
+  // merges, has its own case below.
 
   it("an adjustment on a key that holds an import line is a second line, even through an upsert naming the merge key", async () => {
     const [importBefore] = await lines(`period = '${PAYOUT_PERIOD}' and agent_id = '${AGENT_ID}' and mid = 'MID-AGENT-1'`);
@@ -498,7 +443,7 @@ describe("an import never merges into an adjustment, and an adjustment never int
       insert into rep_payout_rows (agent_id, period, mid, line_kind,
         adjustment_amount, adjusts_period, adjustment_note)
       values ('${AGENT_ID}', '${PAYOUT_PERIOD}', 'MID-AGENT-1', 'adjustment', -5.00, '${PAYOUT_PERIOD_PRIOR}', 'x')
-      on conflict (period, agent_id, mid) where line_kind = 'import' do update
+      on conflict (period, processor, agent_id, mid) where line_kind = 'import' do update
         set adjustment_amount = excluded.adjustment_amount;
     `);
 
@@ -510,31 +455,59 @@ describe("an import never merges into an adjustment, and an adjustment never int
 
   it("still refuses a second IMPORT line on a key, naming the merge key", async () => {
     await asPlatform(db);
+    // The seeded line's own key, processor included (seeded lines carry one
+    // since 20261030140000).
     const error = await attempt(() =>
-      db.exec(`insert into rep_payout_rows (agent_id, period, mid)
-               values ('${AGENT_ID}', '${PAYOUT_PERIOD}', 'MID-AGENT-1')`),
+      db.exec(`insert into rep_payout_rows (agent_id, period, mid, processor)
+         select agent_id, period, mid, processor from rep_payout_rows
+          where agent_id = '${AGENT_ID}' and period = '${PAYOUT_PERIOD}' and mid = 'MID-AGENT-1'`),
     );
     expect(error?.code).toBe("23505");
     expect(error?.message).toContain("rep_payout_rows_import_merge_key");
   });
 
-  it("v2 builds the shared pair in a month where adjustments sit on both keys of the pair", async () => {
-    // A share from August on MID-AGENT-2, with a correction pair already
-    // posted into August on the signer's and the partner's keys.
+  it("v3: importing a key that holds only an adjustment inserts a new import line beside it, the adjustment untouched", async () => {
+    await asPlatform(db);
+    const batch = await insertBatch(db, { fileName: "v3.xlsx" });
+    const [{ month }] = await rows<{ month: string }>(db, `select period::text as month from rep_payout_batches where id = ${batch}`);
+    const adj = await adjustment(AGENT_ID, month, "MID-AGENT-1", "12.34");
+    const adjBefore = await lines(`id = ${adj}`);
+    await stageForCommit(db, batch, [{ mid: "MID-AGENT-1", volume: "200.00", residual: "60.00" }]);
+    expect((await commitV3(db, batch)).written).toBe(1);
+    const onKey = await lines(`period = '${month}' and agent_id = '${AGENT_ID}' and mid = 'MID-AGENT-1'`);
+    expect(onKey).toHaveLength(2);
+    expect(onKey.find((l) => l.id === adj)).toEqual(adjBefore[0]);
+    expect(onKey.find((l) => l.id !== adj)).toMatchObject({
+      line_kind: "import",
+      volume: 200,
+      residual_income: 60,
+      rep_split_pct: 50,
+      rep_payout: 30,
+      adjustment_amount: null,
+    });
+  });
+
+  it("v3 builds the shared pair in a month where adjustments sit on both keys of the pair", async () => {
+    // A 40 + 10 share on MID-AGENT-2 (rate 50) from the batch's month, with a
+    // correction pair already posted into that month on both keys.
+    await asPlatform(db);
+    const batch = await insertBatch(db, { fileName: "v3-shared.xlsx" });
+    const [{ month }] = await rows<{ month: string }>(db, `select period::text as month from rep_payout_batches where id = ${batch}`);
     await asUser(db, ADMIN_ID);
     const [{ id: shareId }] = await rows<{ id: number }>(
       db,
       `select set_merchant_rep_share((select id from merchants where mid = 'MID-AGENT-2'),
-         '${AGENT_ID}', '${PARTNER_ID}', 40, 10, '${AUG}') as id`,
+         '${AGENT_ID}', '${PARTNER_ID}', 40, 10, '${month}') as id`,
     );
-    const signerAdj = await adjustment(AGENT_ID, AUG, "MID-AGENT-2", "-2.00");
-    const partnerAdj = await adjustment(PARTNER_ID, AUG, "MID-AGENT-2", "2.00");
+    const signerAdj = await adjustment(AGENT_ID, month, "MID-AGENT-2", "-2.00");
+    const partnerAdj = await adjustment(PARTNER_ID, month, "MID-AGENT-2", "2.00");
     const adjBefore = await lines(`id in (${signerAdj}, ${partnerAdj})`);
 
-    const batch = await stage([
-      { agentId: AGENT_ID, agentNumber: AGENT_NUMBER, mid: "MID-AGENT-2", period: AUG, volume: "500.00" },
-    ]);
-    expect(await commit("commit_residual_import_v2", batch)).toEqual({ written: 1, skipped: 0 });
+    await stageForCommit(db, batch, [{ mid: "MID-AGENT-2", volume: "500.00" }]);
+    // MID-AGENT-2 is inactive and a Square merchant: both warnings, confirmed.
+    expect(await commitV3(db, batch, ["inactive_merchant", "processor_mismatch"])).toEqual({
+      written: 2, rows: 1, shared: 1, overrides: 0, replaced_lines: 0,
+    });
 
     const pair = await lines(`rep_share_id = ${shareId}`);
     expect(pair.map((l) => [l.agent_id, l.share_role])).toEqual([

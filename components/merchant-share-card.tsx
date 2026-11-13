@@ -95,14 +95,17 @@ function SplitInputs({
   partner,
   onSigner,
   onPartner,
+  total = REP_SIDE_PCT,
 }: {
   idPrefix: string;
   signer: string;
   partner: string;
   onSigner: (value: string) => void;
   onPartner: (value: string) => void;
+  /** The rep side being divided: the merchant's rate for a share, 50 for a correction. */
+  total?: number;
 }) {
-  const problem = shareSplitProblem(signer, partner);
+  const problem = shareSplitProblem(signer, partner, total);
   return (
     <div className="flex flex-col gap-2">
       <div className="grid grid-cols-2 gap-3">
@@ -128,14 +131,14 @@ function SplitInputs({
         </div>
       </div>
       <p className="text-sm" data-testid={`${idPrefix}-summary`}>
-        {shareSummary(signer, partner)}
+        {shareSummary(signer, partner, total)}
       </p>
       <p
         className={cn("text-xs", problem ? "text-destructive" : "text-muted-foreground")}
         data-testid={`${idPrefix}-problem`}
       >
         {problem ??
-          `The two shares divide the rep side, ${REP_SIDE_PCT}. The company keeps the other ${REP_SIDE_PCT}.`}
+          `The two shares divide the rep side, ${total}. The company keeps the other ${100 - total}.`}
       </p>
     </div>
   );
@@ -284,12 +287,14 @@ function SetShareForm({
   defaultSignerId,
   latestCommitted,
   hasOpenShare,
+  repSide,
 }: {
   merchantId: number;
   reps: ShareRep[];
   defaultSignerId: string | null;
   latestCommitted: string | null;
   hasOpenShare: boolean;
+  repSide: number;
 }) {
   const router = useRouter();
   const [signerId, setSignerId] = useState(defaultSignerId ?? "");
@@ -304,7 +309,7 @@ function SetShareForm({
 
   const fromPeriod = monthInputToPeriod(fromMonth);
   const problem =
-    shareSplitProblem(signerPct, partnerPct) ??
+    shareSplitProblem(signerPct, partnerPct, repSide) ??
     (!signerId || !partnerId
       ? "Choose the signer and the partner."
       : signerId === partnerId
@@ -361,6 +366,7 @@ function SetShareForm({
         partner={partnerPct}
         onSigner={setSignerPct}
         onPartner={setPartnerPct}
+        total={repSide}
       />
       <div className="grid gap-1.5">
         <Label htmlFor="share-from">First month it applies to</Label>
@@ -387,7 +393,7 @@ function SetShareForm({
         {busy ? "Saving…" : "Save share"}
       </Button>
       {/* The split's own problem is already shown under the inputs. */}
-      {problem && shareSplitProblem(signerPct, partnerPct) === null && (
+      {problem && shareSplitProblem(signerPct, partnerPct, repSide) === null && (
         <p className="text-xs text-muted-foreground">{problem}</p>
       )}
     </form>
@@ -600,15 +606,20 @@ export function MerchantShareCard({
   defaultSignerId,
   latestCommitted,
   months,
+  rate,
 }: {
   merchantId: number;
   mid: string | null;
   shares: MerchantShare[];
   reps: ShareRep[];
+  /** The merchant's owner: the signer must be them (20261030160000). */
   defaultSignerId: string | null;
   latestCommitted: string | null;
   months: CorrectableMonth[];
+  /** merchants.split_agent_pct: the rep side a share divides. Null: not set yet. */
+  rate: number | null;
 }) {
+  const repSide = rate === null ? REP_SIDE_PCT : Number(rate);
   const names = new Map(reps.map((rep) => [rep.id, rep.full_name]));
 
   return (
@@ -618,9 +629,10 @@ export function MerchantShareCard({
         Shared account
       </h2>
       <p className="text-sm text-muted-foreground">
-        Two reps can divide this account&apos;s rep side ({REP_SIDE_PCT}%). The company&apos;s{" "}
-        {REP_SIDE_PCT}% never changes. Each rep sees the other&apos;s name and their own share,
-        never the other&apos;s payout.
+        Two reps can divide this account&apos;s rep side, the merchant&apos;s rate ({repSide}%),
+        and the signer is the merchant&apos;s owner. The company&apos;s {100 - repSide}% never
+        changes. Each rep sees the other&apos;s name and their own share, never the other&apos;s
+        payout.
       </p>
 
       {!mid ? (
@@ -649,6 +661,7 @@ export function MerchantShareCard({
             defaultSignerId={defaultSignerId}
             latestCommitted={latestCommitted}
             hasOpenShare={shares.some((share) => share.effective_to === null)}
+            repSide={repSide}
           />
           {months.length > 0 && (
             <CorrectionForm

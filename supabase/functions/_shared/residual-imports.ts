@@ -62,3 +62,19 @@ export function buildBatchKey(batchId: number, fileName: string): string {
 export function isPositiveInt(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
+
+/**
+ * A batch month as the upload page sends it: 'YYYY-MM-01', a real month.
+ *
+ * The SHAPE only. Whether the month is inside the import window (not in the
+ * future, not more than 24 months back, memo A11) is the database's call --
+ * guard_payout_batch_period() on rep_payout_batches -- so the rule exists once;
+ * residual-import-file-url passes that trigger's own sentence back.
+ */
+export function isFirstOfMonth(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})-(\d{2})-01$/.exec(value);
+  if (match === null) return false;
+  const month = Number(match[2]);
+  return month >= 1 && month <= 12;
+}

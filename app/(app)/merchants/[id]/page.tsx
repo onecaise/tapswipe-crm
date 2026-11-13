@@ -11,6 +11,7 @@ import {
   statusIntent,
 } from "@/lib/merchants";
 import { formatDate, formatPct, formatText } from "@/lib/format";
+import { MerchantSplitCell } from "@/components/merchant-split-cell";
 import { loadAnnotations } from "@/lib/annotations-data";
 import { loadRecordProposals } from "@/lib/quotes-data";
 import {
@@ -23,6 +24,9 @@ import {
   type ShareRep,
 } from "@/components/merchant-share-card";
 import { MerchantShareNotice } from "@/components/merchant-share-notice";
+import { MerchantOverrideCard } from "@/components/merchant-override-card";
+import { loadMerchantOverrides } from "@/lib/overrides";
+import { importMonths } from "@/lib/payouts";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { NotesPanel } from "@/components/notes-panel";
@@ -53,29 +57,48 @@ function Field({
  * admits in full: the merchant's shares, every rep (for the selects and for
  * names on old shares, deactivated reps included), and the MID's ledger lines.
  */
-async function loadShareCard(
-  merchant: Merchant,
-): Promise<React.ComponentProps<typeof MerchantShareCard>> {
+async function loadShareCard(merchant: Merchant): Promise<{
+  share: React.ComponentProps<typeof MerchantShareCard>;
+  override: React.ComponentProps<typeof MerchantOverrideCard>;
+}> {
   const supabase = await createClient();
-  const [shares, repsResult, ledger] = await Promise.all([
+  const [shares, overrides, repsResult, ledger] = await Promise.all([
     loadMerchantShares(supabase, merchant.id),
+    loadMerchantOverrides(supabase, merchant.id),
     supabase
       .from("profiles")
-      .select("id, full_name, is_active")
+      .select("id, full_name, is_active, manager_id")
       .order("full_name", { ascending: true }),
     merchant.mid
       ? loadShareLedger(supabase, merchant.mid)
       : Promise.resolve({ latestCommitted: null, months: [] }),
   ]);
-  const reps = (repsResult.data ?? []) as ShareRep[];
+  const people = (repsResult.data ?? []) as (ShareRep & { manager_id: string | null })[];
+  const reps: ShareRep[] = people.map(({ id, full_name, is_active }) => ({ id, full_name, is_active }));
   return {
-    merchantId: merchant.id,
-    mid: merchant.mid,
-    shares,
-    reps,
-    defaultSignerId: merchant.agent_id,
-    latestCommitted: ledger.latestCommitted,
-    months: ledger.months,
+    share: {
+      merchantId: merchant.id,
+      mid: merchant.mid,
+      shares,
+      reps,
+      defaultSignerId: merchant.agent_id,
+      rate: merchant.split_agent_pct,
+      latestCommitted: ledger.latestCommitted,
+      months: ledger.months,
+    },
+    // Overrides (20261102120000): admin-only, the same reads. The owner's
+    // manager is the default recipient (memo §0.1); the form prefills it.
+    override: {
+      merchantId: merchant.id,
+      mid: merchant.mid,
+      rate: merchant.split_agent_pct,
+      ownerId: merchant.agent_id,
+      defaultRecipientId: people.find((p) => p.id === merchant.agent_id)?.manager_id ?? null,
+      overrides,
+      reps,
+      latestCommitted: ledger.latestCommitted,
+      currentPeriod: importMonths(new Date())[0],
+    },
   };
 }
 
@@ -196,7 +219,19 @@ async function MerchantDetail({
         <Field label="Street">{formatText(merchant.street)}</Field>
         <Field label="ZIP">{formatText(merchant.zip)}</Field>
         <Field label="Processor">{formatText(merchant.processor)}</Field>
-        <Field label="Agent split">{formatPct(merchant.split_agent_pct)}</Field>
+        <Field label="Agent split">
+          {/* Admins set it here, through set_merchant_split (the only write
+              path); a rep reads it. */}
+          {isAdmin ? (
+            <MerchantSplitCell
+              merchantId={merchant.id}
+              dba={merchant.dba}
+              rate={merchant.split_agent_pct}
+            />
+          ) : (
+            formatPct(merchant.split_agent_pct)
+          )}
+        </Field>
         <Field label="Company split">
           {formatPct(merchant.split_company_pct)}
         </Field>
@@ -219,7 +254,10 @@ async function MerchantDetail({
       </dl>
 
       <MerchantShareNotice entries={shareEntries} />
-      {shareCard && <MerchantShareCard {...shareCard} />}
+      {shareCard && <MerchantShareCard {...shareCard.share} />}
+      {/* Admins only. A rep's page says nothing about overrides: they read
+          their own deduction, and who receives it, on their statement. */}
+      {shareCard && <MerchantOverrideCard {...shareCard.override} />}
 
       <TasksPanel
         ownerType="merchant"

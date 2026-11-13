@@ -237,7 +237,7 @@ describe("processors over PostgREST (phase 1, docs/design/intake-and-reports.md)
   // tests/rls/processors.test.ts asserts the privileges; this asserts what the
   // app actually gets back through the Data API, where a missing grant and a
   // restrictive policy look nothing alike.
-  it("serves a signed-in rep the five processors in drop-down order", async () => {
+  it("serves a signed-in rep the six processors in drop-down order", async () => {
     const { data, error } = await userClient(fx.tokens.owner)
       .from("processors")
       .select("code")
@@ -249,6 +249,7 @@ describe("processors over PostgREST (phase 1, docs/design/intake-and-reports.md)
       "PayBright",
       "Netevia HQ",
       "Square",
+      "365 Pay",
     ]);
   });
 

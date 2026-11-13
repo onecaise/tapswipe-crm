@@ -7,6 +7,8 @@ import {
   asPlatform,
   asUser,
   createTestDb,
+  migrationsBefore,
+  readMigration,
   resetData,
   rows,
   type TestDb,
@@ -400,5 +402,154 @@ describe("territory is not an access boundary", () => {
     const visible = await rows<{ id: string }>(db, `select id from profiles`);
 
     expect(visible.map((p) => p.id)).toEqual([AGENT_ID]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 20261104150000: every ASCII whitespace character is trimmed, as
+// set_rep_identity() trims (phase 13 of docs/design/intake-and-reports.md,
+// carried over from phase 2). The characters are built with chr() in SQL, not
+// written as escapes here.
+// ---------------------------------------------------------------------------
+
+const TRIM_MIGRATION = "20261104150000_set_territory_ascii_trim.sql";
+const OLD_NORMALISE = "normalised := nullif(btrim(coalesce(new_territory, '')), '');";
+const NEW_NORMALISE = "normalised := nullif(btrim(coalesce(new_territory, ''), E' \\t\\n\\r\\f\\x0b'), '');";
+// Tab, newline, carriage return, form feed, vertical tab -- and space.
+const ASCII_WHITESPACE = [9, 10, 13, 12, 11, 32];
+
+/** set_territory as the admin, with `sql` as the value expression. */
+async function setTerritorySql(target: TestDb, sql: string): Promise<void> {
+  await asUser(target, ADMIN_ID);
+  try {
+    await target.exec(`select set_territory('${AGENT_ID}', ${sql})`);
+  } finally {
+    await asPlatform(target);
+  }
+}
+
+describe("set_territory trims every ASCII whitespace character (20261104150000)", () => {
+  it.each(ASCII_WHITESPACE)("strips chr(%i) from both ends", async (code) => {
+    await setTerritorySql(db, `chr(${code}) || chr(${code}) || 'Southeast' || chr(${code})`);
+    expect((await profile(db, AGENT_ID)).territory).toBe("Southeast");
+  });
+
+  it("strips a mix of them, and keeps whitespace inside the name", async () => {
+    await setTerritorySql(db, `chr(9) || ' ' || chr(11) || 'South' || chr(9) || 'east' || chr(13) || chr(10) || chr(12)`);
+    expect((await profile(db, AGENT_ID)).territory).toBe("South\teast");
+  });
+
+  it("clears a territory given only whitespace, with the clear verb", async () => {
+    await preset(db, AGENT_ID, "Southeast");
+    await setTerritorySql(db, `chr(9) || chr(10) || ' ' || chr(13)`);
+    expect((await profile(db, AGENT_ID)).territory).toBeNull();
+    expect((await auditRows(db)).map((r) => r.action)).toEqual(["clear_territory"]);
+  });
+
+  it("treats a padded copy of the stored value as no change: no write, no audit row", async () => {
+    await preset(db, AGENT_ID, "Southeast");
+    await setTerritorySql(db, `chr(9) || 'Southeast' || chr(10)`);
+    expect(await auditRows(db)).toEqual([]);
+  });
+
+  it("measures the 64-character cap after trimming", async () => {
+    await setTerritorySql(db, `chr(9) || repeat('a', 64) || chr(9)`);
+    expect((await profile(db, AGENT_ID)).territory).toBe("a".repeat(64));
+  });
+
+  it("is the 20261002143000 function with only the normalising line changed", async () => {
+    const extract = (sql: string) => {
+      const text = sql.replace(/\r\n/g, "\n");
+      const start = text.lastIndexOf("create or replace function set_territory(");
+      return text.slice(start, text.indexOf("$$;", start));
+    };
+    const before = extract(await readMigration("20261002143000_profiles_territory.sql"));
+    const after = extract(await readMigration(TRIM_MIGRATION));
+    expect(before).toContain(OLD_NORMALISE);
+    expect(after).toBe(before.replace(OLD_NORMALISE, NEW_NORMALISE));
+  });
+
+  it("keeps its privileges: authenticated and service_role, never anon or PUBLIC", async () => {
+    await asPlatform(db);
+    const [fn] = await rows<{ anon: boolean; authed: boolean; svc: boolean; acl: string; definer: boolean }>(
+      db,
+      `select has_function_privilege('anon', 'set_territory(uuid, text)', 'execute') as anon,
+              has_function_privilege('authenticated', 'set_territory(uuid, text)', 'execute') as authed,
+              has_function_privilege('service_role', 'set_territory(uuid, text)', 'execute') as svc,
+              proacl::text as acl, prosecdef as definer
+         from pg_proc where oid = 'set_territory(uuid, text)'::regprocedure`,
+    );
+    expect(fn).toMatchObject({ anon: false, authed: true, svc: true, definer: true });
+    expect(fn.acl).not.toMatch(/(^|[{,])=X/);
+  });
+});
+
+describe("the territory migration", () => {
+  const opened: TestDb[] = [];
+  afterAll(async () => {
+    await Promise.all(opened.map((d) => d.close()));
+  });
+  async function before(): Promise<TestDb> {
+    const target = await createTestDb(await migrationsBefore(TRIM_MIGRATION));
+    opened.push(target);
+    await resetData(target);
+    return target;
+  }
+
+  it("passes over existing territories, a tab-padded one included, and rewrites none", async () => {
+    const target = await before();
+    await target.exec(`
+      update profiles set territory = 'Southeast' where id = '${AGENT_ID}';
+      update profiles set territory = chr(9) || 'Northwest' where id = '${OTHER_AGENT_ID}';`);
+    const snapshot = () =>
+      rows(target, `select id, territory from profiles order by id`);
+    const was = await snapshot();
+    await target.exec(await readMigration(TRIM_MIGRATION));
+    await asPlatform(target);
+    expect(await snapshot()).toEqual(was);
+    // Setting the padded one again now trims it.
+    await asUser(target, ADMIN_ID);
+    await target.exec(`select set_territory('${OTHER_AGENT_ID}', chr(9) || 'Northwest')`);
+    await asPlatform(target);
+    expect(await rows(target, `select territory from profiles where id = '${OTHER_AGENT_ID}'`)).toEqual([
+      { territory: "Northwest" },
+    ]);
+  });
+
+  it("refuses, naming it, over a set_territory that is not the one it copied", async () => {
+    const target = await before();
+    const [{ def }] = await rows<{ def: string }>(
+      target,
+      `select pg_get_functiondef('set_territory(uuid, text)'::regprocedure) as def`,
+    );
+    expect(def).toContain(OLD_NORMALISE);
+    await target.exec(def.replace(OLD_NORMALISE, "normalised := new_territory;"));
+    const error = await (async () => {
+      try {
+        await target.exec(await readMigration(TRIM_MIGRATION));
+        return null;
+      } catch (e) {
+        return e as Error;
+      }
+    })();
+    expect(error?.message).toBe(
+      "set_territory does not carry the 20261002143000 normalising line exactly once here. Inspect pg_get_functiondef before applying 20261104150000.",
+    );
+  });
+
+  it("mutation proof: the old line put back stores the tab again", async () => {
+    const mutant = await createTestDb();
+    opened.push(mutant);
+    await resetData(mutant);
+    const [{ def }] = await rows<{ def: string }>(
+      mutant,
+      `select pg_get_functiondef('set_territory(uuid, text)'::regprocedure) as def`,
+    );
+    expect(def, "the new line must be in the function").toContain(NEW_NORMALISE);
+    await mutant.exec(def.replace(NEW_NORMALISE, OLD_NORMALISE));
+    await setTerritorySql(mutant, `chr(9) || 'Southeast'`);
+    expect(await rows(mutant, `select territory from profiles where id = '${AGENT_ID}'`)).toEqual([
+      { territory: "\tSoutheast" },
+    ]);
   });
 });

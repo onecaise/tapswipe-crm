@@ -88,9 +88,16 @@ insert into bug_reports (agent_id, page, description) values
   ('a0000000-0000-4000-8000-000000000002', '/dashboard', 'Fake bug');
 
 -- Residuals: a batch, a staged row, a share, a shared ledger line (which holds
--- merchant_rep_shares through its RESTRICT key) and a history row.
-insert into rep_payout_batches (imported_by, file_key, file_name) values
-  ('a0000000-0000-4000-8000-000000000001', 'reset/fake.xlsx', 'fake.xlsx');
+-- merchant_rep_shares through its RESTRICT key), a history row and a paid
+-- month. The batch and the closure carry a processor (20261030120000), so the
+-- reset truncates two more tables with a foreign key INTO a kept table. Their
+-- month is last month, computed, because both refuse a month outside the
+-- import window and a fixed date would expire.
+insert into rep_payout_batches (imported_by, file_key, file_name, processor, period) values
+  ('a0000000-0000-4000-8000-000000000001', 'reset/fake.xlsx', 'fake.xlsx', 'TSYS',
+   (date_trunc('month', now() at time zone 'UTC') - interval '1 month')::date);
+insert into payout_period_closures (period, processor) values
+  ((date_trunc('month', now() at time zone 'UTC') - interval '1 month')::date, 'TSYS');
 insert into rep_payout_import_rows (batch_id, row_number) values
   ((select id from rep_payout_batches where file_key = 'reset/fake.xlsx'), 1);
 insert into merchant_rep_shares (merchant_id, primary_agent_id, secondary_agent_id,
@@ -107,12 +114,29 @@ insert into rep_payout_rows (agent_id, period, mid, merchant_id, batch_id,
 insert into rep_payout_row_history (row_id, period, agent_id, mid, field) values
   ((select id from rep_payout_rows where mid = 'RST-MID-1'), '2026-08-01',
    'a0000000-0000-4000-8000-000000000002', 'RST-MID-1', 'residual_income');
+-- An override (20261102120000) and the credit line it paid, which holds
+-- merchant_overrides through its RESTRICT key as the shared line holds the share.
+insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from) values
+  ((select id from merchants where dba = 'Reset Merchant 1'),
+   'a0000000-0000-4000-8000-000000000001', 10, '2026-08-01');
+insert into rep_payout_rows (agent_id, period, processor, mid, merchant_id, batch_id,
+                             line_kind, override_id, override_role, override_amount) values
+  ('a0000000-0000-4000-8000-000000000001', '2026-08-01', 'TSYS', 'RST-MID-1',
+   (select id from merchants where dba = 'Reset Merchant 1'),
+   (select id from rep_payout_batches where file_key = 'reset/fake.xlsx'),
+   'override', (select id from merchant_overrides limit 1), 'credit', 1.00);
 
 -- Bulk user import staging.
 insert into user_import_batches (imported_by, file_name, source_text) values
   ('a0000000-0000-4000-8000-000000000001', 'fake.csv', 'name,email');
 insert into user_import_rows (batch_id, row_number) values
   ((select id from user_import_batches where file_name = 'fake.csv'), 1);
+
+-- Merchant import staging (20261106120000). Invented.
+insert into merchant_import_batches (file_name, file_kind, source_bytes) values
+  ('fake-merchants.csv', 'csv', 'A');
+insert into merchant_import_rows (batch_id, row_number, mid_raw) values
+  ((select id from merchant_import_batches where file_name = 'fake-merchants.csv'), 2, '400100200399');
 
 -- Reference data: catalog, marketing library, company documents.
 insert into brands (name) values ('Reset Brand');

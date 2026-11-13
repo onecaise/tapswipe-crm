@@ -10,11 +10,9 @@ import { Button } from "@/components/ui/button";
 /**
  * Downloads the payout table as an XLSX.
  *
- * The file the export-residuals function returns is **re-importable**: it carries
- * the same nine headers a processor report does, so the way to fill a whole
- * period's figures in bulk is export, type them in Excel, and upload it again.
- * Committing merges by period, agent # and MID, and writes the two money columns
- * only where the file supplies them.
+ * A download only (memo §2.6): the header is the export's own, and the residual
+ * parser refuses the file if it is uploaded (it carries Agent # and Rep
+ * payout). Nothing edits a committed line; a fix is a replace or an adjustment.
  *
  * Not admin-only. The function reads through the caller's own client, so RLS scopes
  * the file: an admin gets the company, a rep gets their own rows. Nothing here

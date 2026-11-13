@@ -1,8 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import {
+  OVERRIDE_FIXTURE,
   PERSONAS,
   SHARE_FIXTURE,
+  createOverrideFixture,
+  overrideLines,
   seedE2E,
   storageStateFor,
   type SeedResult,
@@ -11,8 +14,10 @@ import {
 /**
  * Shared accounts on the payout surfaces (phase 7 of
  * docs/design/residual-splits.md): the period page's markers and the
- * account-total control, the bulk split skipping the partner's line, and the
- * statement's marker and footnote.
+ * statement's marker and footnote. The account-total control and the bulk
+ * split went with every other ledger edit in phase 11 of
+ * docs/design/intake-and-reports.md (20261102140000); payouts-editing.spec.ts
+ * asserts they are gone.
  *
  * The privacy rule is the point: each rep sees the partner's NAME and their
  * OWN share, never the partner's share or payout. The fixture's figures are
@@ -21,8 +26,7 @@ import {
  *
  * Four personas: the admin, the signer (agent), the partner (agent2) and a
  * third rep (agent3) paid on an ordinary line in the same month. Every page
- * is checked at 360, 768 and 1280px for sideways scroll, and every control
- * this phase adds for 44px.
+ * is checked at 360, 768 and 1280px for sideways scroll.
  */
 
 const f = SHARE_FIXTURE;
@@ -40,30 +44,10 @@ async function expectNoSidewaysScroll(page: Page): Promise<void> {
   expect(overflow.body, "body scrolls sideways").toBeLessThanOrEqual(0);
 }
 
-/** Every button and input inside the shared-residual controls is >= 44px tall. */
-async function expectShareControlTargets(page: Page): Promise<void> {
-  const controls = page.getByTestId("shared-residual-control");
-  expect(await controls.count()).toBeGreaterThan(0);
-  const small = await controls.evaluateAll((roots) =>
-    roots.flatMap((root) =>
-      [...root.querySelectorAll("button, input")]
-        .map((el) => ({ el, box: el.getBoundingClientRect() }))
-        .filter(({ box }) => box.width > 0 && box.height < 44)
-        .map(({ el, box }) => `${el.tagName} "${el.textContent?.trim()}" ${Math.round(box.height)}px`),
-    ),
-  );
-  expect(small).toEqual([]);
-}
-
-/** The ledger rows naming a merchant, in page order. */
-const ledgerRows = (page: Page, merchant: string) =>
-  page.getByRole("row").filter({ hasText: merchant });
-
 test.describe("as the admin", () => {
   test.use({ storageState: storageStateFor("admin") });
   test.describe.configure({ mode: "serial" });
 
-  // Reset the fixture: the account total and bulk split tests below write.
   test.beforeAll(async () => {
     await seedE2E();
   });
@@ -75,8 +59,7 @@ test.describe("as the admin", () => {
     await expect(markers(page).nth(0)).toContainText(expected);
     await expect(markers(page).nth(1)).toContainText(expected);
 
-    // The control sits on the signer's line only; the partner's says why not.
-    await expect(page.getByTestId("shared-residual-control")).toHaveCount(1);
+    // Read-only: the partner's line says where its figures come from.
     await expect(
       markers(page).filter({ hasText: "Partner's line: its residual and split follow the signer's line." }),
     ).toHaveCount(1);
@@ -85,78 +68,13 @@ test.describe("as the admin", () => {
   });
 
   for (const width of WIDTHS) {
-    test(`the period page fits ${width}px and the account-total control is 44px, closed and open`, async ({ page }) => {
+    test(`the period page fits ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await page.goto(PERIOD_URL);
+      await expect(markers(page)).toHaveCount(2);
       await expectNoSidewaysScroll(page);
-      await expectShareControlTargets(page);
-      await page.getByRole("button", { name: /account total/ }).click();
-      await expectNoSidewaysScroll(page);
-      await expectShareControlTargets(page);
     });
   }
-
-  test("sets the account total once and both lines are re-divided", async ({ page }) => {
-    await page.goto(PERIOD_URL);
-    await page.getByRole("button", { name: "Change account total ($1,234.56)" }).click();
-    await page.getByLabel(`Account total residual for ${f.shared.dba}`).fill("2000");
-    await page.getByRole("button", { name: "Save total" }).click();
-
-    // $2,000 at 50 is $1,000 for the account: 10 of 50 is $200.00 for the
-    // partner and $800.00 for the signer. Read after a reload, from the
-    // database's own generated column.
-    await page.reload();
-    await expect(markers(page).nth(0)).toContainText("account residual $2,000.00");
-    await expect(markers(page).nth(1)).toContainText("account residual $2,000.00");
-    await expect(page.getByText("$800.00").first()).toBeVisible();
-    await expect(page.getByText("$200.00").first()).toBeVisible();
-    await expect(page.getByText(f.signerPayout)).toHaveCount(0);
-  });
-
-  /** One rep's bulk split: fill, Apply, confirm; returns the input. */
-  async function bulkSplit(page: Page, repName: string, value: string) {
-    const section = page.locator("section").filter({
-      has: page.getByLabel(`Split percentage for all of ${repName}'s rows this period`),
-    });
-    const input = section.getByLabel(`Split percentage for all of ${repName}'s rows this period`);
-    await input.fill(value);
-    await section.getByRole("button", { name: "Apply" }).click();
-    await section.getByRole("button", { name: "Set split" }).click();
-    return { section, input };
-  }
-
-  test("the bulk split on the PARTNER's group skips their partner line and sets the rest", async ({ page }) => {
-    // agent2's group this month is a mix: their half of the shared pair, and an
-    // ordinary line of their own. The partner line takes the signer's rate and
-    // guard_shared_line() refuses a direct change to it, so without the filter
-    // the whole statement is refused and NOTHING is set.
-    await page.goto(PERIOD_URL);
-    const { section, input } = await bulkSplit(page, PERSONAS.agent2.fullName, "45");
-    await expect(section.getByText("Set split for all 1 row")).toBeVisible();
-    // Success clears the box; a refusal leaves "45" there with the error.
-    await expect(input).toHaveValue("");
-
-    await page.reload();
-    // The ordinary line is an input for an admin, so its payout is the
-    // evidence: $100 at 45 is $45.00. The partner line still reads the
-    // signer's 50% -- the bulk split did not touch it.
-    await expect(ledgerRows(page, f.partnerOwn.dba)).toContainText("$45.00");
-    await expect(ledgerRows(page, f.shared.dba).last()).toContainText("50%");
-  });
-
-  test("the bulk split on the SIGNER's group carries the new rate to the partner's line", async ({ page }) => {
-    await page.goto(PERIOD_URL);
-    const { input } = await bulkSplit(page, PERSONAS.agent.fullName, "60");
-    await expect(input).toHaveValue("");
-
-    await page.reload();
-    // Signer's line first (E2E Agent's group), partner's last; the partner's
-    // split is read-only text and now reads the signer's 60 (copied across by
-    // copy_signer_rate_to_partner()).
-    const pair = ledgerRows(page, f.shared.dba);
-    await expect(pair).toHaveCount(2);
-    await expect(pair.last()).toContainText("60%");
-  });
 });
 
 test.describe("as the signer", () => {
@@ -276,4 +194,133 @@ test.describe("as a third rep", () => {
       await expectNoSidewaysScroll(page);
     });
   }
+});
+
+/**
+ * Overrides on a shared account (20261102120000; memo §4.3-4.4, A4c), from
+ * createOverrideFixture(): a 5% override on a shared merchant (agent signs
+ * 40, agent2 partners 10) and on a plain one of agent's, both paid to agent3,
+ * committed through the real v3. The deduction divides between signer and
+ * partner by the cent rule (49.38 + 12.35 = 61.73). Each rep sees their OWN
+ * debit and who receives it; the recipient sees the credit with the
+ * merchant's name as plain text, and nothing of the merchant, the percent or
+ * either rep.
+ */
+test.describe("overrides on a shared account", () => {
+  const o = OVERRIDE_FIXTURE;
+  let fx: Awaited<ReturnType<typeof createOverrideFixture>>;
+  const block = (page: Page) => page.getByTestId("payout-overrides");
+  const lines = (page: Page) => page.getByTestId("payout-override-line");
+  const statementLines = (page: Page) => page.getByTestId("statement-override");
+
+  test.beforeAll(async () => {
+    const seeded = await seedE2E();
+    fx = await createOverrideFixture("shares");
+    // The commit wrote the pair the memo specifies, to the cent.
+    expect(await overrideLines(fx.batchId)).toEqual([
+      { agent_id: seeded.ids.agent, role: "debit", amount: -49.38 },
+      { agent_id: seeded.ids.agent2, role: "debit", amount: -12.35 },
+      { agent_id: seeded.ids.agent, role: "debit", amount: -10 },
+      { agent_id: seeded.ids.agent3, role: "credit", amount: -0.59 },
+      { agent_id: seeded.ids.agent, role: "debit", amount: 0.59 },
+      { agent_id: seeded.ids.agent3, role: "credit", amount: 10 },
+      { agent_id: seeded.ids.agent3, role: "credit", amount: 61.73 },
+    ]);
+  });
+
+  test.describe("the signer", () => {
+    test.use({ storageState: storageStateFor("agent") });
+
+    test("reads their own two debits and who receives them; nothing of the partner's piece or the credit", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}`);
+      const mine = lines(page).filter({ hasText: fx.shared.dba });
+      await expect(mine).toHaveCount(1);
+      await expect(mine).toContainText(`Override ${o.pct}% of residual · to ${PERSONAS.agent3.fullName}`);
+      await expect(mine).toContainText(o.shared.signerDebit);
+      await expect(lines(page).filter({ hasText: fx.plain.dba })).toContainText(o.plain.debit);
+      await expect(block(page).getByText(o.shared.partnerDebit)).toHaveCount(0);
+      await expect(block(page).getByText(o.shared.credit)).toHaveCount(0);
+      await expect(block(page).getByText("Override received")).toHaveCount(0);
+    });
+
+    test("the statement prints the same lines", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}/summary/${fx.ids.agent}`);
+      await expect(statementLines(page).filter({ hasText: fx.shared.dba })).toContainText(
+        `Override ${o.pct}% of residual · to ${PERSONAS.agent3.fullName}`,
+      );
+      await expect(statementLines(page).filter({ hasText: fx.shared.dba })).toContainText(o.shared.signerDebit);
+      await expect(page.getByText(o.shared.partnerDebit)).toHaveCount(0);
+    });
+  });
+
+  test.describe("the partner", () => {
+    test.use({ storageState: storageStateFor("agent2") });
+
+    test("reads their own piece of the deduction and who receives it; nothing of the signer's", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}`);
+      // Scoped to this fixture: another spec's fixture may share the month.
+      const mine = lines(page).filter({ hasText: fx.shared.dba });
+      await expect(mine).toHaveCount(1);
+      await expect(mine).toContainText(`Override ${o.pct}% of residual · to ${PERSONAS.agent3.fullName}`);
+      await expect(mine).toContainText(o.shared.partnerDebit);
+      await expect(page.getByText(o.shared.signerDebit)).toHaveCount(0);
+      await expect(page.getByText(fx.plain.dba)).toHaveCount(0);
+      // The merchant name in the override block is plain text for the partner.
+      await expect(block(page).getByRole("link")).toHaveCount(0);
+    });
+  });
+
+  test.describe("the recipient", () => {
+    test.use({ storageState: storageStateFor("agent3") });
+
+    test("reads the credits with the merchants' names as plain text, and nothing else of them", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}`);
+      const shared = lines(page).filter({ hasText: fx.shared.dba });
+      await expect(shared).toHaveCount(1);
+      await expect(lines(page).filter({ hasText: fx.plain.dba })).toHaveCount(1);
+      await expect(shared).toContainText("Override received");
+      await expect(shared).toContainText(o.shared.credit);
+      await expect(lines(page).filter({ hasText: fx.plain.dba })).toContainText(o.plain.credit);
+      await expect(block(page).getByRole("link")).toHaveCount(0);
+      for (const leak of [
+        `${o.pct}%`,
+        o.shared.signerDebit,
+        o.shared.partnerDebit,
+        PERSONAS.agent.fullName,
+        PERSONAS.agent2.fullName,
+        "of residual",
+      ]) {
+        await expect(page.getByText(leak, { exact: true }), leak).toHaveCount(0);
+        await expect(block(page).getByText(leak), leak).toHaveCount(0);
+      }
+    });
+
+    test("the statement prints the credits with no MID, and no percent", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}/summary/${fx.ids.agent3}`);
+      await expect(statementLines(page).filter({ hasText: fx.shared.dba })).toContainText(o.shared.credit);
+      await expect(statementLines(page).filter({ hasText: fx.plain.dba })).toContainText(o.plain.credit);
+      await expect(page.getByText(fx.shared.mid)).toHaveCount(0);
+      await expect(page.getByText(`${o.pct}%`)).toHaveCount(0);
+    });
+
+    test("cannot open the merchant behind a credit", async ({ page }) => {
+      await page.goto(`/merchants/${fx.shared.merchantId}`);
+      await expect(page.getByText(/We couldn.t find that/)).toBeVisible();
+      await expect(page.getByRole("heading", { name: fx.shared.dba })).toHaveCount(0);
+    });
+  });
+
+  test.describe("the admin", () => {
+    test.use({ storageState: storageStateFor("admin") });
+
+    test("sees every line, the credit with its percent", async ({ page }) => {
+      await page.goto(`/payouts/${fx.period}`);
+      for (const amount of [o.shared.signerDebit, o.shared.partnerDebit, o.shared.credit]) {
+        await expect(block(page).getByText(amount).first(), amount).toBeVisible();
+      }
+      await expect(
+        lines(page).filter({ hasText: fx.shared.dba }).filter({ hasText: "Override received" }),
+      ).toContainText(`Override received · ${o.pct}% of residual`);
+    });
+  });
 });

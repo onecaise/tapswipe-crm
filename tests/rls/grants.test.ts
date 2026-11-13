@@ -168,13 +168,15 @@ describe("grant surface after all migrations", () => {
     // rep_payout_rows: no INSERT. Rows are created only by
     // commit-residual-import under the service role, so an INSERT grant would be
     // backed by no policy — a ledger of what a processor reported must not be
-    // writable a row at a time from a browser. DELETE is the whole-period
-    // escape hatch, admin-gated by policy. UPDATE is held on two COLUMNS only
-    // (20261014160000), so — the quotes case below — it is invisible to
-    // has_table_privilege, and the per-column loop is what pins it.
+    // writable a row at a time from a browser. No DELETE either since
+    // 20261030190000: the period delete is delete_payout_period(), audited and
+    // refused for a paid month, and the grant and its policy are gone. No
+    // UPDATE either since 20261102140000 (it had been two COLUMNS, from
+    // 20261014160000): a column grant is invisible to has_table_privilege, so
+    // the per-column loop is what pins that none is left.
     expect(
       await tablePrivileges(db, "authenticated", "rep_payout_rows"),
-    ).toEqual(["DELETE", "SELECT"]);
+    ).toEqual(["SELECT"]);
     const payoutUpdatable = await rows<{ column_name: string }>(
       db,
       `select attname as column_name from pg_attribute
@@ -182,10 +184,7 @@ describe("grant surface after all migrations", () => {
           and has_column_privilege('authenticated', 'rep_payout_rows', attname, 'UPDATE')
         order by attname`,
     );
-    expect(payoutUpdatable.map((r) => r.column_name)).toEqual([
-      "rep_split_pct",
-      "residual_income",
-    ]);
+    expect(payoutUpdatable.map((r) => r.column_name)).toEqual([]);
 
     // rep_payout_batches: SELECT to list them, UPDATE to abandon one. No INSERT
     // because the Storage key contains the batch id, so the row is created
@@ -210,7 +209,9 @@ describe("grant surface after all migrations", () => {
     // log_payout_row_change(), which is security definer and bypasses grants
     // entirely — which is precisely what lets the history table have no client
     // write path at all.
-    for (const table of ["rep_payout_import_rows", "rep_payout_row_history"]) {
+    // payout_period_closures (20261030120000) joins them: it is written only
+    // by phase 9's definer functions, never by a client, admin included.
+    for (const table of ["rep_payout_import_rows", "rep_payout_row_history", "payout_period_closures"]) {
       expect(
         await tablePrivileges(db, "authenticated", table),
         `${table} should be SELECT-only for authenticated`,
@@ -389,6 +390,7 @@ describe("grant surface after all migrations", () => {
       "quotes",
       "quote_line_items",
       "merchant_rep_shares",
+      "payout_period_closures",
     ]) {
       expect(
         await nonDmlPrivileges(db, "authenticated", table),
@@ -603,6 +605,10 @@ describe("grant surface after all migrations", () => {
       // 20261014140000: the shared-pair guard and the partner-rate copy.
       "guard_shared_line()",
       "copy_signer_rate_to_partner()",
+      // 20261030120000: the import-month window, the closure guard and its audit.
+      "guard_payout_batch_period()",
+      "guard_payout_period_closure()",
+      "log_payout_period_closure()",
     ]) {
       expect(
         await canExecute(db, "authenticated", signature),
@@ -635,6 +641,8 @@ describe("grant surface after all migrations", () => {
       "rep_payout_row_history",
       // Which reps share which account, and in what ratio -- payroll terms.
       "merchant_rep_shares",
+      // Which processor-months were marked paid (20261030120000).
+      "payout_period_closures",
     ]) {
       expect(
         await tablePrivileges(db, "anon", table),
@@ -651,13 +659,11 @@ describe("grant surface after all migrations", () => {
       "public.end_merchant_rep_share(int, date)",
       "public.cancel_merchant_rep_share(int)",
       "public.shared_part(numeric, numeric, numeric)",
-      // Writes both lines of a shared pair as the owner.
-      "public.set_shared_residual(int, date, numeric)",
-      // The shared-aware commit: writes the ledger, deletes staging and
+      // The commit (20261030160000): writes the ledger, deletes staging and
       // writes audit_log as the owner.
-      "public.commit_residual_import_v2(int)",
-      // Sets a batch's skips_acknowledged_at and writes audit_log as the owner.
-      "public.acknowledge_residual_skips(int)",
+      "public.commit_residual_import_v3(int, text[])",
+      // The only write path to a merchant's rate, audited as the owner.
+      "public.set_merchant_split(int, numeric)",
       // Reads merchant_rep_shares and other reps' names past RLS. Its guard
       // refuses a caller with no uid, but that is a second lock.
       "public.my_share_partners(int)",

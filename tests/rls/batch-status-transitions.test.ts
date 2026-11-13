@@ -3,21 +3,22 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   ADMIN_ID,
   AGENT_ID,
-  PAYOUT_PERIOD,
   asPlatform,
   asUser,
+  commitV3,
   createTestDb,
+  insertBatch,
   resetData,
   rows,
   seedPayouts,
-  type PayoutFixtures,
+  stageForCommit,
   type TestDb,
 } from "../helpers/db";
 
 /**
  * guard_batch_status_transition() (20261016170000): a signed-in user may move
  * a residual import batch from review to abandoned, and nothing else. The
- * definer commits, the acknowledgement and the service role are unaffected.
+ * definer commit and the service role are unaffected.
  */
 
 type DbError = { code?: string; message: string };
@@ -27,7 +28,6 @@ type Status = (typeof STATUSES)[number];
 
 describe("rep_payout_batches status transitions", () => {
   let db: TestDb;
-  let fx: PayoutFixtures;
 
   beforeAll(async () => {
     db = await createTestDb();
@@ -37,17 +37,12 @@ describe("rep_payout_batches status transitions", () => {
   });
   beforeEach(async () => {
     await resetData(db);
-    fx = await seedPayouts(db);
+    await seedPayouts(db);
   });
 
   async function batchIn(status: Status): Promise<number> {
     await asPlatform(db);
-    const [{ id }] = await rows<{ id: number }>(
-      db,
-      `insert into rep_payout_batches (imported_by, file_key, file_name, status)
-       values ('${ADMIN_ID}', 't/x.xlsx', 'x.xlsx', '${status}') returning id`,
-    );
-    return id;
+    return insertBatch(db, { status, fileName: "x.xlsx" });
   }
 
   async function statusOf(id: number): Promise<string> {
@@ -102,30 +97,12 @@ describe("rep_payout_batches status transitions", () => {
   });
 
   it("leaves the definer commit free to flip review -> committed", async () => {
+    // v3 (20261030160000) needs rows staged at the batch's own month.
     await asPlatform(db);
-    await db.exec(`delete from rep_payout_import_rows where batch_id = ${fx.batchIds.review} and blocker is not null`);
-    await asUser(db, ADMIN_ID);
-    await db.query(`select commit_residual_import_v2(${fx.batchIds.review})`);
-    expect(await statusOf(fx.batchIds.review)).toBe("committed");
-  });
-
-  it("leaves the acknowledgement free to stamp a committed batch", async () => {
-    await asPlatform(db);
-    const [{ id }] = await rows<{ id: number }>(
-      db,
-      `insert into rep_payout_batches (imported_by, file_key, file_name, status, skipped_rows, committed_at)
-       values ('${ADMIN_ID}', 't/y.xlsx', 'y.xlsx', 'committed',
-               '[{"row_number": 2, "period": "${PAYOUT_PERIOD}", "mid": "M", "agent_number": "1", "reason": "partner_named"}]', now())
-       returning id`,
-    );
-    await asUser(db, ADMIN_ID);
-    await db.query(`select acknowledge_residual_skips(${id})`);
-    await asPlatform(db);
-    const [{ ack }] = await rows<{ ack: string | null }>(
-      db,
-      `select skips_acknowledged_at::text as ack from rep_payout_batches where id = ${id}`,
-    );
-    expect(ack).not.toBeNull();
+    const id = await insertBatch(db);
+    await stageForCommit(db, id, [{ mid: "MID-AGENT-1" }]);
+    await commitV3(db, id);
+    expect(await statusOf(id)).toBe("committed");
   });
 
   // The service role is the other unguarded writer (parse-residual-import's

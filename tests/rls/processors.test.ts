@@ -21,7 +21,8 @@ import {
  *
  * The claims:
  *
- *   1. **Exactly the five processors Owen named**, in his spelling and order.
+ *   1. **Exactly the five processors Owen named, then 365 Pay** (phase 14), in
+ *      his spelling and order.
  *   2. **Every active user reads it; nobody writes it from a client** -- not
  *      even an admin. Writes are `permission denied` (a grant refusal), not a
  *      filtered no-op, and the grant surface is SELECT and nothing else.
@@ -38,7 +39,8 @@ import {
  */
 
 const MIGRATION = "20261023130000_processors.sql";
-const EXPECTED = ["TSYS", "Red Fynn", "PayBright", "Netevia HQ", "Square"];
+// The five Owen named (20261023130000), then 365 Pay (20261106120000, phase 14).
+const EXPECTED = ["TSYS", "Red Fynn", "PayBright", "Netevia HQ", "Square", "365 Pay"];
 
 let db: TestDb;
 
@@ -99,7 +101,7 @@ async function idOf(table: "merchants" | "pre_apps", column: string, value: stri
 }
 
 describe("the processor list", () => {
-  it("holds exactly the five processors, in drop-down order", async () => {
+  it("holds exactly the six processors, in drop-down order", async () => {
     await asPlatform(db);
     expect(await codes()).toEqual(EXPECTED);
     const labels = await rows<{ code: string; label: string }>(
@@ -125,7 +127,7 @@ describe("the processor list", () => {
 });
 
 describe("who can read and write processors", () => {
-  it("an active rep and an admin each read all five", async () => {
+  it("an active rep and an admin each read all six", async () => {
     for (const user of [AGENT_ID, ADMIN_ID]) {
       await asUser(db, user);
       expect(await codes()).toEqual(EXPECTED);

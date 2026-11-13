@@ -46,31 +46,51 @@ export const PAYOUT_BATCH_STATUSES = [
   "review",
   "committed",
   "abandoned",
+  // A committed batch a later one replaced (20261030120000), and one whose
+  // lines delete_payout_period removed (20261030190000). Only a definer
+  // function sets either, and both are final.
+  "replaced",
+  "deleted",
 ] as const;
 
 export type PayoutBatchStatus = (typeof PAYOUT_BATCH_STATUSES)[number];
 
 /**
- * Why a row could not be imported.
- *
- * Only `unknown_agent` is fixable from the review screen — a rep can be created or
- * given the number. The rest are problems with the file itself, and the fix is a
- * corrected upload rather than an edit here: letting someone retype a figure the
- * processor sent would quietly make this database disagree with the report it came
- * from.
+ * Why a row cannot be imported (rep_payout_import_rows.blocker / blockers,
+ * 20261030140000), in the parser's precedence order. Any one of them refuses
+ * the whole import (memo §2.4): nothing on the review screen edits a figure the
+ * processor sent. `unknown_mid` is fixed in the CRM (add the merchant, then
+ * Read again); every other one needs a corrected file (A27). The rule for each
+ * lives once, in supabase/functions/_shared/residuals.ts; this is the UI's copy
+ * of the vocabulary, which tests/unit/payouts.test.ts pins to that list and to
+ * the migration's CHECK.
  */
 export const PAYOUT_BLOCKERS = [
-  "unknown_agent",
-  "unparseable_period",
-  "bad_number",
   "missing_mid",
-  "duplicate_in_file",
+  "duplicate_mid",
+  "unknown_mid",
+  "mid_in_other_batch",
+  "wrong_income_type",
+  "missing_figure",
+  "unreadable_number",
 ] as const;
 
 export type PayoutBlocker = (typeof PAYOUT_BLOCKERS)[number];
 
-/** The one blocker an admin can resolve without touching the spreadsheet. */
-export const FIXABLE_BLOCKER: PayoutBlocker = "unknown_agent";
+/**
+ * The four confirmable warnings (rep_payout_import_rows.warnings,
+ * 20261030120000; other_income_type since 20261111120000), confirmed with
+ * one yes PER TYPE per import, never per line (memo §0b.3). The yes is the review screen's; commit v3 (phase 8) recomputes
+ * every warning and refuses a type the admin did not confirm.
+ */
+export const PAYOUT_WARNINGS = [
+  "processor_mismatch",
+  "inactive_merchant",
+  "bad_numbers",
+  "other_income_type",
+] as const;
+
+export type PayoutWarning = (typeof PAYOUT_WARNINGS)[number];
 
 /** One ledger row. The numeric columns are numbers — see the note above. */
 export type PayoutRow = {
@@ -88,6 +108,12 @@ export type PayoutRow = {
   /** Generated and stored; null whenever either input is null. Never written. */
   rep_payout: number | null;
   batch_id: number | null;
+  /**
+   * The processor the line was paid under (the batch's, 20261030120000); on
+   * an adjustment, the paid month's it corrects; null on a line committed
+   * before processors were recorded, and on a share correction.
+   */
+  processor: string | null;
   /**
    * 'import' for a line a residual file put there; 'adjustment' for one
    * post_share_correction() posted (20261016161000). An adjustment line pays
@@ -108,6 +134,15 @@ export type PayoutRow = {
   /** 'primary' (the signer) or 'secondary' (the partner), or null. */
   share_role: ShareRole | null;
   /**
+   * An override line's override (20261102120000), its side and its signed
+   * amount: a 'debit' on the rep(s) whose merchant carries it, a 'credit' on
+   * its recipient. Null on every other line. Who receives a rep's override
+   * comes from my_override_recipients(), never from these.
+   */
+  override_id: number | null;
+  override_role: OverrideRole | null;
+  override_amount: number | null;
+  /**
    * The share snapshot, read ONLY on admin pages (PAYOUT_SHARE_ADMIN_COLUMNS).
    * Absent on a rep's rows by construction: a rep page never selects them,
    * so the partner's share cannot be rendered there even by mistake.
@@ -119,24 +154,35 @@ export type PayoutRow = {
 
 export type ShareRole = "primary" | "secondary";
 
-export type PayoutLineKind = "import" | "adjustment";
+export type PayoutLineKind = "import" | "adjustment" | "override";
+
+export type OverrideRole = "debit" | "credit";
 
 /** True for a line post_share_correction() wrote rather than a file. */
 export function isAdjustment(row: { line_kind?: PayoutLineKind | null }): boolean {
   return row.line_kind === "adjustment";
 }
 
+/** True for an override line commit v3 wrote (20261102120000). */
+export function isOverride(row: { line_kind?: PayoutLineKind | null }): boolean {
+  return row.line_kind === "override";
+}
+
 /**
  * Lines split the way every payout page shows them: merchant lines in the
- * table, adjustment lines in their own block under it. Order is kept.
+ * table, override lines and adjustment lines each in their own block under
+ * it. Order is kept.
  */
 export function splitPayoutLines<T extends { line_kind?: PayoutLineKind | null }>(
   rows: readonly T[],
-): { imports: T[]; adjustments: T[] } {
+): { imports: T[]; overrides: T[]; adjustments: T[] } {
   const imports: T[] = [];
+  const overrides: T[] = [];
   const adjustments: T[] = [];
-  for (const row of rows) (isAdjustment(row) ? adjustments : imports).push(row);
-  return { imports, adjustments };
+  for (const row of rows) {
+    (isAdjustment(row) ? adjustments : isOverride(row) ? overrides : imports).push(row);
+  }
+  return { imports, overrides, adjustments };
 }
 
 /**
@@ -148,7 +194,7 @@ export function splitPayoutLines<T extends { line_kind?: PayoutLineKind | null }
  * recomputing it here from two strings.
  */
 export const PAYOUT_ROW_COLUMNS =
-  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id, line_kind, adjustment_amount, adjusts_period, adjustment_note, rep_share_id, share_role";
+  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id, processor, line_kind, adjustment_amount, adjusts_period, adjustment_note, rep_share_id, share_role, override_id, override_role, override_amount";
 
 /**
  * The shared-account snapshot, added to PAYOUT_ROW_COLUMNS on ADMIN pages
@@ -179,70 +225,43 @@ export type PayoutBatch = {
   row_count: number;
   uploaded_at: string | null;
   committed_at: string | null;
-  /** What commit_residual_import_v2 did not apply, in sheet-row order. */
-  skipped_rows: SkippedRow[];
-  /** Null while skipped rows are still owed a review. */
-  skips_acknowledged_at: string | null;
   /**
-   * Rows the file marked `Line = Adjustment` that parse-residual-import did
-   * not stage (20261016161000): adjustments are entered in the CRM, never
-   * imported.
+   * The processor and month chosen at upload (20261030120000). Required on
+   * every batch since 20261030140000; null only on one started before.
    */
-  adjustment_rows_ignored: number;
+  processor: string | null;
+  /** YYYY-MM-01. */
+  period: string | null;
+  /** The committed batch this one replaces at commit (phase 9), or null. */
+  replaces_batch_id: number | null;
+  /** Set when a later batch replaced this one (status 'replaced'). */
+  replaced_by_batch_id: number | null;
 };
 
 export const PAYOUT_BATCH_COLUMNS =
-  "id, imported_by, file_key, file_name, status, row_count, uploaded_at, committed_at, skipped_rows, skips_acknowledged_at, adjustment_rows_ignored";
+  "id, imported_by, file_key, file_name, status, row_count, uploaded_at, committed_at, processor, period, replaces_batch_id, replaced_by_batch_id";
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
 
 /**
- * One row commit_residual_import_v2 did not apply, as it records it on the
- * batch (20261016120000). Identifiers from the admin's own file only -- no
- * figure, no name -- plus the period, because a batch can span months and each
- * period page lists the skips that touch it.
+ * A processor-month as close_payout_period() expects it typed, e.g.
+ * "TSYS July 2026": the processor code, then Postgres's
+ * to_char(period, 'FMMonth YYYY'). English and from the date's own digits,
+ * never the browser's locale or time zone, or the phrase shown would not be
+ * the phrase the database accepts.
  */
-export type SkippedRow = {
-  row_number: number;
-  period: string;
-  mid: string;
-  agent_number: string | null;
-  reason: string;
-};
-
-const SKIP_REASONS: Record<string, string> = {
-  partner_named: "Names the partner on a shared account",
-  line_not_shared: "A line for this rep and MID is not part of the share",
-};
-
-export function skipReasonLabel(reason: string): string {
-  return SKIP_REASONS[reason] ?? reason;
+export function payoutMonthLabel(processor: string, period: string): string {
+  const [year, month] = period.split("-");
+  return `${processor} ${MONTH_NAMES[Number(month) - 1]} ${year}`;
 }
 
-/**
- * Rows a committed batch skipped and nobody has reviewed yet. Zero for a batch
- * that skipped nothing, a reviewed one, and any batch not committed.
- */
-export function skipsOwed(batch: Pick<PayoutBatch, "status" | "skipped_rows" | "skips_acknowledged_at">): number {
-  if (batch.status !== "committed" || batch.skips_acknowledged_at !== null) return 0;
-  return batch.skipped_rows.length;
-}
-
-/**
- * What the batch wrote. v2 returns {written, skipped} with written + skipped =
- * the staged rows, and row_count is the staged count, so the figure the commit
- * returned survives a reload. For a batch committed by the old function
- * skipped_rows is [] and this is row_count, which is what that returned.
- */
-export function rowsWritten(batch: Pick<PayoutBatch, "row_count" | "skipped_rows">): number {
-  return batch.row_count - batch.skipped_rows.length;
-}
-
-/** Shared-account preview flags (rep_payout_import_rows.preview_flag) as prose. */
+/** The advisory notes (rep_payout_import_rows.preview_flag) as prose. */
 const PREVIEW_FLAGS: Record<string, string> = {
-  share_not_applied: "Share not applied",
-  partner_named: "Partner row will be skipped",
-  line_not_shared: "Will be skipped: existing line is not shared",
   share_not_in_force: "Share does not cover this month",
-  looks_shared: "Looks shared, no share set",
+  payee_changed: "Pays a different rep than last month",
 };
 
 export function previewFlagLabel(flag: string): string {
@@ -282,22 +301,81 @@ export function batchStatusIntent(status: PayoutBatchStatus): StatusIntent {
 
 /** Blocker codes as prose. One place where a code becomes English. */
 const BLOCKER_LABELS: Record<PayoutBlocker, string> = {
-  unknown_agent: "Agent # not recognised",
-  unparseable_period: "Period could not be read",
-  bad_number: "A figure could not be read",
-  missing_mid: "No MID",
-  duplicate_in_file: "Duplicate row in the file",
+  missing_mid: "No readable Merchant Number",
+  duplicate_mid: "MID repeated in the file",
+  unknown_mid: "MID is not a merchant in the CRM",
+  mid_in_other_batch: "MID already paid this month by another processor",
+  wrong_income_type: "Income Type is not Residuals",
+  missing_figure: "Volume or Residual is blank",
+  unreadable_number: "A figure could not be read",
 };
 
 export function blockerLabel(blocker: string): string {
   return BLOCKER_LABELS[blocker as PayoutBlocker] ?? blocker;
 }
 
+const WARNING_LABELS: Record<PayoutWarning, string> = {
+  processor_mismatch: "Processor does not match",
+  inactive_merchant: "Merchant is inactive",
+  bad_numbers: "Volume is negative, or the residual is more than the volume",
+  other_income_type: "Income Type is not Residuals",
+};
+
+/** Warning types as the question the review screen asks, once per import. */
+const WARNING_QUESTIONS: Record<PayoutWarning, string> = {
+  processor_mismatch:
+    "Import these lines under the processor chosen for this import?",
+  inactive_merchant: "Pay these inactive merchants' lines to their owners?",
+  bad_numbers: "Import these figures exactly as the file has them?",
+  other_income_type:
+    "Import these lines with the residuals, as the processor's own monthly total does?",
+};
+
+export function warningLabel(warning: string): string {
+  return WARNING_LABELS[warning as PayoutWarning] ?? warning;
+}
+
+export function warningQuestion(warning: string): string {
+  return WARNING_QUESTIONS[warning as PayoutWarning] ?? `Accept "${warning}"?`;
+}
+
+/**
+ * Whether the commit may be offered: every warning TYPE present in the import
+ * has a yes (memo §0b.3). One answer per type, never per line; a no, or a type
+ * not yet answered, keeps the commit closed. The yes answers go to
+ * commit_residual_import_v3, which recomputes the warnings and refuses any
+ * type not among them: the database enforces this, not the page.
+ */
+export function warningsConfirmed(
+  present: readonly string[],
+  answers: Readonly<Record<string, "yes" | "no" | undefined>>,
+): boolean {
+  return present.every((warning) => answers[warning] === "yes");
+}
+
+/**
+ * The months the upload page offers: this month (UTC) and the 24 before it,
+ * newest first, as `YYYY-MM-01`. A courtesy list only -- the import window is
+ * guard_payout_batch_period()'s (memo A11), and residual-import-file-url passes
+ * its refusal back -- pinned to that trigger by tests/unit/payouts.test.ts.
+ */
+export function importMonths(now: Date): string[] {
+  const index = now.getUTCFullYear() * 12 + now.getUTCMonth();
+  return Array.from({ length: 25 }, (_, back) => {
+    const at = index - back;
+    const year = Math.floor(at / 12);
+    const month = at - year * 12 + 1;
+    return `${year}-${String(month).padStart(2, "0")}-01`;
+  });
+}
+
 export type PayoutTotals = {
-  /** Merchant (import) lines. Adjustment lines are counted separately. */
+  /** Merchant (import) lines. Adjustment and override lines are counted separately. */
   rows: number;
   /** Adjustment lines: in repPayout, never in rows or unfilled. */
   adjustments: number;
+  /** Override lines (debits and credits): in repPayout, never in rows or unfilled. */
+  overrides: number;
   volume: number;
   residualIncome: number;
   repPayout: number;
@@ -330,6 +408,11 @@ export type PayoutTotals = {
  *      never in `rows` or `unfilled`: a period holding a correction is not
  *      "awaiting figures" because of it. A row with no line_kind (a hand-written
  *      fixture) is an import line.
+ *   5. **An override line is the same: money, not a merchant.** It carries no
+ *      residual, rate or volume either (20261102120000) and pays
+ *      override_amount -- negative on the rep whose merchant carries it,
+ *      positive on its recipient -- so it counts in repPayout and in
+ *      `overrides`, never in `rows`, the volume, the residual or `unfilled`.
  *
  * Totals are summed in floating point and rounded once at the end. Exactness lives
  * in Postgres, which is why rep_payout is a generated column rather than computed
@@ -348,12 +431,17 @@ export function payoutTotals(
   let repPayout = 0;
   let unfilled = 0;
   let adjustments = 0;
+  let overrides = 0;
 
   for (const row of rows) {
     repPayout += toNumber(row.rep_payout);
 
     if (isAdjustment(row)) {
       adjustments += 1;
+      continue;
+    }
+    if (isOverride(row)) {
+      overrides += 1;
       continue;
     }
 
@@ -366,8 +454,9 @@ export function payoutTotals(
   }
 
   return {
-    rows: rows.length - adjustments,
+    rows: rows.length - adjustments - overrides,
     adjustments,
+    overrides,
     volume: round2(volume),
     residualIncome: round2(residualIncome),
     repPayout: round2(repPayout),
@@ -404,92 +493,28 @@ function round2(value: number): number {
   return value < 0 ? -scaled : scaled;
 }
 
-export type FigureInput =
-  | { ok: true; value: number | null }
-  | { ok: false; message: string };
-
-/**
- * Reads what an admin typed into one money or percentage cell.
- *
- * **Not a copy of parseNumberCell in `_shared/residuals.ts`, and not required to
- * agree with it.** That one reads whatever Excel emitted across a whole sheet —
- * serial dates, accounting parentheses, currency symbols, thousands separators.
- * This reads a single value a person just typed into one input, so it accepts far
- * less on purpose: a stray `(1,234)` in a hand-typed cell is more likely a mistake
- * than an intentional negative, and there is a human right there to correct it. A
- * leading `$` and separators are still tolerated, because pasting from the
- * spreadsheet is the obvious way to fill these in.
- *
- * Empty means null — "not worked out yet" — never zero.
- *
- * The database remains the authority on range: rep_split_pct has a 0..100 CHECK.
- * The bound is repeated here only so the admin gets a sentence instead of a raw
- * constraint-violation message on a screen where they cannot see the constraint.
- */
-export function parseFigureInput(
-  text: string,
-  field: "residual_income" | "rep_split_pct",
-): FigureInput {
-  const cleaned = text.trim().replace(/[$,\s]/g, "").replace(/%$/, "");
-  if (cleaned === "") return { ok: true, value: null };
-
-  if (!/^-?\d*\.?\d+$/.test(cleaned)) {
-    return { ok: false, message: "Enter a number, or leave it blank." };
-  }
-
-  const value = Number(cleaned);
-  if (!Number.isFinite(value)) {
-    return { ok: false, message: "Enter a number, or leave it blank." };
-  }
-
-  // D-10. Commas used to be stripped wherever they were, so "12,99" — a decimal
-  // comma — was saved as 1299. A comma now has to be real thousands grouping
-  // (`1,299.00`, `12,345`). Checked only after the old path has read a number,
-  // so anything without a misplaced comma behaves exactly as before. The same
-  // shape as isThousandsGrouped() in `_shared/residuals.ts`; deliberately a copy
-  // (see above), so change both together.
-  if (text.includes(",")) {
-    const body = text
-      .trim()
-      .replace(/[$\s]/g, "")
-      .replace(/%$/, "")
-      .replace(/^-/, "");
-    if (!/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(body)) {
-      return {
-        ok: false,
-        message:
-          "Commas can only separate thousands, as in 1,299.00. Use a period for decimals, for example 12.99.",
-      };
-    }
-  }
-
-  if (field === "rep_split_pct" && (value < 0 || value > 100)) {
-    return { ok: false, message: "A split has to be between 0 and 100." };
-  }
-
-  // Rounded here as well as in the database, so the value the admin sees after a
-  // save is the value they will see on reload.
-  const scaled = Math.round(Math.abs(value) * 100) / 100;
-  return { ok: true, value: value < 0 ? -scaled : scaled };
-}
-
 /** A staged row, as the review screen reads it. */
 export type PayoutImportRow = {
   id: number;
   row_number: number;
-  period_raw: string | null;
-  agent_number_raw: string | null;
+  processor_raw: string | null;
   mid_raw: string | null;
   merchant_name_raw: string | null;
+  income_type_raw: string | null;
   volume_raw: string | null;
-  average_ticket_raw: string | null;
-  total_cost_raw: string | null;
   residual_income_raw: string | null;
-  rep_split_raw: string | null;
   period: string | null;
+  /** The merchant's owner: the payee (phase 7). */
   agent_id: string | null;
   merchant_id: number | null;
+  volume: number | null;
+  residual_income: number | null;
+  /** The first of `blockers` by precedence; what the commit tests. */
   blocker: string | null;
+  /** Every refusal the row trips (20261030140000). */
+  blockers: string[];
+  /** The confirmable warnings (20261030120000). */
+  warnings: string[];
   error: string | null;
   /** Advisory, never a blocker: see previewFlagLabel. */
   preview_flag: string | null;
@@ -497,108 +522,133 @@ export type PayoutImportRow = {
 };
 
 export const PAYOUT_IMPORT_ROW_COLUMNS =
-  "id, row_number, period_raw, agent_number_raw, mid_raw, merchant_name_raw, volume_raw, average_ticket_raw, total_cost_raw, residual_income_raw, rep_split_raw, period, agent_id, merchant_id, blocker, error, preview_flag, preview_note";
+  "id, row_number, processor_raw, mid_raw, merchant_name_raw, income_type_raw, volume_raw, residual_income_raw, period, agent_id, merchant_id, volume, residual_income, blocker, blockers, warnings, error, preview_flag, preview_note";
 
-/** An unrecognised agent number, and what it would import if it resolved. */
-export type UnknownAgentGroup = {
-  agentNumber: string | null;
-  rowCount: number;
-  /** A few merchant names, as a hint for whose book this is. */
-  sampleMerchants: string[];
+/** One row named under a refusal or a warning. */
+export type ReviewLine = {
+  rowNumber: number;
+  mid: string | null;
+  /** What the parser wrote about the row (the refusal's own sentence). */
+  detail: string;
 };
 
-/** A blocker that can only be fixed by correcting the file and re-uploading. */
-export type FileProblem = {
-  blocker: string;
-  rows: { rowNumber: number; detail: string }[];
-};
+/** Every row a refusal code covers. */
+export type ImportRefusal = { blocker: string; rows: ReviewLine[] };
+
+/** Every row a warning type covers: one yes/no for all of them. */
+export type ImportWarningGroup = { warning: string; rows: ReviewLine[] };
 
 export type ImportReview = {
   total: number;
   clean: number;
   blocked: number;
-  /** Fixable in place: create the rep, or give an existing one the number. */
-  unknownAgents: UnknownAgentGroup[];
-  /** Everything else — the fix is a corrected upload. */
-  fileProblems: FileProblem[];
-  /** True when nothing blocks the batch and it can be committed. */
+  /**
+   * The refusals, one entry per code in precedence order, each listing every
+   * row that trips it. A row that trips two codes is under both, so every
+   * unknown MID, every repeat and every wrong Income Type is listed even when
+   * a row has several problems.
+   */
+  refusals: ImportRefusal[];
+  /** The MIDs no merchant has, each once, in file order (the A9 alert). */
+  unknownMids: string[];
+  /** One group per warning type present, in PAYOUT_WARNINGS order. */
+  warnings: ImportWarningGroup[];
+  /** True when nothing refuses the batch. Warnings still need their yes. */
   ready: boolean;
 };
-
-/** How many merchant names to show as a hint per unknown agent number. */
-const SAMPLE_LIMIT = 3;
 
 /**
  * Shapes staged rows into what the review screen renders.
  *
- * Pure, so the grouping is unit-testable without a database — and it is worth
- * testing, because the screen's whole job is to be unambiguous about which
- * problems an admin can fix here and which need the spreadsheet corrected.
- *
- * Unknown agent numbers are grouped and everything else is listed per row, which
- * reflects how each is actually resolved: one action fixes all twelve rows of an
- * unrecognised rep, whereas a bad figure on row 22 is its own edit in Excel.
+ * Pure, so the grouping is unit-testable without a database. A staged row from
+ * before 20261030140000 has a `blocker` and no `blockers`; it is listed under
+ * that one code.
  */
 export function reviewImportRows(
   rows: readonly PayoutImportRow[],
 ): ImportReview {
-  const unknown = new Map<string, UnknownAgentGroup>();
-  const problems = new Map<string, FileProblem>();
+  const refusals = new Map<string, ReviewLine[]>();
+  const warnings = new Map<string, ReviewLine[]>();
+  const unknownMids: string[] = [];
 
   for (const row of rows) {
-    if (row.blocker === null) continue;
-
-    if (row.blocker === FIXABLE_BLOCKER) {
-      // Keyed on the empty string when the cell was blank, so rows with no agent
-      // number at all group together instead of each becoming its own entry.
-      const key = row.agent_number_raw ?? "";
-      const group = unknown.get(key) ?? {
-        agentNumber: row.agent_number_raw,
-        rowCount: 0,
-        sampleMerchants: [],
-      };
-      group.rowCount += 1;
+    const codes =
+      (row.blockers ?? []).length > 0
+        ? row.blockers
+        : row.blocker !== null
+          ? [row.blocker]
+          : [];
+    for (const code of codes) {
+      const list = refusals.get(code) ?? [];
+      list.push({
+        rowNumber: row.row_number,
+        mid: row.mid_raw,
+        // Falling back to the code rather than to an empty string: a blocker
+        // added in SQL and not in the parser should look raw, not blank.
+        detail: row.error ?? code,
+      });
+      refusals.set(code, list);
+      // Listed once per MID, and "abc123" is the same MID as "ABC123".
+      const raw = row.mid_raw;
       if (
-        group.sampleMerchants.length < SAMPLE_LIMIT &&
-        row.merchant_name_raw !== null
+        code === "unknown_mid" &&
+        raw !== null &&
+        !unknownMids.some((mid) => mid.trim().toUpperCase() === raw.trim().toUpperCase())
       ) {
-        group.sampleMerchants.push(row.merchant_name_raw);
+        unknownMids.push(raw);
       }
-      unknown.set(key, group);
-      continue;
     }
-
-    const problem = problems.get(row.blocker) ?? {
-      blocker: row.blocker,
-      rows: [],
-    };
-    problem.rows.push({
-      rowNumber: row.row_number,
-      // The message the parser wrote, which quotes the offending cell. Falling
-      // back to the code rather than to an empty string: a blocker added in SQL
-      // and not in blockerMessage should look raw, not blank.
-      detail: row.error ?? row.blocker,
-    });
-    problems.set(row.blocker, problem);
+    for (const warning of row.warnings ?? []) {
+      const list = warnings.get(warning) ?? [];
+      list.push({ rowNumber: row.row_number, mid: row.mid_raw, detail: warning });
+      warnings.set(warning, list);
+    }
   }
 
   const blocked = rows.filter((row) => row.blocker !== null).length;
+  const order = (known: readonly string[]) => (a: string, b: string) => {
+    const ia = known.indexOf(a);
+    const ib = known.indexOf(b);
+    return (ia === -1 ? known.length : ia) - (ib === -1 ? known.length : ib) || a.localeCompare(b);
+  };
 
   return {
     total: rows.length,
     clean: rows.length - blocked,
     blocked,
-    unknownAgents: [...unknown.values()].sort(
-      (a, b) => b.rowCount - a.rowCount,
-    ),
-    fileProblems: [...problems.values()].sort((a, b) =>
-      a.blocker.localeCompare(b.blocker),
-    ),
+    refusals: [...refusals.keys()]
+      .sort(order(PAYOUT_BLOCKERS))
+      .map((blocker) => ({ blocker, rows: refusals.get(blocker)! })),
+    unknownMids,
+    warnings: [...warnings.keys()]
+      .sort(order(PAYOUT_WARNINGS))
+      .map((warning) => ({ warning, rows: warnings.get(warning)! })),
     // A batch with no rows at all is NOT ready. Committing it would flip a batch
     // to 'committed' having imported nothing, which reads as a successful import
     // of an empty month.
     ready: rows.length > 0 && blocked === 0,
   };
+}
+
+/**
+ * The count and sums of the rows carrying one warning, for its block on the
+ * review screen (phase 15: other_income_type shows how much the ACH lines
+ * add). Summed in whole cents; staged figures are already rounded to them.
+ */
+export function warningTotals(
+  rows: readonly PayoutImportRow[],
+  warning: string,
+): { count: number; volume: number; residual: number } {
+  let count = 0;
+  let volume = 0;
+  let residual = 0;
+  for (const row of rows) {
+    if (!(row.warnings ?? []).includes(warning)) continue;
+    count += 1;
+    volume += Math.round((row.volume ?? 0) * 100);
+    residual += Math.round((row.residual_income ?? 0) * 100);
+  }
+  return { count, volume: volume / 100, residual: residual / 100 };
 }
 
 /** One period's worth of rows, as the periods list shows it. */

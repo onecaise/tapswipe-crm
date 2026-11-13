@@ -265,12 +265,14 @@ describe("what each party sees", () => {
   });
 
   it("lists every share a rep is party to, newest first, and an ended one keeps its end", async () => {
-    // The signer is also the partner on a second, ended share elsewhere.
+    // The signer is also the partner on a second share elsewhere. Its signer
+    // is that merchant's owner, OTHER (20261030160000: a share's signer is
+    // the owner; this was LONER before that rule).
     await asUser(db, ADMIN_ID);
     await db.query(`select end_merchant_rep_share(${shareB}, '2026-11-01')`);
     const shareC = await setShare(
       await merchantId("MID-OTHER-1"),
-      LONER_ID,
+      OTHER_AGENT_ID,
       AGENT_ID,
       "25",
       "25",

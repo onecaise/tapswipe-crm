@@ -12,7 +12,7 @@ import { storageStateFor } from "../fixtures/seed";
 test.use({ storageState: storageStateFor("admin") });
 
 for (const [path, name] of [
-  ["/payouts/import", "Residual report (XLSX)"],
+  ["/payouts/import", "Residual report (XLSX or CSV)"],
   ["/admin/users/import", "Rep list (CSV)"],
 ] as const) {
   test(`QA-005 the file input on ${path} has an accessible name`, async ({ page }) => {

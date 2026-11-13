@@ -132,6 +132,11 @@ const PROFILE_REFERENCES = [
   // that name two other reps are cleared by merchant before this loop runs.
   ["merchant_rep_shares", "primary_agent_id"],
   ["merchant_rep_shares", "secondary_agent_id"],
+  // merchant_overrides.recipient_id, the twenty-sixth reference
+  // (20261102120000), NO ACTION. Same shape as the shares: overrides on this
+  // user's OWN merchants, and the override lines of both, are cleared by hand
+  // before this loop runs.
+  ["merchant_overrides", "recipient_id"],
   ["ghost_sheets", "agent_id"],
   ["pre_apps", "agent_id"],
   ["merchants", "agent_id"],
@@ -228,6 +233,58 @@ for (const user of existing.users.filter((user) => wanted.has(user.email))) {
     }
   }
 
+  // merchant_overrides: every override this user receives OR that sits on
+  // their merchant (merchant_id is ON DELETE RESTRICT, and one on this rep's
+  // merchant names somebody else). Its lines first: rep_payout_rows.override_id
+  // is ON DELETE RESTRICT, and a pair includes the other person's line.
+  const overrideFilters = [`recipient_id.eq.${user.id}`];
+  if (merchantIds.length > 0) {
+    overrideFilters.push(`merchant_id.in.(${merchantIds.join(",")})`);
+  }
+  const { data: overrides, error: overridesReadError } = await admin
+    .from("merchant_overrides")
+    .select("id")
+    .or(overrideFilters.join(","));
+  if (overridesReadError) {
+    throw new Error(`Could not read overrides: ${overridesReadError.message}`);
+  }
+  const overrideIds = (overrides ?? []).map((override) => override.id);
+  if (overrideIds.length > 0) {
+    const { error: overrideLinesError } = await admin
+      .from("rep_payout_rows")
+      .delete()
+      .in("override_id", overrideIds);
+    if (overrideLinesError) {
+      throw new Error(`Could not delete override lines: ${overrideLinesError.message}`);
+    }
+    const { error: overridesError } = await admin
+      .from("merchant_overrides")
+      .delete()
+      .in("id", overrideIds);
+    if (overridesError) {
+      throw new Error(`Could not delete overrides: ${overridesError.message}`);
+    }
+  }
+
+  // An override line must carry its batch (20261102120000), so the batch
+  // delete in the loop below (its FK sets batch_id NULL) would be refused
+  // while another person's override line still points at it. Those lines
+  // are derived from the batch, so they go first.
+  const { data: ownBatches } = await admin
+    .from("rep_payout_batches")
+    .select("id")
+    .eq("imported_by", user.id);
+  const ownBatchIds = (ownBatches ?? []).map((batch) => batch.id);
+  if (ownBatchIds.length > 0) {
+    const { error: batchOverrideLinesError } = await admin
+      .from("rep_payout_rows")
+      .delete()
+      .eq("line_kind", "override")
+      .in("batch_id", ownBatchIds);
+    if (batchOverrideLinesError) {
+      throw new Error(`Could not delete override lines: ${batchOverrideLinesError.message}`);
+    }
+  }
   for (const [table, column] of PROFILE_REFERENCES) {
     await admin.from(table).delete().eq(column, user.id);
   }

@@ -256,14 +256,15 @@ describe("set_merchant_rep_share", () => {
     ["50 + 0 (the partner gets nothing)", "50", "0"],
     ["50.01 + -0.01 (a negative share)", "50.01", "-0.01"],
     ["24.995 + 25.005 (finer than a hundredth)", "24.995", "25.005"],
-  ])("refuses shares of %s: they must each be above 0 and total exactly 50", async (_label, a, b) => {
+  ])("refuses shares of %s: they must each be above 0 and total exactly the merchant's rate, 50", async (_label, a, b) => {
     const merchant = await merchantId("MID-AGENT-2");
     const error = await attempt(
       ADMIN_ID,
       setSql(merchant, AGENT_ID, THIRD_AGENT_ID, a, b, "2026-08-01"),
     );
     expect(error?.code).toBe("22023");
-    expect(error?.message).toMatch(/add up to the rep side: 50/);
+    // The rate is the merchant's own since 20261030160000; the seeded one is 50.
+    expect(error?.message).toMatch(/add up to this merchant's rate: 50./);
     expect(await shares()).toEqual([]);
   });
 
@@ -411,6 +412,78 @@ describe("set_merchant_rep_share", () => {
       await setShare("MID-OTHER-2", "2026-08-01", "25", "25", OTHER_AGENT_ID, THIRD_AGENT_ID);
       expect(await shares()).toHaveLength(2);
     });
+  });
+});
+
+/**
+ * 20261030160000 (phase 8 of docs/design/intake-and-reports.md, §2.5, A22,
+ * A28): the signer is the merchant's owner, the two shares total the
+ * MERCHANT'S rate (not a constant 50), and a merchant with no rate or a rate
+ * of 0 has nothing to share.
+ */
+describe("set_merchant_rep_share under the owner rule and the merchant's rate", () => {
+  // rate null: a merchant with NO rate, which since 20261030180000 only a row
+  // made before that migration can be (an insert without one takes the
+  // owner's profile rate), so it is inserted with triggers off.
+  async function merchantAt(mid: string, rate: number | null): Promise<number> {
+    await asPlatform(db);
+    if (rate === null) await db.exec(`set session_replication_role = replica`);
+    try {
+      await db.exec(`
+        insert into merchants (agent_id, mid, dba, status, city, state, split_agent_pct, split_company_pct)
+        values ('${AGENT_ID}', '${mid}', '${mid} Co', 'active', 'Nashville', 'TN',
+                ${rate === null ? "null" : rate}, ${rate === null ? "null" : 100 - rate});`);
+    } finally {
+      if (rate === null) await db.exec(`set session_replication_role = origin`);
+    }
+    return merchantId(mid);
+  }
+
+  it("refuses a signer who is not the merchant's owner, naming the owner, and writes nothing", async () => {
+    const merchant = await merchantId("MID-AGENT-2");
+    const error = await attempt(ADMIN_ID, setSql(merchant, THIRD_AGENT_ID, AGENT_ID, "25", "25", "2026-08-01"));
+    expect(error?.code).toBe("PT409");
+    expect(error?.message).toBe(
+      "The signer of a shared account is the merchant's owner, Agent User. Name them as the signer, or move the merchant first.",
+    );
+    expect(await shares()).toEqual([]);
+    expect(await audit()).toEqual([]);
+  });
+
+  it("holds the two shares to the merchant's own rate: 20 + 10 on a rate of 30, never 25 + 25", async () => {
+    const merchant = await merchantAt("MID-THIRTY", 30);
+    const error = await attempt(ADMIN_ID, setSql(merchant, AGENT_ID, THIRD_AGENT_ID, "25", "25", "2026-08-01"));
+    expect(error?.code).toBe("22023");
+    expect(error?.message).toBe(
+      "The two shares must each be above 0, in hundredths at most, and add up to this merchant's rate: 30.",
+    );
+    await setShare("MID-THIRTY", "2026-08-01", "20", "10");
+    const [row] = await shares();
+    expect([row.primary_rep_pct, row.secondary_rep_pct]).toEqual(["20.00", "10.00"]);
+  });
+
+  it("refuses a merchant at rate 0 (A28) and one with no rate yet", async () => {
+    const house = await merchantAt("MID-HOUSE", 0);
+    const zero = await attempt(ADMIN_ID, setSql(house, AGENT_ID, THIRD_AGENT_ID, "25", "25", "2026-08-01"));
+    expect(zero?.code).toBe("PT409");
+    expect(zero?.message).toBe("This merchant's rate is 0, so there is no rep side to share.");
+    const none = await merchantAt("MID-NORATE", null);
+    const unset = await attempt(ADMIN_ID, setSql(none, AGENT_ID, THIRD_AGENT_ID, "25", "25", "2026-08-01"));
+    expect(unset?.code).toBe("PT409");
+    expect(unset?.message).toBe("This merchant has no split rate yet. Set its rate before sharing it.");
+    expect(await shares()).toEqual([]);
+  });
+
+  it("the table CHECK is only the outer bound now: at most 50 (a 20 + 10 row is legal to the table)", async () => {
+    await asPlatform(db);
+    const m = await merchantId("MID-AGENT-2");
+    await db.exec(`
+      insert into merchant_rep_shares (merchant_id, primary_agent_id, secondary_agent_id,
+                                       primary_rep_pct, secondary_rep_pct, effective_from)
+      values (${m}, '${AGENT_ID}', '${THIRD_AGENT_ID}', 20, 10, '2026-08-01')`);
+    expect(
+      await rows(db, `select pg_get_constraintdef(oid) as def from pg_constraint where conname = 'merchant_rep_shares_total_rep_side'`),
+    ).toEqual([{ def: "CHECK (((primary_rep_pct + secondary_rep_pct) <= 50.00))" }]);
   });
 });
 
@@ -613,8 +686,8 @@ describe("the table's own constraints, the backstop for any writer", () => {
     // that can be in the way — seeded merchants also carry support tickets.
     await asPlatform(db);
     await db.exec(`
-      insert into merchants (agent_id, mid, dba, status, city, state)
-      values ('${AGENT_ID}', 'MID-SHARED-ONLY', 'Shared Only Co', 'active', 'Nashville', 'TN');
+      insert into merchants (agent_id, mid, dba, status, city, state, split_agent_pct, split_company_pct)
+      values ('${AGENT_ID}', 'MID-SHARED-ONLY', 'Shared Only Co', 'active', 'Nashville', 'TN', 50, 50);
     `);
     const id = await setShare("MID-SHARED-ONLY", "2026-08-01");
     await asPlatform(db);

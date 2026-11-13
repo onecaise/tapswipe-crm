@@ -3,12 +3,13 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
   ADMIN_ID,
   AGENT_ID,
-  OTHER_AGENT_ID,
   asPlatform,
   asUser,
   createTestDb,
+  insertBatch,
   migrationsBefore,
   migrationsThrough,
+  OTHER_AGENT_ID,
   readMigration,
   rows,
   seed,
@@ -184,12 +185,9 @@ describe("the same batches give the same results before and after", () => {
     await db.exec(`
       update profiles set agent_number = '4471' where id = '${AGENT_ID}';
       update profiles set agent_number = '9902' where id = '${OTHER_AGENT_ID}';
-      insert into rep_payout_batches (imported_by, file_key, file_name, status)
-      values ('${ADMIN_ID}', 'g/a.xlsx', 'a.xlsx', 'review'),
-             ('${ADMIN_ID}', 'g/b.xlsx', 'b.xlsx', 'review');
     `);
-    const batches = await rows<{ id: number }>(db, `select id from rep_payout_batches order by id`);
-    const [a, b] = batches.map((batch) => batch.id);
+    const a = await insertBatch(db, { fileName: "a.xlsx" });
+    const b = await insertBatch(db, { fileName: "b.xlsx" });
 
     const staged = (batch: number, rowsSql: string) => `
       insert into rep_payout_import_rows
@@ -483,5 +481,79 @@ describe("the migration refuses a rewrite that would move anything", () => {
     await db.exec(`grant select (rep_payout) on rep_payout_rows to service_role`);
     await expect(applyMigration(db)).rejects.toThrow(/column-level privileges/);
     await expectRolledBack(db, before);
+  });
+});
+
+/**
+ * 20261102120000 rewrites rep_payout a second time (the override branch,
+ * phase 10 of docs/design/intake-and-reports.md), by the same drop and re-add
+ * under the same precautions. The same proof, against the schema just before
+ * it: every existing payout -- the 70,000 awkward rows, shared pairs across
+ * every cent and their half-cent ties, adjustment lines -- unchanged to the
+ * cent, and its own guard aborting a rewrite that would move one.
+ */
+describe("20261102120000's rewrite (the override branch) moves no existing payout", () => {
+  const OVERRIDES = "20261102120000_merchant_overrides.sql";
+
+  async function populated(): Promise<TestDb> {
+    const db = await createTestDb(await migrationsBefore(OVERRIDES));
+    opened.push(db);
+    await seed(db);
+    await asPlatform(db);
+    await db.exec(`delete from rep_payout_rows`);
+    await insertAwkwardRows(db);
+    await db.exec(`
+      insert into merchant_rep_shares (merchant_id, primary_agent_id, secondary_agent_id,
+                                       primary_rep_pct, secondary_rep_pct, effective_from)
+      values ((select id from merchants where mid = 'MID-AGENT-1'), '${AGENT_ID}', '${OTHER_AGENT_ID}',
+              33.33, 16.67, '2026-01-01');
+      insert into rep_payout_rows (agent_id, period, mid, residual_income, rep_split_pct,
+                                   rep_share_id, share_role, primary_rep_pct, secondary_rep_pct,
+                                   account_residual_income)
+      select case s.role when 'primary' then '${AGENT_ID}'::uuid else '${OTHER_AGENT_ID}'::uuid end,
+             '2026-08-01', 'PAIR-' || g,
+             case s.role
+               when 'primary' then (g * 0.01) - shared_part(g * 0.01, 16.67, 50.00)
+               else shared_part(g * 0.01, 16.67, 50.00) end,
+             50.00, (select id from merchant_rep_shares limit 1), s.role, 33.33, 16.67, g * 0.01
+        from generate_series(-2000, 2000) as g
+       cross join (values ('primary'), ('secondary')) as s(role);
+      insert into rep_payout_rows (agent_id, period, mid, line_kind, adjustment_amount, adjusts_period)
+      values ('${AGENT_ID}', '2026-09-01', 'ADJ-1', 'adjustment', -12.35, '2026-07-01'),
+             ('${OTHER_AGENT_ID}', '2026-09-01', 'ADJ-1', 'adjustment', 12.35, '2026-07-01'),
+             ('${AGENT_ID}', '2026-09-01', 'ADJ-2', 'adjustment', 0.01, '2026-08-01');`);
+    return db;
+  }
+
+  it("over the awkward rows, 8,002 shared lines and the adjustments: nothing moves", async () => {
+    const db = await populated();
+    const before = await payoutSnapshot(db);
+    expect(before.rows).toBe(10_001 * 7 + 8 + 4_001 * 2 + 3);
+    await applyMigration(db, await readMigration(OVERRIDES));
+    expect(await payoutSnapshot(db)).toEqual(before);
+    // And the new branch is there: the column now reads override_amount.
+    const [{ expr }] = await rows<{ expr: string }>(
+      db,
+      `select pg_get_expr(d.adbin, d.adrelid) as expr from pg_attrdef d
+         join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+        where d.adrelid = 'rep_payout_rows'::regclass and a.attname = 'rep_payout'`,
+    );
+    expect(expr).toContain("override_amount");
+  });
+
+  it("aborts, leaving nothing half-applied, when its rewrite would round differently", async () => {
+    const db = await populated();
+    const before = await payoutSnapshot(db);
+    const sql = await readMigration(OVERRIDES);
+    expect(sql).toContain(UNSHARED_BRANCH);
+    const broken = sql.replace(
+      UNSHARED_BRANCH,
+      "      when share_role is null then\n        trunc(residual_income * rep_split_pct / 100, 2)",
+    );
+    await expect(applyMigration(db, broken)).rejects.toThrow(
+      /rep_payout rewrite changed existing payouts .*per-row checksum DIFFERS/,
+    );
+    expect(await payoutSnapshot(db)).toEqual(before);
+    expect(await rows(db, `select to_regclass('public.merchant_overrides') as t`)).toEqual([{ t: null }]);
   });
 });

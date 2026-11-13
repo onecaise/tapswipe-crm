@@ -25,12 +25,19 @@ import {
  *   * the cent rule THROUGH THE GENERATED COLUMN: signer + partner payout =
  *     round(account residual x rate / 100, 2), what one rep alone would get,
  *     for every cent from -$20.00 to $20.00 at three ratios;
- *   * set_shared_residual() is the one way to set the residual, and sets both
- *     lines in one statement;
+ *   * the pair's figures, set together, pay both lines from the solo payout;
  *   * the partner's rate copies the signer's -- set on the signer's line, it
  *     lands on both;
  *   * the guard refuses hand-editing one piece of a pair, the partner's rate,
- *     or any share column, while ordinary lines edit exactly as before;
+ *     or any share column;
+ *
+ * SINCE 20261102140000 NO CLIENT EDITS A LEDGER LINE (phase 11 of
+ * docs/design/intake-and-reports.md): set_shared_residual() is dropped (the
+ * file supplies the residual and commit v3 writes both pieces), and a
+ * signed-in admin's UPDATE is refused by the grant. guard_shared_line() and
+ * the partner-rate copy are KEPT as backstops for an owner-side write, so the
+ * figures below are set the way such a write runs: as the owner, with the
+ * admin's identity in the claims, under the shared-write flag for the pair.
  *   * each line proves its own residual piece (a CHECK), the share snapshot
  *     totals 50, adjustment lines pay their amount;
  *   * a share with lines cannot be deleted; each rep reads only their line.
@@ -148,14 +155,34 @@ async function attemptAsOwner(sql: string): Promise<DbError | null> {
   }
 }
 
+/**
+ * Sets the pair's account residual and both pieces in one statement, as the
+ * dropped set_shared_residual() did and as commit v3 now writes them at
+ * insert: the owner, the admin's identity, the shared-write flag.
+ */
 async function setResidual(amount: string): Promise<void> {
-  await asUser(db, ADMIN_ID);
-  await db.query(`select set_shared_residual(${shareId}, '${SHARED_MONTH}', ${amount})`);
+  await asOwnerFor(ADMIN_ID);
+  await db.exec(`
+    select set_config('tapswipe.shared_write', 'on', true);
+    update rep_payout_rows
+       set account_residual_income = ${amount},
+           residual_income = case share_role
+             when 'secondary' then shared_part(${amount}, secondary_rep_pct, primary_rep_pct + secondary_rep_pct)
+             else ${amount} - shared_part(${amount}, secondary_rep_pct, primary_rep_pct + secondary_rep_pct)
+           end
+     where rep_share_id = ${shareId} and period = '${SHARED_MONTH}';
+    select set_config('tapswipe.shared_write', '', true);`);
   await asPlatform(db);
 }
 
+/** The owner role (every privilege; how a definer function runs) with `userId` as auth.uid(). */
+async function asOwnerFor(userId: string): Promise<void> {
+  await db.exec(`reset role;`);
+  await db.exec(`set request.jwt.claims = '${JSON.stringify({ sub: userId, role: "authenticated" })}';`);
+}
+
 async function setSignerRate(rate: string): Promise<void> {
-  await asUser(db, ADMIN_ID);
+  await asOwnerFor(ADMIN_ID);
   await db.query(
     `update rep_payout_rows set rep_split_pct = ${rate}
       where rep_share_id = ${shareId} and period = '${SHARED_MONTH}' and share_role = 'primary'`,
@@ -163,7 +190,7 @@ async function setSignerRate(rate: string): Promise<void> {
   await asPlatform(db);
 }
 
-describe("set_shared_residual and the generated payout", () => {
+describe("a pair's figures and the generated payout", () => {
   it("divides the account residual 40:10 and pays both lines from the solo payout", async () => {
     await setResidual("100.01");
     await setSignerRate("50");
@@ -210,18 +237,11 @@ describe("set_shared_residual and the generated payout", () => {
     ]);
   });
 
-  it.each([
-    ["an agent", AGENT_ID, "PT403"],
-    ["the partner", THIRD_AGENT_ID, "PT403"],
-  ])("refuses %s with PT403", async (_label, caller, code) => {
-    const error = await attempt(caller, `select set_shared_residual(${shareId}, '${SHARED_MONTH}', 1.00)`);
-    expect(error?.code).toBe(code);
-    expect((await pair()).signer.account_residual_income).toBeNull();
-  });
-
-  it("refuses a month with no pair (PT404) and a fraction of a cent (22023)", async () => {
-    expect((await attempt(ADMIN_ID, `select set_shared_residual(${shareId}, '2026-09-01', 1.00)`))?.code).toBe("PT404");
-    expect((await attempt(ADMIN_ID, `select set_shared_residual(${shareId}, '${SHARED_MONTH}', 1.005)`))?.code).toBe("22023");
+  it("set_shared_residual is gone (20261102140000): nothing edits a pair after commit", async () => {
+    await asPlatform(db);
+    expect(await rows(db, `select to_regprocedure('set_shared_residual(int, date, numeric)') as fn`)).toEqual([{ fn: null }]);
+    const error = await attempt(ADMIN_ID, `select set_shared_residual(${shareId}, '${SHARED_MONTH}', 1.00)`);
+    expect(error?.code).toBe("42883");
   });
 });
 
@@ -317,19 +337,24 @@ describe("the guard: a pair is edited together or not at all", () => {
       `update rep_payout_rows set rep_split_pct = 60 where share_role = 'secondary'`,
       /rate always copies the signer's/,
     ],
-  ])("refuses an admin hand-editing %s (PT409)", async (_label, sql, message) => {
+  ])("refuses hand-editing %s: by grant for an admin (42501), by the guard for the owner (PT409)", async (_label, sql, message) => {
     await setResidual("100.01");
     await setSignerRate("50");
     const before = await pair();
-    const error = await attempt(ADMIN_ID, sql);
-    expect(error?.code).toBe("PT409");
-    expect(error?.message).toMatch(message);
+    // Since 20261102140000 an admin holds no UPDATE at all, so the grant
+    // refuses first; the guard still refuses the owner, who holds every
+    // privilege (what a definer function or the service role acts as).
+    const asAdmin = await attempt(ADMIN_ID, sql);
+    expect(asAdmin?.code).toBe("42501");
+    const asOwner = await attemptAsOwner(sql);
+    expect(asOwner?.code).toBe("PT409");
+    expect(asOwner?.message).toMatch(message);
     expect(await pair()).toEqual(before);
   });
 
-  // The share columns themselves. Since 20261014160000 an admin's session
-  // holds UPDATE on residual_income and rep_split_pct only, so the GRANT
-  // refuses these first, with permission denied, before the guard runs. The
+  // The share columns themselves. Since 20261102140000 an admin's session
+  // holds no UPDATE at all (20261014160000 had narrowed it to the two
+  // figures), so the GRANT refuses these first, with permission denied, before the guard runs. The
   // guard still refuses them for a writer that holds every privilege (the
   // owner, which is what the definer functions and the service role act as),
   // so both layers are pinned.
@@ -374,8 +399,14 @@ describe("the guard: a pair is edited together or not at all", () => {
     }
   });
 
-  it("changes nothing for an ordinary line: the inline edit works exactly as before", async () => {
-    await asUser(db, ADMIN_ID);
+  it("an ordinary line: the guard lets the owner's figure edit through; a signed-in admin's is refused", async () => {
+    // The inline edit this used to pin is gone (20261102140000): the grant now
+    // refuses an admin. The guard itself still only binds shared and
+    // adjustment columns, so an owner-side edit of an ordinary line passes it.
+    expect(
+      (await attempt(ADMIN_ID, `update rep_payout_rows set residual_income = 91.00 where mid = 'MID-AGENT-1' and period = '2026-07-01'`))?.code,
+    ).toBe("42501");
+    await asOwnerFor(ADMIN_ID);
     const result = await db.query(
       `update rep_payout_rows set residual_income = 91.00, rep_split_pct = 55
         where mid = 'MID-AGENT-1' and period = '2026-07-01'`,
@@ -502,6 +533,8 @@ describe("the adjustment branch, against a scratch table built from the migratio
   const INPUT_COLUMNS = [
     "line_kind",
     "adjustment_amount",
+    // The override branch's input (20261102120000), which rewrote the column.
+    "override_amount",
     "share_role",
     "residual_income",
     "rep_split_pct",
@@ -511,13 +544,20 @@ describe("the adjustment branch, against a scratch table built from the migratio
     "rep_payout",
   ];
 
+  /**
+   * The expression as the NEWEST migration that re-adds the column writes it:
+   * 20261014140000 first, 20261102120000 (the override branch) since. Copied,
+   * never retyped, and compared with the live column below.
+   */
   async function expressionFromMigration(): Promise<string> {
-    const sql = await readMigration("20261014140000_shared_lines.sql");
-    const match = sql.match(
-      /add column rep_payout numeric\(14,2\) generated always as \(\n([\s\S]*?)\n {2}\) stored;/,
-    );
-    if (!match) throw new Error("rep_payout expression not found in 20261014140000");
-    return match[1];
+    for (const file of ["20261102120000_merchant_overrides.sql", "20261014140000_shared_lines.sql"]) {
+      const sql = await readMigration(file);
+      const match = sql.match(
+        /add column rep_payout numeric\(14,2\) generated always as \(\n([\s\S]*?)\n {2}\) stored;/,
+      );
+      if (match) return match[1];
+    }
+    throw new Error("rep_payout expression not found in any migration that re-adds it");
   }
 
   async function createScratch(): Promise<void> {
@@ -601,6 +641,32 @@ ${await expressionFromMigration()}
       { label: "zero", amount: "0.00", rep_payout: "0.00" },
     ]);
   });
+
+  it("the override branch pays exactly override_amount, signed, whatever else the row carries", async () => {
+    await createScratch();
+    await db.exec(`
+      insert into adjustment_scratch
+        (label, line_kind, override_amount, adjustment_amount, share_role, residual_income,
+         rep_split_pct, account_residual_income, primary_rep_pct, secondary_rep_pct)
+      values
+        ('debit',          'override', -10.00, 99.00, null, 100.00, 50.00, null, null, null),
+        ('credit',         'override', 10.00,  null,  null, 100.00, 50.00, null, null, null),
+        ('clawback debit', 'override', 1.18,   null,  null, null,   null,  null, null, null),
+        ('shared-looking', 'override', -1.67,  null,  'primary', 100.00, 50.00, 100.00, 25, 25),
+        ('zero',           'override', 0,      null,  null, null,   null,  null, null, null),
+        ('blank',          'override', null,   null,  null, 100.00, 50.00, null, null, null);
+    `);
+    expect(
+      await rows(db, `select label, rep_payout::text from adjustment_scratch order by label`),
+    ).toEqual([
+      { label: "blank", rep_payout: null },
+      { label: "clawback debit", rep_payout: "1.18" },
+      { label: "credit", rep_payout: "10.00" },
+      { label: "debit", rep_payout: "-10.00" },
+      { label: "shared-looking", rep_payout: "-1.67" },
+      { label: "zero", rep_payout: "0.00" },
+    ]);
+  });
 });
 
 describe("each rep reads only their own line", () => {
@@ -624,23 +690,6 @@ describe("each rep reads only their own line", () => {
 });
 
 describe("catalog and privileges", () => {
-  it("set_shared_residual is security definer, guarded first, locked, not for anon", async () => {
-    await asPlatform(db);
-    const sig = "set_shared_residual(int, date, numeric)";
-    const [fn] = await rows<{ prosecdef: boolean; body: string; auth: boolean; anon: boolean }>(
-      db,
-      `select prosecdef, prosrc as body,
-              has_function_privilege('authenticated', '${sig}', 'execute') as auth,
-              has_function_privilege('anon', '${sig}', 'execute') as anon
-         from pg_proc where oid = '${sig}'::regprocedure`,
-    );
-    expect(fn.prosecdef).toBe(true);
-    expect(fn.body.trimStart()).toMatch(/^declare[\s\S]*?begin\s+if not is_admin\(\) then/);
-    expect(fn.body).toContain("pg_advisory_xact_lock(hashtext('tapswipe.merchant_rep_shares'))");
-    expect(fn.auth).toBe(true);
-    expect(fn.anon).toBe(false);
-  });
-
   it("the two trigger functions are executable by nobody signed in", async () => {
     await asPlatform(db);
     for (const sig of ["guard_shared_line()", "copy_signer_rate_to_partner()"]) {

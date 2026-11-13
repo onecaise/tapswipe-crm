@@ -1,0 +1,13 @@
+Processor,Merchant Number,Merchant Name,Income Type,Volume,Residual
+TSYS,990000000101,Test Diner One,Residuals,"12,345.67",123.45
+TSYS,990000000102,Test Bakery Two,Residuals,5000.00,50.00
+TSYS,990000000103,Test Garage Three,Residuals,50.00,80.00
+TSYS,sqtest0001abc,Test Coffee Cart Four,Residuals,3000.00,30.00
+TSYS,990000000105,Test Closed Shop Five,Residuals,1000.00,10.00
+TSYS,990000000106,Test House Account Six,Residuals,20000.00,200.00
+Square,990000000107,Test Override Store Seven,Residuals,10000.00,100.00
+TSYS,990000000108,Test Merge Eight,Residuals,0.00,-15.00
+TSYS,990000000110,Test 365 Ten,Residuals,2500.00,25.00
+TSYS,990000000111,Test No Processor Eleven,Residuals,4000.00,-12.34
+TSYS,990000000113,=1+1,Residuals,1000.00,10.00
+TSYS,990000000199,Test Unknown Merchant,Residuals,100.00,1.00

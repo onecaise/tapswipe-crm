@@ -75,6 +75,21 @@ describe("shareSummary", () => {
   });
 });
 
+describe("at the merchant's own rate (20261030160000)", () => {
+  it("holds a new share to the merchant's rate, not to 50", () => {
+    expect(shareSplitProblem("20", "10", 30)).toBeNull();
+    expect(shareSplitProblem("25", "25", 30)).toBe(
+      "The two shares must add up to 30. These add up to 50.",
+    );
+    expect(shareSplitProblem("33.33", "11.67", 45)).toBeNull();
+  });
+
+  it("shows the company the rest of the residual", () => {
+    expect(shareSummary("20", "10", 30)).toBe("Company 70% · Signer 20% · Partner 10%");
+    expect(shareSummary("33.33", "11.67", 45)).toBe("Company 55% · Signer 33.33% · Partner 11.67%");
+  });
+});
+
 describe("months", () => {
   it("round-trips a month input and steps across a year", () => {
     expect(monthInputToPeriod("2026-08")).toBe("2026-08-01");
