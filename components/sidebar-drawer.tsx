@@ -1,6 +1,11 @@
 "use client";
 
-import { MenuIcon, XIcon } from "lucide-react";
+import {
+  MenuIcon,
+  PanelLeftCloseIcon,
+  PanelLeftOpenIcon,
+  XIcon,
+} from "lucide-react";
 import {
   createContext,
   useCallback,
@@ -8,8 +13,10 @@ import {
   useEffect,
   useMemo,
   useState,
+  useSyncExternalStore,
 } from "react";
 
+import { SIDEBAR_COLLAPSED_ATTR, SIDEBAR_COLLAPSED_KEY } from "@/lib/sidebar";
 import { cn } from "@/lib/utils";
 
 /**
@@ -32,6 +39,10 @@ import { cn } from "@/lib/utils";
  * navigation. It would also duplicate the open-ticket count query, and give
  * every nav link a twin — which is the ambiguity `display:none` exists to avoid.
  *
+ * FROM md UP the pinned column can also be HIDDEN, by <SidebarCollapseToggle>
+ * in the topbar. That is a separate piece of state from `open` with its own
+ * mechanism — see the note above the collapsed-state functions below.
+ *
  * Every colour here is a token. The scrim is `bg-sidebar/60` rather than a
  * `bg-black/50` literal: globals.css stores its values as bare HSL triplets
  * precisely so `hsl(var(--sidebar) / 0.6)` works, so the overlay is the sidebar's
@@ -53,6 +64,50 @@ function useSidebar(): SidebarContextValue {
   }
 
   return value;
+}
+
+/*
+ * The md-and-up "hidden" choice.
+ *
+ * Its source of truth is an attribute on <html>, not React state, and
+ * app/globals.css hides #app-sidebar from md up while it is present. The
+ * attribute is set before first paint by components/sidebar-collapse-script.tsx
+ * from localStorage, so a remembered choice never flashes the panel; React only
+ * reads it back, through useSyncExternalStore, to label the toggle. The server
+ * snapshot is "shown" (the default), and React re-renders with the real value
+ * straight after hydration rather than reporting a mismatch.
+ *
+ * Scoped to md in the CSS rather than here, so a phone that has the attribute
+ * (the same device, narrowed) keeps its drawer exactly as before.
+ */
+function subscribeCollapsed(onChange: () => void) {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: [SIDEBAR_COLLAPSED_ATTR],
+  });
+  return () => observer.disconnect();
+}
+
+const collapsedSnapshot = () =>
+  document.documentElement.hasAttribute(SIDEBAR_COLLAPSED_ATTR);
+
+const collapsedServerSnapshot = () => false;
+
+function setSidebarCollapsed(collapsed: boolean) {
+  document.documentElement.toggleAttribute(SIDEBAR_COLLAPSED_ATTR, collapsed);
+
+  // Remembered per device. try/catch because storage can be unavailable or
+  // throw on write; the toggle still works for this page view without it.
+  try {
+    if (collapsed) {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, "1");
+    } else {
+      window.localStorage.removeItem(SIDEBAR_COLLAPSED_KEY);
+    }
+  } catch {
+    // Nothing to do: the choice just will not survive a reload.
+  }
 }
 
 /** Matches Tailwind's `md`. Kept next to the classes that assume it. */
@@ -210,6 +265,51 @@ export function SidebarTrigger() {
         <XIcon size={20} aria-hidden />
       ) : (
         <MenuIcon size={20} aria-hidden />
+      )}
+    </button>
+  );
+}
+
+/**
+ * Hides or shows the pinned sidebar from md up; not rendered below it, where
+ * the hamburger above is the control and nothing about it changes.
+ *
+ * One button in the topbar for both directions, rather than a hide button in
+ * the panel and a show button elsewhere: the topbar is sticky and outlives the
+ * panel, so the way back is always in the same place the way out was. While
+ * the panel is hidden the button grows a visible "Menu" label, because an
+ * icon alone is too easy to miss as the only route back to the navigation.
+ *
+ * Styled as the hamburger is — the same row of neutral icon controls — and
+ * print:hidden comes from the topbar it sits in.
+ */
+export function SidebarCollapseToggle() {
+  const collapsed = useSyncExternalStore(
+    subscribeCollapsed,
+    collapsedSnapshot,
+    collapsedServerSnapshot,
+  );
+
+  return (
+    <button
+      type="button"
+      onClick={() => setSidebarCollapsed(!collapsed)}
+      aria-controls="app-sidebar"
+      aria-expanded={!collapsed}
+      aria-label={collapsed ? "Show menu" : "Hide menu"}
+      title={collapsed ? "Show menu" : "Hide menu"}
+      className={cn(
+        "hidden h-9 shrink-0 items-center justify-center gap-1.5 rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:inline-flex",
+        collapsed ? "border border-input px-2.5 text-foreground" : "w-9",
+      )}
+    >
+      {collapsed ? (
+        <>
+          <PanelLeftOpenIcon size={18} aria-hidden />
+          <span className="text-sm font-medium">Menu</span>
+        </>
+      ) : (
+        <PanelLeftCloseIcon size={18} aria-hidden />
       )}
     </button>
   );

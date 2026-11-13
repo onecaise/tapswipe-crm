@@ -4,7 +4,10 @@ import { Suspense } from "react";
 import { GlobalSearch } from "@/components/global-search";
 import { LogoutButton } from "@/components/logout-button";
 import { NotificationsBell } from "@/components/notifications-bell";
-import { SidebarTrigger } from "@/components/sidebar-drawer";
+import {
+  SidebarCollapseToggle,
+  SidebarTrigger,
+} from "@/components/sidebar-drawer";
 import { requireUser } from "@/lib/auth";
 import { countNotifications, notificationsFloor } from "@/lib/notifications";
 import { createClient } from "@/lib/supabase/server";
@@ -47,6 +50,9 @@ export function AppTopbar() {
           the first thing a thumb reaches. Hidden from md up, where the sidebar
           it opens is pinned anyway. */}
       <SidebarTrigger />
+      {/* Its md-and-up counterpart: hides the pinned column for a full-width
+          page, and is the way back. Exactly one of the two is ever shown. */}
+      <SidebarCollapseToggle />
 
       <GlobalSearch />
 

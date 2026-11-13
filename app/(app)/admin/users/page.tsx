@@ -5,6 +5,7 @@ import { ArrowLeftIcon, UploadIcon, UserPlusIcon } from "lucide-react";
 import { requireAdmin, type Role } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { formatText } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { AgentNumberCell } from "@/components/agent-number-cell";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
@@ -39,6 +40,24 @@ type ProfileRow = {
   created_at: string | null;
 };
 
+/**
+ * Compact cells, so all nine columns fit a laptop's content column without the
+ * table scrolling sideways. The primitive's px-4 is right for the five-column
+ * lists; nine columns at that padding spend over 100px on gutters alone.
+ */
+const HEAD = "px-2.5";
+const CELL = "px-2.5 py-2.5";
+
+/**
+ * The name column stays put when the table does scroll (an iPad, or a laptop
+ * with the sidebar showing), so a row is still identifiable from its Actions
+ * end. Needs its own background or the scrolled columns show through it, and
+ * the row's hover tint is re-applied as a layer over that background rather
+ * than replacing it, for the same reason. The 1px shadow is the column's edge.
+ */
+const STICKY =
+  "sticky left-0 z-[1] bg-card shadow-[1px_0_0_hsl(var(--border))]";
+
 async function UsersTable() {
   // Application-level boundary: non-admins never render this page.
   const viewer = await requireAdmin();
@@ -72,15 +91,15 @@ async function UsersTable() {
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Name</TableHead>
-          <TableHead>Agent #</TableHead>
-          <TableHead>Territory</TableHead>
-          <TableHead>Legal names</TableHead>
-          <TableHead>Split</TableHead>
-          <TableHead>Role</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Created</TableHead>
-          <TableHead className="text-right">Actions</TableHead>
+          <TableHead className={cn(HEAD, STICKY)}>Name</TableHead>
+          <TableHead className={HEAD}>Agent #</TableHead>
+          <TableHead className={HEAD}>Territory</TableHead>
+          <TableHead className={HEAD}>Legal names</TableHead>
+          <TableHead className={HEAD}>Split</TableHead>
+          <TableHead className={HEAD}>Role</TableHead>
+          <TableHead className={HEAD}>Status</TableHead>
+          <TableHead className={HEAD}>Created</TableHead>
+          <TableHead className={cn(HEAD, "text-right")}>Actions</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -92,10 +111,19 @@ async function UsersTable() {
           </TableRow>
         ) : (
           profiles.map((profile) => (
-            <TableRow key={profile.id}>
-              <TableCell className="font-medium">
-                <span className="flex flex-col">
-                  <span>
+            <TableRow key={profile.id} className="group">
+              <TableCell
+                className={cn(
+                  CELL,
+                  STICKY,
+                  "font-medium group-hover:bg-[linear-gradient(hsl(var(--muted)/0.5),hsl(var(--muted)/0.5))]",
+                )}
+              >
+                {/* Capped and truncated rather than left to set the column's
+                    width: one long address would otherwise widen the sticky
+                    column for every row. The title carries the full text. */}
+                <span className="flex max-w-[13rem] flex-col">
+                  <span className="truncate" title={profile.full_name}>
                     {profile.full_name}
                     {profile.id === viewer.id && (
                       <span className="ml-2 text-xs font-normal text-muted-foreground">
@@ -107,12 +135,15 @@ async function UsersTable() {
                       are indistinguishable on the one screen that deactivates
                       accounts and resets passwords. Null only for rows that
                       predate profiles.email and were not backfilled. */}
-                  <span className="text-xs font-normal text-muted-foreground">
+                  <span
+                    className="truncate text-xs font-normal text-muted-foreground"
+                    title={profile.email ?? undefined}
+                  >
                     {formatText(profile.email)}
                   </span>
                 </span>
               </TableCell>
-              <TableCell>
+              <TableCell className={CELL}>
                 {/* How a processor's residual report names this rep. Blank for
                     everyone until someone fills it in — the column is new and
                     there was nothing to backfill it from. */}
@@ -122,7 +153,7 @@ async function UsersTable() {
                   agentNumber={profile.agent_number}
                 />
               </TableCell>
-              <TableCell>
+              <TableCell className={CELL}>
                 {/* A reporting label, not an access boundary — nothing reads
                     this to decide what the rep can see. Blank for everyone
                     until someone fills it in; the column is new and there was
@@ -133,7 +164,7 @@ async function UsersTable() {
                   territory={profile.territory}
                 />
               </TableCell>
-              <TableCell>
+              <TableCell className={CELL}>
                 {/* Legal name over LLC legal name, for the processor's
                     paperwork. Admin-set only, through set_rep_identity(); a rep
                     missing either cannot submit a pre-app (phase 4). */}
@@ -145,7 +176,7 @@ async function UsersTable() {
                   llcLegalName={profile.llc_legal_name}
                 />
               </TableCell>
-              <TableCell>
+              <TableCell className={CELL}>
                 {/* The rep's share of a merchant's residual (memo §0b.4).
                     Admin-set only, through set_rep_split(); copied onto a
                     pre-app at submit, so a change here moves no existing
@@ -156,14 +187,14 @@ async function UsersTable() {
                   rate={profile.split_rate_pct}
                 />
               </TableCell>
-              <TableCell>
+              <TableCell className={CELL}>
                 {/* A role is not a status, so it gets no status colour and
                     certainly not brand red — the word already says which one it
                     is. */}
                 <Badge variant="secondary">{profile.role}</Badge>
               </TableCell>
-              <TableCell>
-                <div className="flex items-center gap-2">
+              <TableCell className={CELL}>
+                <div className="flex flex-col items-start gap-1">
                   {/* Deactivated is grey rather than red: it's an inert state, not
                       a danger, and red here would read as "something is wrong with
                       this account" on every row an admin has deliberately
@@ -180,12 +211,12 @@ async function UsersTable() {
                   )}
                 </div>
               </TableCell>
-              <TableCell className="text-muted-foreground">
+              <TableCell className={cn(CELL, "text-muted-foreground")}>
                 {profile.created_at
                   ? new Date(profile.created_at).toLocaleDateString()
                   : "—"}
               </TableCell>
-              <TableCell>
+              <TableCell className={CELL}>
                 <UserRowActions
                   userId={profile.id}
                   fullName={profile.full_name}
@@ -204,7 +235,9 @@ async function UsersTable() {
 
 export default function ManageUsersPage() {
   return (
-    <PageShell width="list">
+    // Full width: nine columns, and every one of them is wanted at once. The
+    // table still scrolls inside its own card where they do not fit.
+    <PageShell width="full">
       <Button asChild variant="ghost" size="sm" className="self-start">
         <Link href="/dashboard">
           <ArrowLeftIcon size={16} />

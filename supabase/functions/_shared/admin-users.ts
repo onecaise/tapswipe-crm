@@ -158,6 +158,39 @@ export function isAcceptablePassword(value: unknown): value is string {
 }
 
 /**
+ * admin-reset-password's optional `password`, decided before anything is
+ * changed.
+ *
+ * Absent, null, or blank (empty or only whitespace) means "generate one", which
+ * is the behaviour the function had before an admin could type one. Anything
+ * else must be a string passing isAcceptablePassword, set exactly as given, no
+ * trimming, for the same reason that function gives.
+ *
+ * The refusal carries a fixed message that never contains the value: it goes
+ * back in a response body the browser shows, and a password has no business in
+ * an error string even when it is the caller's own.
+ */
+export type ResetPasswordChoice =
+  | { ok: true; password: string | null }
+  | { ok: false; error: string };
+
+export function resolveResetPassword(value: unknown): ResetPasswordChoice {
+  if (value === undefined || value === null) return { ok: true, password: null };
+  if (typeof value === "string" && value.trim() === "") {
+    return { ok: true, password: null };
+  }
+  if (!isAcceptablePassword(value)) {
+    return {
+      ok: false,
+      error:
+        `password must be at least ${MIN_PASSWORD_LENGTH} characters, ` +
+        "or left blank to generate one",
+    };
+  }
+  return { ok: true, password: value };
+}
+
+/**
  * Deliberately permissive: one @, no spaces, a dot in the domain.
  *
  * The authority on whether an address is usable is GoTrue, which rejects what it

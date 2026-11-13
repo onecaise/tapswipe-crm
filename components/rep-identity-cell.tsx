@@ -82,9 +82,17 @@ export function RepIdentityCell({
   if (!editing) {
     return (
       <span className="flex items-start gap-1.5">
-        <span className="flex flex-col gap-0.5 text-sm">
-          <span>{legalName ?? EMPTY}</span>
-          <span className="text-xs text-muted-foreground">
+        {/* Capped and truncated, the full name in a title: an LLC name can
+            run to sixty characters, and at its natural width it alone pushed
+            Manage Users into scrolling sideways. */}
+        <span className="flex min-w-0 max-w-[12rem] flex-col gap-0.5 text-sm">
+          <span className="truncate" title={legalName ?? undefined}>
+            {legalName ?? EMPTY}
+          </span>
+          <span
+            className="truncate text-xs text-muted-foreground"
+            title={llcLegalName ?? undefined}
+          >
             {llcLegalName ?? EMPTY}
           </span>
           {/* Amber, not red: waiting on an admin, like "temp password". */}
@@ -130,7 +138,7 @@ export function RepIdentityCell({
         autoFocus
         onChange={(event) => setLegal(event.target.value)}
         onKeyDown={onKeyDown}
-        className="h-7 w-48 text-xs"
+        className="h-7 w-40 text-xs"
       />
       <Input
         aria-label={`LLC legal name for ${fullName}`}
@@ -140,7 +148,7 @@ export function RepIdentityCell({
         disabled={busy}
         onChange={(event) => setLlc(event.target.value)}
         onKeyDown={onKeyDown}
-        className="h-7 w-48 text-xs"
+        className="h-7 w-40 text-xs"
       />
       <span className="flex items-center gap-1.5">
         <Button
@@ -163,7 +171,7 @@ export function RepIdentityCell({
           Cancel
         </Button>
       </span>
-      <span className="text-xs text-muted-foreground">
+      <span className="max-w-[12rem] whitespace-normal text-xs text-muted-foreground">
         No LLC? Enter their own legal name in both. A blank box clears it.
       </span>
       {error && <span className="text-xs text-destructive">{error}</span>}

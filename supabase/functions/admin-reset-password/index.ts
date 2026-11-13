@@ -1,6 +1,11 @@
 // Issues a new temporary password for an account and returns it to the calling
 // admin, to be handed over out-of-band.
 //
+// The password is the admin's own choice when the body carries a non-blank
+// `password` (at least MIN_PASSWORD_LENGTH, the rule create-user uses), and
+// generated otherwise. Either way it goes back in the response once and is
+// written nowhere else: not to audit_log, not to a log line, not into an error.
+//
 // verify_jwt = false in config.toml, so this function authenticates the caller
 // itself — withSupabase({ auth: "user" }) rejects a missing or invalid JWT
 // before the handler runs.
@@ -27,6 +32,7 @@ import {
   generateTempPassword,
   isUuid,
   json,
+  resolveResetPassword,
   writeAudit,
 } from "../_shared/admin-users.ts";
 
@@ -60,6 +66,15 @@ export default {
       return json({ error: "user_id must be a uuid" }, 400);
     }
 
+    // Optional: the admin may type the temporary password instead of taking a
+    // generated one. Validated here, before the lookup or any service-role
+    // call, so a refusal changes nothing. The message is fixed text and never
+    // includes the value.
+    const choice = resolveResetPassword(body.password);
+    if (!choice.ok) {
+      return json({ error: choice.error }, 400);
+    }
+
     // Through the caller-scoped client, so the database confirms the row exists
     // and is visible rather than this code assuming it.
     //
@@ -76,7 +91,9 @@ export default {
       return json({ error: "User not found" }, 404);
     }
 
-    const temporaryPassword = generateTempPassword();
+    // Still "temporary" either way: must_change_password is set below, so it
+    // survives one sign-in.
+    const temporaryPassword = choice.password ?? generateTempPassword();
 
     // Authorization settled — service role from here.
     const { error: passwordError } =
@@ -85,9 +102,17 @@ export default {
       });
 
     if (passwordError) {
+      // GoTrue can refuse a typed password this function let through (its own
+      // rules, e.g. its 72-character cap). That is the admin's input, so a 400,
+      // not a server fault. GoTrue's messages state the rule, never the value.
+      const status =
+        choice.password !== null &&
+        (passwordError as { status?: number }).status === 422
+          ? 400
+          : 500;
       return json(
         { error: `Could not reset the password: ${passwordError.message}` },
-        500,
+        status,
       );
     }
 
@@ -129,7 +154,12 @@ export default {
     --header 'Content-Type: application/json' \
     --data '{"user_id":"<TARGET_USER_ID>"}'
 
+  Optional "password": set that instead of generating one. Blank or absent
+  generates.
+
   Expected: 200 with { user_id, temporary_password }
+            400 if password is given, not blank, and too short (or GoTrue
+                refuses it)
             404 if no such user
             403 if the caller is not an active admin
             401 if there is no valid JWT

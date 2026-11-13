@@ -221,3 +221,20 @@
     break-inside: auto;
   }
 }
+
+/*
+ * The desktop sidebar, hidden by choice (components/sidebar-drawer.tsx,
+ * SidebarCollapseToggle). Keyed on an attribute on <html> rather than a class
+ * React toggles, because components/sidebar-collapse-script.tsx sets it before
+ * first paint from localStorage — so a remembered choice never flashes the
+ * panel. The main column is flex-1 beside it and takes the freed width.
+ *
+ * 768px is Tailwind's `md`. Below it the attribute does nothing: the phone
+ * drawer is untouched, even on a device whose desktop-width choice was "hidden".
+ * Print needs nothing here — the <aside> is print:hidden either way.
+ */
+@media (min-width: 768px) {
+  html[data-sidebar-collapsed] #app-sidebar {
+    display: none;
+  }
+}

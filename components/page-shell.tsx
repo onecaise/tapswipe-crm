@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils";
 
 /**
- * The three content widths the app uses, named by what they hold.
+ * The content widths the app uses, named by what they hold.
  *
  * These were already the convention — every page hand-wrote one of them — but
  * copied into 23 files, which is why adjusting the reading width used to mean 23
@@ -10,6 +10,10 @@ import { cn } from "@/lib/utils";
  */
 const WIDTHS = {
   list: "max-w-6xl gap-6",
+  // No cap at all: the whole content column. For a table too wide for `list`
+  // whose every column is wanted at once — Manage Users, where the 1152px cap
+  // pushed the Actions column off-screen on a monitor with room to spare.
+  full: "max-w-none gap-6",
   detail: "max-w-5xl gap-8",
   form: "max-w-3xl gap-6",
 } as const;

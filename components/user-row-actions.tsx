@@ -2,13 +2,21 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { CheckIcon, CopyIcon, KeyRoundIcon } from "lucide-react";
+import {
+  CheckIcon,
+  CopyIcon,
+  EyeIcon,
+  EyeOffIcon,
+  KeyRoundIcon,
+} from "lucide-react";
 
 import { callAdminFunction, type ResetPassword } from "@/lib/admin-users";
 import type { Role } from "@/lib/auth";
+import { MIN_PASSWORD_LENGTH, isAcceptablePassword } from "@/lib/passwords";
 import { createClient } from "@/lib/supabase/client";
 import { ConfirmPair } from "@/components/confirm-pair";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 /**
  * Deactivate / reactivate, reset password, and change role for one user.
@@ -56,6 +64,23 @@ export function UserRowActions({
   const [pendingRole, setPendingRole] = useState<Role | null>(null);
   const [tempPassword, setTempPassword] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  /**
+   * The temporary password the admin typed into the reset form, if any. Blank
+   * means "generate one" — the function decides, and the result screen shows
+   * whichever was set. Cleared whenever the form closes so one rep's password
+   * is never left sitting in another row's field.
+   */
+  const [chosenPassword, setChosenPassword] = useState("");
+  const [showChosen, setShowChosen] = useState(false);
+  const chosenBlank = chosenPassword.trim() === "";
+  const chosenTooShort =
+    !chosenBlank && !isAcceptablePassword(chosenPassword);
+
+  const closeResetForm = () => {
+    setConfirming(null);
+    setChosenPassword("");
+    setShowChosen(false);
+  };
 
   const toggleActive = async () => {
     setBusy("active");
@@ -79,7 +104,11 @@ export function UserRowActions({
 
     const { data, error: callError } = await callAdminFunction<ResetPassword>(
       "admin-reset-password",
-      { user_id: userId },
+      // Sent verbatim, no trim, and only when not blank: a blank field is the
+      // generated-password path, the same as before this field existed.
+      chosenBlank
+        ? { user_id: userId }
+        : { user_id: userId, password: chosenPassword },
     );
 
     if (callError || !data) {
@@ -87,6 +116,8 @@ export function UserRowActions({
     } else {
       setTempPassword(data.temporary_password);
     }
+    setChosenPassword("");
+    setShowChosen(false);
     setBusy(null);
   };
 
@@ -157,7 +188,10 @@ export function UserRowActions({
 
   return (
     <div className="flex flex-col items-end gap-1.5">
-      <div className="flex items-center justify-end gap-2">
+      {/* Wraps rather than holding all three controls on one line: this is
+          the widest column on Manage Users, and letting it wrap at a laptop
+          width is most of what lets the other eight fit beside it. */}
+      <div className="flex flex-wrap items-center justify-end gap-2">
         {/* Shows the pending choice while it waits to be confirmed, so the
             select reflects what was picked rather than snapping back and
             looking like the click was lost. */}
@@ -198,19 +232,86 @@ export function UserRowActions({
         {confirming !== "role" && (
           <>
             {confirming === "password" ? (
-              <ConfirmPair
-                label="Reset?"
-                onConfirm={() => void resetPassword()}
-                onCancel={() => setConfirming(null)}
-                busy={busy === "password"}
-              />
+              <form
+                className="flex flex-col items-end gap-1.5"
+                aria-label={`Reset password for ${fullName}`}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!chosenTooShort) void resetPassword();
+                }}
+              >
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <label
+                    htmlFor={`reset-password-${userId}`}
+                    className="text-xs text-muted-foreground"
+                  >
+                    Temporary password (optional)
+                  </label>
+                  <Input
+                    id={`reset-password-${userId}`}
+                    // Masked by default, revealable: the admin has to read it
+                    // out, and a typo they cannot see is the whole risk.
+                    type={showChosen ? "text" : "password"}
+                    value={chosenPassword}
+                    onChange={(event) => setChosenPassword(event.target.value)}
+                    // Not the admin's own credential; nothing should save it.
+                    autoComplete="off"
+                    aria-describedby={`reset-password-hint-${userId}`}
+                    aria-invalid={chosenTooShort || undefined}
+                    disabled={busy === "password"}
+                    className="h-8 w-40 text-xs"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowChosen((shown) => !shown)}
+                    aria-pressed={showChosen}
+                    aria-label={showChosen ? "Hide password" : "Show password"}
+                  >
+                    {showChosen ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
+                  </Button>
+                  <Button
+                    type="submit"
+                    size="sm"
+                    disabled={busy === "password" || chosenTooShort}
+                  >
+                    {busy === "password" ? "Working…" : "Reset"}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy === "password"}
+                    onClick={closeResetForm}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+                <span
+                  id={`reset-password-hint-${userId}`}
+                  // Wraps to the form's width; the cell is whitespace-nowrap.
+                  className={
+                    chosenTooShort
+                      ? "max-w-[22rem] whitespace-normal text-right text-xs text-destructive"
+                      : "max-w-[22rem] whitespace-normal text-right text-xs text-muted-foreground"
+                  }
+                >
+                  At least {MIN_PASSWORD_LENGTH} characters. Leave blank to
+                  generate one. The rep must choose their own at first login.
+                </span>
+              </form>
             ) : (
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 disabled={busy !== null}
-                onClick={() => setConfirming("password")}
+                onClick={() => {
+                  setChosenPassword("");
+                  setShowChosen(false);
+                  setConfirming("password");
+                }}
               >
                 <KeyRoundIcon size={14} />
                 Reset password

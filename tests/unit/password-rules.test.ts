@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MIN_PASSWORD_LENGTH as SHARED_MIN,
   isAcceptablePassword as sharedIsAcceptable,
+  resolveResetPassword,
 } from "../../supabase/functions/_shared/admin-users";
 import { MIN_PASSWORD_LENGTH, isAcceptablePassword } from "@/lib/passwords";
 
@@ -78,5 +79,36 @@ describe("the rule itself", () => {
     // this constant above 6 is fine; lowering it below would let the form offer
     // a password the Auth server refuses no matter what these two files say.
     expect(MIN_PASSWORD_LENGTH).toBeGreaterThanOrEqual(6);
+  });
+});
+
+describe("admin-reset-password's optional password", () => {
+  it("treats absent, null and blank as 'generate one'", () => {
+    for (const value of [undefined, null, "", "   ", "\t\n"]) {
+      expect(resolveResetPassword(value)).toEqual({ ok: true, password: null });
+    }
+  });
+
+  it("returns a typed password exactly as given, spaces included", () => {
+    expect(resolveResetPassword(" typed-pass ")).toEqual({
+      ok: true,
+      password: " typed-pass ",
+    });
+    expect(resolveResetPassword("x".repeat(MIN_PASSWORD_LENGTH))).toEqual({
+      ok: true,
+      password: "x".repeat(MIN_PASSWORD_LENGTH),
+    });
+  });
+
+  it("refuses one too short, or a non-string, without echoing the value", () => {
+    const short = "q".repeat(MIN_PASSWORD_LENGTH - 1);
+    for (const value of [short, 1234567, {}, ["abcdefg"], true]) {
+      const result = resolveResetPassword(value);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toContain(String(MIN_PASSWORD_LENGTH));
+        expect(result.error).not.toContain(short);
+      }
+    }
   });
 });

@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AppTopbar } from "@/components/app-topbar";
 import { BugReportLauncher } from "@/components/bug-report-launcher";
+import { SidebarCollapseScript } from "@/components/sidebar-collapse-script";
 import { SidebarProvider } from "@/components/sidebar-drawer";
 import { requireUser } from "@/lib/auth";
 
@@ -35,6 +36,10 @@ export default function AppLayout({
         <Suspense fallback={null}>
           <ForcePasswordChangeGate />
         </Suspense>
+
+        {/* Before the sidebar in the markup, so a remembered "hidden" is
+            applied while the page parses and the panel never flashes. */}
+        <SidebarCollapseScript />
 
         <AppSidebar />
 
