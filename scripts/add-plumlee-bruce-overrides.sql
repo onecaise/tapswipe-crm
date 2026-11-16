@@ -58,7 +58,7 @@
 --
 -- A merchant skipped because its live override pays someone else does NOT get
 -- Bruce's 5% (one override per merchant per month). The report counts them
--- separately ("to someone else") so that is a decision, not a surprise.
+-- separately (the "other:" count) so that is a decision, not a surprise.
 --
 -- It prints no email, id or digest: counts, and the names (dba) of the first
 -- five merchants it would give an override.
