@@ -771,3 +771,82 @@ four deletions as a merge-resolution commit. Merge Plumlee first.
 | **D8** | Report 2's new "Overrides from company" column (and in its Excel export). | **Add it.** Without it a Report 2 row no longer adds up (residual ≠ rep side + company share). |
 | **D10** | Replace means uploading the same file again. Would you want a "re-commit from the stored file" button instead? | **Not now.** Re-uploading the original files is the existing, tested path. A button is a separate feature. |
 | **D11** | Plumlee's gap to ISO Hub (§4.5). | Pull ISO Hub's per-MID agent report for Plumlee, August and September, and reconcile it MID by MID before re-marking September paid. It is outside this design's change. |
+
+## 8. Open reconciliation questions (16 Nov 2026, read-only analysis)
+
+These results come from the ISO Hub load files (`C:\Users\owen\iso-hub-export\to-load`, August and
+September 2026), `Merchants-final.csv`, `Merchant Application.csv`, `overrides-final.csv` and
+the Agent Commissions totals. Only residual and commission figures were used. **This note supersedes
+§4.5's Bruce itemization**, which assumed Sherwin's 3 overrides were owner-funded in ISO Hub; the
+analysis below shows they are not.
+
+**Q1. Plumlee's remaining gap is the 45 Smokes self-overrides, not Smokes #2 alone.**
+
+- Smokes #2 (MID 30119988817) has a residual of 39.00 (Aug) and 233.631 (Sep). Half of that is
+  19.50 / 116.82, nowhere near the gap. In the application file, Smokes #2 is one of the **9**
+  merchants with Bruce's 5%, not a self-override.
+- In `Merchant Application.csv`, **45 of Plumlee's Smokes merchants** name Plumlee LLC as its own
+  1st Override at 50%. Their residual is 2,441.000 (Aug) and 6,840.494 (Sep), and **50% of it is
+  1,220.500 / 3,420.247**.
+- ISO Hub's Plumlee total is reproduced as 50% of Plumlee's net (8,970.082 / 15,206.129) + 25% of
+  Lamar + 50% of the 45. That gives 5,786.647 / 11,135.168, against ISO Hub's 5,786.645 /
+  11,135.165.
+- **This does not equal the gap to the cent:** 1,220.50 against 1,220.48 (Aug) and 3,420.25 against
+  3,420.08 (Sep). The residue is the CRM's per-line rounding on Plumlee's own lines (4,485.06 against
+  4,485.041; 7,603.23 against 7,603.065) plus 0.006 on Lamar. The merchant set is not wrong, so no
+  other combination was searched for.
+- The CRM cannot pay this: an override to the merchant's owner is refused. **Question:** confirm that
+  the accepted difference is "50% self-override on these 45 Smokes merchants", not "Smokes #2", and
+  that the CRM stays at 50% on them.
+
+**Q2. In ISO Hub, Lamar is owner-funded and Sherwin's 3 are company-funded.** The Agent Commissions
+files hold agent totals only, with no per-merchant lines or rates. So this is inferred: Bruce's ISO Hub
+total is tested against each funding combination, using his net (2,088.218 / 3,253.403), Lamar's
+residual (324.424 / 447.424), the residual of Sherwin's 3 (274.104 / 297.880) and the 5% on the 9
+application merchants (207.313 / 200.429).
+
+| Funding in ISO Hub | Bruce, Aug | − ISO Hub | Bruce, Sep | − ISO Hub |
+| --- | --- | --- | --- | --- |
+| Lamar owner, Sherwin's 3 owner | 1,156.611 | −13.70 | 1,700.380 | −14.89 |
+| **Lamar owner, Sherwin's 3 company** | **1,170.316** | **+0.003** | **1,715.274** | **+0.000** |
+| Lamar company, Sherwin's 3 owner | 1,237.717 | +67.40 | 1,812.236 | +96.96 |
+| Lamar company, Sherwin's 3 company | 1,251.422 | +81.11 | 1,827.130 | +111.86 |
+
+Only one row matches, to a third of a cent. ISO Hub implements Lamar's owner funding as a 25% split
+for Bruce (change-log row 273), so it charges Bruce for Lamar. It does **not** charge him for
+Sherwin's 3. Sherwin's ISO Hub total also equals the CRM's net/2 plus 5% of his 3 (13,503.13 /
+12,852.67), so ISO Hub pays Sherwin that 5% on top.
+
+**Corrected §4.5 itemization for Bruce** (CRM after the change minus ISO Hub):
+
+| Month | Lamar | Sherwin's 3 | 79 Plumlee overrides ISO Hub doesn't have | CRM rounding | Total |
+| --- | --- | --- | --- | --- | --- |
+| Aug | 81.11 | 0.00 | 241.18 (448.49 − 207.31) | 0.02 | 322.31 |
+| Sep | 111.86 | 0.00 | 559.86 (760.29 − 200.43) | 0.02 | 671.74 |
+
+**Today's** gap (227.49 / 544.98) is the 79-override piece **minus** Sherwin's 3 (241.18 − 13.71 /
+559.86 − 14.90). The CRM currently charges Bruce for Sherwin's 3 and ISO Hub does not. Bruce's CRM
+figure only looked equal to ISO Hub apart from the 79-override piece because those two pieces offset.
+
+- **For ISO Hub parity, the decided all-company funding is right for Sherwin's 3** (the CRM matches ISO
+  Hub after the change).
+- **For Lamar, all-company funding is a deliberate difference** of 81.11 / 111.86 against ISO Hub.
+  **Question:** keep Lamar company-funded as decided, or make it the one owner-funded override to match
+  ISO Hub? The runbook in §4.4 is unaffected either way: run the one-off for 92, then switch Lamar back
+  with `set_merchant_override_funding`. Or the script can skip it, with `expected_count` unchanged and
+  Lamar reported separately.
+
+**Q3. Confirm Q2 from ISO Hub itself.** The inference rests on totals. To confirm it per merchant,
+download ISO Hub's per-agent residual report: the export that produced `AgentResidualReportLumpSum.csv`,
+whose columns are `#, Processor, MID, MERCHANT NAME, SALES VOLUME, TRANSACTIONS, TOTAL INCOME,
+TOTAL EXPENSE, GROSS, NET, Bonus, Deduction, Agent Split(%), Agent Split`. Download it for **August
+2026 and September 2026, all processors**, for **Bruce Rozar, Dubble Bubbles Distributing Company LLC
+(Sherwin) and Plumlee LLC**. The copy in Downloads (6 Nov) is Bruce's with all-zero totals, so it was
+run for a month or filter with no data. On it, Lamar should show Agent Split(%) 25 for Bruce, Sherwin's
+3 should show no deduction to Bruce, and the 45 Smokes should show Plumlee's extra 50%.
+
+**Q4 (minor). Sherwin's net in the load files is higher than in the CRM and ISO Hub.** Summing the
+load files over `Merchants-final.csv`'s Dubble Bubbles merchants gives 27,217.80 (Aug) / 25,958.73 (Sep),
+against 26,978.85 / 25,675.55 in both the CRM and ISO Hub (a difference of 238.95 / 283.18). Some
+residual on those MIDs is paid to neither system's Sherwin. The likely causes are shared accounts or
+non-residual income rows, but this was not traced. It does not affect overrides.
