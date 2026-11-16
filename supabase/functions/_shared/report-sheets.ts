@@ -56,6 +56,12 @@ export type MerchantSummaryRow = {
   volume: number;
   residual: number;
   rep_side: number;
+  /**
+   * The MID's committed company-funded override credits in the
+   * processor-month (20261116120000): money out of the company's share.
+   * residual = rep_side + company_overrides + company_share.
+   */
+  company_overrides: number;
   company_share: number;
 };
 
@@ -85,6 +91,7 @@ export const MERCHANT_FIGURES = [
   ["volume", "Volume"],
   ["residual", "Residual"],
   ["rep_side", "Rep side"],
+  ["company_overrides", "Overrides from company"],
   ["company_share", "Company share"],
 ] as const satisfies readonly (readonly [keyof MerchantSummaryRow, string])[];
 

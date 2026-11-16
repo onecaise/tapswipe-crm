@@ -5,6 +5,7 @@ import { requireAdmin } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { formatDate, formatPeriod } from "@/lib/format";
 import { loadProcessors } from "@/lib/processors";
+import { COMPANY_FUNDER } from "@/lib/overrides";
 import {
   REPORT_TABS,
   detailKey,
@@ -196,7 +197,7 @@ async function loadOverrideDetail(
   if (batchIds.length === 0) return {};
   const { data: lineData } = await supabase
     .from("rep_payout_rows")
-    .select("id, agent_id, period, mid, merchant_name, batch_id, override_id, override_role, override_amount")
+    .select("id, agent_id, period, mid, merchant_name, batch_id, override_id, override_role, override_amount, override_funded_by")
     .eq("line_kind", "override")
     .in("batch_id", batchIds)
     .gte("period", filters.from)
@@ -205,6 +206,7 @@ async function loadOverrideDetail(
   type Line = {
     id: number; agent_id: string; period: string; mid: string; merchant_name: string | null;
     batch_id: number; override_id: number; override_role: "debit" | "credit"; override_amount: number | null;
+    override_funded_by: "owner" | "company" | null;
   };
   const lines = (lineData ?? []) as Line[];
   if (lines.length === 0) return {};
@@ -231,9 +233,13 @@ async function loadOverrideDetail(
   const details: Record<string, OverrideDetail[]> = {};
   for (const line of lines) {
     const override = overrides.get(line.override_id);
+    // A company-funded credit has no debit line: the company pays it
+    // (20261116120000), and the line says so rather than naming nobody.
     const counterpart = line.override_role === "debit"
       ? (override ? names.get(override.recipient_id) ?? null : null)
-      : [...(debtors.get(`${line.batch_id}|${line.override_id}`) ?? [])].sort().join(" and ") || null;
+      : line.override_funded_by === "company"
+        ? COMPANY_FUNDER
+        : [...(debtors.get(`${line.batch_id}|${line.override_id}`) ?? [])].sort().join(" and ") || null;
     const key = detailKey(line.agent_id, line.period);
     (details[key] ??= []).push({
       id: line.id,

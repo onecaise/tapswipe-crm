@@ -1,9 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { createClient } from "@supabase/supabase-js";
+
 import {
+  E2E_PASSWORD,
   PERSONAS,
+  createOverrideFixture,
   overrideCardMerchant,
   overridesOn,
+  publicStackConfig,
   setOverrideAsAdmin,
   storageStateFor,
 } from "./fixtures/seed";
@@ -21,6 +26,13 @@ import { service } from "./qa/qa-stack";
  * database's own sentence when it refuses, changes an override by starting a
  * new one (the old one ended at that month), cancels an unused one -- and
  * that the owner's page has no card and no action at all.
+ *
+ * Funding (20261116120000, docs/design/override-funding.md): the form asks
+ * who pays with neither choice made, says what each choice means in money,
+ * and will not save without one; "Change who pays" is refused while a month
+ * the override paid is marked paid, saved with a reason once it is reopened,
+ * and the month then waits on Payouts for a replace; a company-funded
+ * override shows nothing on its owner's statement.
  */
 
 /** This month (UTC) as an <input type="month"> value and as words. */
@@ -48,16 +60,33 @@ async function personaId(persona: keyof typeof PERSONAS): Promise<string> {
 
 const card = (page: Page) => page.getByTestId("merchant-override-card");
 
-async function setOverride(page: Page, pct: string, month: string): Promise<void> {
+const PAID_FROM = { owner: "The owner's side", company: "The company's share" } as const;
+
+async function setOverride(
+  page: Page,
+  pct: string,
+  month: string,
+  funded: keyof typeof PAID_FROM = "owner",
+): Promise<void> {
   await card(page).getByLabel("Percent of the full residual").fill(pct);
+  await card(page).getByRole("radio", { name: PAID_FROM[funded] }).check();
   await card(page).getByLabel("First month it applies to").fill(month);
   await card(page).getByRole("button", { name: "Save override" }).click();
+}
+
+/** The admin persona's own session, for what a test arranges rather than tests. */
+async function adminClient() {
+  const { apiUrl, publishableKey } = publicStackConfig();
+  const admin = createClient(apiUrl, publishableKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  const { error } = await admin.auth.signInWithPassword({ email: PERSONAS.admin.email, password: E2E_PASSWORD });
+  if (error) throw new Error(error.message);
+  return admin;
 }
 
 test.describe("as the admin", () => {
   test.use({ storageState: storageStateFor("admin") });
 
-  test("sets one: the manager prefilled, the worked example shown, saved, audited and in force", async ({ page }) => {
+  test("sets one: the manager prefilled, who pays chosen with no default, the example per choice, saved, audited, in force", async ({ page }) => {
     const id = await overrideCardMerchant("Set");
     const month = thisMonth();
     await page.goto(`/merchants/${id}`);
@@ -71,23 +100,41 @@ test.describe("as the admin", () => {
     await expect(card(page).getByRole("option", { name: PERSONAS.agent.fullName, exact: true })).toHaveCount(0);
 
     await card(page).getByLabel("Percent of the full residual").fill("10");
+    await card(page).getByLabel("First month it applies to").fill(month.input);
+    // "Paid from": neither choice made, and no save without one.
+    for (const label of Object.values(PAID_FROM)) {
+      await expect(card(page).getByRole("radio", { name: label })).not.toBeChecked();
+    }
     await expect(card(page).getByTestId("override-problem")).toHaveText(
-      "On a $100 residual: the recipient gets $10.00, the rep keeps $40.00 of the $50.00 rep side, and the company keeps $50.00.",
+      "Choose who pays it: the owner's side or the company's share.",
     );
-    await setOverride(page, "10", month.input);
+    await expect(card(page).getByRole("button", { name: "Save override" })).toBeDisabled();
+    // The worked example follows the choice.
+    await card(page).getByRole("radio", { name: PAID_FROM.owner }).check();
+    await expect(card(page).getByTestId("override-problem")).toHaveText(
+      "On a $100 residual: the recipient gets $10.00, the owner keeps $40.00 of the $50.00 rep side, and the company keeps $50.00.",
+    );
+    await card(page).getByRole("radio", { name: PAID_FROM.company }).check();
+    await expect(card(page).getByTestId("override-problem")).toHaveText(
+      "On a $100 residual: the recipient gets $10.00, the owner keeps the full $50.00 rep side, and the company keeps $40.00 of its $50.00.",
+    );
+    await card(page).getByRole("button", { name: "Save override" }).click();
 
     await expect(card(page).getByTestId("merchant-override-in-force")).toHaveText(
-      `In force: 10% of residual to ${PERSONAS.agent2.fullName}, from ${month.words}.`,
+      `In force: 10% of residual to ${PERSONAS.agent2.fullName}, paid from the company's share, from ${month.words}.`,
     );
     await expect(card(page).getByTestId("merchant-override-row")).toHaveCount(1);
+    await expect(card(page).getByTestId("merchant-override-funding")).toHaveText("Paid from the company's share");
+    // The form starts blank again: the next override is chosen afresh.
+    await expect(card(page).getByRole("radio", { name: PAID_FROM.company })).not.toBeChecked();
     expect(await overridesOn(id)).toEqual([
-      { recipient_id: await personaId("agent2"), override_pct: 10, effective_from: month.period, effective_to: null },
+      { recipient_id: await personaId("agent2"), override_pct: 10, effective_from: month.period, effective_to: null, funded_by: "company" },
     ]);
     const { data: saved } = await service().from("merchant_overrides").select("id").eq("merchant_id", id).single();
     const { data: audit } = await service()
-      .from("audit_log").select("action, actor_id")
+      .from("audit_log").select("action, actor_id, detail")
       .eq("table_name", "merchant_overrides").eq("row_id", String(saved!.id));
-    expect(audit).toEqual([{ action: "set_merchant_override", actor_id: await personaId("admin") }]);
+    expect(audit).toEqual([{ action: "set_merchant_override", actor_id: await personaId("admin"), detail: "funded_by=company" }]);
   });
 
   test("refuses above the merchant's rate before the round trip, and nothing is saved", async ({ page }) => {
@@ -96,7 +143,7 @@ test.describe("as the admin", () => {
     await card(page).getByLabel("Percent of the full residual").fill("50.01");
     await card(page).getByLabel("First month it applies to").fill(thisMonth().input);
     await expect(card(page).getByTestId("override-problem")).toHaveText(
-      "An override comes out of the rep side, so it cannot be more than this merchant's rate: 50.",
+      "An override cannot be more than this merchant's rate: 50.",
     );
     await expect(card(page).getByRole("button", { name: "Save override" })).toBeDisabled();
     expect(await overridesOn(id)).toEqual([]);
@@ -113,11 +160,12 @@ test.describe("as the admin", () => {
     // The form now says "Change"; a new start ends the open override.
     await expect(card(page).getByRole("heading", { name: "Change the override" })).toBeVisible();
     await card(page).getByLabel("Paid to").selectOption({ label: PERSONAS.agent3.fullName });
-    await setOverride(page, "7.5", next.input);
+    // The new one is paid by the company; the old one stays the owner's.
+    await setOverride(page, "7.5", next.input, "company");
     await expect(card(page).getByTestId("merchant-override-row")).toHaveCount(2);
     expect(await overridesOn(id)).toEqual([
-      { recipient_id: await personaId("agent2"), override_pct: 10, effective_from: now.period, effective_to: next.period },
-      { recipient_id: await personaId("agent3"), override_pct: 7.5, effective_from: next.period, effective_to: null },
+      { recipient_id: await personaId("agent2"), override_pct: 10, effective_from: now.period, effective_to: next.period, funded_by: "owner" },
+      { recipient_id: await personaId("agent3"), override_pct: 7.5, effective_from: next.period, effective_to: null, funded_by: "company" },
     ]);
 
     // Starting another one in the same month as the open one: refused by the
@@ -138,6 +186,69 @@ test.describe("as the admin", () => {
     await card(page).getByRole("button", { name: "Delete override" }).click();
     await expect(card(page).getByTestId("merchant-override-row")).toHaveCount(0);
     expect(await overridesOn(id)).toEqual([]);
+  });
+
+  test("change who pays: refused while its month is paid, saved with a reason after Reopen; the month then waits for a replace", async ({ page }) => {
+    const fx = await createOverrideFixture("funding");
+    const period = `${fx.period}-01`;
+    const words = new Date(`${period}T00:00:00Z`).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+    const { data: batch } = await service().from("rep_payout_batches").select("processor").eq("id", fx.batchId).single();
+    const processor = batch!.processor as string;
+    const label = `${processor} ${words}`;
+    const admin = await adminClient();
+    const { error: paidError } = await admin.rpc("close_payout_period", {
+      period_input: period, processor_input: processor, confirmation_input: label,
+    });
+    expect(paidError).toBeNull();
+    try {
+      await page.goto(`/merchants/${fx.plain.merchantId}`);
+      const row = card(page).getByTestId("merchant-override-row");
+      await expect(row.getByTestId("merchant-override-funding")).toHaveText("Paid from the owner's side");
+      await row.getByRole("button", { name: "Change who pays" }).click();
+      await expect(row.getByRole("alert")).toHaveText(
+        `${label} is marked paid. Reopen it (with a reason) before changing who pays this override.`,
+      );
+      await expect(row.getByRole("button", { name: "Save who pays" })).toHaveCount(0);
+
+      const { error: reopenError } = await admin.rpc("reopen_payout_period", {
+        period_input: period, processor_input: processor, reason_input: "e2e: changing who pays an override",
+      });
+      expect(reopenError).toBeNull();
+      await page.reload();
+      await row.getByRole("button", { name: "Change who pays" }).click();
+      await expect(row.getByText("Switch to: paid from the company's share.")).toBeVisible();
+      await expect(row.getByText(`${label}: will need a replace to take effect.`)).toBeVisible();
+      await expect(row.getByRole("button", { name: "Save who pays" })).toBeDisabled();
+      await row.getByLabel("Reason").fill("Paid from the company's share, as ISO Hub pays it.");
+      await row.getByRole("button", { name: "Save who pays" }).click();
+      await expect(row.getByTestId("merchant-override-funding")).toHaveText("Paid from the company's share");
+      await expect(row.getByTestId("merchant-override-stale")).toHaveText(
+        `Who pays it changed after ${label} was committed. Replace that month on Payouts to apply it.`,
+      );
+
+      // Payouts: the month says so, and offers no Mark paid until it is replaced.
+      await page.goto("/payouts");
+      const month = page.getByTestId("processor-month")
+        .filter({ has: page.getByRole("link", { name: "e2e-override-funding.xlsx" }) });
+      await expect(month.getByText("Override funding changed: replace this month to apply (1 override)")).toBeVisible();
+      await expect(month.getByRole("button", { name: `Mark paid: ${label}` })).toHaveCount(0);
+    } finally {
+      // Leave the month as other runs expect it: not paid, and its funding the lines'.
+      const { data: open } = await service().from("payout_period_closures").select("period")
+        .eq("processor", processor).eq("period", period);
+      if ((open ?? []).length > 0) {
+        await admin.rpc("reopen_payout_period", {
+          period_input: period, processor_input: processor, reason_input: "e2e cleanup: reopening its own month",
+        });
+      }
+      const { data: ov } = await service().from("merchant_overrides").select("id, funded_by")
+        .eq("merchant_id", fx.plain.merchantId).single();
+      if (ov && ov.funded_by !== "owner") {
+        await admin.rpc("set_merchant_override_funding", {
+          override_id_input: ov.id, funded_by_input: "owner", reason_input: "e2e cleanup: back to the owner",
+        });
+      }
+    }
   });
 
   test("fits a 360px phone, every control 44px tall", async ({ page }) => {
@@ -162,6 +273,18 @@ test.describe("as the admin", () => {
 
 test.describe("as the owner", () => {
   test.use({ storageState: storageStateFor("agent") });
+
+  test("a company-funded override shows nothing on the owner's statement", async ({ page }) => {
+    const fx = await createOverrideFixture("company", "company");
+    await page.goto(`/payouts/${fx.period}`);
+    await expect(page.getByText(fx.plain.dba).filter({ visible: true }).first()).toBeVisible();
+    // The fixture's three merchants are the owner's; with company funding none
+    // carries a debit line, so the owner's Overrides block lists none of them.
+    await expect(
+      page.getByTestId("payout-override-line").filter({ visible: true })
+        .filter({ hasText: /E2E Override (Plain|Shared|Clawback) company/ }),
+    ).toHaveCount(0);
+  });
 
   test("the merchant page has no override card and no override action, even with one in force", async ({ page }) => {
     const id = await overrideCardMerchant("Rep View");

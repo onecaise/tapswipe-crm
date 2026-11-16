@@ -360,7 +360,7 @@ describe("replace (commit_residual_import_v3 on a replacement batch)", () => {
     await db.exec(`delete from audit_log`);
 
     const result = await commitV3(db, next);
-    expect(result).toEqual({ written: 1, rows: 1, shared: 0, overrides: 0, replaced_lines: 2 });
+    expect(result).toEqual({ written: 1, rows: 1, shared: 0, overrides: 0, company_overrides: 0, replaced_lines: 2 });
 
     expect(await linesOf(`period = '${old.period}' and processor = '${PROCESSOR}'`)).toEqual([
       { mid: "MID-AGENT-1", agent_id: AGENT_ID, residual: "90.00", batch_id: next, line_kind: "import", share_role: null },

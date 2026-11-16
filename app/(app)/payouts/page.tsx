@@ -215,7 +215,7 @@ async function ProcessorMonths() {
   if (profile.role !== "admin") return null;
 
   const supabase = await createClient();
-  const [batches, closures, reps] = await Promise.all([
+  const [batches, closures, reps, pending] = await Promise.all([
     supabase
       .from("rep_payout_batches")
       .select("id, file_name, processor, period, committed_at")
@@ -228,9 +228,12 @@ async function ProcessorMonths() {
       .select("id, full_name")
       .eq("is_active", true)
       .order("full_name", { ascending: true }),
+    // Months whose override lines carry another funding than their override's
+    // now (20261116120000): replace them to apply it; Mark paid waits.
+    supabase.rpc("override_funding_pending"),
   ]);
 
-  const error = batches.error ?? closures.error ?? reps.error;
+  const error = batches.error ?? closures.error ?? reps.error ?? pending.error;
   if (error) {
     return (
       <p className="text-sm text-destructive">
@@ -249,6 +252,11 @@ async function ProcessorMonths() {
     ),
   );
   const activeReps = (reps.data ?? []) as { id: string; full_name: string }[];
+  const stale = new Map(
+    ((pending.data ?? []) as { processor: string; period: string; override_count: number }[]).map(
+      (p) => [`${p.processor}|${p.period}`, Number(p.override_count)],
+    ),
+  );
 
   return (
     <section className="flex flex-col gap-3" aria-labelledby="processor-months">
@@ -295,6 +303,7 @@ async function ProcessorMonths() {
                       processor={month.processor}
                       label={payoutMonthLabel(month.processor, month.period)}
                       closedAt={closedAt}
+                      staleOverrides={stale.get(`${month.processor}|${month.period}`) ?? 0}
                     />
                     {closedAt !== null && (
                       <PayoutAdjustmentForm

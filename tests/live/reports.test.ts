@@ -109,11 +109,11 @@ describe("rep_payout_summary and merchant_processor_summary over PostgREST", () 
   it("an admin gets Report 2's rows", async () => {
     const { data, error } = await userClient(fx.tokens.admin).rpc("merchant_processor_summary", args());
     expect(error).toBeNull();
-    expect((data as Record<string, unknown>[]).map((r) => [r.row_kind, r.mid, r.residual, r.rep_side, r.company_share]))
+    expect((data as Record<string, unknown>[]).map((r) => [r.row_kind, r.mid, r.residual, r.rep_side, r.company_overrides, r.company_share]))
       .toEqual([
-        ["merchant", "LIVE-REPORT-1", 123.45, 61.73, 61.72],
-        ["processor", null, 123.45, 61.73, 61.72],
-        ["total", null, 123.45, 61.73, 61.72],
+        ["merchant", "LIVE-REPORT-1", 123.45, 61.73, 0, 61.72],
+        ["processor", null, 123.45, 61.73, 0, 61.72],
+        ["total", null, 123.45, 61.73, 0, 61.72],
       ]);
   });
 

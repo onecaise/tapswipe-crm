@@ -128,7 +128,7 @@ beforeAll(async () => {
   if (shareError) throw new Error(`share: ${shareError.message}`);
   const { error: overrideError } = await asAdmin.rpc("set_merchant_override", {
     merchant_id_input: plain, recipient_id_input: fx.userIds.admin, override_pct_input: 5,
-    effective_from_input: first.period,
+    effective_from_input: first.period, funded_by_input: "owner",
   });
   if (overrideError) throw new Error(`override: ${overrideError.message}`);
 

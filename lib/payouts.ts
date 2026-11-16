@@ -143,6 +143,12 @@ export type PayoutRow = {
   override_role: OverrideRole | null;
   override_amount: number | null;
   /**
+   * Who paid the override, as at commit (20261116120000): 'owner' (the
+   * line pair has a debit) or 'company' (a credit only). Null off override
+   * lines. A rep page shows it nowhere; an admin's credit label does.
+   */
+  override_funded_by: "owner" | "company" | null;
+  /**
    * The share snapshot, read ONLY on admin pages (PAYOUT_SHARE_ADMIN_COLUMNS).
    * Absent on a rep's rows by construction: a rep page never selects them,
    * so the partner's share cannot be rendered there even by mistake.
@@ -194,7 +200,7 @@ export function splitPayoutLines<T extends { line_kind?: PayoutLineKind | null }
  * recomputing it here from two strings.
  */
 export const PAYOUT_ROW_COLUMNS =
-  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id, processor, line_kind, adjustment_amount, adjusts_period, adjustment_note, rep_share_id, share_role, override_id, override_role, override_amount";
+  "id, agent_id, period, mid, merchant_name, merchant_id, volume, average_ticket, total_cost, residual_income, rep_split_pct, rep_payout, batch_id, processor, line_kind, adjustment_amount, adjusts_period, adjustment_note, rep_share_id, share_role, override_id, override_role, override_amount, override_funded_by";
 
 /**
  * The shared-account snapshot, added to PAYOUT_ROW_COLUMNS on ADMIN pages

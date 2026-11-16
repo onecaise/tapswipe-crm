@@ -24,12 +24,17 @@ import { Input } from "@/components/ui/input";
  *
  * Paid is what stops a replace or a delete of the month; a paid month is then
  * corrected with an adjustment line.
+ *
+ * A month whose override lines carry another funding than their overrides'
+ * now (override_funding_pending(), 20261116120000) says so and offers no Mark
+ * paid until it is replaced; close_payout_period() refuses it anyway.
  */
 export function PayoutMonthPaid({
   period,
   processor,
   label,
   closedAt,
+  staleOverrides = 0,
 }: {
   period: string;
   processor: string;
@@ -37,6 +42,8 @@ export function PayoutMonthPaid({
   label: string;
   /** When it was marked paid, or null when it is not. */
   closedAt: string | null;
+  /** Overrides whose funding changed after this month was committed. */
+  staleOverrides?: number;
 }) {
   const router = useRouter();
 
@@ -86,7 +93,13 @@ export function PayoutMonthPaid({
         ) : (
           <StatusBadge intent="success">paid {formatDate(closedAt)}</StatusBadge>
         )}
-        {mode === null && (
+        {staleOverrides > 0 && (
+          <StatusBadge intent="warning">
+            Override funding changed: replace this month to apply ({staleOverrides} override
+            {staleOverrides === 1 ? "" : "s"})
+          </StatusBadge>
+        )}
+        {mode === null && !(closedAt === null && staleOverrides > 0) && (
           <Button
             type="button"
             size="sm"
