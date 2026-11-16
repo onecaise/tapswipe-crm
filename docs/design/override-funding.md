@@ -1,8 +1,18 @@
 # Override funding: from the owner's share or from the company's share
 
-Design only (16 Nov 2026). No code, no migration, nothing pushed. Written on branch
-`plumlee-bruce-overrides` (after `2701254`). The build branches off master **after** that branch is
-merged (§5.4). The owner's decisions of 16 Nov 2026 are recorded in §7.
+Design written 16 Nov 2026 on branch `plumlee-bruce-overrides` (after `2701254`); **built the same
+day on `override-funding`** (`a6c61b9`: migration `20261116120000`, the UI, the script, the tests).
+The deploy plan is `docs/claude/deploy-override-funding.md`. The owner's decisions of 16 Nov 2026
+are recorded in §7.
+
+> **Final decision on the existing overrides (16 Nov 2026, after §8), which supersedes the text
+> below wherever they differ:** of the 92 overrides, **91 become company-funded** (the 88 on Plumlee
+> LLC merchants to Bruce, 103, and Sherwin's 3 to 105). **The Lamar County Justice Court 25% to
+> Plumlee (108) stays owner-funded, to match ISO Hub** (§8 Q2). The script is
+> `scripts/set-override-funding.sql` (§4.4 describes it; it asserts 103 → 88, 105 → 3, 108 → 1,
+> total 92, and changes only the 91). §4.5's table is restated for this decision; §8's Bruce
+> itemization keeps only the 79-override line. As built, the rest of this design holds; what the
+> build added or changed is in §9.
 
 Read with: `docs/claude/payouts-and-teardown.md` (Overrides, Reports, Replace / Mark paid),
 `docs/design/intake-and-reports.md` §4 and phase 10, and `20261102120000_merchant_overrides.sql`.
@@ -27,9 +37,10 @@ An override is paid from one of two places, chosen **per override**:
 
 (The figures are a $100 residual, a merchant rate of 50 and a 5% override.)
 
-**Update, 16 Nov 2026: every existing override becomes company-funded**, the Lamar County Justice
-Court 25% to Plumlee included. A single override can be switched back to owner-funded afterwards
-under the same audited, admin-only rule (§4).
+**Update, 16 Nov 2026: every existing override but one becomes company-funded.** (An earlier
+update included the Lamar County Justice Court 25% to Plumlee; the final decision keeps it
+owner-funded, as ISO Hub pays it.) Any single override can be switched either way afterwards under
+the same audited, admin-only rule (§4).
 
 ---
 
@@ -411,92 +422,68 @@ recipient, percent and months), because no override boundary can move at or befo
 month. The funding is the one deliberate exception, and that is why it has its own audited function,
 the paid-month refusal and the stale flag.
 
-### 4.4 The one-off for the 92 existing overrides (runbook, dev first, then prod)
+### 4.4 The one-off for the existing overrides: 91 change, Lamar stays (runbook, dev first, then prod)
 
 **The count is 92** (decided 16 Nov 2026): 88 overrides on Plumlee LLC merchants paid to Bruce
 Rozar (103), 3 paid to Sherwin Anderson (105), and the Lamar County Justice Court 25% paid to
-Plumlee LLC (108). All 92 become company-funded.
+Plumlee LLC (108). **91 become company-funded; Lamar stays owner-funded** (final decision, after
+§8 Q2: it matches ISO Hub, which charges Bruce for it).
 
-**Pre-check count**, `scripts/set-override-funding-company-counts.sql` (read-only, SQL Editor, no
-names, emails or ids): one row per recipient's `agent_number` × `funded_by`, with columns:
+**As built** (`a6c61b9`): `scripts/set-override-funding.sql` and the read-only
+`scripts/set-override-funding-counts.sql`. The deploy plan, with every expected reading, is
+`docs/claude/deploy-override-funding.md` §5b.
 
-- `overrides`: the total;
-- `on_plumlee_merchants`: those whose merchant is owned by the `llc_legal_name = 'Plumlee LLC'`
-  profile;
-- `live`: according to `merchant_has_live_override()`;
-- `with_committed_lines`;
+**The counts file** (one grid; the SQL Editor shows only the last result, so every pre-check is one
+query, one row per finding: `section, item, n, amount`): overrides by recipient × funding and the
+total; the 88 on Plumlee merchants and Lamar's; the paid months of August and September 2026; the
+committed processor-months touched by the 91; `override_funding_pending()`'s rows; adjustments on
+those months; drift since commit; override debits and credits by agent and month. Before the
+change it reads `103 owner 88`, `105 owner 3`, `108 owner 1`, `total 92`; after it,
+`103 company 88`, `105 company 3`, `108 owner 1`, `total 92`.
 
-plus a total row. The expected result before the change:
-
-| recipient | funded_by | overrides | on_plumlee_merchants |
-| --- | --- | --- | --- |
-| 103 | owner | 88 | 88 |
-| 105 | owner | 3 | 0 |
-| 108 | owner | 1 | 0 |
-| **total** | | **92** | **88** |
-
-After the change, the same rows read `company`. The same file also holds the other read-only
-pre-checks in step 2 below, so a single paste answers all of them.
-
-`scripts/set-override-funding-company.sql` is a SQL Editor one-off with the same shape as
-`scripts/add-plumlee-bruce-overrides.sql`:
+**The script** has the same shape as `scripts/add-plumlee-bruce-overrides.sql` (retired, §5.4):
 
 - It ships as a **dry run** (`do_commit := false`), so the report comes back as a rolled-back error
   that starts with "DRY RUN".
-- `expected_count constant int := 92`. The script **counts the overrides on the project it is run
-  against** and asserts that the number found is exactly `expected_count`. The dry-run report
-  **prints the number found** (with the per-recipient breakdown above) whether or not it matches.
-  A mismatch aborts before anything is written, and the message says "found N, expected 92". It
-  never takes "every override there is" as the count. On dev, the constant is edited to dev's own
-  number, which the counts file shows.
-- It takes `lock_timeout 10s` and, as the admin, uses a transaction-local role `authenticated` plus
-  JWT claims.
-- It calls `set_merchant_override_funding(id, 'company', '<reason>')` **for every override**. It
-  never updates the table directly.
-- It aborts before writing if any of these fail:
-  - the count matches;
-  - no touched month is marked paid. Otherwise it lists the blocking processor-months and stops;
-  - no override is already `'company'`. A re-run then reports "nothing to do" instead of writing
-    audit rows that change nothing.
-- After writing it re-checks:
-  - every override is now `'company'`;
-  - there are exactly 92 `set_override_funding` audit rows from this run, with the admin as actor;
-  - nothing else in `merchant_overrides` moved (byte-for-byte as before, apart from `funded_by`).
-- It prints counts and the stale processor-months.
-- PGlite and live tests run both files as pasted.
+- **Before changing anything it asserts the tally by recipient on the project it is run against**:
+  103 → 88 (all on Plumlee LLC merchants), 105 → 3, 108 → 1 (on Lamar's MID `30119964826`),
+  92 in total. Any other number aborts with **"found N, expected M"** for each line that differs,
+  plus the numbers found. The constants are the owner's decision; they are never edited to fit.
+- It changes **only the 91**: every override but Lamar's, which must be owner-funded (it aborts if
+  not). If the 91 are already company-funded it reports "nothing to do"; if only some are, it aborts
+  (a half-applied state is a question, not a re-run).
+- It aborts, naming them, if any processor-month carrying lines of the 91 is marked paid.
+- As the admin (a transaction-local role `authenticated` plus JWT claims) it calls
+  `set_merchant_override_funding(id, 'company', reason)` for each, with a written reason. It never
+  updates the table directly and has no exception handler.
+- After writing it re-checks: 91 company, Lamar owner; exactly 91 `set_override_funding` audit rows
+  by the admin and no other audit row; every other column of every override byte-for-byte as before.
+- It prints the **final tally** (`91 company, 1 owner, 92 in total`, and by recipient) and the
+  committed months to replace; in commit mode the same as a one-row grid.
+- PGlite (`tests/rls/set-override-funding.test.ts`) and the local stack as the editor's
+  non-superuser role (`tests/live/set-override-funding.test.ts`) run both files as pasted.
 
-The order of work, in full:
+The order of work (in full, with expected readings, in the deploy plan):
 
-0. **Merge `plumlee-bruce-overrides` into master first** (§5.4). The funding work is a new branch
-   off master after that merge.
-1. Ship the migration and app together (dev, then prod via `scripts/push-prod-migration.ps1 -DryRun`
-   first; functions: `export-report`). Every existing override is then `'owner'`, and every existing
-   override line carries `override_funded_by = 'owner'` (§2.3). Nothing is stale.
-2. **Pre-checks, read-only, on prod** (the counts file):
-   1. **The count by recipient** is the table above: 92 in total.
-   2. `override_funding_pending()` is empty.
-   3. No adjustment line adjusts August or September 2026 under any affected processor. Such a line
-      would refuse the replace.
-   4. **Drift check:** no merchant in the August/September batches has changed owner, rate or MID
-      since commit. A replace re-pays the whole file from the merchants **as they are now**, not only
-      the override lines (§6, R1).
-   5. Debits per rep per month, to confirm §4.5's attribution exactly.
-3. **Reopen each September 2026 processor-month that any override touched** (the dry run lists them)
-   with a reason, e.g. "Overrides move to company funding (owner decision, 16 Nov 2026); replacing
-   with the same file." This is the decided route (D6).
-4. Run the one-off: dry run (check that it says found 92), then commit.
+0. `plumlee-bruce-overrides` is merged into master (done before the build; §5.4).
+1. Ship the migration, `export-report` and the app (dev, then prod). Every existing override is
+   then `'owner'`, and every existing override line carries `override_funded_by = 'owner'` (§2.3).
+   Nothing is stale and no figure changes.
+2. **Pre-checks, read-only, on prod** (the counts file): the tally; nothing pending; no adjustment
+   on August or September 2026; no drift since commit; the debits by owner and month.
+3. **Reopen each September 2026 processor-month that the 91 touched**, with a reason (D6).
+4. Run the script: dry run, then commit.
 5. **Replace** each processor-month `override_funding_pending()` lists, August and September, with
    the same files.
 6. Compare Report 1 for August and September with ISO Hub's Agent Commissions (§4.5).
-7. **Mark paid** the September processor-months again (typed phrase), but only once step 6's
-   differences are the expected ones (§4.5).
+7. **Mark paid** the September processor-months again, once step 6's differences are the expected
+   ones. `close_payout_period` refuses a month still pending.
 
 **Fallback only (D6):** if step 3 or step 5 cannot be done for a September processor-month, for
-example because an adjustment already adjusts it, that month stays paid. The difference is then
-posted with `post_payout_adjustment` in the open month instead: Plumlee +760.29 and Bruce +126.76,
-per affected processor and MID. This needs one variant of §4.1: an override whose touched paid
-months are left stale on purpose, recorded in the audit `detail`. It is designed only if it is
-needed.
+example because an adjustment already adjusts it, that month stays paid. The difference would then
+be posted with `post_payout_adjustment` in the open month: Plumlee +760.29 and Bruce +14.90 for
+September, per processor and MID. That needs a variant of §4.1 (touched paid months left stale on
+purpose, recorded in the audit `detail`), designed only if needed.
 
 ### 4.5 Expected effect on Report 1, and the comparison with ISO Hub
 
@@ -507,79 +494,64 @@ needed.
 - ISO Hub's `Agent_Commissions_Aug_2026.xlsx` and `Agent_Commissions_Sep_2026.xlsx`
   (`C:\Users\owen\iso-hub-export`), TOTAL AGENT COMMISSION column only. Those files also carry bank
   routing and account columns, which this design does not copy;
+- the load files in `C:\Users\owen\iso-hub-export\to-load` for the residuals behind them (§8);
 - the rule above: a company-funded override removes the owner's debit and leaves the credit.
 
-**The new split is the old split minus the debits the rep holds. Overrides received do not change.**
+**The new split is the old split minus the debits the rep holds on the overrides that change.
+Overrides received do not change.**
 
-**Who holds the debits.** This is inferred from the exports and confirmed exactly by pre-check 2.5
-before it is relied on. Every rep's split is half their net residual, apart from per-line rounding,
-except Plumlee and Bruce:
+**Who holds the debits.** This is inferred from the exports, and confirmed exactly by the counts
+file's `8 debits` before it is relied on. Every rep's split is half their net residual, apart from
+per-line rounding, except Plumlee and Bruce:
 
 | Month | Plumlee: net/2 − split | Bruce's credits | Bruce: net/2 − split | Plumlee's + Sherwin's credits |
 | --- | --- | --- | --- | --- |
 | Aug | 4,485.04 − 4,036.57 = 448.47 | 448.49 | 1,044.11 − 949.31 = 94.80 | 81.11 + 13.71 = 94.82 |
 | Sep | 7,603.06 − 6,842.94 = 760.12 | 760.29 | 1,626.70 − 1,499.96 = 126.74 | 111.86 + 14.90 = 126.76 |
 
-So **Plumlee's merchants fund Bruce's 88 overrides**, and **Bruce's merchants (Lamar County Justice
-Court and the three behind Sherwin's credits) fund Plumlee's and Sherwin's**. Sherwin holds no debit.
-The few cents of difference are the per-line half-cent rounding of the import lines. The debit totals
-below equal the credits exactly, as v3 writes them.
+So **Plumlee's merchants fund Bruce's 88 overrides**, and **Bruce's merchants fund Lamar's 25% to
+Plumlee and Sherwin's 3**. Sherwin holds no debit. With Lamar staying owner-funded, **Bruce still
+pays Lamar** (81.11 / 111.86) and is relieved only of Sherwin's 3 (13.71 / 14.90); Plumlee is
+relieved of all of Bruce's 88 (448.49 / 760.29).
 
 | Rep | Month | Agent split now → after | Override received | **Total agent commission now → after** | Change | **ISO Hub** | CRM after − ISO Hub |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Plumlee LLC (108) | Aug | 4,036.57 → **4,485.06** | 81.11 | 4,117.68 → **4,566.17** | +448.49 | **5,786.65** | **−1,220.48** |
-| Bruce Rozar (103) | Aug | 949.31 → **1,044.13** | 448.49 | 1,397.80 → **1,492.62** | +94.82 | **1,170.31** | **+322.31** |
+| Bruce Rozar (103) | Aug | 949.31 → **963.02** | 448.49 | 1,397.80 → **1,411.51** | +13.71 | **1,170.31** | **+241.20** |
 | Sherwin Anderson (105) | Aug | 13,489.58 (unchanged) | 13.71 | 13,503.29 (unchanged) | 0.00 | **13,503.13** | +0.16 |
 | Plumlee LLC (108) | Sep | 6,842.94 → **7,603.23** | 111.86 | 6,954.80 → **7,715.09** | +760.29 | **11,135.17** | **−3,420.08** |
-| Bruce Rozar (103) | Sep | 1,499.96 → **1,626.72** | 760.29 | 2,260.25 → **2,387.01** | +126.76 | **1,715.27** | **+671.74** |
+| Bruce Rozar (103) | Sep | 1,499.96 → **1,514.86** | 760.29 | 2,260.25 → **2,275.15** | +14.90 | **1,715.27** | **+559.88** |
 | Sherwin Anderson (105) | Sep | 12,837.95 (unchanged) | 14.90 | 12,852.85 (unchanged) | 0.00 | **12,852.67** | +0.18 |
 
-The "all reps" total commission rises by the total of overrides received: August $29,341.69 →
-**$29,885.00** (+543.31) and September $32,878.28 → **$33,765.33** (+887.05). Report 2's company
-share falls by the same amounts, and the new "Overrides from company" column shows them. No other
-rep's row changes. The replace re-reads the same files, so volume, net residual and the other reps'
-splits are unchanged, provided pre-check 2.4 finds no drift.
+The "all reps" total commission rises by the company-funded overrides received: August $29,341.69 →
+**$29,803.89** (+462.20 = 448.49 + 13.71) and September $32,878.28 → **$33,653.47** (+775.19 =
+760.29 + 14.90). Report 2's **Overrides from company** totals those amounts and its company share
+falls by the same. No other rep's row changes. The replace re-reads the same files, so volume, net
+residual and the other reps' splits are unchanged, provided the counts file finds no drift.
 
 **How close "exact" can be.** ISO Hub rounds its totals differently from the CRM, which rounds every
 line. Across every rep this change does not touch (all of them except 103 and 108), the CRM and ISO
 Hub differ by up to **$0.46 in August** (Jonathan Pope 133; Taylor Thomas 111 is −0.42) and
-**$0.18 in September** (Sherwin). Sherwin is one of those: his +0.16 / +0.18 is rounding, and this
-change does not move it. "Lands on ISO Hub" below therefore means **within that rounding band**,
+**$0.18 in September** (Sherwin). "Lands on ISO Hub" therefore means **within that rounding band**,
 not to the cent.
 
-**Plumlee (108): does NOT land on ISO Hub. The change narrows the gap but leaves −$1,220.48
-(August) and −$3,420.08 (September).**
+**Plumlee (108): does not land on ISO Hub, by an accepted difference.** −$1,220.48 (August) and
+−$3,420.08 (September) are ISO Hub's 50% self-override on 45 of Plumlee's own Smokes merchants
+(§8 Q1), which the CRM does not pay (an override to the merchant's owner is refused). 50% of their
+residual is 1,220.50 / 3,420.25; the rest is the CRM's per-line rounding. No funding choice closes
+it.
 
-The brief asked this design to say Plumlee should land exactly. The two ISO Hub files do not
-support that. In ISO Hub, Plumlee is paid **$1,301.61 (Aug) / $3,532.11 (Sep)** above half of
-Plumlee's CRM net residual (8,970.08 / 15,206.12). In the CRM, the only addition to Plumlee's 50% is
-the Lamar override (81.11 / 111.86). That override is the same amount in both systems, and Plumlee
-holds no other debit after the change. So **no choice of override funding can close this gap**. Its
-cause is outside this design, and the most likely ones are:
-
-- ISO Hub credits Plumlee on merchants the CRM pays to someone else, such as the house account
-  (122, $54,068.40 net in August at rate 0) or another rep;
-- or overrides to Plumlee that the CRM does not have. A house merchant at rate 0 cannot carry an
-  override under D1.
-
-**This must be explained before step 7 (Mark paid September again).** The next step is ISO Hub's
-per-MID agent report for Plumlee (the `AgentResidualReportLumpSum` export) for August and September,
-compared MID by MID with the CRM's Plumlee lines and with the credits Plumlee receives.
-
-**Bruce (103): stays above ISO Hub by $322.31 (Aug) / $671.74 (Sep)**, itemized:
+**Bruce (103): above ISO Hub by $241.20 (Aug) / $559.88 (Sep)**, which is now one item:
 
 | Item | Aug | Sep | Why |
 | --- | --- | --- | --- |
-| Lamar County Justice Court, 25% to Plumlee | 81.11 | 111.86 | Company-funded here, so Bruce keeps his full 50%. Owner-funded in ISO Hub: Bruce is at 50% with the 25% coming out of his side (change-log row 273). |
-| Sherwin's 3 overrides | 13.71 | 14.90 | Company-funded here. Owner-funded from Bruce's side in ISO Hub. |
-| The 79 Plumlee overrides ISO Hub doesn't have | 227.49 | 544.98 | The CRM pays Bruce 5% on all 88 Plumlee merchants. ISO Hub pays him on 9. These amounts are the remainder, and equal **today's** gap (CRM now − ISO Hub: 1,397.80 − 1,170.31 = 227.49; 2,260.25 − 1,715.27 = 544.98), to within ISO Hub's rounding. Pre-check 2.5 can give them exactly as the sum of Bruce's credits on those 79 merchants. |
-| **Total** | **322.31** | **671.74** | |
+| The 79 Plumlee overrides ISO Hub doesn't pay | 241.18 | 559.86 | The CRM pays Bruce 5% on all 88 Plumlee merchants (`0b2e1d9`); ISO Hub pays him on 9 (207.31 / 200.43). 448.49 − 207.31; 760.29 − 200.43. |
+| Rounding | 0.02 | 0.02 | ISO Hub's totals. |
+| **Total** | **241.20** | **559.88** | |
 
-So the change **widens** Bruce's difference from ISO Hub by the Lamar and Sherwin items, and that is
-expected. The owner chose company funding for all 92, so the CRM deliberately differs from ISO Hub
-on Lamar and on Sherwin's 3. The 79-override difference was already there and comes from the 5%
-on every Plumlee merchant (`0b2e1d9`), which this change does not touch. That implies 9 overrides
-in ISO Hub worth about 221.00 (Aug) / 215.31 (Sep) to Bruce (448.49 − 227.49; 760.29 − 544.98).
+Lamar and Sherwin's 3 now match ISO Hub's funding (Lamar charged to Bruce, Sherwin's paid on top),
+so they no longer appear here. The 79-override difference is not this design's; it comes from the
+5% on every Plumlee merchant and is unchanged by any funding choice.
 
 **Sherwin (105): unchanged, and within rounding of ISO Hub** (+0.16 / +0.18) before and after.
 
@@ -759,8 +731,10 @@ four deletions as a merge-resolution commit. Merge Plumlee first.
 | **D3** | **The owner does not see a company-funded override on their statement.** The recipient still sees "Override received", and admins see "from the company's share". |
 | **D6** | **September: reopen, switch the funding, then replace August and September.** Adjustment lines are a fallback only (§4.4). |
 | **D9** | **The count is 92**: 88 on Plumlee merchants to Bruce, Sherwin's 3, and Lamar. A read-only count by recipient is a pre-check, the dry run prints the number found, and the script asserts the exact number found on the target project (§4.4). |
+| **D12** | **91 change, Lamar stays owner-funded** (after §8 Q2): the 88 Plumlee-merchant overrides to Bruce and Sherwin's 3 become company-funded; the Lamar County Justice Court 25% to Plumlee stays owner-funded to match ISO Hub. The script asserts 103 → 88, 105 → 3, 108 → 1, total 92, changes only the 91, and prints the final tally (91 company, 1 owner). |
+| **D2, D4, D5, D7, D8, D10** | Built as recommended below. |
 
-**Still recommended, not yet confirmed:**
+**Recommended, and built as recommended:**
 
 | # | Question | Recommendation |
 | --- | --- | --- |
@@ -850,3 +824,32 @@ load files over `Merchants-final.csv`'s Dubble Bubbles merchants gives 27,217.80
 against 26,978.85 / 25,675.55 in both the CRM and ISO Hub (a difference of 238.95 / 283.18). Some
 residual on those MIDs is paid to neither system's Sherwin. The likely causes are shared accounts or
 non-residual income rows, but this was not traced. It does not affect overrides.
+
+## 9. As built (16 Nov 2026, `a6c61b9`)
+
+What the build added to, or changed from, the text above. Everything else is as designed.
+
+- **Two more messages reworded**, because they said an override comes out of the owner's side:
+  `guard_merchant_split_and_owner` (re-created in the migration; moving a merchant with a live
+  override is still refused in both modes, D2) now says "This merchant has an override. End it before
+  moving the merchant."; commit v3's cap backstop says "An override cannot be more than the
+  merchant's rate". `set_merchant_override`'s rate-0 and owner-recipient messages likewise. The
+  migration re-creates the guard, so it is a seventh function in it.
+- **The stale-month flag** (§3) is on `/payouts` → Processor months, read from
+  `override_funding_pending()`: "Override funding changed: replace this month to apply (N
+  overrides)", with no Mark paid on an unpaid stale month.
+- **The override card** reads each override's touched months (`loadOverrideMonths()` in
+  `lib/overrides.ts`: committed months, paid or not, stale or not) for "Change who pays"; a paid
+  month replaces the Save with the sentence the database would give.
+- **The scripts are named** `scripts/set-override-funding.sql` and
+  `scripts/set-override-funding-counts.sql` (the design's working name had "-company"). The counts
+  file is one grid with nine sections (§4.4).
+- **Report 1's override detail** says "from Tapswipe (company share)" on a company-funded credit;
+  an admin's credit label on a statement adds "from the company's share".
+- **The migration was applied to the local stack through `docker exec psql`** (16 Nov 2026), and
+  recorded in its migration history, because the host could not reach the local database that day;
+  see the build report. Dev and prod take it the normal way (the deploy plan).
+- **Tests**: `tests/rls/override-funding.test.ts` (29), `tests/rls/set-override-funding.test.ts`
+  (13), `tests/live/override-funding.test.ts` (3), `tests/live/set-override-funding.test.ts` (4);
+  the existing override, report, commit, lock and reset tests take the explicit funding; three
+  Report 2 mutation proofs in `tests/rls/reports.test.ts`. `npm test`: 3143 passed, 131 files.

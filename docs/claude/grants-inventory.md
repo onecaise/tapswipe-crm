@@ -24,7 +24,7 @@ seven privileges DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE and UPDAT
 | `processors` | `20261023130000_processors.sql` | none | SELECT | SELECT | Reference list, changed only by migration. The service role reads it to check a chosen processor. |
 | `pre_app_tax_secrets` | `20261026140000_pre_app_tax_secrets.sql` | none | none | ALL | The fourth secrets table: zero policies, no client grant, Edge Function only (CLAUDE.md, "Three tiers"). |
 | `payout_period_closures` | `20261030120000_import_schema.sql` | none | SELECT | SELECT | Mark paid. Admin SELECT by policy; written only by `close_payout_period()` / `reopen_payout_period()` (definer). |
-| `merchant_overrides` | `20261102120000_merchant_overrides.sql` | none | SELECT | DELETE, SELECT | Admin SELECT by policy; written only by its three definer RPCs. The service role reads and deletes for the teardowns. |
+| `merchant_overrides` | `20261102120000_merchant_overrides.sql` | none | SELECT | DELETE, SELECT | Admin SELECT by policy; written only by its definer RPCs (set, end, cancel, and since `20261116120000` `set_merchant_override_funding`, which adds no grant). The service role reads and deletes for the teardowns. |
 
 Each migration starts with `revoke all … from` the Data API roles (and `public` on the two tables
 that have a sequence), then grants. That first revoke is load-bearing on the local stack: there,
