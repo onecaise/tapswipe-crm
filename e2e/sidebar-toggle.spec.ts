@@ -25,6 +25,14 @@ const sidebar = (page: Page) => page.locator("#app-sidebar");
 const hideButton = (page: Page) => page.getByRole("button", { name: "Hide menu" });
 const showButton = (page: Page) => page.getByRole("button", { name: "Show menu" });
 
+/**
+ * The app's JavaScript and nothing else. Next serves CSS from the same
+ * /_next/static/chunks/ directory, and the rule that hides the panel is in
+ * that CSS, so refusing the whole directory would refuse the very thing under
+ * test. A query string (dev cache-busting) is allowed after the extension.
+ */
+const APP_SCRIPTS = /\/_next\/static\/chunks\/.*\.js(\?.*)?$/;
+
 async function mainBox(page: Page) {
   const box = await page.locator("main").boundingBox();
   if (!box) throw new Error("main has no box");
@@ -90,14 +98,21 @@ test("remembers the choice across a reload, applied before any app script runs",
   await expect(sidebar(page)).toBeHidden();
   await expect(showButton(page)).toBeVisible();
 
-  // The no-flash claim. With every Next chunk refused, React never hydrates,
+  // The no-flash claim. With every Next script refused, React never hydrates,
   // so nothing but the inline pre-paint script can be hiding the panel — the
-  // server-rendered <aside> is in the HTML and would otherwise show.
-  await page.route("**/_next/static/chunks/**", (route) => route.abort());
+  // server-rendered <aside> is in the HTML and would otherwise show. The
+  // stylesheets still load: the hiding rule lives there.
+  const refused: string[] = [];
+  await page.route(APP_SCRIPTS, (route) => {
+    refused.push(route.request().url());
+    return route.abort();
+  });
   await page.goto("/dashboard");
   await expect(sidebar(page)).toBeAttached();
   await expect(sidebar(page)).toBeHidden();
-  await page.unroute("**/_next/static/chunks/**");
+  // Proof the block bit: scripts were asked for and refused.
+  expect(refused.length).toBeGreaterThan(0);
+  await page.unroute(APP_SCRIPTS);
 
   // Shown again is remembered too.
   await page.goto("/dashboard");
@@ -131,7 +146,34 @@ test("a phone keeps its drawer, even after hiding the sidebar at desktop width",
   await expect(page.getByRole("navigation")).toBeVisible();
   await expect(sidebar(page)).toHaveCSS("display", "flex");
 
-  await page.getByRole("button", { name: "Close navigation" }).click();
+  // Closed by the button inside the drawer. (The topbar's "Close navigation"
+  // is under the open drawer, so a phone user cannot tap it.) It sits at the
+  // drawer's top-right and is big enough for a thumb.
+  const closeButton = sidebar(page).getByRole("button", { name: "Close menu" });
+  await expect(closeButton).toBeVisible();
+  // Measured once the 200ms slide has finished, not mid-way through it.
+  await expect(sidebar(page)).toHaveCSS("transform", "matrix(1, 0, 0, 1, 0, 0)");
+  const drawerBox = (await sidebar(page).boundingBox())!;
+  const closeBox = (await closeButton.boundingBox())!;
+  expect(closeBox.width).toBeGreaterThanOrEqual(44);
+  expect(closeBox.height).toBeGreaterThanOrEqual(44);
+  expect(closeBox.x + closeBox.width).toBeLessThanOrEqual(drawerBox.x + drawerBox.width);
+  expect(closeBox.x).toBeGreaterThan(drawerBox.x + drawerBox.width / 2);
+  expect(closeBox.y).toBeLessThan(drawerBox.y + 64);
+  await closeButton.click();
+  await expect(sidebar(page)).toBeHidden();
+  await expect(hamburger).toBeVisible();
+
+  // Closed by tapping the dimmed area beside it.
+  await hamburger.click();
+  await expect(sidebar(page)).toBeVisible();
+  await page.mouse.click(PHONE.width - 20, PHONE.height / 2);
+  await expect(sidebar(page)).toBeHidden();
+
+  // And by Escape, as before.
+  await hamburger.click();
+  await expect(sidebar(page)).toBeVisible();
+  await page.keyboard.press("Escape");
   await expect(sidebar(page)).toBeHidden();
 });
 

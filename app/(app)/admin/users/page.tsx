@@ -45,8 +45,8 @@ type ProfileRow = {
  * table scrolling sideways. The primitive's px-4 is right for the five-column
  * lists; nine columns at that padding spend over 100px on gutters alone.
  */
-const HEAD = "px-2.5";
-const CELL = "px-2.5 py-2.5";
+const HEAD = "px-2";
+const CELL = "px-2 py-2.5";
 
 /**
  * The name column stays put when the table does scroll (an iPad, or a laptop
@@ -122,7 +122,7 @@ async function UsersTable() {
                 {/* Capped and truncated rather than left to set the column's
                     width: one long address would otherwise widen the sticky
                     column for every row. The title carries the full text. */}
-                <span className="flex max-w-[13rem] flex-col">
+                <span className="flex max-w-[8rem] flex-col">
                   <span className="truncate" title={profile.full_name}>
                     {profile.full_name}
                     {profile.id === viewer.id && (

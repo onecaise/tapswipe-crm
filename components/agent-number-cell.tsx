@@ -68,8 +68,15 @@ export function AgentNumberCell({
     return (
       <span className="flex items-center gap-1.5">
         {/* Monospace so 0/O and 1/l are separable — this is a code someone
-            reconciles against a spreadsheet, not a name. */}
-        <span className="font-mono text-xs">{agentNumber ?? EMPTY}</span>
+            reconciles against a spreadsheet, not a name. Truncated past 4.5rem,
+            the full code in a title: it can run to 32 characters, and at its
+            natural width one long code would widen the column for every row. */}
+        <span
+          className="max-w-[4.5rem] truncate font-mono text-xs"
+          title={agentNumber ?? undefined}
+        >
+          {agentNumber ?? EMPTY}
+        </span>
         <Button
           type="button"
           variant="ghost"

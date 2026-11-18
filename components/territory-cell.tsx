@@ -79,10 +79,10 @@ export function TerritoryCell({
   if (!editing) {
     return (
       <span className="flex items-center gap-1.5">
-        {/* Truncated past 8rem, the full label in a title, so one long
+        {/* Truncated past 6rem, the full label in a title, so one long
             territory does not widen the column for every row. */}
         <span
-          className="max-w-[8rem] truncate text-sm"
+          className="max-w-[6rem] truncate text-sm"
           title={territory ?? undefined}
         >
           {territory ?? EMPTY}
