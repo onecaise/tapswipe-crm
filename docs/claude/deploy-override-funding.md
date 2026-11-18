@@ -38,10 +38,21 @@ select
          or count(*) filter (where override_role = 'debit') < 1
          or coalesce(sum(override_amount) filter (where override_role = 'debit'), 0)
             <> -coalesce(sum(override_amount) filter (where override_role = 'credit'), 0)) p) as bad_pairs,
+  (select string_agg(format('batch %s / override %s', batch_id, override_id), ', '
+                     order by batch_id, override_id) from (
+     select batch_id, override_id
+       from rep_payout_rows where line_kind = 'override'
+      group by batch_id, override_id
+     having count(*) filter (where override_role = 'credit') <> 1
+         or count(*) filter (where override_role = 'debit') < 1
+         or coalesce(sum(override_amount) filter (where override_role = 'debit'), 0)
+            <> -coalesce(sum(override_amount) filter (where override_role = 'credit'), 0)) p) as bad_pair_list,
   (select max(version) from supabase_migrations.schema_migrations)                  as latest;
 ```
 
-`bad_pairs` **0** and `latest` **20261111120000**. Prod: `overrides` **92**. Anything else: stop and ask.
+`bad_pairs` **0** (`bad_pair_list` empty) and `latest` **20261111120000**. Prod: `overrides` **92**. Anything else: stop and ask.
+
+`bad_pairs` is the migration's own section-0 proof, read-only: the same grouping by (batch, override) and the same three conditions (exactly one credit, at least one debit, the debits totalling minus the credit). The migration refuses the push on exactly the pairs `bad_pair_list` names, in the same `batch N / override M` form, so a problem shows here, before the push, not during it.
 
 ## 2. Edge Functions
 
