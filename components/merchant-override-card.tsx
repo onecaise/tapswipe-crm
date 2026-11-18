@@ -445,8 +445,7 @@ function SetOverrideForm({
         </div>
         <p className="text-xs text-muted-foreground">
           The owner&apos;s side: the owner keeps their rate less the override. The company&apos;s
-          share: the owner keeps their full rate, and the company pays the override (how ISO Hub
-          pays application overrides).
+          share: the owner keeps their full rate, and the company pays the override.
         </p>
       </fieldset>
       <p

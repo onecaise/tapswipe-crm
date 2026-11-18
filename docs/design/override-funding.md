@@ -33,7 +33,7 @@ An override is paid from one of two places, chosen **per override**:
 | | Recipient | Owner (rep side) | Company |
 | --- | --- | --- | --- |
 | **Owner-funded** (how the CRM works today) | 5 | 45 of the 50 | 50 |
-| **Company-funded** (how ISO Hub pays application overrides) | 5 | the full 50 | 45 |
+| **Company-funded** | 5 | the full 50 | 45 |
 
 (The figures are a $100 residual, a merchant rate of 50 and a 5% override.)
 
