@@ -40,7 +40,7 @@ export function StatusBadge({
     >
       {/* bg-current picks up the text colour, so a new intent needs one line
           above rather than a matching dot rule here. */}
-      <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" aria-hidden />
       {children}
     </span>
   );

@@ -233,6 +233,23 @@ export function SidebarShell({ children }: { children: React.ReactNode }) {
           "md:visible md:sticky md:left-auto md:z-auto md:translate-x-0",
         )}
       >
+        {/*
+          The drawer's own close button. The topbar's hamburger turns into a
+          close button too, but the open drawer sits on top of it, so on a
+          phone it cannot be tapped; this one is where the eye already is.
+          Top-right of the logo row, in the space the wordmark leaves, and
+          44px square so a thumb can hit it. md:hidden because the pinned
+          column has nothing to close (the topbar toggle hides it there).
+          Unreachable while the drawer is parked: the <aside> is invisible.
+        */}
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          aria-label="Close menu"
+          className="absolute right-1 top-[9px] flex h-11 w-11 items-center justify-center rounded-md text-sidebar-foreground transition-colors hover:bg-sidebar-active hover:text-sidebar-foreground-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden"
+        >
+          <XIcon size={20} aria-hidden />
+        </button>
         {children}
       </aside>
     </>

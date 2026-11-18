@@ -85,7 +85,7 @@ export function RepIdentityCell({
         {/* Capped and truncated, the full name in a title: an LLC name can
             run to sixty characters, and at its natural width it alone pushed
             Manage Users into scrolling sideways. */}
-        <span className="flex min-w-0 max-w-[12rem] flex-col gap-0.5 text-sm">
+        <span className="flex min-w-0 max-w-[8rem] flex-col gap-0.5 text-sm">
           <span className="truncate" title={legalName ?? undefined}>
             {legalName ?? EMPTY}
           </span>
@@ -95,9 +95,16 @@ export function RepIdentityCell({
           >
             {llcLegalName ?? EMPTY}
           </span>
-          {/* Amber, not red: waiting on an admin, like "temp password". */}
+          {/* Amber, not red: waiting on an admin, like "temp password".
+              Allowed to wrap onto two lines (the cell is whitespace-nowrap):
+              on one line it was the widest thing in the column. */}
           {role === "agent" && missing && (
-            <StatusBadge intent="warning">can&apos;t submit pre-apps yet</StatusBadge>
+            <StatusBadge
+              intent="warning"
+              className="self-start whitespace-normal rounded-lg leading-tight"
+            >
+              can&apos;t submit pre-apps yet
+            </StatusBadge>
           )}
         </span>
         <Button
