@@ -273,7 +273,7 @@ describe.skipIf(FUNCTIONS_DOWN)("export-report", () => {
     const row = (m: string) => lines.find((r) => r[2] === m)!;
     expect(cents(row(MIDS.clawback)[6])).toBe(-1176);
     expect(cents(row(MIDS.house)[7])).toBe(0); // rep side at rate 0
-    expect(cents(row(MIDS.house)[8])).toBe(50001); // company share: all of it
+    expect(cents(row(MIDS.house)[9])).toBe(50001); // company share: all of it
     // The shared account once, under its signer, with the account's residual.
     expect(cents(row(MIDS.shared)[6])).toBe(123456);
     expect(row(MIDS.shared)[4]).toBe("Live Owner Agent");
