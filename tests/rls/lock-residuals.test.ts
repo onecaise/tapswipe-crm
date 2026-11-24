@@ -8,6 +8,7 @@ import {
   asUser,
   commitV3,
   createTestDb,
+  hasColumn,
   insertBatch,
   migrationsBefore,
   readMigration,
@@ -94,12 +95,15 @@ async function committedMonth(target: TestDb): Promise<{ batch: number; period: 
     target,
     `select period::text as period from rep_payout_batches where id = ${batch}`,
   );
+  // funded_by exists from 20261116120000; this fixture also seeds a database
+  // replayed to before it, where the override is owner-funded by definition.
+  const funded = await hasColumn(target, "merchant_overrides", "funded_by");
   await target.exec(`
     insert into merchant_rep_shares (merchant_id, primary_agent_id, secondary_agent_id,
                                      primary_rep_pct, secondary_rep_pct, effective_from)
     values ((select id from merchants where mid = 'LK-SHARED'), '${AGENT_ID}', '${OTHER_AGENT_ID}', 40, 10, '${period}');
-    insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from)
-    values ((select id from merchants where mid = 'LK-OVR'), '${RECIPIENT_ID}', 10, '${period}');`);
+    insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from${funded ? ", funded_by" : ""})
+    values ((select id from merchants where mid = 'LK-OVR'), '${RECIPIENT_ID}', 10, '${period}'${funded ? ", 'owner'" : ""});`);
   await stageForCommit(target, batch, [{ mid: "LK-PLAIN" }, { mid: "LK-SHARED" }, { mid: "LK-OVR" }]);
   await commitV3(target, batch);
   await target.exec(`delete from audit_log; delete from rep_payout_row_history;`);

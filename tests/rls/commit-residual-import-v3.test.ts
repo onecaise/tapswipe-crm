@@ -671,7 +671,7 @@ describe("the money: the merchant's rate, the company the rest, the cent rule on
   it("divides the merchant's rate between signer and partner by the cent rule, the pair summing to T", async () => {
     const { wrong, ties, result } = await sharedGrid(db);
     const shared = SPLITS.length * RESIDUALS.length;
-    expect(result).toEqual({ written: shared * 2, rows: shared, shared, overrides: 0, replaced_lines: 0 });
+    expect(result).toEqual({ written: shared * 2, rows: shared, shared, overrides: 0, company_overrides: 0, replaced_lines: 0 });
     expect(wrong).toEqual([]);
     // The grid holds exact half-cent ties (25+25 on an odd T), so the tie rule is exercised.
     expect(ties).toBeGreaterThan(0);
@@ -725,7 +725,7 @@ describe("the commit's record", () => {
     await db.exec(`delete from audit_log`);
     const { id, period } = await batchWith(db, [{ mid: "MID-AGENT-1" }, { mid: "MID-OTHER-1" }]);
     const result = await commit(db, id);
-    expect(result).toEqual({ written: 2, rows: 2, shared: 0, overrides: 0, replaced_lines: 0 });
+    expect(result).toEqual({ written: 2, rows: 2, shared: 0, overrides: 0, company_overrides: 0, replaced_lines: 0 });
 
     const audit = await rows(
       db,

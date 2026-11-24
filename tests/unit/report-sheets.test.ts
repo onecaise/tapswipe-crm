@@ -45,7 +45,7 @@ function merchant(over: Partial<MerchantSummaryRow>): MerchantSummaryRow {
   return {
     row_kind: "merchant", period: "2026-07-01", processor: "TSYS", merchant_id: 1, mid: "000000000123",
     merchant_name: "Corner Cafe", owner_id: "a", owner_code: "9002", owner_name: "Ann Ito",
-    volume: 50000, residual: 200, rep_side: 100, company_share: 100, ...over,
+    volume: 50000, residual: 200, rep_side: 100, company_overrides: 0, company_share: 100, ...over,
   };
 }
 
@@ -143,12 +143,14 @@ describe("Report 1 (rep payout summary)", () => {
 describe("Report 2 (merchants by processor)", () => {
   const selection: ReportSelection = { report: "merchants", from: "2026-07-01", to: "2026-07-01", processor: "TSYS" };
   const rows: MerchantSummaryRow[] = [
-    merchant({}),
+    // A company-funded override of 10 on Corner Cafe (20261116120000): residual =
+    // rep side + overrides from company + company share, on the row and the totals.
+    merchant({ company_overrides: 10, company_share: 90 }),
     merchant({ mid: "4445550001", merchant_name: "Clawback Co", residual: -11.76, rep_side: -5.88, company_share: -5.88 }),
     merchant({ row_kind: "processor", merchant_id: null, mid: null, merchant_name: null, owner_id: null,
-      owner_code: null, owner_name: null, residual: 188.24, rep_side: 94.12, company_share: 94.12 }),
+      owner_code: null, owner_name: null, residual: 188.24, rep_side: 94.12, company_overrides: 10, company_share: 84.12 }),
     merchant({ row_kind: "total", period: null, processor: null, merchant_id: null, mid: null, merchant_name: null,
-      owner_id: null, owner_code: null, owner_name: null, residual: 188.24, rep_side: 94.12, company_share: 94.12 }),
+      owner_id: null, owner_code: null, owner_name: null, residual: 188.24, rep_side: 94.12, company_overrides: 10, company_share: 84.12 }),
   ];
 
   it("has the page's columns, the MID and owner code as their own text columns", () => {
@@ -156,7 +158,7 @@ describe("Report 2 (merchants by processor)", () => {
     const { rows: grid, sheet } = roundTrip(built);
     expect(built.sheetName).toBe("Merchants by processor");
     expect(grid[built.headerRow - 1]).toEqual([
-      "Processor", "Merchant", "MID", "Owner code", "Owner name", "Volume", "Residual", "Rep side", "Company share",
+      "Processor", "Merchant", "MID", "Owner code", "Owner name", "Volume", "Residual", "Rep side", "Overrides from company", "Company share",
     ]);
     expect([...MERCHANT_TEXT_HEADERS, ...MERCHANT_FIGURES.map(([, l]) => l)]).toEqual(grid[built.headerRow - 1]);
     const first = built.headerRow + 1;
@@ -167,8 +169,8 @@ describe("Report 2 (merchants by processor)", () => {
 
   it("writes each processor-month's subtotal with its paid state, and the grand total", () => {
     const { rows: grid } = roundTrip(buildReportSheet(selection, rows, [{ processor: "TSYS", period: "2026-07-01", closed_at: null }]));
-    expect(rowStarting(grid, "TSYS subtotal (not marked paid)")!.slice(5)).toEqual([50000, 188.24, 94.12, 94.12]);
-    expect(rowStarting(grid, "Grand total")!.slice(5)).toEqual([50000, 188.24, 94.12, 94.12]);
+    expect(rowStarting(grid, "TSYS subtotal (not marked paid)")!.slice(5)).toEqual([50000, 188.24, 94.12, 10, 84.12]);
+    expect(rowStarting(grid, "Grand total")!.slice(5)).toEqual([50000, 188.24, 94.12, 10, 84.12]);
     const paidGrid = roundTrip(buildReportSheet(selection, rows,
       [{ processor: "TSYS", period: "2026-07-01", closed_at: "2026-08-01T00:00:00Z" }])).rows;
     expect(rowStarting(paidGrid, "TSYS subtotal (paid)")).toBeDefined();

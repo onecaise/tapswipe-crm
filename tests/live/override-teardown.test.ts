@@ -71,6 +71,7 @@ beforeAll(async () => {
     recipient_id_input: fx.userIds.intruder,
     override_pct_input: 10,
     effective_from_input: "2099-01-01",
+    funded_by_input: "owner",
   });
   if (setError) throw new Error(`set_merchant_override: ${setError.message}`);
   overrideId = id as number;
@@ -102,6 +103,7 @@ beforeAll(async () => {
       batch_id: batchId,
       line_kind: "override",
       override_id: overrideId,
+      override_funded_by: "owner",
     })),
   );
   if (linesError) throw new Error(`override lines insert: ${linesError.message}`);

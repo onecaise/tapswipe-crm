@@ -3127,7 +3127,10 @@ export const OVERRIDE_FIXTURE = {
   clawback: { residual: -11.76, debit: "$0.59", credit: "-$0.59" },
 } as const;
 
-export async function createOverrideFixture(label: string): Promise<{
+export async function createOverrideFixture(
+  label: string,
+  funded: "owner" | "company" = "owner",
+): Promise<{
   batchId: number;
   period: string;
   shared: { mid: string; dba: string; merchantId: number };
@@ -3191,6 +3194,7 @@ export async function createOverrideFixture(label: string): Promise<{
       recipient_id_input: ids.agent3,
       override_pct_input: OVERRIDE_FIXTURE.pct,
       effective_from_input: slot.period,
+      funded_by_input: funded,
     });
     if (error) throw new Error(`set_merchant_override: ${error.message}`);
   }
@@ -3294,6 +3298,7 @@ export async function setOverrideAsAdmin(
   recipient: PersonaKey,
   pct: number,
   from: string,
+  funded: "owner" | "company" = "owner",
 ): Promise<number> {
   const db = serviceClient();
   const { data: who } = await db.from("profiles").select("id").eq("email", PERSONAS[recipient].email).single();
@@ -3312,6 +3317,7 @@ export async function setOverrideAsAdmin(
     recipient_id_input: who.id,
     override_pct_input: pct,
     effective_from_input: from,
+    funded_by_input: funded,
   });
   if (error) throw new Error(error.message);
   return data as number;
@@ -3319,11 +3325,11 @@ export async function setOverrideAsAdmin(
 
 /** The overrides on one merchant, as the service role. */
 export async function overridesOn(merchantId: number): Promise<
-  { recipient_id: string; override_pct: number; effective_from: string; effective_to: string | null }[]
+  { recipient_id: string; override_pct: number; effective_from: string; effective_to: string | null; funded_by: "owner" | "company" }[]
 > {
   const { data, error } = await serviceClient()
     .from("merchant_overrides")
-    .select("recipient_id, override_pct, effective_from, effective_to")
+    .select("recipient_id, override_pct, effective_from, effective_to, funded_by")
     .eq("merchant_id", merchantId)
     .order("effective_from", { ascending: true });
   if (error) throw new Error(`overrides on ${merchantId}: ${error.message}`);
@@ -3332,6 +3338,7 @@ export async function overridesOn(merchantId: number): Promise<
     override_pct: Number(row.override_pct),
     effective_from: row.effective_from as string,
     effective_to: (row.effective_to as string | null) ?? null,
+    funded_by: row.funded_by as "owner" | "company",
   }));
 }
 

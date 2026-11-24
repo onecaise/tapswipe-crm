@@ -81,6 +81,7 @@ type R2Row = {
   volume: string;
   residual: string;
   rep_side: string;
+  company_overrides: string;
   company_share: string;
 };
 
@@ -153,11 +154,12 @@ async function share(target: TestDb, merchantId: number, signer: string, partner
     values (${merchantId}, '${signer}', '${partner}', ${a}, ${b}, '${from}')`);
 }
 
-async function override(target: TestDb, merchantId: number, pct: number, from: string): Promise<void> {
+async function override(target: TestDb, merchantId: number, pct: number, from: string,
+                        funded: "owner" | "company" = "owner"): Promise<void> {
   await asPlatform(target);
   await target.exec(`
-    insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from)
-    values (${merchantId}, '${MANAGER_ID}', ${pct}, '${from}')`);
+    insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from, funded_by)
+    values (${merchantId}, '${MANAGER_ID}', ${pct}, '${from}', '${funded}')`);
 }
 
 type Staged = { mid: string; volume?: string; residual?: string };
@@ -204,7 +206,7 @@ async function report2(target: TestDb, from: string, to = from, processor: strin
   return asAdmin(target, () => rows<R2Row>(target,
     `select row_kind, period::text, processor, merchant_id, mid, merchant_name,
             owner_id::text, owner_code, owner_name, volume::text, residual::text,
-            rep_side::text, company_share::text
+            rep_side::text, company_overrides::text, company_share::text
        from ${R2}('${from}', '${to}', ${procArg(processor)})`), who);
 }
 
@@ -378,7 +380,7 @@ describe("a worked month through the real commit", () => {
     expect(byMid.get("WK-PLAIN")).toMatchObject({
       processor: "TSYS", merchant_name: "WK-PLAIN Co", owner_id: AGENT_ID, owner_code: "101",
       owner_name: "Agent User", volume: "1000.00", residual: "100.00", rep_side: "50.00",
-      company_share: "50.00",
+      company_overrides: "0.00", company_share: "50.00",
     });
     expect(byMid.get("WK-CLAW")).toMatchObject({
       volume: "0.00", residual: "-11.76", rep_side: "-5.41", company_share: "-6.35",
@@ -568,7 +570,8 @@ describe("reconciliation over random months, through the real commit", () => {
             }
             if (!house && rand() < 0.4) {
               const o = Math.max(1, Math.floor(rand() * Math.round(rate * 100))) / 100;
-              await override(db, id, o, month);
+              // Both fundings (20261116120000), in the same months.
+              await override(db, id, o, month, rand() < 0.5 ? "owner" : "company");
             }
             // Clawbacks, zero-volume fee lines, odd cents, exact zeros.
             const kind = rand();
@@ -589,6 +592,8 @@ describe("reconciliation over random months, through the real commit", () => {
       const [shape] = await rows<Record<string, number>>(db, `
         select count(*) filter (where share_role = 'secondary')::int as partners,
                count(*) filter (where override_role = 'credit')::int as overrides,
+               count(*) filter (where override_role = 'credit' and override_funded_by = 'company')::int as company_funded,
+               count(*) filter (where override_role = 'credit' and override_funded_by = 'owner')::int as owner_funded,
                count(*) filter (where line_kind = 'import' and residual_income < 0)::int as clawbacks,
                count(*) filter (where line_kind = 'import' and volume = 0)::int as zero_volume,
                count(*) filter (where line_kind = 'import' and rep_split_pct = 0)::int as house
@@ -607,9 +612,16 @@ describe("reconciliation over random months, through the real commit", () => {
 
         const total2 = r2.find((r) => r.row_kind === "total")!;
         expect(cents(total2.residual), `${month}: Report 2 total`).toBe(fileTotal.get(month));
-        expect(cents(total2.rep_side) + cents(total2.company_share)).toBe(fileTotal.get(month));
-        // Debits and credits cancel: the reps' total is the rep side of every merchant.
-        expect(paid).toBe(cents(total2.rep_side));
+        expect(cents(total2.rep_side) + cents(total2.company_overrides) + cents(total2.company_share))
+          .toBe(fileTotal.get(month));
+        // Owner-funded debits and credits cancel; a company-funded credit is
+        // paid on top of the rep side, out of the company's share.
+        expect(paid).toBe(cents(total2.rep_side) + cents(total2.company_overrides));
+        // Every Report 2 row adds up: residual = rep side + overrides from company + company share.
+        for (const row of merchants) {
+          expect(cents(row.rep_side) + cents(row.company_overrides) + cents(row.company_share), row.mid!)
+            .toBe(cents(row.residual));
+        }
 
         // Every rep row is that rep's statement.
         for (const rep of reps) {
@@ -628,7 +640,7 @@ describe("reconciliation over random months, through the real commit", () => {
         for (const column of ["sales_volume", "net_residual", "agent_split", "overrides_received", "total_commission"] as const) {
           expect(cents(total1[column]), column).toBe(reps.reduce((s, r) => s + cents(r[column]), 0));
         }
-        for (const column of ["volume", "residual", "rep_side", "company_share"] as const) {
+        for (const column of ["volume", "residual", "rep_side", "company_overrides", "company_share"] as const) {
           expect(cents(total2[column]), column).toBe(merchants.reduce((s, r) => s + cents(r[column]), 0));
         }
 
@@ -768,6 +780,39 @@ describe("mutation proofs: each protection is what stops its case", () => {
     await without(SIGS[0],
       "+ coalesce(sum(l.override_amount)\n                          filter (where l.line_kind = 'override' and l.override_role = 'debit'), 0)");
     expect(repRow(await report1(mutant, M), AGENT_ID)?.agent_split).toBe("50.00");
+  });
+
+  // 20261116120000: a company-funded override. R = 100 at 50, 5% to Dana from
+  // the company: the rep keeps the full 50, Dana 5, the company 45.
+  async function companyMonth(target: TestDb): Promise<void> {
+    const m = await merchant(target, "MU-CO", AGENT_ID, 50);
+    await override(target, m, 5, M, "company");
+    await commitMonth(target, "TSYS", M, [{ mid: "MU-CO", residual: "100.00" }]);
+  }
+
+  it("a company-funded override: the owner's split is the full rep side; Report 2 takes it from the company", async () => {
+    await companyMonth(mutant);
+    const r1 = await report1(mutant, M);
+    expect(repRow(r1, AGENT_ID)).toMatchObject({ agent_split: "50.00", overrides_received: "0.00", total_commission: "50.00" });
+    expect(repRow(r1, MANAGER_ID)).toMatchObject({ agent_split: "0.00", overrides_received: "5.00", total_commission: "5.00" });
+    const row = (await report2(mutant, M)).find((r) => r.row_kind === "merchant");
+    expect(row).toMatchObject({ residual: "100.00", rep_side: "50.00", company_overrides: "5.00", company_share: "45.00" });
+  });
+
+  it("the company share: without subtracting the company-funded overrides, a Report 2 row would not add up", async () => {
+    await companyMonth(mutant);
+    await without(SIGS[1], "round(a.res - a.rep - a.co, 2)", "round(a.res - a.rep, 2)");
+    const row = (await report2(mutant, M)).find((r) => r.row_kind === "merchant")!;
+    expect(row.company_share).toBe("50.00");
+    expect(cents(row.rep_side) + cents(row.company_overrides) + cents(row.company_share)).not.toBe(cents(row.residual));
+  });
+
+  it("the company overrides: an owner-funded override's credit never counts as the company's", async () => {
+    await month(mutant);
+    const owned = async () => (await report2(mutant, M)).find((r) => r.row_kind === "merchant");
+    expect(await owned()).toMatchObject({ rep_side: "50.00", company_overrides: "0.00", company_share: "50.00" });
+    await without(SIGS[1], "\n                and l.override_funded_by = 'company'", "");
+    expect(await owned()).toMatchObject({ company_overrides: "10.00", company_share: "40.00" });
   });
 
   it("a shared account's residual once: counting the partner's line again would be caught", async () => {
