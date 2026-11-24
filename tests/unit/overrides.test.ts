@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CHOOSE_FUNDING,
+  COMPANY_FUNDER,
+  OVERRIDE_FUNDING_CHOICES,
   overrideExample,
+  overrideFundingText,
   overrideIdsOf,
   overrideInForce,
   overrideLineLabel,
@@ -42,15 +46,38 @@ describe("parseOverridePct: the cap is the merchant's rate", () => {
   });
 });
 
-describe("overrideExample", () => {
-  it("states the memo's example: rate 50, override 10", () => {
-    expect(overrideExample(1000, 50)).toBe(
-      "On a $100 residual: the recipient gets $10.00, the rep keeps $40.00 of the $50.00 rep side, and the company keeps $50.00.",
+describe('overrideExample: one sentence per "Paid from" choice', () => {
+  it("before a choice is made, it asks for one instead of guessing", () => {
+    expect(overrideExample(1000, 50, null)).toBe(CHOOSE_FUNDING);
+    expect(CHOOSE_FUNDING).toBe("Choose who pays it: the owner's side or the company's share.");
+  });
+
+  it("owner-funded, the memo's example: rate 50, override 10", () => {
+    expect(overrideExample(1000, 50, "owner")).toBe(
+      "On a $100 residual: the recipient gets $10.00, the owner keeps $40.00 of the $50.00 rep side, and the company keeps $50.00.",
     );
   });
 
-  it("at the cap, the rep keeps nothing and the company's share is unchanged", () => {
-    expect(overrideExample(3000, 30)).toMatch(/the rep keeps \$0\.00 of the \$30\.00 rep side, and the company keeps \$70\.00\.$/);
+  it("owner-funded at the cap: the owner keeps nothing and the company's share is unchanged", () => {
+    expect(overrideExample(3000, 30, "owner")).toMatch(/the owner keeps \$0\.00 of the \$30\.00 rep side, and the company keeps \$70\.00\.$/);
+  });
+
+  it("company-funded, the design's example: rate 50, override 5", () => {
+    expect(overrideExample(500, 50, "company")).toBe(
+      "On a $100 residual: the recipient gets $5.00, the owner keeps the full $50.00 rep side, and the company keeps $45.00 of its $50.00.",
+    );
+  });
+
+  it("company-funded at a rate below 50 and a fractional percent", () => {
+    expect(overrideExample(250, 30, "company")).toBe(
+      "On a $100 residual: the recipient gets $2.50, the owner keeps the full $30.00 rep side, and the company keeps $67.50 of its $70.00.",
+    );
+  });
+
+  it("the choices, in order, neither of them a default", () => {
+    expect(OVERRIDE_FUNDING_CHOICES.map((c) => c.value)).toEqual(["owner", "company"]);
+    expect(overrideFundingText("owner")).toBe("paid from the owner's side");
+    expect(overrideFundingText("company")).toBe("paid from the company's share");
   });
 });
 
@@ -74,11 +101,19 @@ describe("overrideLineLabel (memo A4c)", () => {
       "Override received · 10% of residual",
     );
   });
+
+  it("a company-funded credit says so to an admin only; the recipient's label is unchanged", () => {
+    const line = { override_role: "credit" as const, override_funded_by: "company" as const };
+    expect(overrideLineLabel(line, view, true)).toBe("Override received · 10% of residual · from the company's share");
+    expect(overrideLineLabel(line, view, false)).toBe("Override received");
+    expect(overrideLineLabel({ ...line, override_funded_by: "owner" }, view, true)).toBe("Override received · 10% of residual");
+    expect(COMPANY_FUNDER).toBe("Tapswipe (company share)");
+  });
 });
 
 describe("months and the override in force", () => {
   const o = (id: number, from: string, to: string | null): MerchantOverride => ({
-    id, merchant_id: 1, recipient_id: "r", override_pct: 10, effective_from: from, effective_to: to,
+    id, merchant_id: 1, recipient_id: "r", override_pct: 10, effective_from: from, effective_to: to, funded_by: "owner",
   });
 
   it("effective_to is exclusive", () => {

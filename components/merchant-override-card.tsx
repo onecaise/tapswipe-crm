@@ -8,8 +8,13 @@ import { createClient } from "@/lib/supabase/client";
 import { friendlyDbError } from "@/lib/db-errors";
 import { formatPeriod } from "@/lib/format";
 import {
+  CHOOSE_FUNDING,
   type MerchantOverride,
+  OVERRIDE_FUNDING_CHOICES,
+  type OverrideFunding,
+  type OverrideMonth,
   overrideExample,
+  overrideFundingText,
   overrideInForce,
   overrideMonths,
   parseOverridePct,
@@ -26,6 +31,7 @@ import type { ShareRep } from "@/components/merchant-share-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 
 /**
  * The admin's "Override" card on a merchant page (20261102120000, memo §4):
@@ -40,22 +46,42 @@ import { Label } from "@/components/ui/label";
  *
  * "Change" is a new override from a later month: set_merchant_override ends
  * the open one at that month in the same call, so the list is the history.
+ * Who pays it (20261116120000, docs/design/override-funding.md) is chosen on
+ * every new override with no default, and changed afterwards only through
+ * "Change who pays" (set_merchant_override_funding: a reason, refused while a
+ * month it touched is marked paid; a committed month takes it on replace).
  * Every control is at least 44px tall: this page is used on phones.
  */
 const TOUCH = "min-h-11";
 const FIELD = "h-11";
 
+/** "TSYS September 2026" */
+const monthLabel = (month: OverrideMonth) => `${month.processor} ${formatPeriod(month.period)}`;
+
 function OverrideRow({
   override,
   names,
   latestCommitted,
+  months,
 }: {
   override: MerchantOverride;
   names: Map<string, string>;
   latestCommitted: string | null;
+  /** The committed processor-months its lines are in, with their paid and stale state. */
+  months: readonly OverrideMonth[];
 }) {
   const router = useRouter();
-  const [mode, setMode] = useState<"idle" | "end" | "cancel">("idle");
+  const [mode, setMode] = useState<"idle" | "end" | "cancel" | "funding">("idle");
+  const [reason, setReason] = useState("");
+  const other: OverrideFunding = override.funded_by === "company" ? "owner" : "company";
+  const paidMonths = months.filter((month) => month.paid);
+  const staleMonths = months.filter((month) => month.stale);
+  const reasonProblem =
+    reason.trim().length < 10
+      ? "Give a reason of at least 10 characters. It is kept in the audit log."
+      : reason.trim().length > 500
+        ? "The reason can be at most 500 characters."
+        : null;
   const firstOpen = latestCommitted ? nextPeriod(latestCommitted) : null;
   const defaultEnd = periodToMonthInput(
     [nextPeriod(override.effective_from), firstOpen ?? ""].sort().at(-1)!,
@@ -74,6 +100,7 @@ function OverrideRow({
       return;
     }
     setMode("idle");
+    setReason("");
     setBusy(false);
     router.refresh();
   };
@@ -92,6 +119,16 @@ function OverrideRow({
       <p className="text-xs text-muted-foreground">
         {overrideMonths(override.effective_from, override.effective_to)}
       </p>
+      <p className="text-xs" data-testid="merchant-override-funding">
+        {override.funded_by === "company" ? "Paid from the company's share" : "Paid from the owner's side"}
+      </p>
+      {staleMonths.length > 0 && (
+        <p className="text-xs text-muted-foreground" data-testid="merchant-override-stale">
+          Who pays it changed after {staleMonths.map(monthLabel).join(", ")}{" "}
+          {staleMonths.length === 1 ? "was" : "were"} committed. Replace{" "}
+          {staleMonths.length === 1 ? "that month" : "those months"} on Payouts to apply it.
+        </p>
+      )}
 
       {mode === "idle" && (
         <div className="flex flex-wrap gap-2">
@@ -113,6 +150,102 @@ function OverrideRow({
           >
             Cancel override
           </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className={TOUCH}
+            onClick={() => setMode("funding")}
+          >
+            Change who pays
+          </Button>
+        </div>
+      )}
+
+      {mode === "funding" && (
+        <div className="flex flex-col gap-2" data-testid="merchant-override-funding-change">
+          <p className="text-sm">
+            Switch to: <span className="font-medium">{overrideFundingText(other)}</span>.
+          </p>
+          {months.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              No month is committed with this override yet, so the change applies from its first month.
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-1 text-xs" aria-label="Months this override has paid">
+              {months.map((month) => (
+                <li key={`${month.processor}|${month.period}`}>
+                  {monthLabel(month)}:{" "}
+                  {month.paid
+                    ? "marked paid. Reopen it on Payouts first."
+                    : "will need a replace to take effect."}
+                </li>
+              ))}
+            </ul>
+          )}
+          {paidMonths.length > 0 ? (
+            <p className="text-sm text-destructive" role="alert">
+              {paidMonths.map(monthLabel).join(", ")} {paidMonths.length === 1 ? "is" : "are"} marked
+              paid. Reopen {paidMonths.length === 1 ? "it" : "them"} (with a reason) before changing who
+              pays this override.
+            </p>
+          ) : (
+            <>
+              <div className="grid gap-1.5">
+                <Label htmlFor={`override-${override.id}-reason`}>Reason</Label>
+                <Textarea
+                  id={`override-${override.id}-reason`}
+                  value={reason}
+                  maxLength={500}
+                  onChange={(event) => setReason(event.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {reasonProblem ?? "Kept in the audit log with the change."}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  className={TOUCH}
+                  disabled={busy || reasonProblem !== null}
+                  onClick={() =>
+                    void run("set_merchant_override_funding", {
+                      override_id_input: override.id,
+                      funded_by_input: other,
+                      reason_input: reason.trim(),
+                    })
+                  }
+                >
+                  {busy ? "Saving…" : "Save who pays"}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className={TOUCH}
+                  disabled={busy}
+                  onClick={() => {
+                    setReason("");
+                    setMode("idle");
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </>
+          )}
+          {paidMonths.length > 0 && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className={cn(TOUCH, "self-start")}
+              onClick={() => setMode("idle")}
+            >
+              Back
+            </Button>
+          )}
         </div>
       )}
 
@@ -202,6 +335,8 @@ function SetOverrideForm({
     defaultRecipientId && defaultRecipientId !== ownerId ? defaultRecipientId : "",
   );
   const [pct, setPct] = useState("");
+  // Who pays it: required, and never preselected (design §3).
+  const [fundedBy, setFundedBy] = useState<OverrideFunding | null>(null);
   const [fromMonth, setFromMonth] = useState(
     latestCommitted ? periodToMonthInput(nextPeriod(latestCommitted)) : "",
   );
@@ -217,12 +352,14 @@ function SetOverrideForm({
         ? parsed.message
         : !recipientId
           ? "Choose who receives it."
-          : !fromPeriod
-            ? "Choose the first month it applies to."
-            : null;
+          : fundedBy === null
+            ? CHOOSE_FUNDING
+            : !fromPeriod
+              ? "Choose the first month it applies to."
+              : null;
 
   const save = async () => {
-    if (problem || !fromPeriod || !parsed.ok) return;
+    if (problem || !fromPeriod || !parsed.ok || fundedBy === null) return;
     setBusy(true);
     setError(null);
     const { error: rpcError } = await createClient().rpc("set_merchant_override", {
@@ -230,6 +367,7 @@ function SetOverrideForm({
       recipient_id_input: recipientId,
       override_pct_input: parsed.hundredths / 100,
       effective_from_input: fromPeriod,
+      funded_by_input: fundedBy,
     });
     setBusy(false);
     if (rpcError) {
@@ -237,6 +375,7 @@ function SetOverrideForm({
       return;
     }
     setPct("");
+    setFundedBy(null);
     router.refresh();
   };
 
@@ -285,12 +424,39 @@ function SetOverrideForm({
           />
         </div>
       </div>
+      <fieldset className="grid gap-1.5" data-testid="override-funded-by">
+        <legend className="mb-1.5 text-sm font-medium">Paid from</legend>
+        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-x-6">
+          {OVERRIDE_FUNDING_CHOICES.map((choice) => (
+            <label key={choice.value} className={cn("flex items-center gap-2 text-sm", TOUCH)}>
+              <input
+                type="radio"
+                name={`override-${merchantId}-funded-by`}
+                value={choice.value}
+                checked={fundedBy === choice.value}
+                onChange={() => setFundedBy(choice.value)}
+                // 44px tall like every control here (the phone test), the
+                // circle itself the browser's usual size.
+                className="h-11 w-4 shrink-0"
+              />
+              {choice.label}
+            </label>
+          ))}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          The owner&apos;s side: the owner keeps their rate less the override. The company&apos;s
+          share: the owner keeps their full rate, and the company pays the override.
+        </p>
+      </fieldset>
       <p
-        className={cn("text-xs", problem && pct.trim() !== "" ? "text-destructive" : "text-muted-foreground")}
+        className={cn(
+          "text-xs",
+          !parsed.ok && pct.trim() !== "" ? "text-destructive" : "text-muted-foreground",
+        )}
         data-testid="override-problem"
       >
         {parsed.ok && rate !== null
-          ? overrideExample(parsed.hundredths, Number(rate))
+          ? overrideExample(parsed.hundredths, Number(rate), fundedBy)
           : problem}
       </p>
       <div className="grid gap-1.5">
@@ -331,6 +497,7 @@ export function MerchantOverrideCard({
   reps,
   latestCommitted,
   currentPeriod,
+  overrideMonthsById = {},
 }: {
   merchantId: number;
   mid: string | null;
@@ -344,6 +511,8 @@ export function MerchantOverrideCard({
   latestCommitted: string | null;
   /** This month, YYYY-MM-01 (UTC), for "in force". */
   currentPeriod: string;
+  /** Each override's touched months (loadOverrideMonths), keyed by override id. */
+  overrideMonthsById?: Record<number, OverrideMonth[]>;
 }) {
   const names = new Map(reps.map((rep) => [rep.id, rep.full_name]));
   const now = overrideInForce(overrides, currentPeriod);
@@ -356,16 +525,17 @@ export function MerchantOverrideCard({
         Override
       </h2>
       <p className="text-sm text-muted-foreground">
-        A percent of the full residual, taken out of the rep side
-        {rateShown === null ? "" : ` (this merchant's rate, ${rateShown}%)`} and paid to a named
-        person, the owner&apos;s manager by default. It can be at most the rate, and the
-        company&apos;s share never changes. The rep sees who receives it; the recipient sees the
-        merchant&apos;s name only.
+        A percent of the full residual paid to a named person, the owner&apos;s manager by
+        default. It can be at most this merchant&apos;s rate
+        {rateShown === null ? "" : ` (${rateShown}%)`}. Each override says who pays it: the
+        owner&apos;s side (the owner keeps their rate less the override) or the company&apos;s share
+        (the owner keeps their full rate). When the owner pays, the rep sees who receives it; the
+        recipient sees the merchant&apos;s name only.
       </p>
 
       <p className="text-sm" data-testid="merchant-override-in-force">
         {now
-          ? `In force: ${Number(now.override_pct)}% of residual to ${names.get(now.recipient_id) ?? "Unknown"}, ${overrideMonths(now.effective_from, now.effective_to)}.`
+          ? `In force: ${Number(now.override_pct)}% of residual to ${names.get(now.recipient_id) ?? "Unknown"}, ${overrideFundingText(now.funded_by)}, ${overrideMonths(now.effective_from, now.effective_to)}.`
           : "No override in force this month."}
       </p>
 
@@ -383,6 +553,7 @@ export function MerchantOverrideCard({
                   override={override}
                   names={names}
                   latestCommitted={latestCommitted}
+                  months={overrideMonthsById[override.id] ?? []}
                 />
               ))}
             </ul>

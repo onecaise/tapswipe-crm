@@ -100,14 +100,14 @@ async function plant(
   merchantId: number,
   pct: number,
   from: string,
-  fields: { recipient?: string; to?: string | null } = {},
+  fields: { recipient?: string; to?: string | null; funded?: "owner" | "company" } = {},
 ): Promise<number> {
   await asPlatform(target);
   const [{ id }] = await rows<{ id: number }>(
     target,
-    `insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from, effective_to)
+    `insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from, effective_to, funded_by)
      values (${merchantId}, '${fields.recipient ?? MANAGER_ID}', ${pct}, '${from}',
-             ${fields.to ? `'${fields.to}'` : "null"}) returning id`,
+             ${fields.to ? `'${fields.to}'` : "null"}, '${fields.funded ?? "owner"}') returning id`,
   );
   return id;
 }
@@ -201,12 +201,13 @@ async function setOverride(
   pct: number | string,
   from: string,
   recipient: string = MANAGER_ID,
+  funded: "owner" | "company" = "owner",
 ): Promise<number> {
   await asUser(target, ADMIN_ID);
   try {
     const [{ id }] = await rows<{ id: number }>(
       target,
-      `select set_merchant_override(${merchantId}, '${recipient}', ${pct}, '${from}') as id`,
+      `select set_merchant_override(${merchantId}, '${recipient}', ${pct}, '${from}', '${funded}') as id`,
     );
     return id;
   } finally {
@@ -296,8 +297,8 @@ describe("merchant_overrides: RLS, grants, CHECKs", () => {
     const m = await merchant(db, "OV-1");
     const id = await plant(db, m, 10, await nextMonth(db));
     for (const sql of [
-      `insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from)
-       values (${m}, '${MANAGER_ID}', 5, '2030-01-01')`,
+      `insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from, funded_by)
+       values (${m}, '${MANAGER_ID}', 5, '2030-01-01', 'owner')`,
       `update merchant_overrides set override_pct = 1 where id = ${id}`,
       `delete from merchant_overrides where id = ${id}`,
     ]) {
@@ -344,7 +345,7 @@ describe("merchant_overrides: RLS, grants, CHECKs", () => {
 describe("set_merchant_override", () => {
   it("is admin only: PT403 for a rep, no EXECUTE for anon", async () => {
     const m = await merchant(db, "OV-1");
-    const sql = `select set_merchant_override(${m}, '${MANAGER_ID}', 10, '2030-01-01')`;
+    const sql = `select set_merchant_override(${m}, '${MANAGER_ID}', 10, '2030-01-01', 'owner')`;
     expect((await rpc(db, sql, AGENT_ID))?.code).toBe("PT403");
     await asUser(db, null);
     await db.exec(`set role anon`);
@@ -377,7 +378,7 @@ describe("set_merchant_override", () => {
       }
       for (const [i, pct] of rejected.entries()) {
         const m = await merchant(db, `NO-${i}`, { rate });
-        const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', ${pct}, '2030-01-01')`);
+        const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', ${pct}, '2030-01-01', 'owner')`);
         expect(error?.code).toBe("22023");
         expect(error?.message).toMatch(
           Number(pct) > 50
@@ -389,22 +390,22 @@ describe("set_merchant_override", () => {
 
     it("refuses any override on a house merchant at rate 0", async () => {
       const m = await merchant(db, "HOUSE", { rate: 0 });
-      const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 0.01, '2030-01-01')`);
+      const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 0.01, '2030-01-01', 'owner')`);
       expect(error?.code).toBe("PT409");
-      expect(error?.message).toBe("This merchant's rate is 0, so there is no rep side for an override to come out of.");
+      expect(error?.message).toBe("This merchant's rate is 0, so it cannot carry an override.");
     });
 
     it("refuses 0, a negative, finer than a hundredth, and a merchant with no rate", async () => {
       const m = await merchant(db, "OV-1");
       for (const pct of ["0", "-5", "10.001"]) {
-        expect((await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', ${pct}, '2030-01-01')`))?.code).toBe("22023");
+        expect((await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', ${pct}, '2030-01-01', 'owner')`))?.code).toBe("22023");
       }
       await asPlatform(db);
       await db.exec(`set session_replication_role = replica;
         insert into merchants (agent_id, mid, dba, city, state) values ('${AGENT_ID}', 'NORATE', 'No Rate', 'Nashville', 'TN');
         set session_replication_role = origin;`);
       const [{ id }] = await rows<{ id: number }>(db, `select id from merchants where mid = 'NORATE'`);
-      const error = await rpc(db, `select set_merchant_override(${id}, '${MANAGER_ID}', 5, '2030-01-01')`);
+      const error = await rpc(db, `select set_merchant_override(${id}, '${MANAGER_ID}', 5, '2030-01-01', 'owner')`);
       expect(error?.message).toBe("This merchant has no split rate yet. Set its rate before giving it an override.");
     });
   });
@@ -420,21 +421,21 @@ describe("set_merchant_override", () => {
 
     it("must be named: the function never guesses (the form prefills the manager)", async () => {
       const m = await merchant(db, "OV-1");
-      const error = await rpc(db, `select set_merchant_override(${m}, null, 5, '2030-01-01')`);
+      const error = await rpc(db, `select set_merchant_override(${m}, null, 5, '2030-01-01', 'owner')`);
       expect(error?.code).toBe("22023");
     });
 
     it("refuses someone deactivated, someone who does not exist, and the owner", async () => {
       const m = await merchant(db, "OV-1");
       await db.exec(`update profiles set is_active = false where id = '${MANAGER_ID}'`);
-      let error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01')`);
+      let error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01', 'owner')`);
       expect([error?.code, error?.message]).toEqual(["PT409", `${MANAGER_NAME} is deactivated, so a new override cannot name them.`]);
-      error = await rpc(db, `select set_merchant_override(${m}, '99999999-9999-9999-9999-999999999999', 5, '2030-01-01')`);
+      error = await rpc(db, `select set_merchant_override(${m}, '99999999-9999-9999-9999-999999999999', 5, '2030-01-01', 'owner')`);
       expect(error?.code).toBe("PT404");
-      error = await rpc(db, `select set_merchant_override(${m}, '${AGENT_ID}', 5, '2030-01-01')`);
+      error = await rpc(db, `select set_merchant_override(${m}, '${AGENT_ID}', 5, '2030-01-01', 'owner')`);
       expect([error?.code, error?.message]).toEqual([
         "22023",
-        "The override is paid out of the owner's side, so the owner cannot also receive it. Name their manager or another person.",
+        "The owner cannot also receive the override on their own merchant. Name their manager or another person.",
       ]);
       expect(await rows(db, `select id from merchant_overrides`)).toEqual([]);
     });
@@ -442,7 +443,7 @@ describe("set_merchant_override", () => {
     it("refuses either party of a share overlapping it", async () => {
       const m = await merchant(db, "OV-1");
       await share(db, m, 40, 10, "2030-01-01");
-      const error = await rpc(db, `select set_merchant_override(${m}, '${OTHER_AGENT_ID}', 5, '2030-03-01')`);
+      const error = await rpc(db, `select set_merchant_override(${m}, '${OTHER_AGENT_ID}', 5, '2030-03-01', 'owner')`);
       expect([error?.code, error?.message]).toEqual([
         "PT409",
         "Other Agent is a party to this merchant's shared account, so they cannot also receive its override.",
@@ -456,7 +457,7 @@ describe("set_merchant_override", () => {
     const [{ id: draft }] = await rows<{ id: number }>(db, `select id from pre_apps where status = 'draft' limit 1`);
     const [{ id: submitted }] = await rows<{ id: number }>(db, `select id from pre_apps where status = 'submitted' limit 1`);
     await db.exec(`update merchants set pre_app_id = ${draft} where id = ${m}`);
-    const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01')`);
+    const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01', 'owner')`);
     expect([error?.code, error?.message]).toEqual([
       "PT409",
       "This merchant's pre-app has not been submitted, so it cannot carry an override yet.",
@@ -467,9 +468,9 @@ describe("set_merchant_override", () => {
 
   it("refuses a merchant with no MID, and a start that is not the 1st", async () => {
     const m = await merchant(db, "OV-1");
-    expect((await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-02')`))?.code).toBe("22023");
+    expect((await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-02', 'owner')`))?.code).toBe("22023");
     await db.exec(`update merchants set mid = null where id = ${m}`);
-    const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01')`);
+    const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01', 'owner')`);
     expect(error?.message).toMatch(/^This merchant has no MID/);
   });
 
@@ -477,7 +478,7 @@ describe("set_merchant_override", () => {
     const m = await merchant(db, "OV-1");
     const { id, period } = await batchWith(db, [{ mid: "OV-1" }]);
     await commit(db, id);
-    const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '${period}')`);
+    const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '${period}', 'owner')`);
     expect(error?.code).toBe("PT409");
     expect(error?.message).toMatch(/is already committed for this MID\. An override can only start after it/);
   });
@@ -485,7 +486,7 @@ describe("set_merchant_override", () => {
   it("a later start ends the open override at that month (one call, audited twice); an earlier or equal one is refused", async () => {
     const m = await merchant(db, "OV-1");
     const first = await setOverride(db, m, 10, "2030-01-01");
-    let error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01')`);
+    let error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01', 'owner')`);
     expect(error?.message).toBe("This merchant already has an override starting January 2030. Cancel or end that one first.");
     const second = await setOverride(db, m, 5, "2030-04-01", OTHER_AGENT_ID);
     expect(
@@ -499,7 +500,7 @@ describe("set_merchant_override", () => {
     ]);
     // An override that ends in the future still blocks a start inside it.
     await rpc(db, `select end_merchant_override(${second}, '2030-09-01')`);
-    error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-06-01')`);
+    error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-06-01', 'owner')`);
     expect(error?.message).toBe("That month overlaps another override on this merchant.");
   });
 });
@@ -575,7 +576,7 @@ describe("the rules that hold over time", () => {
     const m = await merchant(db, "OV-1");
     await plant(db, m, 10, "2030-01-01");
     const error = await attempt(() => db.query(`update merchants set agent_id = '${OTHER_AGENT_ID}' where id = ${m}`));
-    expect(error?.message).toBe("This merchant has an override, which comes out of its owner's side. End it before moving the merchant.");
+    expect(error?.message).toBe("This merchant has an override. End it before moving the merchant.");
     const free = await merchant(db, "OV-2");
     await db.exec(`update merchants set agent_id = '${OTHER_AGENT_ID}' where id = ${free}`);
   });
@@ -694,7 +695,7 @@ describe("commit v3 writes the override lines", () => {
         update merchants set split_agent_pct = 30, split_company_pct = 70 where id = ${m};
         set session_replication_role = origin;`);
       const error = await refused(db, id);
-      expect(error.message).toBe(`MIDs OV-1 (override #${ov}) have an override above the merchant's rate. An override comes out of the rep side: end or change it, then commit.`);
+      expect(error.message).toBe(`MIDs OV-1 (override #${ov}) have an override above the merchant's rate. An override cannot be more than the merchant's rate: end or change it, then commit.`);
       expect((await linesOf(db, id)).length).toBe(0);
     });
 
@@ -783,8 +784,8 @@ describe("commit v3 writes the override lines", () => {
     const before = await linesOf(db, id);
     const later = (n: number) => `(date '${period}' + interval '${n} month')::date`;
     expect(await rpc(db, `select end_merchant_override(${ov}, ${later(1)})`)).toBeNull();
-    expect(await rpc(db, `select set_merchant_override(${m}, '${OTHER_AGENT_ID}', 20, ${later(2)})`)).toBeNull();
-    expect((await rpc(db, `select set_merchant_override(${m}, '${OTHER_AGENT_ID}', 20, '${period}')`))?.code).toBe("PT409");
+    expect(await rpc(db, `select set_merchant_override(${m}, '${OTHER_AGENT_ID}', 20, ${later(2)}, 'owner')`)).toBeNull();
+    expect((await rpc(db, `select set_merchant_override(${m}, '${OTHER_AGENT_ID}', 20, '${period}', 'owner')`))?.code).toBe("PT409");
     expect(await linesOf(db, id)).toEqual(before);
   });
 });
@@ -859,8 +860,8 @@ async function propertyCheck(target: TestDb, seed: number, count: number): Promi
     insert into merchants (agent_id, mid, dba, status, processor, split_agent_pct, split_company_pct, city, state)
     values ${list.map((c, i) => `('${AGENT_ID}', 'P-${i}', 'P ${i}', 'active', 'TSYS', ${pct(c.s)}, ${pct(10000 - c.s)}, 'Nashville', 'TN')`).join(",")}`);
   await target.exec(`
-    insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from)
-    select id, '${MANAGER_ID}', v.o, '${period}'
+    insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from, funded_by)
+    select id, '${MANAGER_ID}', v.o, '${period}', 'owner'
       from merchants m join (values ${list.map((c, i) => `('P-${i}', ${pct(c.o)})`).join(",")}) as v(mid, o) on v.mid = m.mid`);
   const shared = list.map((c, i) => [c, i] as const).filter(([c]) => c.b !== null);
   if (shared.length > 0) {
@@ -1032,7 +1033,7 @@ describe("who sees what", () => {
 // -------------------------------------------------------------------------
 
 describe("the ledger CHECKs", () => {
-  const base = `agent_id, period, processor, mid, line_kind, override_id, override_role, override_amount, batch_id`;
+  const base = `agent_id, period, processor, mid, line_kind, override_id, override_role, override_amount, batch_id, override_funded_by`;
   async function tryLine(values: string): Promise<DbError | null> {
     await asPlatform(db);
     return attempt(() => db.query(`insert into rep_payout_rows (${base}) values (${values})`));
@@ -1042,17 +1043,24 @@ describe("the ledger CHECKs", () => {
     const m = await merchant(db, "OV-1");
     const ov = await plant(db, m, 10, "2030-01-01");
     const batch = await insertBatch(db);
-    const ok = `'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'debit', -1, ${batch}`;
+    const ok = `'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'debit', -1, ${batch}, 'owner'`;
     expect(await tryLine(ok)).toBeNull();
     for (const [values, constraint] of [
-      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', null, 'debit', -1, ${batch}`, "rep_payout_rows_override_columns"],
-      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, null, -1, ${batch}`, "rep_payout_rows_override_columns"],
-      [`'${AGENT_ID}', '2030-01-01', null, 'OV-1', 'override', ${ov}, 'credit', 1, ${batch}`, "rep_payout_rows_override_columns"],
-      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'credit', 1, null`, "rep_payout_rows_adjustment_no_figures"],
-      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'import', ${ov}, 'debit', -1, ${batch}`, "rep_payout_rows_override_columns"],
-      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'refund', 1, ${batch}`, "rep_payout_rows_override_role"],
-      [`'${OTHER_AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'debit', -1, ${batch}`, null],
-      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'debit', -2, ${batch}`, "rep_payout_rows_override_line_key"],
+      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', null, 'debit', -1, ${batch}, 'owner'`, "rep_payout_rows_override_columns"],
+      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, null, -1, ${batch}, 'owner'`, "rep_payout_rows_override_columns"],
+      [`'${AGENT_ID}', '2030-01-01', null, 'OV-1', 'override', ${ov}, 'credit', 1, ${batch}, 'owner'`, "rep_payout_rows_override_columns"],
+      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'credit', 1, null, 'owner'`, "rep_payout_rows_adjustment_no_figures"],
+      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'import', ${ov}, 'debit', -1, ${batch}, 'owner'`, "rep_payout_rows_override_columns"],
+      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'refund', 1, ${batch}, 'owner'`, "rep_payout_rows_override_role"],
+      [`'${OTHER_AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'debit', -1, ${batch}, 'owner'`, null],
+      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'debit', -2, ${batch}, 'owner'`, "rep_payout_rows_override_line_key"],
+      // 20261116120000: the funding is set with the other three, on override lines only;
+      // a company-funded override is a credit only.
+      [`'${MANAGER_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'credit', 1, ${batch}, null`, "rep_payout_rows_override_columns"],
+      [`'${MANAGER_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'credit', 1, ${batch}, 'house'`, "rep_payout_rows_override_funded_by"],
+      [`'${AGENT_ID}', '2030-01-01', 'TSYS', 'OV-1', 'import', null, null, null, ${batch}, 'owner'`, "rep_payout_rows_override_columns"],
+      [`'${MANAGER_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'debit', -1, ${batch}, 'company'`, "rep_payout_rows_company_override_no_debit"],
+      [`'${MANAGER_ID}', '2030-01-01', 'TSYS', 'OV-1', 'override', ${ov}, 'credit', 1, ${batch}, 'company'`, null],
     ] as const) {
       const error = await tryLine(values);
       if (constraint === null) expect(error).toBeNull();
@@ -1090,7 +1098,7 @@ describe("the ledger CHECKs", () => {
 
 describe("grants and catalog", () => {
   const FUNCTIONS = [
-    "set_merchant_override(int, uuid, numeric, date)",
+    "set_merchant_override(int, uuid, numeric, date, text)",
     "end_merchant_override(int, date)",
     "cancel_merchant_override(int)",
     "my_override_recipients()",
@@ -1199,7 +1207,7 @@ describe("the migration over a populated database", () => {
 describe("mutation proofs: each protection is what stops its case", () => {
   let mutant: TestDb;
   const MUTATED = [
-    "set_merchant_override(int, uuid, numeric, date)",
+    "set_merchant_override(int, uuid, numeric, date, text)",
     "end_merchant_override(int, date)",
     "cancel_merchant_override(int)",
     "my_override_recipients()",
@@ -1248,66 +1256,66 @@ describe("mutation proofs: each protection is what stops its case", () => {
   };
 
   it("the cap in set_merchant_override", async () => {
-    await without("set_merchant_override(int, uuid, numeric, date)",
+    await without("set_merchant_override(int, uuid, numeric, date, text)",
       "if override_pct_input > m.split_agent_pct then", "if false then");
     await swap(async () => {
       const m = await merchant(db, "OV-1", { rate: 30 });
-      expect(await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 40, '2030-01-01')`)).toBeNull();
+      expect(await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 40, '2030-01-01', 'owner')`)).toBeNull();
     });
   });
 
   it("the recipient's active check in set_merchant_override", async () => {
-    await without("set_merchant_override(int, uuid, numeric, date)", "if not recipient.is_active then", "if false then");
+    await without("set_merchant_override(int, uuid, numeric, date, text)", "if not recipient.is_active then", "if false then");
     await swap(async () => {
       const m = await merchant(db, "OV-1");
       await db.exec(`update profiles set is_active = false where id = '${MANAGER_ID}'`);
-      expect(await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01')`)).toBeNull();
+      expect(await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01', 'owner')`)).toBeNull();
     });
   });
 
   it("the owner check in set_merchant_override", async () => {
-    await without("set_merchant_override(int, uuid, numeric, date)", "if recipient.id = m.agent_id then", "if false then");
+    await without("set_merchant_override(int, uuid, numeric, date, text)", "if recipient.id = m.agent_id then", "if false then");
     await swap(async () => {
       const m = await merchant(db, "OV-1");
-      expect(await rpc(db, `select set_merchant_override(${m}, '${AGENT_ID}', 5, '2030-01-01')`)).toBeNull();
+      expect(await rpc(db, `select set_merchant_override(${m}, '${AGENT_ID}', 5, '2030-01-01', 'owner')`)).toBeNull();
     });
   });
 
   it("the share-party check in set_merchant_override", async () => {
-    await without("set_merchant_override(int, uuid, numeric, date)",
+    await without("set_merchant_override(int, uuid, numeric, date, text)",
       "recipient.id in (s.primary_agent_id, s.secondary_agent_id)", "false");
     await swap(async () => {
       const m = await merchant(db, "OV-1");
       await share(db, m, 40, 10, "2030-01-01");
-      expect(await rpc(db, `select set_merchant_override(${m}, '${OTHER_AGENT_ID}', 5, '2030-03-01')`)).toBeNull();
+      expect(await rpc(db, `select set_merchant_override(${m}, '${OTHER_AGENT_ID}', 5, '2030-03-01', 'owner')`)).toBeNull();
     });
   });
 
   it("the month rule in set_merchant_override", async () => {
-    await without("set_merchant_override(int, uuid, numeric, date)",
+    await without("set_merchant_override(int, uuid, numeric, date, text)",
       "if latest is not null and effective_from_input <= latest then", "if false then");
     await swap(async () => {
       const m = await merchant(db, "OV-1");
       const { id, period } = await batchWith(db, [{ mid: "OV-1" }]);
       await commit(db, id);
-      expect(await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '${period}')`)).toBeNull();
+      expect(await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '${period}', 'owner')`)).toBeNull();
     });
   });
 
   it("the pre-app check in set_merchant_override", async () => {
-    await without("set_merchant_override(int, uuid, numeric, date)", "if m.pre_app_id is not null then", "if false then");
+    await without("set_merchant_override(int, uuid, numeric, date, text)", "if m.pre_app_id is not null then", "if false then");
     await swap(async () => {
       const m = await merchant(db, "OV-1");
       await db.exec(`update merchants set pre_app_id = (select id from pre_apps where status = 'draft' limit 1) where id = ${m}`);
-      expect(await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01')`)).toBeNull();
+      expect(await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01', 'owner')`)).toBeNull();
     });
   });
 
   it("the is_admin() guard in set_merchant_override", async () => {
-    await without("set_merchant_override(int, uuid, numeric, date)", "if not is_admin() then", "if false then");
+    await without("set_merchant_override(int, uuid, numeric, date, text)", "if not is_admin() then", "if false then");
     await swap(async () => {
       const m = await merchant(db, "OV-1");
-      expect(await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01')`, AGENT_ID)).toBeNull();
+      expect(await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-01-01', 'owner')`, AGENT_ID)).toBeNull();
     });
   });
 
@@ -1465,32 +1473,32 @@ describe("mutation proofs: each protection is what stops its case", () => {
   // -----------------------------------------------------------------------
 
   it("the cap at rate 0: the rate-0 refusal, and behind it the cap itself", async () => {
-    await without("set_merchant_override(int, uuid, numeric, date)", "if m.split_agent_pct = 0 then", "if false then");
+    await without("set_merchant_override(int, uuid, numeric, date, text)", "if m.split_agent_pct = 0 then", "if false then");
     await swap(async () => {
       const m = await merchant(db, "HOUSE", { rate: 0 });
       // Without its own sentence a house merchant is still refused, by the cap.
-      const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 0.01, '2030-01-01')`);
+      const error = await rpc(db, `select set_merchant_override(${m}, '${MANAGER_ID}', 0.01, '2030-01-01', 'owner')`);
       expect([error?.code, error?.message]).toEqual([
         "22023",
-        "An override comes out of the rep side, so it cannot be more than this merchant's rate: 0.",
+        "An override cannot be more than this merchant's rate: 0.",
       ]);
     });
-    await without("set_merchant_override(int, uuid, numeric, date)",
+    await without("set_merchant_override(int, uuid, numeric, date, text)",
       "if override_pct_input > m.split_agent_pct then", "if false then");
     await swap(async () => {
       const [{ id }] = await rows<{ id: number }>(db, `select id from merchants where mid = 'HOUSE'`);
-      expect(await rpc(db, `select set_merchant_override(${id}, '${MANAGER_ID}', 0.01, '2030-01-01')`)).toBeNull();
+      expect(await rpc(db, `select set_merchant_override(${id}, '${MANAGER_ID}', 0.01, '2030-01-01', 'owner')`)).toBeNull();
     });
   });
 
   it("the cap at rate 50: the function's outer bound, and behind it the table CHECK", async () => {
-    await without("set_merchant_override(int, uuid, numeric, date)",
+    await without("set_merchant_override(int, uuid, numeric, date, text)",
       "or override_pct_input <= 0 or override_pct_input > 50 then", "or override_pct_input <= 0 then");
-    await without("set_merchant_override(int, uuid, numeric, date)",
+    await without("set_merchant_override(int, uuid, numeric, date, text)",
       "if override_pct_input > m.split_agent_pct then", "if false then");
     await swap(async () => {
       const m = await merchant(db, "FIFTY", { rate: 50 });
-      const sql = `select set_merchant_override(${m}, '${MANAGER_ID}', 50.01, '2030-01-01')`;
+      const sql = `select set_merchant_override(${m}, '${MANAGER_ID}', 50.01, '2030-01-01', 'owner')`;
       // Both checks in the function gone: the table's outer bound refuses.
       expect((await rpc(db, sql))?.message).toContain("merchant_overrides_pct_range");
       await asPlatform(db);
@@ -1507,12 +1515,12 @@ describe("mutation proofs: each protection is what stops its case", () => {
   });
 
   it("one override per merchant per month: the function's overlap check, and behind it the exclusion constraint", async () => {
-    await without("set_merchant_override(int, uuid, numeric, date)",
+    await without("set_merchant_override(int, uuid, numeric, date, text)",
       "raise exception 'That month overlaps another override on this merchant.'\n      using errcode = 'PT409';", "null;");
     await swap(async () => {
       const m = await merchant(db, "OV-1");
       await plant(db, m, 10, "2030-01-01", { to: "2030-06-01" });
-      const sql = `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-03-01')`;
+      const sql = `select set_merchant_override(${m}, '${MANAGER_ID}', 5, '2030-03-01', 'owner')`;
       expect((await rpc(db, sql))?.message).toContain("merchant_overrides_no_overlap");
       await asPlatform(db);
       await db.exec(`alter table merchant_overrides drop constraint merchant_overrides_no_overlap`);
@@ -1531,8 +1539,8 @@ describe("mutation proofs: each protection is what stops its case", () => {
   it("no client write: the missing grant, and behind it the missing write policy", async () => {
     await swap(async () => {
       const m = await merchant(db, "OV-1");
-      const insert = `insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from)
-                      values (${m}, '${MANAGER_ID}', 5, '2030-01-01')`;
+      const insert = `insert into merchant_overrides (merchant_id, recipient_id, override_pct, effective_from, funded_by)
+                      values (${m}, '${MANAGER_ID}', 5, '2030-01-01', 'owner')`;
       expect((await rpc(db, insert))?.message).toMatch(/permission denied for table merchant_overrides/);
       await asPlatform(db);
       await db.exec(`grant insert on merchant_overrides to authenticated;

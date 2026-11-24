@@ -25,7 +25,7 @@ import {
 } from "@/components/merchant-share-card";
 import { MerchantShareNotice } from "@/components/merchant-share-notice";
 import { MerchantOverrideCard } from "@/components/merchant-override-card";
-import { loadMerchantOverrides } from "@/lib/overrides";
+import { loadMerchantOverrides, loadOverrideMonths } from "@/lib/overrides";
 import { importMonths } from "@/lib/payouts";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
@@ -73,6 +73,9 @@ async function loadShareCard(merchant: Merchant): Promise<{
       ? loadShareLedger(supabase, merchant.mid)
       : Promise.resolve({ latestCommitted: null, months: [] }),
   ]);
+  // Each override's committed months, paid and stale (20261116120000), for
+  // "Change who pays".
+  const overrideMonthsById = Object.fromEntries(await loadOverrideMonths(supabase, overrides));
   const people = (repsResult.data ?? []) as (ShareRep & { manager_id: string | null })[];
   const reps: ShareRep[] = people.map(({ id, full_name, is_active }) => ({ id, full_name, is_active }));
   return {
@@ -98,6 +101,7 @@ async function loadShareCard(merchant: Merchant): Promise<{
       reps,
       latestCommitted: ledger.latestCommitted,
       currentPeriod: importMonths(new Date())[0],
+      overrideMonthsById,
     },
   };
 }

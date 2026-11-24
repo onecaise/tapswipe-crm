@@ -183,6 +183,7 @@ describe("after 20261104140000", () => {
       rows: 1,
       shared: 0,
       overrides: 0,
+      company_overrides: 0,
       replaced_lines: 0,
     });
     await asPlatform(db);

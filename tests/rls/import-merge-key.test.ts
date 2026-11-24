@@ -506,7 +506,7 @@ describe("an import never merges into an adjustment, and an adjustment never int
     await stageForCommit(db, batch, [{ mid: "MID-AGENT-2", volume: "500.00" }]);
     // MID-AGENT-2 is inactive and a Square merchant: both warnings, confirmed.
     expect(await commitV3(db, batch, ["inactive_merchant", "processor_mismatch"])).toEqual({
-      written: 2, rows: 1, shared: 1, overrides: 0, replaced_lines: 0,
+      written: 2, rows: 1, shared: 1, overrides: 0, company_overrides: 0, replaced_lines: 0,
     });
 
     const pair = await lines(`rep_share_id = ${shareId}`);

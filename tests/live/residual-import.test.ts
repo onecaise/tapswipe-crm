@@ -1159,7 +1159,7 @@ describe("the four warnings are stored per row, once per type, and block nothing
     // merchant's rate (50 here), and keeps what was confirmed.
     const { data, error } = await commitV3(batchId, stored);
     expect(error, error?.message).toBeNull();
-    expect(data).toEqual({ written: 13, rows: 13, shared: 0, overrides: 0, replaced_lines: 0 });
+    expect(data).toEqual({ written: 13, rows: 13, shared: 0, overrides: 0, company_overrides: 0, replaced_lines: 0 });
     const { data: batch } = await adminClient()
       .from("rep_payout_batches")
       .select("confirmed_warnings")
@@ -1246,7 +1246,7 @@ describe("committing over HTTP", () => {
 
     const admin = await commitV3(batchId);
     expect(admin.error).toBeNull();
-    expect(admin.data).toEqual({ written: 1, rows: 1, shared: 0, overrides: 0, replaced_lines: 0 });
+    expect(admin.data).toEqual({ written: 1, rows: 1, shared: 0, overrides: 0, company_overrides: 0, replaced_lines: 0 });
 
     // v2 is gone from the Data API (20261030160000), and the old
     // commit_residual_import(int) since 20261104140000.
@@ -1611,6 +1611,7 @@ describe("the export is scoped by RLS, and is no longer an import format", () =>
       recipient_id_input: fixtures.userIds.intruder,
       override_pct_input: 10,
       effective_from_input: slot.period,
+      funded_by_input: "owner",
     });
     expect(setError, setError?.message).toBeNull();
     const { batchId } = await importFile([HEADER, line(mid, { residual: "$100.00" })], slot);
@@ -1847,7 +1848,7 @@ describe("a shared account, through upload, preview and commit (v3)", () => {
   it("commits through v3, paying the pair from the file at the merchant's rate, skipping nothing", async () => {
     const { data, error } = await commitV3(batchId);
     expect(error, error?.message).toBeNull();
-    expect(data).toEqual({ written: 3, rows: 2, shared: 1, overrides: 0, replaced_lines: 0 });
+    expect(data).toEqual({ written: 3, rows: 2, shared: 1, overrides: 0, company_overrides: 0, replaced_lines: 0 });
 
     const { data: batch } = await adminClient()
       .from("rep_payout_batches")
@@ -2119,7 +2120,7 @@ describe("phase 5: a correction exports as Line = Adjustment, and share_not_in_f
     it("commits every flagged row through v3: the note is advisory", async () => {
       const { data, error } = await commitV3(batchId);
       expect(error, error?.message).toBeNull();
-      expect(data).toEqual({ written: 2, rows: 2, shared: 0, overrides: 0, replaced_lines: 0 });
+      expect(data).toEqual({ written: 2, rows: 2, shared: 0, overrides: 0, company_overrides: 0, replaced_lines: 0 });
     });
   });
 });

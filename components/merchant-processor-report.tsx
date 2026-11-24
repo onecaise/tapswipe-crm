@@ -18,8 +18,11 @@ import {
  * one a row of merchant_processor_summary() as it came back.
  *
  * Residual is the account's (a shared account once, on its signer); rep side
- * is the merchant's rate of it, before any override; company share is the
- * rest. The subtotal says whether the processor-month is marked paid.
+ * is the merchant's rate of it, before any override; overrides from company
+ * are the company-funded overrides paid on it (20261116120000); company share
+ * is the rest, so residual = rep side + overrides from company + company
+ * share. An owner-funded override moves money inside the rep side and does
+ * not appear. The subtotal says whether the processor-month is marked paid.
  *
  * A table from `xl` up and on paper; one card per merchant below it, so at
  * 360px every amount is on screen.

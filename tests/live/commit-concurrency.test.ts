@@ -289,7 +289,7 @@ describe("a commit and an override change on the same merchant and month", () =>
 begin;
 set local role authenticated;
 select set_config('request.jwt.claims', '{"sub":"${fixtures.userIds.admin}","role":"authenticated"}', true);
-select '${tag}', set_merchant_override(${merchantId}, '${fixtures.userIds.intruder}', 10, '${period}');
+select '${tag}', set_merchant_override(${merchantId}, '${fixtures.userIds.intruder}', 10, '${period}', 'owner');
 ${hold ? `select '${tag}-holding', pg_sleep(${HOLD_SECONDS});` : ""}
 commit;
 `;
@@ -352,7 +352,7 @@ commit;
   });
 
   it("mutation proof: without set_merchant_override's locks, it slips in under the commit and breaks the month rule", async () => {
-    const SIG = "set_merchant_override(int, uuid, numeric, date)";
+    const SIG = "set_merchant_override(int, uuid, numeric, date, text)";
     const original = probe(`select pg_get_functiondef('${SIG}'::regprocedure);`);
     const LOCK = "perform pg_advisory_xact_lock(hashtext('tapswipe.merchant_rep_shares'));";
     const ROW = "select * into m from merchants where id = merchant_id_input for update;";

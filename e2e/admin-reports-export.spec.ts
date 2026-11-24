@@ -141,7 +141,7 @@ test.describe("as the admin", () => {
     const file = await exportFromPage(page);
     expect(file.name).toBe(`residual-report-2-${fx.period}-${slug(processor)}.xlsx`);
     const { header, lines } = bodyAfter(file.rows, "Processor", "Merchant");
-    expect(header).toEqual(["Processor", "Merchant", "MID", "Owner code", "Owner name", "Volume", "Residual", "Rep side", "Company share"]);
+    expect(header).toEqual(["Processor", "Merchant", "MID", "Owner code", "Owner name", "Volume", "Residual", "Rep side", "Overrides from company", "Company share"]);
 
     for (const merchant of [fx.shared, fx.plain, fx.clawback]) {
       const pageRow = page.getByTestId("report-merchant-row").filter({ hasText: merchant.mid });
@@ -150,21 +150,21 @@ test.describe("as the admin", () => {
       expect(line, merchant.mid).toBeDefined();
       expect(line[1]).toBe(merchant.dba);
       expect(`${line[3]} · ${line[4]}`).toBe(cells[2]);
-      expect(line.slice(5, 9).map((v) => money(Number(v)))).toEqual(cells.slice(3, 7));
+      expect(line.slice(5, 10).map((v) => money(Number(v)))).toEqual(cells.slice(3, 8));
     }
     expect(lines.find((r) => r[2] === fx.clawback.mid)!.slice(6, 8)).toEqual([-11.76, -5.88]);
 
     const subtotal = lines.find((r) => r[0] === `${processor} subtotal (not marked paid)`)!;
     const pageSubtotal = (await page.getByTestId("report-processor-row").getByRole("cell").allInnerTexts()).map((t) => t.trim());
-    expect(subtotal.slice(5, 9).map((v) => money(Number(v)))).toEqual(pageSubtotal.slice(-4));
+    expect(subtotal.slice(5, 10).map((v) => money(Number(v)))).toEqual(pageSubtotal.slice(-5));
     const grand = lines.find((r) => r[0] === "Grand total")!;
     const pageGrand = (await page.getByTestId("report-total-row").getByRole("cell").allInnerTexts()).map((t) => t.trim());
-    expect(grand.slice(5, 9).map((v) => money(Number(v)))).toEqual(pageGrand.slice(-4));
+    expect(grand.slice(5, 10).map((v) => money(Number(v)))).toEqual(pageGrand.slice(-5));
 
     const { client } = await sessionOf("admin");
     const { data } = await client.rpc("merchant_processor_summary", rpcArgs());
     const fnGrand = (data as Record<string, unknown>[]).find((r) => r.row_kind === "total")!;
-    expect(grand.slice(5, 9).map(cents)).toEqual(["volume", "residual", "rep_side", "company_share"].map((k) => cents(fnGrand[k])));
+    expect(grand.slice(5, 10).map(cents)).toEqual(["volume", "residual", "rep_side", "company_overrides", "company_share"].map((k) => cents(fnGrand[k])));
     expect(cents(grand[6])).toBe(142280);
   });
 
