@@ -1,6 +1,6 @@
 # Merchants list, merchant detail page, and the dashboard lead board
 
-Design written 24 Nov 2026 on `master` (after `6d5bda6`). **Design only: no code, no migration, no
+Design written 24 Nov 2026 after `6d5bda6` (branch `merchants-dashboard-design`); owner's decisions recorded the same day. **Design only: no code, no migration, no
 hosted project touched.** Build order, as the owner asked: (1) the merchants list, (2) the merchant
 detail page, (3) the dashboard. The three are designed together so they share one set of functions,
 one filter/URL style and one way of showing "who is paid" changes.
@@ -11,6 +11,35 @@ Read with: `CLAUDE.md` (security rules, the RLS + grants checklist, definer rule
 `docs/claude/security-fixes.md` phase 1 (merchants are admin-only to change),
 `components/list-table.tsx` (the one responsive list), and `docs/design/override-funding.md` on the
 unmerged `override-funding` branch.
+
+---
+
+## Owner's decisions (24 Nov 2026)
+
+The owner accepted the recommendation on all thirteen decisions in §6, **with two changes**:
+
+- **(6) Export is Excel (`.xlsx`), not CSV**, built the way the Reports export is
+  (`export-report`): a caller-scoped, admin-only, audited Edge Function writing the file with the
+  pinned SheetJS 0.20.3, every text cell `t: "s"`. Owner's reason: opening a CSV in Excel drops
+  leading zeros from MIDs and mangles long numbers, and MIDs here include letters and leading zeros;
+  the Reports export already keeps MIDs as text. §1.5 ("Status and export"), §4.1 and §4.2 are
+  rewritten to match.
+- **(9) No stage-history table, but dropping a lead on Lost saves the reason as a note on the
+  lead**, through the existing append-only `notes`, so there is a record of who moved a lead to Lost
+  and why. §3.4 and §3.8 are rewritten to match; §3.7 stays as the rejected alternative.
+
+**Build order is unchanged:** the list (phases 1a, 1b, 1c), then the merchant page (2a–2d), then the
+board (3a, 3b). Phase 3c (stage history) is dropped.
+
+**Deploy rules (owner, 24 Nov 2026), binding on every phase here:**
+
+- **No migration from this design is pushed to any hosted project** (dev or prod) until the owner
+  confirms `override-funding` is on `master` **and** on prod. Building is fine; deploying waits.
+- **Funding reaches prod before any list-phase migration.**
+- **Never switch branches in the main working folder during the funding deploy.** The prod push
+  script sends every migration in that folder's `supabase/migrations`, so a design-phase branch
+  checked out there could put the wrong migrations on prod. Phases are built in a **separate git
+  worktree** (`../tapswipe-crm-1a` for phase 1a), whose migrations never appear in the main folder.
 
 ---
 
@@ -201,7 +230,7 @@ in memory is cheaper than the write cost of more indexes; revisit with the count
 | **Assign agent** (move to another rep's book) | **Yes** | preview + written reason | new `move_merchants()` |
 | **Update processor** | Yes, indirectly (which file the MID is expected on) | preview + written reason | new `set_merchants_processor()` |
 | **Change status** | No | a confirm ("Set 14 merchants to inactive?") | new `set_merchants_status()` |
-| **Export selected** | No | a confirm | new `export_merchants()` |
+| **Export selected** | No | a confirm | new Edge Function `export-merchants` (`.xlsx`) |
 
 #### 1.5.3 The preview-and-apply shape (assign agent, processor)
 
@@ -294,15 +323,38 @@ replaced." (It is still treated as a payroll change, as the owner asked: preview
   than a client `update().in('id', ids)`: the client update is atomic too, but it cannot write an
   audit row when the admin owns the merchant, and a count mismatch after the fact cannot be rolled
   back from the browser.
-- `export_merchants(merchant_ids int[]) returns setof jsonb` — definer, `is_admin()` first,
-  ≤ 1000 ids (an export reads, it does not move money; decision 4), writes **one** audit row
-  (`export_merchants`, `detail` = the count) **before** returning rows, failing closed — the
-  `export-report` rule. Columns: DBA, legal name, MID (text), status, processor, rate, company
-  rate, owner name, owner agent code, city, state, street, ZIP, date added. Nothing secret lives on
-  `merchants`. The browser builds a **CSV** (decision 6) with the formula-injection guard from
-  `supabase/functions/_shared/report-sheets.ts` (a text starting `= + - @`, tab or CR gets a
-  leading `'`) — reused through a small exported helper, not copied, the way `lib/reports.ts`
-  re-exports from `_shared`. No SheetJS in the browser bundle.
+- **Export is an Excel file (`.xlsx`) from a new Edge Function, `export-merchants`** (decision 6
+  as decided: the owner chose Excel over CSV, because Excel opening a CSV drops MIDs' leading
+  zeros). It is built **exactly the way `export-report` is**
+  (`docs/claude/payouts-and-teardown.md`, "Export Excel"), and for the same reasons — the audit row
+  needs a write no client role holds, and the Next app holds no service key:
+  1. `withSupabase({ auth: "user" })` (401) → `callerIsActive` on the caller-scoped client →
+     `callerIsAdmin` (403 "Admin only", before the body is read).
+  2. The body: 1–1000 merchant ids (decision 4; 400 otherwise).
+  3. **The rows are read through the caller-scoped client** (the `merchant_list` view of §1.4),
+     so RLS decides what comes back; an id the caller cannot see is simply absent, and an empty
+     result is 404.
+  4. **One `audit_log` row** (`export_merchants`, `table_name = 'merchants'`, `detail` = the count)
+     through `supabaseAdmin`, **failing closed**: no audit row, no file. `supabaseAdmin` is used for
+     that insert only.
+  5. The file: `application/octet-stream`, `Cache-Control: no-store`, named
+     `merchants-<yyyy-mm-dd>-<n>.xlsx`.
+
+  Cells: **every text cell `t: "s"` and never `f`**, so MIDs and agent codes stay text with their
+  leading zeros and letters; the rate and company rate are number cells (format `0.00`); the date
+  added is a text `yyyy-mm-dd` (the Reports file's month rule). **Formula injection** as in
+  `_shared/report-sheets.ts`: a text whose first character is `= + - @`, tab or CR gets a visible
+  leading `'`. The sheet writer lives in a new dependency-free `_shared/merchant-sheet.ts`, sharing
+  the cell helpers with `report-sheets.ts` (moved into one `_shared/sheet-cells.ts`, not copied).
+  SheetJS stays the pinned `cdn.sheetjs.com` 0.20.3 build in the function's `deno.json`, never
+  `npm:xlsx`, and never in the browser bundle. Columns: DBA, legal name, MID, status, processor,
+  rate, company rate, owner name, owner agent code, street, city, state, ZIP, date added. Nothing
+  secret lives on `merchants`.
+
+  This makes **fifteen** Edge Functions: a `[functions.export-merchants]` block in
+  `supabase/config.toml` with `verify_jwt = false`, and `CLAUDE.md`'s count and table updated in the
+  same commit. The browser calls it through `invokeEdgeFunction()` (`lib/edge-functions.ts`), never
+  showing a `functions.invoke()` error's `.message`.
 
 #### Other single-merchant admin actions that could be offered in bulk
 
@@ -326,8 +378,9 @@ an audit row and a reason added.
 - **Migration A (phase 1a):** view `merchant_list` (`security_invoker = true`), `grant select …
   to authenticated`, two indexes. **No table, so no RLS, no `profiles` FK, teardown lists
   unchanged.**
-- **Migration B (phase 1b):** `set_merchants_status()`, `export_merchants()` with their
-  revoke/grant lines.
+- **Migration B (phase 1b):** `set_merchants_status()` with its revoke/grant lines. The export is
+  the `export-merchants` Edge Function (no migration; it reads through the `merchant_list` view and
+  writes `audit_log` as service role, which already holds that grant).
 - **Migration C (phase 1c):** `move_merchants()`, `set_merchants_processor()` with their
   revoke/grant lines.
 - `docs/tapswipe_crm_schema.sql` first, then the migrations (the standing rule).
@@ -508,8 +561,8 @@ colour on the card beyond that; stage colour stays on badges only (design system
 
 ### 3.4 How a stage change is stored, validated and audited
 
-**Stored exactly as today: `leads.status` (and `lost_reason`) via the existing client UPDATE.** No
-new write path, no new function (decision 9 covers history):
+**Every move except to Lost is stored exactly as today: `leads.status` via the existing client
+UPDATE.** No new write path:
 
 ```ts
 supabase.from("leads")
@@ -521,16 +574,45 @@ supabase.from("leads")
 - **Validation stays in the database:** `leads_status_vocabulary` refuses an unknown stage,
   `leads_lost_reason_required` refuses Lost without a reason, `update own or admin` refuses
   someone else's lead and a deactivated rep. The board adds nothing the database does not enforce.
-- **Lost asks for a reason first.** Dropping (or choosing) Lost opens a small dialog ("Why was it
-  lost?", required, non-blank); Cancel puts the card back. Moving out of Lost clears `lost_reason`,
-  as the lead form does today.
-- **`count === 0`** means the lead changed or vanished since the board loaded: roll back and say
-  "This lead was changed elsewhere. The board has been refreshed." then `router.refresh()`.
-- **Audit:** unchanged — an admin moving a rep's lead gets the `cross_agent_update` row from
-  `log_cross_agent_change()`; **a rep moving their own lead leaves no trail**, exactly as editing
-  the stage in the lead form does today. Dragging makes stage changes easier, so the owner should
-  decide whether that is still acceptable (decision 9): the alternative is a `lead_stage_changes`
-  history table (see 3.7).
+- **Lost asks for a reason first, and the reason is also saved as a note** (decision 9 as decided).
+  Dropping a card on Lost, or choosing Lost from "Move to…", opens a small dialog ("Why was it
+  lost?", required, non-blank, at most 1000 characters); Cancel puts the card back. Saving calls one
+  new function, so the stage and the note land together or not at all:
+
+  ```
+  move_lead_to_lost(lead_id_input int, from_status_input text, reason_input text) returns boolean
+  ```
+
+  - **`security invoker`** (the default; nothing here needs more than the caller may do),
+    `set search_path = public, pg_temp`, `revoke all … from public; grant execute … to
+    authenticated, service_role;`. RLS decides both writes: `update own or admin` on `leads`,
+    `insert own` on `notes` (`(agent_id = auth.uid() and is_active_agent()) or is_admin()`).
+  - In one transaction: `update leads set status = 'lost', lost_reason = <trimmed reason> where
+    id = lead_id_input and status = from_status_input`; **0 rows → return false and write nothing**
+    (moved elsewhere, or not the caller's lead — indistinguishable, as everywhere); otherwise
+    `insert into notes (agent_id, owner_type, owner_id, body) values (auth.uid(), 'lead',
+    lead_id_input, 'Moved to Lost: ' || <trimmed reason>)` and return true. Blank or over-long
+    reason → 22023 with a showable message, before either write.
+  - **The note is the record of who and why**: `notes` is append-only (no client UPDATE at either
+    layer, DELETE admin-only), its author is `notes.agent_id` = the caller, and its time is
+    `created_at`. It appears in the lead's notes panel and on the lead timeline like any other note.
+    No new table, so no new `profiles` FK and no teardown list changes.
+  - **Who can read the note follows the existing notes rule**: a rep's own note is visible to them
+    and to admins; **an admin's note on a rep's lead is visible to admins only**, because the notes
+    SELECT policy is author-or-admin. That is today's behaviour for every admin note, not something
+    this adds; the rep still sees the reason itself in `lost_reason` on the lead.
+  - Moving out of Lost clears `lost_reason` (the client UPDATE, as the lead form does today); the
+    note stays, so the history of why it was once lost survives.
+  - The lead form's own Lost path is unchanged (it writes `lost_reason` only). Routing it through
+    `move_lead_to_lost()` too is a small follow-up if wanted.
+- **`count === 0`** (or `false` from `move_lead_to_lost`) means the lead changed or vanished since
+  the board loaded: roll back and say "This lead was changed elsewhere. The board has been
+  refreshed." then `router.refresh()`.
+- **Audit:** an admin moving a rep's lead still gets the `cross_agent_update` row from
+  `log_cross_agent_change()`; a move to Lost now always leaves the note; **a rep moving their own
+  lead between the other stages leaves no trail**, as editing the stage in the lead form does today.
+  The owner decided against a stage-history table (decision 9; §3.7 is kept as the rejected
+  alternative).
 - **`application_sent` is only a stage.** Dropping a card there does not create a pre-app; the win
   is still derived from a pre-app or merchant, as `lib/leads.ts` insists.
 
@@ -575,9 +657,10 @@ for a PostgREST error; Edge Function errors are not involved) → on success, no
 `router.refresh()` only on the stale case). One move in flight per card; a second drag of the same
 card waits.
 
-### 3.7 Optional: a stage history (decision 9)
+### 3.7 Rejected: a stage history (decision 9)
 
-If the owner wants every stage change recorded (who, from, to, when — reps included), add
+**Not built — the owner decided against it on 24 Nov 2026**; the Lost note in §3.4 is the record
+kept instead. Kept here so the cost is known if it is ever reconsidered. If the owner wants every stage change recorded (who, from, to, when — reps included), add
 `lead_stage_changes(id, lead_id → leads on delete cascade, agent_id → profiles not null, from_status,
 to_status, changed_by → profiles, changed_at)` written by an AFTER UPDATE OF status trigger on
 `leads` (definer, fail closed). That is a **new table** and therefore the full checklist: RLS on,
@@ -593,7 +676,10 @@ must list it in `clear_tables`. The lead timeline could then show stage changes 
 
 - **Migration D (phase 3a):** `lead_board_counts()` (invoker) + revoke/grant. No table, no policy,
   no grant on a table; teardown lists unchanged.
-- Optional migration E (3.7) as above.
+- **Migration D2 (phase 3a, with the Move to… menu):** `move_lead_to_lost()` (invoker) + revoke/grant.
+  It writes `leads` and `notes` under their existing policies and grants; no table, no policy, no
+  teardown change.
+- No stage-history table (decision 9).
 
 ---
 
@@ -614,9 +700,14 @@ must list it in `clear_tables`. The lead timeline could then show stage changes 
 - `docs/claude/grants-inventory.md` (the view's grant)
 
 **Phase 1b — bulk status + export**: migration B; new `components/merchant-bulk-bar.tsx` (client:
-selection context, sticky bar), `components/merchant-bulk-dialog.tsx` (status/export confirm),
-`lib/csv.ts` (CSV writer using the `_shared/report-sheets.ts` injection helper — a small export
-added there, which is a change to a `_shared` file; `report-sheets` tests must stay green).
+selection context, sticky bar), `components/merchant-bulk-dialog.tsx` (status/export confirm);
+the export: new `supabase/functions/export-merchants/` (`index.ts`, `deno.json` with the pinned
+SheetJS 0.20.3 URL), new `supabase/functions/_shared/merchant-sheet.ts`, new
+`supabase/functions/_shared/sheet-cells.ts` (the text/number/injection cell helpers moved out of
+`report-sheets.ts`, which then imports them — its tests must stay green unchanged),
+`supabase/config.toml` (`[functions.export-merchants]`, `verify_jwt = false`), a button calling it
+through `invokeEdgeFunction()`, `CLAUDE.md` (fourteen → fifteen functions, the table line) and
+`docs/claude/edge-functions-and-storage.md`.
 
 **Phase 1c — bulk assign agent + processor**: migration C; `merchant-bulk-dialog.tsx` gains the
 preview/reason mode; `lib/merchant-bulk.ts` (types, the effect texts, and the mapping of a PT409
@@ -658,18 +749,20 @@ line for this file).
 | **rls** `merchant-list-view.test.ts` | 1a | `security_invoker=true` in reloptions; rep sees only own rows and only own `agent_name`; admin sees all; `anon` has no grant; mutation proof (view without the option → rep test red) |
 | **rls** `merchant-bulk.test.ts` | 1b, 1c | each function: PT403 for a rep; `prosecdef` true; `proacl` has no PUBLIC/anon; 0 and 201 ids refused; reason length; dry run writes nothing (no merchant change, no audit row); apply all-or-nothing (one refused → zero changed, zero audit rows); `changed_since_preview`; live share and live override (owner- **and** company-funded once the branch is in) refused; inactive target refused; `awaiting_commit` flagged for a review batch; one audit row per changed merchant with `detail`; unchanged writes nothing; export writes one audit row and fails closed (audit insert forced to fail → no rows returned) |
 | **rls** `lead-board.test.ts` | 3a | `prosecdef` false; rep counts own only; `agent_id_input` = another rep → zeros; out-of-vocabulary rows counted in `needs_review`; lost without reason still refused by the constraint; conditional UPDATE with a stale `from` touches 0 rows |
+| **rls** `move-lead-to-lost.test.ts` | 3a | `prosecdef` false; `proacl` has no PUBLIC/anon; rep on own lead → status lost, `lost_reason` set, exactly one note (`owner_type 'lead'`, author = rep, body `Moved to Lost: …`); stale `from` → false and **no note**; another rep's lead → false, nothing written; deactivated rep → false; blank / over-long reason → 22023 and nothing written; admin on a rep's lead → note authored by the admin plus the `cross_agent_update` row; note insert made to fail → the lead is not lost either (one transaction) |
 | **rls** `grants.test.ts` | 1a–3a | the four new functions and the view appear in its pinned inventory |
 | **unit** | 1a | `parseMerchantListParams` (bad values dropped, backwards ranges, page clamp, rep-only `agent` sort ignored), `merchantListHref` (defaults omitted, page reset), sort whitelist |
-| **unit** | 1b | CSV writer: quoting, leading zeros, injection prefix |
+| **unit** | 1b | `merchant-sheet.ts`: every text cell `t: "s"` with no `f` (a MID `000123` and `AB00123` stay text), number cells for the rates, injection prefix, header row; `report-sheets.test.ts` unchanged and green after the helper move |
+| **live** `merchant-export.test.ts` | 1b | the function on the stack: 401 no JWT, 403 rep, 403 deactivated admin token, 400 bad body, 404 nothing visible, the file parsed back with SheetJS matching the merchants cell for cell (leading zeros kept), one `export_merchants` audit row, and fail-closed (audit insert made to fail → no file) |
 | **unit** | 1c | effect texts; PT409 DETAIL → per-merchant messages |
 | **unit** | 3a/3b | `lead-board.ts` reducer: move, counts, rollback, dedupe on show-more |
 | **unit** `claude-md.test.ts` | each | stays green (index lines) |
-| **live** | 1c | `move_merchants` through PostgREST as admin and as rep (403 via PT403 mapping), proving the RPC is reachable with the real grants on the stack (no Edge Function is involved, so this is the only live addition) |
+| **live** | 1c | `move_merchants` through PostgREST as admin and as rep (403 via PT403 mapping), proving the RPC is reachable with the real grants on the stack (1c involves no Edge Function) |
 | **e2e** `merchants-list.spec.ts` | 1a | sort by each header (order + `aria-sort`), page size 25/50/100, prev/next, total, URL round-trip (reload keeps filters/sort/page), rep sees no Agent filter/column, phone cards and "Sort by" select at 375px, axe |
-| **e2e** `merchants-bulk.spec.ts` | 1b, 1c | select page / select all N (and the >200 disabled state), status confirm, export downloads a CSV whose rows match the selection, move preview lists a refused override merchant, reason required, "Continue with the N", the audit row visible on the Activity tab (2c), phone sticky bar |
+| **e2e** `merchants-bulk.spec.ts` | 1b, 1c | select page / select all N (and the >200 disabled state), status confirm, export downloads an `.xlsx` whose rows match the selection, MIDs with leading zeros intact, move preview lists a refused override merchant, reason required, "Continue with the N", the audit row visible on the Activity tab (2c), phone sticky bar |
 | **e2e** `merchant-tabs.spec.ts` | 2a | deep link to each tab; rep has no Overrides/Activity tab and their URLs 404; Back/forward; phone tab bar scrolls and is usable; axe |
 | **e2e** existing | 2a | `merchant-override.spec.ts`, `merchant-shares.spec.ts`, `merchant-split.spec.ts`, `merchant-owner.spec.ts`, `merchant-location.spec.ts` navigate to the right tab (and `merchant-owner` moves to the Admin menu in 2d) |
-| **e2e** `lead-board.spec.ts` | 3a, 3b | rep sees only own cards; admin rep filter; mouse drag changes stage (reload proves it stored); keyboard drag; Move to…; Lost asks a reason and Cancel restores; a forced failure (route intercept returning an error) rolls back and announces; stale move (lead changed in a second session) refreshes; show more; phone: chips + Move to…, no drag; iPad viewport long-press drag; axe |
+| **e2e** `lead-board.spec.ts` | 3a, 3b | rep sees only own cards; admin rep filter; mouse drag changes stage (reload proves it stored); keyboard drag; Move to…; Lost asks a reason, Cancel restores, and Save leaves the `Moved to Lost: …` note on the lead's page; a forced failure (route intercept returning an error) rolls back and announces; stale move (lead changed in a second session) refreshes; show more; phone: chips + Move to…, no drag; iPad viewport long-press drag; axe |
 | **e2e** `dashboard-filters.spec.ts` | 3a | **retired** (the bar is gone); its strip assertions move into `lead-board.spec.ts` |
 
 Each new spec is proved by reverting the fix it guards (testing.md), and durations read, not just
@@ -680,17 +773,19 @@ passes.
 | Phase | Ships | Migration | Depends on |
 | --- | --- | --- | --- |
 | **1a** | Paged, sortable, filtered list (no bulk) | A (view, indexes) | — |
-| **1b** | Selection, bulk status, export | B | 1a |
+| **1b** | Selection, bulk status, Excel export (`export-merchants`) | B (+ a function deploy) | 1a |
 | **1c** | Bulk assign agent + processor with preview/reason | C | 1b |
 | **2a** | Detail page as tabs (Overview, Pricing, Overrides, Notes, Proposals, Tickets) | none | `override-funding` merged (decision 1) |
 | **2b** | Admin menu + effect text | none (uses C) | 1c, 2a |
 | **2c** | Residuals and Activity tabs | none | 2a |
 | **2d** | owner/processor only through the audited functions (column grants) | yes | 2b (decision 7) |
-| **3a** | Board read-only (+ Move to… menu), compact strip, filter bar removed | D | — (independent of 1–2) |
+| **3a** | Board read-only (+ Move to… menu, Lost with its note), compact strip, filter bar removed | D, D2 | — (independent of 1–2) |
 | **3b** | Drag and drop (+ `@dnd-kit/core`) | none | 3a |
-| 3c (optional) | Stage history | E | 3b, decision 9 |
 
-**Deploying:** each migration is applied **before** the app that calls it (the app calls functions
+**Deploying — the owner's rules first (24 Nov 2026):** nothing here is pushed to dev or prod until
+the owner confirms `override-funding` is on `master` and on prod; funding reaches prod before any
+list-phase migration; and branches are never switched in the main working folder while a deploy
+is in progress (phases are built in a separate worktree). Then: each migration is applied **before** the app that calls it (the app calls functions
 that must exist), dev first, through the guarded wrappers; prod through
 `scripts/push-prod-migration.ps1 -DryRun` first. Remember `db push` applies **every** pending
 migration: if `override-funding`'s `20261116120000` is merged but not yet on a project, pushing 1a
@@ -753,7 +848,7 @@ processor, agent (admins), split range and date added, and sort by clicking DBA,
 or Added — an arrow shows which way. Everything you pick is in the web address, so a link or a
 reload shows the same page. On a phone each merchant is a card, with a "Sort by" menu. Admins can
 tick merchants (or "all 312 matching", up to 200 at a time) and then: change status (one confirm),
-export them to a spreadsheet file (one confirm, recorded), or — for the two changes that affect pay
+export them to an Excel file with MIDs kept as text (one confirm, recorded), or — for the two changes that affect pay
 — **move them to another rep** or **change their processor**. Those two always show a preview first:
 which merchants will change, which cannot and why (for example "has an override, end it first"), a
 plain warning that months already committed are not re-paid unless you replace them (and that a
@@ -782,11 +877,13 @@ leads with "Show more".
 - Pushing any new database change also pushes override funding if it is merged but not yet deployed.
 - Until the follow-up in decision 7, an admin can still move a merchant through the Edit form
   without a reason.
-- A rep's own stage changes leave no history today; the board makes them easier (decision 9).
+- A rep's own moves between stages still leave no history (you chose no history table); a move to
+  Lost always leaves a note saying who and why.
 - One new library for drag and drop (decision 2).
 - Losing the Manager, Territory and date filters from the dashboard (decision 10).
 
-**Decisions for you** (my recommendation first):
+**Decisions — made by the owner on 24 Nov 2026.** All thirteen recommendations accepted, except
+6 and 9, changed as marked:
 
 1. **Merge override-funding before the merchant-page work?** — Yes; build the list (phase 1) and the
    board (phase 3) meanwhile, they do not touch it.
@@ -798,15 +895,16 @@ leads with "Show more".
    automatic splitting into chunks.
 5. **Bulk change of the merchant rate?** — Not now. Add later if you need it, under the same
    preview-and-reason rules.
-6. **Export format?** — CSV (opens in Excel, no new code in the browser); Excel `.xlsx` only if you
-   need formatting.
+6. **Export format?** — ~~CSV~~ **Decided: Excel (`.xlsx`)**, built like the Reports export, so MIDs
+   stay text and keep their leading zeros (a CSV opened in Excel loses them).
 7. **Make "move" and "processor" possible only through the audited, reason-required path?**
    (remove them from the Edit form) — Yes, as phase 2d, once the Admin menu exists.
 8. **Show a rep their own override deductions on the merchant's Residuals tab?** — Yes, worded
    exactly as on their statement (they already see it there); company-funded overrides stay
    invisible to them.
-9. **Keep a full history of lead stage changes (who, from, to, when — reps included)?** — Not in
-   the first build; decide after using the board. It adds a table and touches every teardown list.
+9. **Keep a full history of lead stage changes (who, from, to, when — reps included)?** — **Decided:
+   no history table.** Instead, moving a lead to Lost saves the reason as a note on the lead (the
+   existing append-only notes), so who moved it to Lost and why is recorded.
 10. **Where do Manager / Territory / date-range figures go?** — Drop them from the dashboard; add to
     the admin Reports page later only if you miss them.
 11. **Cards per column?** — 20, with "Show more" loading 20 at a time.
