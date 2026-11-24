@@ -6,7 +6,7 @@ import {
   dashboardHref,
   type DashboardFilters,
 } from "@/lib/dashboard";
-import { cn } from "@/lib/utils";
+import { FilterSelect } from "@/components/filter-select";
 import { FilterTabs } from "@/components/filter-tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -57,57 +57,6 @@ export type DashboardFilterOptions = {
   territories: string[];
 };
 
-/**
- * A labelled native `<select>` on the app's own input tokens.
- *
- * Local to this file rather than promoted to components/ui: there is one caller,
- * and a primitive invented before its second use is a guess about what the
- * second use needs. Native rather than a popover library for the reason
- * StateCombobox gives for not reaching for cmdk — this needs a list and a
- * value, and two dependencies to get a listbox is a poor trade.
- */
-function FilterSelect({
-  name,
-  label,
-  value,
-  options,
-  anyLabel,
-}: {
-  name: string;
-  label: string;
-  value: string;
-  options: { value: string; label: string }[];
-  /** What the unset option reads as, e.g. "All reps". */
-  anyLabel: string;
-}) {
-  const id = `dashboard-filter-${name}`;
-  return (
-    <div className="grid gap-1.5">
-      <Label htmlFor={id} className="text-xs text-muted-foreground">
-        {label}
-      </Label>
-      <select
-        id={id}
-        name={name}
-        defaultValue={value}
-        className={cn(
-          // The Input primitive's own classes, so this cannot drift from the
-          // date fields sitting beside it in the same row.
-          "flex h-9 w-full min-w-[10rem] rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-sm transition-colors",
-          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring md:text-sm",
-        )}
-      >
-        <option value="">{anyLabel}</option>
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
 export function DashboardFilterBar({
   filters,
   isAdmin,
@@ -146,6 +95,7 @@ export function DashboardFilterBar({
           {isAdmin && (
             <>
               <FilterSelect
+                idPrefix="dashboard-filter"
                 name="rep"
                 label="Rep"
                 anyLabel="All reps"
@@ -156,6 +106,7 @@ export function DashboardFilterBar({
                 }))}
               />
               <FilterSelect
+                idPrefix="dashboard-filter"
                 name="manager"
                 label="Manager"
                 anyLabel="All managers"
@@ -166,6 +117,7 @@ export function DashboardFilterBar({
                 }))}
               />
               <FilterSelect
+                idPrefix="dashboard-filter"
                 name="territory"
                 label="Territory"
                 anyLabel="All territories"

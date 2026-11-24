@@ -107,7 +107,7 @@ Tapswipe's internal CRM (merchant services): Dashboard, Merchants, Pre-Apps, Lea
 - **Not built yet:** My Submissions.
 - **Still starter-kit template:** `README.md` only. Edge Functions: fourteen in the repo. Details of both → `docs/claude/project-state.md`.
 
-**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. 84 migrations exist; `20260804201300_initial_schema.sql` is the first.
+**`docs/tapswipe_crm_schema.sql` is the authoritative spec** for the data model and access rules, not the migrations. Change the doc first, then make `supabase/migrations/` match it. 85 migrations exist; `20260804201300_initial_schema.sql` is the first.
 
 ## Hosted projects and deployment
 
@@ -126,7 +126,7 @@ npm run build          # next build (also type-checks)
 npm run lint           # eslint .
 npx tsc --noEmit       # type-check only
 
-npm test               # hermetic suite — PGlite + pure logic, no Docker (3108 tests, 130 files — every file must load)
+npm test               # hermetic suite — PGlite + pure logic, no Docker (3144 tests, 132 files — every file must load)
 npm run test:live      # local stack over HTTP — needs `supabase start` + `functions serve` (369 tests)
 npm run test:deployed  # read-only assertions about the DEPLOYED projects (29 tests)
 npm run test:e2e       # Playwright, real browser against the app on the local stack (385 tests, 6 of them setup; last full run 385, 11 Nov 2026)
@@ -230,6 +230,7 @@ Everything below was moved verbatim out of this file; one line each.
 - `docs/claude/reset-business-data.md` — runbook and design notes for the one-off business-data reset (written there, not moved).
 - `docs/claude/deploy-batch-1.md`, `docs/claude/deploy-residuals.md` — deploy plans, dev then prod, for Phases 1–5, then 6–14b and the real-data load: guards, pre-check, functions, checklists, failures.
 - `docs/design/residual-splits.md` — shared-account design memo.
+- `docs/design/merchants-and-dashboard.md` — the merchants list (paging, sort, filters, admin bulk actions), the tabbed merchant page and the dashboard lead board: the design, the owner's 24 Nov 2026 decisions and deploy rules, and the phases (1a built: the `merchant_list` view).
 - `docs/design/intake-and-reports.md` — the intake, MID-based residual import, overrides and reports memo: Owen's binding decisions, the phased build plan and every phase's build notes.
 - `docs/tapswipe_crm_master_plan.md` — product master plan.
 

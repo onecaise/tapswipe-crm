@@ -6,85 +6,106 @@ import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import {
   MERCHANT_FILTER_OPTIONS,
-  MERCHANT_LIST_COLUMNS,
+  MERCHANT_PAGE_SIZES,
+  MERCHANT_SORT_LABELS,
+  type MerchantListParams,
   type MerchantListRow,
-  parseMerchantFilter,
+  type MerchantListSearchParams,
+  type MerchantSort,
+  merchantFiltersActive,
+  merchantListHref,
+  merchantSortHref,
+  parseMerchantListParams,
   statusIntent,
 } from "@/lib/merchants";
+import { loadMerchantPage } from "@/lib/merchants-data";
+import { loadProcessors } from "@/lib/processors";
 import { formatDate, formatPct, formatText } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
 import { PageShell } from "@/components/page-shell";
 import { FilterTabs } from "@/components/filter-tabs";
 import { ListTable, type ListColumn } from "@/components/list-table";
+import { ListPagination } from "@/components/list-pagination";
+import {
+  MerchantFilters,
+  type MerchantAgentOption,
+} from "@/components/merchant-filters";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 
+/**
+ * The merchants list, one page at a time (docs/design/merchants-and-dashboard.md
+ * §1, phase 1a): filters, sort, page size and page all in the URL, read through
+ * the security_invoker `merchant_list` view so RLS still decides whose
+ * merchants these are. Never the whole table in the browser.
+ */
 async function MerchantsList({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string }>;
+  searchParams: Promise<MerchantListSearchParams>;
 }) {
-  const { status } = await searchParams;
-  const filter = parseMerchantFilter(status);
-
+  const raw = await searchParams;
   const profile = await requireUser();
+  const isAdmin = profile.role === "admin";
   const supabase = await createClient();
 
-  // Tier 1: RLS scopes this to the caller's own rows, or everything for an
-  // admin. There is no agent_id filter here on purpose — adding one would
-  // duplicate the policy in application code, where it could drift out of sync.
-  let query = supabase
-    .from("merchants")
-    .select(MERCHANT_LIST_COLUMNS)
-    .order("date_added", { ascending: false })
-    .order("id", { ascending: false });
-
-  if (filter !== "all") {
-    query = query.eq("status", filter);
+  // The processor list validates ?processor= and fills the select; the rep
+  // list is an admin's only (the agent filter is hidden from a rep, whose
+  // profiles policy would return only themselves anyway).
+  const [processors, agentsResult] = await Promise.all([
+    loadProcessors(supabase),
+    isAdmin
+      ? supabase.from("profiles").select("id, full_name").order("full_name")
+      : Promise.resolve({ data: [] as MerchantAgentOption[], error: null }),
+  ]);
+  if (agentsResult.error) {
+    throw new Error(`Could not load the agent list: ${agentsResult.error.message}`);
   }
+  const agents = (agentsResult.data ?? []) as MerchantAgentOption[];
 
-  const { data, error } = await query;
+  const params = parseMerchantListParams(raw, {
+    isAdmin,
+    processors: processors.map((p) => p.code),
+  });
 
-  if (error) {
+  // Tier 1: RLS scopes this to the caller's own rows, or everything for an
+  // admin. There is no agent_id filter for a rep on purpose — adding one would
+  // duplicate the policy in application code, where it could drift.
+  let result: Awaited<ReturnType<typeof loadMerchantPage>>;
+  try {
+    result = await loadMerchantPage(supabase, params);
+  } catch (error) {
     return (
       <p className="text-sm text-destructive">
-        Could not load merchants: {error.message}
+        {error instanceof Error ? error.message : "Could not load merchants."}
       </p>
     );
   }
+  // The page actually shown: the last one when the URL asked for more.
+  const shown: MerchantListParams = { ...params, page: result.page };
 
-  const merchants = (data ?? []) as MerchantListRow[];
-  const isAdmin = profile.role === "admin";
-
-  // Admins see whose book each merchant is in. Resolved with a second plain
-  // query rather than a PostgREST embed: two simple selects are easier to
-  // reason about (and to verify) than relationship-traversal syntax, and this
-  // only runs for admins.
-  let agentNames = new Map<string, string>();
-  if (isAdmin && merchants.length > 0) {
-    const agentIds = [...new Set(merchants.map((m) => m.agent_id))];
-    const { data: agents } = await supabase
-      .from("profiles")
-      .select("id, full_name")
-      .in("id", agentIds);
-    agentNames = new Map(
-      (agents ?? []).map((a) => [a.id as string, a.full_name as string]),
-    );
-  }
-
-  const emptyMessage =
-    filter === "all" ? "No merchants yet." : `No ${filter} merchants.`;
+  const sortFor = (sort: MerchantSort): ListColumn<MerchantListRow>["sort"] => {
+    const active = shown.sort === sort;
+    const labels = MERCHANT_SORT_LABELS[sort];
+    const next = active ? (shown.dir === "asc" ? "desc" : "asc") : null;
+    return {
+      href: merchantSortHref(shown, sort),
+      direction: active ? (shown.dir === "asc" ? "ascending" : "descending") : null,
+      label: next ? `Sort by ${labels.name}, ${labels[next]}` : `Sort by ${labels.name}`,
+    };
+  };
 
   // The list's shape as data, so the table and the stacked-card view below lg
-  // cannot disagree about it. The admin-only Agent column is spliced in at its
-  // existing position — before Added, not appended — so the column order is
-  // unchanged. This also retires the hand-counted `colSpan={isAdmin ? 7 : 6}`
-  // the empty row used to carry.
+  // cannot disagree about it. The admin-only Agent column keeps its position,
+  // before Added. Its name now comes with the row, from the view's join,
+  // instead of a second profiles read.
   const columns: ListColumn<MerchantListRow>[] = [
     {
       header: "DBA",
       primary: true,
       className: "font-medium",
+      sort: sortFor("dba"),
       cell: (merchant) => (
         <Link
           href={`/merchants/${merchant.id}`}
@@ -94,7 +115,7 @@ async function MerchantsList({
         </Link>
       ),
     },
-    { header: "MID", cell: (merchant) => formatText(merchant.mid) },
+    { header: "MID", sort: sortFor("mid"), cell: (merchant) => formatText(merchant.mid) },
     {
       header: "Status",
       cell: (merchant) => (
@@ -104,41 +125,118 @@ async function MerchantsList({
       ),
     },
     { header: "Processor", cell: (merchant) => formatText(merchant.processor) },
-    { header: "Split", cell: (merchant) => formatPct(merchant.split_agent_pct) },
+    {
+      header: "Split",
+      sort: sortFor("split"),
+      cell: (merchant) => formatPct(merchant.split_agent_pct),
+    },
     ...(isAdmin
       ? [
           {
             header: "Agent",
             className: "text-muted-foreground",
-            cell: (merchant: MerchantListRow) =>
-              formatText(agentNames.get(merchant.agent_id)),
+            sort: sortFor("agent"),
+            cell: (merchant: MerchantListRow) => formatText(merchant.agent_name),
           },
         ]
       : []),
     {
       header: "Added",
       className: "text-muted-foreground",
+      sort: sortFor("added"),
       cell: (merchant) => formatDate(merchant.date_added),
     },
   ];
+
+  const emptyMessage = merchantFiltersActive(shown)
+    ? "No merchants match these filters."
+    : "No merchants yet.";
 
   return (
     <div className="flex flex-col gap-4">
       <FilterTabs
         options={MERCHANT_FILTER_OPTIONS}
-        active={filter}
-        hrefFor={(value) =>
-          value === "all" ? "/merchants" : `/merchants?status=${value}`
+        active={shown.status}
+        hrefFor={(status) => merchantListHref(shown, { status, page: 1 })}
+      />
+
+      <MerchantFilters
+        params={shown}
+        isAdmin={isAdmin}
+        processors={processors}
+        agents={agents}
+      />
+
+      <SortChips params={shown} isAdmin={isAdmin} />
+
+      <ListPagination
+        total={result.total}
+        page={result.page}
+        lastPage={result.lastPage}
+        size={shown.size}
+        sizes={MERCHANT_PAGE_SIZES}
+        hrefFor={(page, size) =>
+          merchantListHref(shown, {
+            page,
+            size: size as MerchantListParams["size"],
+          })
         }
+        noun={["merchant", "merchants"]}
       />
 
       <ListTable
         columns={columns}
-        rows={merchants}
+        rows={result.rows}
         rowKey={(merchant) => merchant.id}
         emptyMessage={emptyMessage}
       />
     </div>
+  );
+}
+
+/**
+ * The sort control below lg, where ListTable renders cards and a card has no
+ * column headers to click. The same links the headers are: the active one
+ * flips direction, the others start in their own default.
+ */
+function SortChips({
+  params,
+  isAdmin,
+}: {
+  params: MerchantListParams;
+  isAdmin: boolean;
+}) {
+  const sorts: MerchantSort[] = isAdmin
+    ? ["added", "dba", "mid", "split", "agent"]
+    : ["added", "dba", "mid", "split"];
+  return (
+    <nav
+      aria-label="Sort merchants"
+      className="flex flex-wrap items-center gap-2 lg:hidden"
+    >
+      <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+        Sort by
+      </span>
+      {sorts.map((sort) => {
+        const labels = MERCHANT_SORT_LABELS[sort];
+        const active = params.sort === sort;
+        return (
+          <Link
+            key={sort}
+            href={merchantSortHref(params, sort)}
+            aria-current={active ? "true" : undefined}
+            className={cn(
+              "inline-flex min-h-11 items-center rounded-full px-3.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              active
+                ? "bg-foreground text-card"
+                : "bg-muted text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {active ? `${labels.name}, ${labels[params.dir]}` : labels.name}
+          </Link>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -173,7 +271,7 @@ async function HeaderActions() {
 export default function MerchantsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string }>;
+  searchParams: Promise<MerchantListSearchParams>;
 }) {
   return (
     <PageShell width="list">

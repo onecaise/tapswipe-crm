@@ -43,6 +43,14 @@ Sequences are not in `role_table_grants`, so they are not in the query.
 
 The tests check the four sequences too.
 
+## Views
+
+Not in the query or its tests, which track tables (`create table`). One view exists since the cutoff:
+
+| View | Migration | `anon` | `authenticated` | `service_role` | Why |
+| --- | --- | --- | --- | --- | --- |
+| `merchant_list` | `20261124120000_merchant_list_view.sql` | none | SELECT | none | The merchants list page (phase 1a of `docs/design/merchants-and-dashboard.md`). **`security_invoker = true`**, so the caller's `merchants` and `profiles` policies apply; without it the view would run as its owner and bypass RLS. The migration revokes all from every Data API role first (the local stack's default ACL would otherwise give `service_role` extra privileges). Pinned by `tests/rls/merchant-list-view.test.ts`. |
+
 ## Does any table rely on an automatic grant?
 
 **No.** Checked 4 Nov 2026 in three ways:

@@ -1,4 +1,6 @@
 import { Fragment } from "react";
+import Link from "next/link";
+import { ArrowDownIcon, ArrowUpDownIcon, ArrowUpIcon } from "lucide-react";
 
 import {
   Table,
@@ -116,7 +118,65 @@ export type ListColumn<T> = {
    * sit in a column as wide as its neighbours.
    */
   headerClassName?: string;
+  /**
+   * Makes the table header a sort control: a link to the same list in this
+   * column's order. Server-side sorting, so a link rather than a button — the
+   * order lives in the URL like every other list filter here, and it works
+   * with JavaScript off.
+   *
+   * `direction` is set on the ONE column the list is sorted by, and becomes the
+   * <th>'s `aria-sort`; every other column leaves it null and carries no
+   * aria-sort at all, which is what ARIA asks for. `label` is the link's
+   * accessible name, and must contain the visible header ("Sort by DBA, Z to
+   * A") so a voice user saying what they see still hits it.
+   *
+   * Table-only. A card has no column headers, so a list offering sort on a
+   * phone renders its own control above the cards (the merchants list's sort
+   * chips).
+   */
+  sort?: {
+    href: string;
+    direction: "ascending" | "descending" | null;
+    label: string;
+  };
 };
+
+/**
+ * A sortable header: the header text and an arrow. The arrow is decoration
+ * (aria-hidden) — the <th>'s aria-sort says the order to a screen reader, and
+ * the link's label says where clicking goes.
+ */
+function SortLink({
+  sort,
+  children,
+}: {
+  sort: NonNullable<ListColumn<unknown>["sort"]>;
+  children: React.ReactNode;
+}) {
+  const Icon =
+    sort.direction === "ascending"
+      ? ArrowUpIcon
+      : sort.direction === "descending"
+        ? ArrowDownIcon
+        : ArrowUpDownIcon;
+  return (
+    <Link
+      href={sort.href}
+      aria-label={sort.label}
+      className={cn(
+        "-mx-1 inline-flex items-center gap-1 rounded px-1 py-1 uppercase hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        sort.direction !== null && "text-foreground",
+      )}
+    >
+      {children}
+      <Icon
+        size={14}
+        aria-hidden
+        className={sort.direction === null ? "opacity-40" : undefined}
+      />
+    </Link>
+  );
+}
 
 export function ListTable<T>({
   columns,
@@ -148,8 +208,16 @@ export function ListTable<T>({
           <TableHeader>
             <TableRow>
               {columns.map((column, index) => (
-                <TableHead key={index} className={column.headerClassName}>
-                  {column.header}
+                <TableHead
+                  key={index}
+                  className={column.headerClassName}
+                  aria-sort={column.sort?.direction ?? undefined}
+                >
+                  {column.sort ? (
+                    <SortLink sort={column.sort}>{column.header}</SortLink>
+                  ) : (
+                    column.header
+                  )}
                 </TableHead>
               ))}
             </TableRow>

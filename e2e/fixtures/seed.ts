@@ -3992,3 +3992,89 @@ export async function clearMerchantImport(fileNamePrefix: string, midPrefix: str
     .like("file_name", `${fileNamePrefix}%`)
     .eq("status", "review");
 }
+
+/**
+ * The merchants-list paging fixture (docs/design/merchants-and-dashboard.md,
+ * phase 1a): thirty merchants in agent2's book at a rate nothing else in
+ * the seed uses, so `?split_min=12.34&split_max=12.34` isolates exactly
+ * them and the spec can assert real counts, page boundaries and orders
+ * without depending on whatever else the database holds.
+ *
+ * MIDs `E2EPG001`..`E2EPG030` (letters and digits, within the 6-20 rule)
+ * and DBAs that sort differently from the MIDs: the DBA runs backwards
+ * ("E2E Paging 30" is MID 001), so a test reading the order can tell the two
+ * sorts apart. Added dates step back one day each, so "newest first" is
+ * MID 001 first. Recreated whole each time: deleted (with the audit rows the
+ * service-role writes leave, actor null) and inserted.
+ */
+export const PAGING_FIXTURE = {
+  count: 30,
+  rate: 12.34,
+  midPrefix: "E2EPG",
+  dbaPrefix: "E2E Paging",
+} as const;
+
+export function pagingMid(n: number): string {
+  return `${PAGING_FIXTURE.midPrefix}${String(n).padStart(3, "0")}`;
+}
+
+export function pagingDba(n: number): string {
+  return `${PAGING_FIXTURE.dbaPrefix} ${String(PAGING_FIXTURE.count + 1 - n).padStart(2, "0")}`;
+}
+
+export async function seedPagingMerchants(): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  await clearPagingMerchants();
+  const { data: owner, error: ownerError } = await db
+    .from("profiles")
+    .select("id")
+    .eq("email", PERSONAS.agent2.email)
+    .single();
+  if (ownerError || !owner) throw new Error(`agent2 profile: ${ownerError?.message}`);
+  const today = new Date();
+  const rows = Array.from({ length: PAGING_FIXTURE.count }, (_, index) => {
+    const n = index + 1;
+    const added = new Date(today);
+    added.setUTCDate(added.getUTCDate() - n);
+    return {
+      agent_id: owner.id as string,
+      mid: pagingMid(n),
+      dba: pagingDba(n),
+      legal_business_name: `${pagingDba(n)} LLC`,
+      status: "active",
+      processor: "TSYS",
+      split_agent_pct: PAGING_FIXTURE.rate,
+      split_company_pct: 100 - PAGING_FIXTURE.rate,
+      city: "Nashville",
+      state: "TN",
+      date_added: added.toISOString().slice(0, 10),
+    };
+  });
+  const { error } = await db.from("merchants").insert(rows);
+  if (error) throw new Error(`paging merchants: ${error.message}`);
+}
+
+export async function clearPagingMerchants(): Promise<void> {
+  const { apiUrl, serviceKey } = localStackConfig();
+  const db = createClient(apiUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await db
+    .from("merchants")
+    .select("id")
+    .like("mid", `${PAGING_FIXTURE.midPrefix}%`);
+  if (error) throw new Error(`paging merchants: ${error.message}`);
+  const ids = (data ?? []).map((row) => row.id as number);
+  if (ids.length === 0) return;
+  const { error: deleteError } = await db.from("merchants").delete().in("id", ids);
+  if (deleteError) throw new Error(`paging merchants delete: ${deleteError.message}`);
+  const { error: auditError } = await db
+    .from("audit_log")
+    .delete()
+    .eq("table_name", "merchants")
+    .in("row_id", ids.map(String));
+  if (auditError) throw new Error(`paging merchants audit rows: ${auditError.message}`);
+}

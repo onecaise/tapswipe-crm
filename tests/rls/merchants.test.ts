@@ -13,9 +13,12 @@ import {
 } from "../helpers/db";
 
 /**
- * The same column list app/merchants/page.tsx reads, via MERCHANT_LIST_COLUMNS
- * in lib/merchants.ts. Kept literal here so the test exercises the real query
- * rather than `select *`, which would hide a column the page can't actually see.
+ * The merchants columns the list page reads (MERCHANT_LIST_COLUMNS in
+ * lib/merchants.ts, less the view's agent_name — the page reads them through
+ * the merchant_list view since 20261124120000, whose own visibility is
+ * tests/rls/merchant-list-view.test.ts). Kept literal here so the test exercises
+ * the real columns rather than `select *`, which would hide a column the page
+ * can't actually see.
  */
 const LIST_COLUMNS =
   "id, agent_id, mid, dba, legal_business_name, status, processor, split_agent_pct, date_added";
