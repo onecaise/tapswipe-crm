@@ -48,8 +48,14 @@ async function mids(page: Page): Promise<string[]> {
   return bodyRows(page).locator("td:nth-child(2)").allInnerTexts();
 }
 
+/**
+ * A column header by its exact accessible name, which is its sort link's
+ * label: the page names them for screen readers on purpose. "Sort by MID" on
+ * a column the list is not sorted by; on the one it is, the label also says
+ * where a click goes next -- "Sort by MID, Z to A" while it is A to Z.
+ */
 function header(page: Page, name: string) {
-  return page.getByRole("columnheader", { name: new RegExp(`^${name}`) });
+  return page.getByRole("columnheader", { name, exact: true });
 }
 
 test.describe("an admin on the merchants list", () => {
@@ -83,8 +89,8 @@ test.describe("an admin on the merchants list", () => {
 
   test("defaults to newest first, marked on the Added header", async ({ page }) => {
     await page.goto(LIST);
-    await expect(header(page, "Added")).toHaveAttribute("aria-sort", "descending");
-    await expect(header(page, "DBA")).not.toHaveAttribute("aria-sort", /.*/);
+    await expect(header(page, "Sort by Added, oldest first")).toHaveAttribute("aria-sort", "descending");
+    await expect(header(page, "Sort by DBA")).not.toHaveAttribute("aria-sort", /.*/);
     expect((await mids(page)).slice(0, 3)).toEqual([pagingMid(1), pagingMid(2), pagingMid(3)]);
   });
 
@@ -93,21 +99,21 @@ test.describe("an admin on the merchants list", () => {
     await page.getByRole("link", { name: "Sort by MID" }).click();
     await expect(page).toHaveURL(/[?&]sort=mid(&|$)/);
     await expect(page).not.toHaveURL(/[?&]page=/);
-    await expect(header(page, "MID")).toHaveAttribute("aria-sort", "ascending");
+    await expect(header(page, "Sort by MID, Z to A")).toHaveAttribute("aria-sort", "ascending");
     expect(await mids(page)).toEqual(
       Array.from({ length: 25 }, (_, i) => pagingMid(i + 1)),
     );
 
     await page.getByRole("link", { name: "Sort by MID, Z to A" }).click();
     await expect(page).toHaveURL(/[?&]dir=desc(&|$)/);
-    await expect(header(page, "MID")).toHaveAttribute("aria-sort", "descending");
+    await expect(header(page, "Sort by MID, A to Z")).toHaveAttribute("aria-sort", "descending");
     expect((await mids(page))[0]).toBe(pagingMid(30));
   });
 
   test("sorts by DBA, which is not the MID order", async ({ page }) => {
     await page.goto(LIST);
     await page.getByRole("link", { name: "Sort by DBA" }).click();
-    await expect(header(page, "DBA")).toHaveAttribute("aria-sort", "ascending");
+    await expect(header(page, "Sort by DBA, Z to A")).toHaveAttribute("aria-sort", "ascending");
     await expect(bodyRows(page).first()).toContainText(pagingDba(30));
     expect((await mids(page))[0]).toBe(pagingMid(30));
   });
@@ -120,7 +126,7 @@ test.describe("an admin on the merchants list", () => {
     );
     await page.reload();
     expect(await mids(page)).toEqual(before);
-    await expect(header(page, "MID")).toHaveAttribute("aria-sort", "descending");
+    await expect(header(page, "Sort by MID, A to Z")).toHaveAttribute("aria-sort", "descending");
   });
 
   test("shows the last page for a page past the end", async ({ page }) => {
@@ -136,7 +142,7 @@ test.describe("an admin on the merchants list", () => {
     await page.getByRole("button", { name: "Apply" }).click();
     await expect(page).toHaveURL(/split_min=12\.34/);
     await expect(page.getByTestId("list-total")).toHaveText("30 merchants · showing 1–25");
-    await expect(header(page, "MID")).toHaveAttribute("aria-sort", "ascending");
+    await expect(header(page, "Sort by MID, Z to A")).toHaveAttribute("aria-sort", "ascending");
 
     await page.getByRole("link", { name: "Clear filters" }).click();
     await expect(page).toHaveURL(/\/merchants\?sort=mid$/);
@@ -144,8 +150,8 @@ test.describe("an admin on the merchants list", () => {
 
   test("offers the Agent filter, column and sort", async ({ page }) => {
     await page.goto(LIST);
-    await expect(page.getByLabel("Agent")).toBeVisible();
-    await expect(header(page, "Agent")).toBeVisible();
+    await expect(page.getByLabel("Agent", { exact: true })).toBeVisible();
+    await expect(header(page, "Sort by Agent")).toBeVisible();
     await expect(bodyRows(page).first()).toContainText("E2E Agent Two");
   });
 
@@ -169,10 +175,13 @@ test.describe("the rep who owns them", () => {
   test("sees them paged, with no Agent filter, column or sort", async ({ page }) => {
     await page.goto(`${LIST}&sort=agent`);
     await expect(page.getByTestId("list-total")).toHaveText("30 merchants · showing 1–25");
-    await expect(page.getByLabel("Agent")).toHaveCount(0);
-    await expect(header(page, "Agent")).toHaveCount(0);
+    await expect(page.getByLabel("Agent", { exact: true })).toHaveCount(0);
+    // No Agent header in any form: sortable in either state, or plain.
+    await expect(
+      page.getByRole("columnheader", { name: /^(Sort by )?Agent/ }),
+    ).toHaveCount(0);
     // ?sort=agent is dropped for a rep: the default order stands.
-    await expect(header(page, "Added")).toHaveAttribute("aria-sort", "descending");
+    await expect(header(page, "Sort by Added, oldest first")).toHaveAttribute("aria-sort", "descending");
   });
 });
 
@@ -182,7 +191,12 @@ test.describe("another rep", () => {
   test("sees none of them", async ({ page }) => {
     await page.goto(LIST);
     await expect(page.getByTestId("list-total")).toHaveText("0 merchants");
-    await expect(page.getByText("No merchants match these filters.")).toBeVisible();
+    // The table's copy. The phone card repeats it, hidden at this width.
+    const empty = page
+      .getByText("No merchants match these filters.", { exact: true })
+      .filter({ visible: true });
+    await expect(empty).toHaveCount(1);
+    await expect(empty).toBeVisible();
   });
 });
 
